@@ -208,7 +208,6 @@ serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }
 derive-where = { version = "1.7.0", default-features = false }
 educe = { version = "0.7.6", default-features = false }
-delegate = { version = "0.13.5", default-features = false }
 const_format = { version = "0.2.37", default-features = false }
 fastrand = { version = "2.5.0", default-features = false }
 pin-project-lite = { version = "0.2.17", default-features = false }

@@ -5,7 +5,6 @@ Consult this index before hand-rolling a non-domain helper, parser, encoder, ret
 ## Boilerplate, derives, and compile-time helpers
 
 - **Custom `Default` values or selective trait bounds** — `educe`: keep manual `Default` when a template identity anchor must remain literal (such as `observability.rs`).
-- **Mechanical method forwarding on wrappers or newtypes** — `delegate`: pure forwarding only; keep policy checks and error mapping explicit.
 - **Generic `Clone`/`Debug`/`Default`/`Eq` without bounds on `T`** — `derive-where`: avoids accidental `T: Debug` or `T: Default` bounds on generic containers and routes.
 - **Redacted `Debug`, `Deref`, `Display`, `From`, `IntoIterator`** — `derive_more`: redact secrets (`#[debug("...")]`); reserve `Deref` for smart pointers.
 - **Safe `Pin` projections for `Future`/`Stream`/`Body` adapters** — `pin-project-lite`: works under `unsafe_code = "forbid"`.
