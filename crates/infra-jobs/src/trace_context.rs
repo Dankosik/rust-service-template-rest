@@ -27,9 +27,9 @@ pub(crate) fn link(span: &tracing::Span, carrier: &Carrier) {
         propagator.extract_with_context(&opentelemetry::Context::new(), carrier)
     });
     let span_ref = TraceContextExt::span(&context);
-    let context = span_ref.span_context();
-    if context.is_valid() && context.is_remote() {
-        span.add_link(context.clone());
+    let span_context = span_ref.span_context();
+    if span_context.is_valid() && span_context.is_remote() {
+        span.add_link(span_context.clone());
     }
 }
 

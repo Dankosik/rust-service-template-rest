@@ -11,13 +11,18 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::engine::{ForcedCleanup, Operation, RECORD_RETRY_INTERVAL, Shared, observe_recovery};
+use crate::engine::{
+    ForcedCleanup, Operation, OperationError, RECORD_RETRY_INTERVAL, Shared, backstop,
+    observe_recovery,
+};
 use crate::kind::{Attempt, Completion, HandlerFuture, JobError, JobId, Registered};
 use crate::state::FailureReason;
 
 use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
-use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outcome, write_of};
+use outcome::{
+    Ended, Transition, Unacknowledged, WritePlan, Written, map_outcome, send_outcome, write_of,
+};
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
@@ -112,7 +117,7 @@ impl KindMetrics {
 
 struct AttemptSlots {
     _membership: MetricMembership,
-    _global: tokio::sync::OwnedSemaphorePermit,
+    _group: tokio::sync::OwnedSemaphorePermit,
     _kind: Option<crate::claim::KindSlot>,
 }
 
@@ -166,46 +171,87 @@ pub(crate) struct ClaimFence {
     pub(crate) token: uuid::Uuid,
 }
 
-pub(crate) fn record_exhausted(attempt: &AttemptId, summary: String) {
-    observe_attempt(
-        None,
-        attempt,
-        &Transition::Fail {
-            reason: FailureReason::Exhausted,
-            summary,
-        },
-    );
+pub(crate) fn record_exhausted(attempt: &AttemptId, summary: &str) {
+    observe_terminal_failure(attempt, FailureReason::Exhausted, summary);
 }
 
-fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transition: &Transition) {
-    match handles {
-        Some(handles) if matches!(transition, Transition::Complete(_)) => {
-            handles.completed.increment(1);
-        }
-        _ => attempts_counter(attempt.kind, transition.label()).increment(1),
+fn observe_outcome(
+    shared: &Shared,
+    handles: &KindMetrics,
+    attempt: &AttemptId,
+    transition: &Transition,
+    handler_duration: Option<Duration>,
+) {
+    if matches!(transition, Transition::Release) {
+        shared
+            .lifecycle
+            .counters
+            .cancelled
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        shared
+            .lifecycle
+            .counters
+            .known_results
+            .fetch_add(1, Ordering::Relaxed);
     }
+    record_on_span(&tracing::Span::current(), transition);
+    if let Some(duration) = handler_duration {
+        handles.duration.record(duration);
+    }
+    observe_attempt(handles, attempt, transition);
+}
+
+fn observe_attempt(handles: &KindMetrics, attempt: &AttemptId, transition: &Transition) {
     let outcome = transition.label();
     match transition {
         Transition::Complete(_) => {
+            handles.completed.increment(1);
             tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
+            attempts_counter(attempt.kind, outcome).increment(1);
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_finished");
         }
         Transition::Release => {
+            attempts_counter(attempt.kind, outcome).increment(1);
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_finished");
         }
         Transition::Retry { summary, .. } => {
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_failed");
+            attempts_counter(attempt.kind, outcome).increment(1);
+            log_attempt_failed(attempt, outcome, summary);
         }
-        Transition::Fail { summary, .. } => {
-            if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                metrics::gauge!(LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC, "kind" => attempt.kind)
-                    .set(timestamp.as_secs_f64());
-            }
-            tracing::warn!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, job.failure_reason = outcome, error = summary.as_str(), "job_failed");
-        }
+        Transition::Fail { .. } => {}
     }
+}
+
+fn observe_terminal_failure(attempt: &AttemptId, reason: FailureReason, summary: &str) {
+    let outcome = reason.as_str();
+    attempts_counter(attempt.kind, outcome).increment(1);
+    if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        metrics::gauge!(LAST_TERMINAL_ATTEMPT_TIMESTAMP_METRIC, "kind" => attempt.kind)
+            .set(timestamp.as_secs_f64());
+    }
+    tracing::warn!(
+        job.id = %attempt.job_id,
+        job.kind = attempt.kind,
+        job.attempt = attempt.number,
+        outcome,
+        job.failure_reason = outcome,
+        error = summary,
+        "job_failed"
+    );
+}
+
+fn log_attempt_failed(attempt: &AttemptId, outcome: &'static str, summary: &str) {
+    tracing::info!(
+        job.id = %attempt.job_id,
+        job.kind = attempt.kind,
+        job.attempt = attempt.number,
+        outcome,
+        error = error_field(summary),
+        "job_attempt_failed"
+    );
 }
 
 fn error_field(summary: &str) -> Option<&str> {
@@ -230,7 +276,7 @@ pub(crate) fn supervise(
     drop(trace);
     let slots = Arc::new(AttemptSlots {
         _membership: shared.owned_attempts.join(),
-        _global: claimed.slot,
+        _group: claimed.slot,
         _kind: claimed.kind_slot,
     });
     async move {
@@ -265,10 +311,11 @@ fn attempt_span(attempt: &AttemptId) -> tracing::Span {
 fn record_on_span(span: &tracing::Span, transition: &Transition) {
     span.record("outcome", transition.label());
     match transition {
-        Transition::Retry { .. } | Transition::Fail { .. } => {}
-        Transition::Complete(_) | Transition::Snooze { .. } | Transition::Release => return,
+        Transition::Retry { .. } | Transition::Fail { .. } => {
+            span.record("otel.status_code", "ERROR");
+        }
+        Transition::Complete(_) | Transition::Snooze { .. } | Transition::Release => {}
     }
-    span.record("otel.status_code", "ERROR");
 }
 
 async fn run_attempt(
@@ -280,77 +327,22 @@ async fn run_attempt(
     supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
 ) {
-    if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, supervisor_deadline) {
+    let Some((ended, handler_duration)) = execute_handler(
+        shared,
+        registered,
+        attempt.number,
+        fence,
+        payload,
+        supervisor_deadline,
+    )
+    .await
+    else {
         observe_uncertain(shared, &attempt);
         return;
-    }
-    let policy = registered.policy;
-    let attempt_deadline = clamped_deadline(Instant::now(), policy.timeout, supervisor_deadline);
-    let cancel = CancellationToken::new();
-    let prepared = payload.map_err(Ended::Error).and_then(|bytes| {
-        prepare_handler(
-            registered.dispatch.as_ref(),
-            Attempt {
-                number: attempt.number,
-                fence,
-                attempt_deadline,
-                cancellation: cancel.clone(),
-            },
-            shared.pool.clone(),
-            &bytes,
-        )
-    });
-    let (ended, handler_duration) = match prepared {
-        Err(ended) => (ended, None),
-        Ok(future) => {
-            let started = Instant::now();
-            let Some(ended) = drive(
-                &shared.lifecycle.cleanup,
-                future,
-                cancel,
-                attempt_deadline,
-                supervisor_deadline,
-            )
-            .await
-            else {
-                observe_uncertain(shared, &attempt);
-                return;
-            };
-            (ended, Some(started.elapsed()))
-        }
     };
-    let transition = map_outcome(&attempt, policy, registered.is_outbox, ended);
-    if matches!(transition, Transition::Release) {
-        shared
-            .lifecycle
-            .counters
-            .cancelled
-            .fetch_add(1, Ordering::Relaxed);
-    } else {
-        shared
-            .lifecycle
-            .counters
-            .known_results
-            .fetch_add(1, Ordering::Relaxed);
-    }
-    record_on_span(&tracing::Span::current(), &transition);
+    let transition = map_outcome(&attempt, registered.policy, registered.is_outbox, ended);
     let handles = registered.metrics();
-    if let Some(duration) = handler_duration {
-        handles.duration.record(duration);
-    }
-    if !matches!(transition, Transition::Fail { .. }) {
-        observe_attempt(Some(handles), &attempt, &transition);
-    }
-    if matches!(transition, Transition::Complete(Completion::Committed)) {
-        observe_acknowledged(
-            shared,
-            handles,
-            &attempt,
-            Operation::Record,
-            Written::Applied,
-        );
-        return;
-    }
+    observe_outcome(shared, handles, &attempt, &transition, handler_duration);
     let written = persist(
         shared,
         handles,
@@ -361,11 +353,58 @@ async fn run_attempt(
         &slots,
     )
     .await;
-    if let Transition::Fail { summary, .. } = &transition {
+    if let Transition::Fail { reason, summary } = &transition {
         if written == Some(Written::Applied) {
-            observe_attempt(Some(handles), &attempt, &transition);
+            observe_terminal_failure(&attempt, *reason, summary);
         } else {
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = error_field(summary), "job_attempt_failed");
+            log_attempt_failed(&attempt, transition.label(), summary);
+        }
+    }
+}
+
+async fn execute_handler(
+    shared: &Shared,
+    registered: &Registered,
+    attempt_number: u16,
+    fence: ClaimFence,
+    payload: Result<Vec<u8>, JobError>,
+    supervisor_deadline: Instant,
+) -> Option<(Ended, Option<Duration>)> {
+    if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, supervisor_deadline) {
+        return None;
+    }
+    let attempt_deadline = clamped_deadline(
+        Instant::now(),
+        registered.policy.timeout,
+        supervisor_deadline,
+    );
+    let cancel = CancellationToken::new();
+    let prepared = payload.map_err(Ended::Error).and_then(|bytes| {
+        prepare_handler(
+            registered.dispatch.as_ref(),
+            Attempt {
+                number: attempt_number,
+                fence,
+                attempt_deadline,
+                cancellation: cancel.clone(),
+            },
+            shared.pool.clone(),
+            &bytes,
+        )
+    });
+    match prepared {
+        Err(ended) => Some((ended, None)),
+        Ok(future) => {
+            let started = Instant::now();
+            let ended = drive(
+                &shared.lifecycle.cleanup,
+                future,
+                cancel,
+                attempt_deadline,
+                supervisor_deadline,
+            )
+            .await?;
+            Some((ended, Some(started.elapsed())))
         }
     }
 }
@@ -404,6 +443,25 @@ async fn within<T>(
     }
 }
 
+pub(super) async fn execute_before_deadline<T, F>(
+    shared: &Shared,
+    acquire_operation: &'static str,
+    deadline: Instant,
+    query: F,
+) -> Result<T, OperationError>
+where
+    F: AsyncFnOnce(&mut sqlx::postgres::PgConnection) -> Result<T, sqlx::Error>,
+{
+    backstop(Box::pin(async {
+        let mut connection = shared.acquire(acquire_operation).await?;
+        if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, deadline) {
+            return Err(OperationError::TimedOut);
+        }
+        query(&mut connection).await.map_err(OperationError::from)
+    }))
+    .await
+}
+
 fn deadline_reached_or_cleanup_ended(cleanup: &ForcedCleanup, until: Instant) -> bool {
     Instant::now() >= until || cleanup.has_ended()
 }
@@ -419,7 +477,7 @@ async fn drive(
     attempt_deadline: Instant,
     supervisor_deadline: Instant,
 ) -> Option<Ended> {
-    let _ended = cancel.clone().drop_guard();
+    let _cancel_on_drop = cancel.clone().drop_guard();
     let mut handler = std::mem::DropGuard::new(future, |future| {
         if let Err(payload) =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future)))
@@ -431,7 +489,7 @@ async fn drive(
     let reason = {
         let mut run = std::pin::pin!(std::panic::AssertUnwindSafe(&mut *handler).catch_unwind());
         let mut first_poll = true;
-        let admitted = std::future::poll_fn(|cx| {
+        let bounded_run = std::future::poll_fn(|cx| {
             let now = Instant::now();
             if now >= supervisor_deadline || cleanup.has_ended() {
                 cancel.cancel();
@@ -449,7 +507,7 @@ async fn drive(
         });
         tokio::select! {
             biased;
-            ended = admitted => return ended,
+            ended = bounded_run => return ended,
             () = cleanup.forced() => {}
             () = tokio::time::sleep_until(attempt_deadline) => {}
         }
@@ -466,7 +524,7 @@ async fn drive(
         reason
     };
     drop(handler);
-    (Instant::now() < supervisor_deadline && !cleanup.has_ended()).then_some(reason)
+    (!deadline_reached_or_cleanup_ended(cleanup, supervisor_deadline)).then_some(reason)
 }
 
 fn ended_after_cancel(
@@ -498,16 +556,25 @@ async fn persist(
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) -> Option<Written> {
-    let write = write_of(transition);
-    let operation = write.map_or(Operation::Record, outcome::Write::operation);
+    let plan = write_of(transition);
+    let operation = plan.operation();
+    if matches!(plan, WritePlan::AlreadyCommitted) {
+        observe_acknowledged(shared, handles, attempt, operation, Written::Applied);
+        return Some(Written::Applied);
+    }
     loop {
         if deadline_reached_or_cleanup_ended(&shared.lifecycle.cleanup, supervisor_deadline) {
             break;
         }
         let sent = within(&shared.lifecycle.cleanup, supervisor_deadline, async {
-            match write {
-                None => complete_batched(shared, fence, supervisor_deadline, slots).await,
-                Some(write) => send_outcome(shared, fence, write, supervisor_deadline).await,
+            match plan {
+                WritePlan::AlreadyCommitted => Ok(Written::Applied),
+                WritePlan::CompleteBatched => {
+                    complete_batched(shared, fence, supervisor_deadline, slots).await
+                }
+                WritePlan::Single(write) => {
+                    send_outcome(shared, fence, write, supervisor_deadline).await
+                }
             }
         })
         .await;

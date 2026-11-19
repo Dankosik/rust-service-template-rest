@@ -1,6 +1,6 @@
 use super::{
-    Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, Shared, backstop, in_tx, observe_failure,
-    observe_recovery, observed, set_statement_timeout,
+    Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, Shared, in_maintenance_tx,
+    observe_failure, observe_recovery, observed,
 };
 use crate::outbox::KIND;
 use metrics::Unit;
@@ -68,15 +68,12 @@ struct OutboxSample {
 }
 
 async fn read(shared: &Shared) -> Result<OutboxSample, OperationError> {
-    let _turn = shared.statement_turn.lock().await;
-    backstop(async {
-        in_tx(&shared.pool, async |tx| -> Result<OutboxSample, OperationError> {
-            set_statement_timeout(tx, SAMPLE_STATEMENT_TIMEOUT).await?;
-            Ok(observed(
-                "sample outbox",
-                sqlx::query_as!(
-                    OutboxSample,
-                    r#"
+    in_maintenance_tx(shared, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
+        Ok(observed(
+            "sample outbox",
+            sqlx::query_as!(
+                OutboxSample,
+                r#"
                     WITH ordered_candidates AS MATERIALIZED (
                         SELECT created_at, predecessor_job_id
                         FROM background_jobs
@@ -112,13 +109,11 @@ async fn read(shared: &Shared) -> Result<OutboxSample, OperationError> {
                         )::double precision AS "oldest_blocked_age!",
                         EXTRACT(EPOCH FROM statement_timestamp())::double precision AS "observed_at!"
                     "#,
-                    ORDERED_SAMPLE_CAP,
-                )
-                .fetch_one(&mut *tx),
+                ORDERED_SAMPLE_CAP,
             )
-            .await?)
-        })
-        .await
+            .fetch_one(&mut *tx),
+        )
+        .await?)
     })
     .await
 }

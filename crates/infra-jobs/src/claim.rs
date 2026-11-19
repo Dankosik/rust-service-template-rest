@@ -114,7 +114,7 @@ pub(crate) async fn run_claim_loop(
                 }
             }
         }
-        let Some(mut slots) = take_slots(&shared, &stop).await else {
+        let Some(slots) = take_slots(&shared, &stop).await else {
             return;
         };
         let requested = slots.num_permits();
@@ -128,7 +128,21 @@ pub(crate) async fn run_claim_loop(
             last_claim = Instant::now();
             send_claim(&shared, &policy, slot_count(requested)).await
         };
-        next = finish_round(&shared, &mut slots, requested, round, &stop, &failure);
+        next = match round {
+            Ok(ClaimRound {
+                claim_started_at,
+                rows,
+            }) => {
+                observe_recovery(&shared, Operation::Claim);
+                let next = Next::after_claim(rows.len(), requested);
+                dispatch_drawn(&shared, slots, rows, claim_started_at, &stop, &failure);
+                next
+            }
+            Err(error) => {
+                observe_failure(&shared, Operation::Claim, &error);
+                Next::Idle
+            }
+        };
     }
 }
 
@@ -137,6 +151,18 @@ enum Next {
     Now,
     Soon,
     Idle,
+}
+
+impl Next {
+    const fn after_claim(claimed: usize, requested: usize) -> Self {
+        if claimed == requested {
+            Self::Now
+        } else if claimed == 0 {
+            Self::Idle
+        } else {
+            Self::Soon
+        }
+    }
 }
 
 pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
@@ -168,14 +194,12 @@ async fn wait_for_wake_or_tick(
 }
 
 async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSemaphorePermit> {
-    let one = tokio::select! {
+    let mut permits = tokio::select! {
         biased;
         () = stop.cancelled() => return None,
         permit = Arc::clone(&shared.slots).acquire_owned() => permit.ok()?,
     };
-    let extra = shared.slots.available_permits();
-    let mut permits = one;
-    if let Ok(count) = u32::try_from(extra)
+    if let Ok(count) = u32::try_from(shared.slots.available_permits())
         && count > 0
         && let Ok(more) = Arc::clone(&shared.slots).try_acquire_many_owned(count)
     {
@@ -405,40 +429,9 @@ fn slot_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(1)
 }
 
-fn finish_round(
+fn dispatch_drawn(
     shared: &Arc<Shared>,
-    slots: &mut OwnedSemaphorePermit,
-    requested: usize,
-    round: Result<ClaimRound, OperationError>,
-    stop: &CancellationToken,
-    failure: &CancellationToken,
-) -> Next {
-    match round {
-        Ok(ClaimRound {
-            claim_started_at,
-            rows,
-        }) => {
-            observe_recovery(shared, Operation::Claim);
-            let next = if rows.len() == requested {
-                Next::Now
-            } else if rows.is_empty() {
-                Next::Idle
-            } else {
-                Next::Soon
-            };
-            dispatch_known(shared, slots, rows, claim_started_at, stop, failure);
-            next
-        }
-        Err(error) => {
-            observe_failure(shared, Operation::Claim, &error);
-            Next::Idle
-        }
-    }
-}
-
-fn dispatch_known(
-    shared: &Arc<Shared>,
-    slots: &mut OwnedSemaphorePermit,
+    mut slots: OwnedSemaphorePermit,
     rows: Vec<Drawn>,
     claim_started_at: Instant,
     stop: &CancellationToken,
@@ -450,7 +443,7 @@ fn dispatch_known(
                 attempt,
                 error_summary,
             } => {
-                attempt::record_exhausted(&attempt, error_summary.unwrap_or_default());
+                attempt::record_exhausted(&attempt, &error_summary);
             }
             Drawn::Running {
                 job,
@@ -470,7 +463,7 @@ fn dispatch_known(
                     .registered
                     .running_slots
                     .as_ref()
-                    .and_then(|slots| KindSlot::take(slots, &shared.claim_wake));
+                    .and_then(|running_slots| KindSlot::take(running_slots, &shared.claim_wake));
                 job.registered
                     .metrics()
                     .queue_wait
@@ -513,7 +506,7 @@ enum Drawn {
     },
     Exhausted {
         attempt: AttemptId,
-        error_summary: Option<String>,
+        error_summary: String,
     },
 }
 
@@ -545,7 +538,7 @@ impl ClaimRow {
         if self.exhausted {
             return Ok(Drawn::Exhausted {
                 attempt,
-                error_summary: self.error_summary,
+                error_summary: self.error_summary.unwrap_or_default(),
             });
         }
         let payload = match self.payload {

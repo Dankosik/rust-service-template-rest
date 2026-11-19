@@ -225,12 +225,9 @@ pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
 
 struct TransactionFailure(JobError);
 
-impl From<sqlx::Error> for TransactionFailure {
-    fn from(error: sqlx::Error) -> Self {
-        Self(JobError::postgres(
-            "job completion failed: postgres",
-            &error,
-        ))
+impl TransactionFailure {
+    fn completion(error: &sqlx::Error) -> Self {
+        Self(JobError::postgres("job completion failed: postgres", error))
     }
 }
 
@@ -405,8 +402,10 @@ async fn run_transactional<K: JobKind>(
         async move |tx| {
             handler.run(job, tx).await.map_err(TransactionFailure)?;
             let complete = crate::attempt::complete_query(fence);
-            let rows = observed("complete job", complete.execute(&mut *tx)).await?;
-            if rows.rows_affected() == 0 {
+            let completed = observed("complete job", complete.execute(&mut *tx))
+                .await
+                .map_err(|error| TransactionFailure::completion(&error))?;
+            if completed.rows_affected() == 0 {
                 return Err(TransactionFailure(JobError::retryable(
                     "job claim is stale",
                 )));
@@ -465,7 +464,10 @@ impl fmt::Debug for Kinds {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KindError {
     // template:begin outbox:jobs-outbox-registry-error
-    #[error("publish_domain_event requires a dedicated single-kind outbox publisher registry")]
+    #[error(
+        "{} requires a dedicated single-kind outbox publisher registry",
+        crate::outbox::KIND
+    )]
     OutboxKind,
     // template:end outbox:jobs-outbox-registry-error
     #[error("no job kind is registered")]
@@ -846,7 +848,7 @@ mod tests {
     fn transaction_diagnostics_preserve_the_stage_and_withhold_driver_text() {
         use infra_postgres::TxError;
         let TransactionFailure(completion) =
-            TransactionFailure::from(sqlx::Error::Protocol("private-test-value".to_owned()));
+            TransactionFailure::completion(&sqlx::Error::Protocol("private-test-value".to_owned()));
         assert_eq!(completion.disposition, Disposition::Retry);
         assert_eq!(
             completion.to_string(),

@@ -1,10 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PassEnd, PopulationSample, in_observation_tx,
-    in_tx, observed,
+    MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, in_observation_tx, in_tx,
+    observed, set_statement_timeout,
 };
 use metrics::Unit;
 use tokio::time::MissedTickBehavior;
@@ -13,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::{
     Operation, OperationError, Shared, backstop, observe_failure, observe_recovery,
 };
-use infra_postgres::set_statement_timeout;
 
 // template:begin outbox:jobs-maintenance-outbox-module
 mod outbox;
@@ -32,21 +30,9 @@ const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
-    remove_expired_with_cancel(shared, None)
-        .await
-        .map(|(removed, _)| removed)
-}
-
-async fn remove_expired_with_cancel(
-    shared: &Shared,
-    cancel: Option<&CancellationToken>,
-) -> Result<(u64, PassEnd), OperationError> {
     let mut pass = CleanupPass::start(Cleanup::Jobs);
     let mut removed = 0u64;
     loop {
-        if cancel.is_some_and(CancellationToken::is_cancelled) {
-            return Ok((removed, PassEnd::Cancelled));
-        }
         let batch = Box::pin(delete_batch(shared))
             .await
             .inspect_err(|_| pass.failed())?;
@@ -54,56 +40,66 @@ async fn remove_expired_with_cancel(
         removed = removed.saturating_add(batch);
         if batch < u64::from(RETENTION_BATCH_ROWS) {
             pass.completed();
-            return Ok((removed, PassEnd::Completed));
+            return Ok(removed);
         }
     }
 }
 
-pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken) {
+pub(crate) async fn run_retention(shared: &Shared, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
         let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
-        while !cancel.is_cancelled() {
+        loop {
             schedule.next().await;
-            if cancel.is_cancelled() {
-                return;
-            }
-            match remove_expired_with_cancel(&shared, Some(&cancel)).await {
-                Ok((_, PassEnd::Cancelled)) => return,
-                Ok((_, PassEnd::Completed)) => observe_recovery(&shared, Operation::Retention),
-                Err(error) => observe_failure(&shared, Operation::Retention, &error),
+            match remove_expired(shared).await {
+                Ok(_) => observe_recovery(shared, Operation::Retention),
+                Err(error) => observe_failure(shared, Operation::Retention, &error),
             }
         }
     }))
     .await;
 }
 
-async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
+async fn in_maintenance_tx<T, F>(
+    shared: &Shared,
+    timeout: Duration,
+    work: F,
+) -> Result<T, OperationError>
+where
+    F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, OperationError>,
+{
     let _turn = shared.statement_turn.lock().await;
     backstop(async {
-        in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
-            set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
-            let delete = sqlx::query!(
-                "DELETE FROM background_jobs \
-                 WHERE id = ANY (ARRAY( \
-                     SELECT id FROM background_jobs \
-                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
-                     ORDER BY finished_at \
-                     LIMIT $2 \
-                     FOR UPDATE SKIP LOCKED))",
-                RETAIN_COMPLETED_FOR as _,
-                i64::from(RETENTION_BATCH_ROWS),
-            );
-            Ok(observed("delete finished jobs", delete.execute(&mut *tx))
-                .await?
-                .rows_affected())
+        in_tx(&shared.pool, async |tx| {
+            set_statement_timeout(tx, timeout).await?;
+            work(tx).await
         })
         .await
     })
     .await
 }
 
+async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
+    in_maintenance_tx(shared, RETENTION_STATEMENT_TIMEOUT, async |tx| {
+        let delete = sqlx::query!(
+            "DELETE FROM background_jobs \
+             WHERE id = ANY (ARRAY( \
+                 SELECT id FROM background_jobs \
+                 WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
+                 ORDER BY finished_at \
+                 LIMIT $2 \
+                 FOR UPDATE SKIP LOCKED))",
+            RETAIN_COMPLETED_FOR as _,
+            i64::from(RETENTION_BATCH_ROWS),
+        );
+        Ok(observed("delete finished jobs", delete.execute(&mut *tx))
+            .await?
+            .rows_affected())
+    })
+    .await
+}
+
 pub(crate) async fn run_sampling(
-    shared: Arc<Shared>,
+    shared: &Shared,
     kinds: &[&'static str],
     cancel: CancellationToken,
 ) {
@@ -120,21 +116,18 @@ pub(crate) async fn run_sampling(
     });
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
-            run_kind_sampling(&shared, kinds, &cancel),
-            run_population_sampling(&shared, &cancel),
+            run_kind_sampling(shared, kinds),
+            run_population_sampling(shared),
         );
     }))
     .await;
 }
 
-async fn run_kind_sampling(shared: &Shared, kinds: &[&str], cancel: &CancellationToken) {
+async fn run_kind_sampling(shared: &Shared, kinds: &[&str]) -> ! {
     let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    while !cancel.is_cancelled() {
+    loop {
         ticker.tick().await;
-        if cancel.is_cancelled() {
-            return;
-        }
         // template:begin outbox:jobs-maintenance-outbox-sampler
         if outbox::is_registered(kinds) {
             outbox::sample(shared).await;
@@ -152,19 +145,16 @@ async fn run_kind_sampling(shared: &Shared, kinds: &[&str], cancel: &Cancellatio
     }
 }
 
-async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
+async fn run_population_sampling(shared: &Shared) -> ! {
     let mut observers = [Population::Completed, Population::Failed].map(|population| {
         (
             population,
-            MaintenanceObserver::start(population.observer()),
+            MaintenanceObserver::start(population.maintenance_population()),
         )
     });
-    while !cancel.is_cancelled() {
+    loop {
         for (population, observer) in &mut observers {
             observer.sample(read_population(shared, *population)).await;
-            if cancel.is_cancelled() {
-                return;
-            }
         }
         tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
     }
@@ -177,7 +167,7 @@ enum Population {
 }
 
 impl Population {
-    const fn observer(self) -> MaintenancePopulation {
+    const fn maintenance_population(self) -> MaintenancePopulation {
         match self {
             Self::Completed => MaintenancePopulation::Cleanup(Cleanup::Jobs),
             Self::Failed => MaintenancePopulation::FailedJobs,
@@ -264,20 +254,17 @@ fn invalidate_sample() {
 }
 
 async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, OperationError> {
-    let _turn = shared.statement_turn.lock().await;
-    backstop(async {
-        in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
-            set_statement_timeout(tx, SAMPLE_STATEMENT_TIMEOUT).await?;
-            let rows = observed(
-                "sample jobs",
-                sqlx::query_as!(
-                    SampleRow,
-                    "WITH sampled AS ( \
-                         SELECT statement_timestamp() AS observed_at \
-                     ), registered AS ( \
-                         SELECT name.kind \
-                         FROM unnest($1::text[]) AS name(kind) \
-                     ) \
+    in_maintenance_tx(shared, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
+        let rows = observed(
+            "sample jobs",
+            sqlx::query_as!(
+                SampleRow,
+                "WITH sampled AS ( \
+                     SELECT statement_timestamp() AS observed_at \
+                 ), registered AS ( \
+                     SELECT name.kind \
+                     FROM unnest($1::text[]) AS name(kind) \
+                 ) \
                      SELECT registered.kind AS \"kind!\", \
                             available.count AS \"available!\", \
                             scheduled.count AS \"scheduled!\", \
@@ -352,9 +339,7 @@ async fn sample_once(shared: &Shared, kinds: &[&str]) -> Result<Sample, Operatio
                 .fetch_all(&mut *tx),
             )
             .await?;
-            decode_sample(rows)
-        })
-        .await
+        decode_sample(rows)
     })
     .await
 }

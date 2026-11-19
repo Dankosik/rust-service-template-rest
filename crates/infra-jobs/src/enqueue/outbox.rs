@@ -30,37 +30,9 @@ pub async fn enqueue<T: JobKind>(
     intent: &T,
     order: Option<(&str, i64)>,
 ) -> Result<Admission, EnqueueError> {
-    admit(tx, intent, order, true).await
-}
-
-pub async fn reconcile<T: JobKind>(
-    tx: &mut Tx<'_, impl TxMode>,
-    intent: &T,
-    order: Option<(&str, i64)>,
-) -> Result<Admission, EnqueueError> {
-    admit(tx, intent, order, false).await
-}
-
-async fn admit<T: JobKind>(
-    tx: &mut Tx<'_, impl TxMode>,
-    intent: &T,
-    order: Option<(&str, i64)>,
-    allow_insert: bool,
-) -> Result<Admission, EnqueueError> {
-    if T::NAME != KIND {
-        return Err(EnqueueError::OutboxKind);
-    }
-    if order.is_some_and(|(key, version)| !is_valid_unique_key(key) || version < 1) {
+    let PreparedIntent::Ready(payload) = prepare_intent(intent, order)? else {
         return Ok(Admission::InvalidOrder);
-    }
-    let payload = encode_payload(intent)?;
-    if contains_decoded_nul(&payload) {
-        return Err(EnqueueError::PayloadContainsNul);
-    }
-    serde_json::from_str::<T>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    if !allow_insert {
-        return compare_receipt(tx, &payload, order).await;
-    }
+    };
     let (aggregate_key, version) = order.unzip();
     let trace = trace_context::capture();
     let id = JobId::new_v7();
@@ -102,10 +74,45 @@ async fn admit<T: JobKind>(
         notify_workers_after_commit(tx, KIND);
         return Ok(Admission::Created);
     }
-    match compare_receipt(tx, &payload, order).await? {
-        Admission::MissingReceipt => Ok(Admission::OrderConflict),
-        other => Ok(other),
+    Ok(compare_receipt(tx, &payload, order)
+        .await?
+        .into_admission(Admission::OrderConflict))
+}
+
+pub async fn reconcile<T: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    intent: &T,
+    order: Option<(&str, i64)>,
+) -> Result<Admission, EnqueueError> {
+    let PreparedIntent::Ready(payload) = prepare_intent(intent, order)? else {
+        return Ok(Admission::InvalidOrder);
+    };
+    Ok(compare_receipt(tx, &payload, order)
+        .await?
+        .into_admission(Admission::MissingReceipt))
+}
+
+enum PreparedIntent {
+    Ready(String),
+    InvalidOrder,
+}
+
+fn prepare_intent<T: JobKind>(
+    intent: &T,
+    order: Option<(&str, i64)>,
+) -> Result<PreparedIntent, EnqueueError> {
+    if T::NAME != KIND {
+        return Err(EnqueueError::OutboxKind);
     }
+    if order.is_some_and(|(key, version)| !is_valid_unique_key(key) || version < 1) {
+        return Ok(PreparedIntent::InvalidOrder);
+    }
+    let payload = encode_payload(intent)?;
+    if contains_decoded_nul(&payload) {
+        return Err(EnqueueError::PayloadContainsNul);
+    }
+    serde_json::from_str::<T>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
+    Ok(PreparedIntent::Ready(payload))
 }
 
 fn contains_decoded_nul(payload: &str) -> bool {
@@ -127,11 +134,27 @@ fn contains_decoded_nul(payload: &str) -> bool {
     false
 }
 
+enum ReceiptComparison {
+    Same,
+    Different,
+    Missing,
+}
+
+impl ReceiptComparison {
+    const fn into_admission(self, on_missing: Admission) -> Admission {
+        match self {
+            Self::Same => Admission::Duplicate,
+            Self::Different => Admission::EventIdConflict,
+            Self::Missing => on_missing,
+        }
+    }
+}
+
 async fn compare_receipt(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &str,
     order: Option<(&str, i64)>,
-) -> Result<Admission, EnqueueError> {
+) -> Result<ReceiptComparison, EnqueueError> {
     let (aggregate_key, version) = order.unzip();
     let same = observed(
         "compare outbox receipt",
@@ -150,8 +173,8 @@ async fn compare_receipt(
     )
     .await?;
     Ok(match same {
-        Some(true) => Admission::Duplicate,
-        Some(false) => Admission::EventIdConflict,
-        None => Admission::MissingReceipt,
+        Some(true) => ReceiptComparison::Same,
+        Some(false) => ReceiptComparison::Different,
+        None => ReceiptComparison::Missing,
     })
 }

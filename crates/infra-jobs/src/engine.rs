@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use enum_map::EnumMap;
 use sqlx::{Postgres, pool::PoolConnection, postgres::PgPool};
-use tokio::sync::{Notify, Semaphore, watch};
+use tokio::sync::{Notify, Semaphore, SetOnce, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -127,7 +127,11 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    fn init_metrics(&self) -> Vec<&'static str> {
+    fn kind_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.groups().flat_map(|group| group.registry.names())
+    }
+
+    fn init_metrics(&self, kinds: &[&'static str]) {
         crate::attempt::describe_metrics();
         for group in self.groups() {
             group.owned_attempts.bind();
@@ -137,22 +141,18 @@ impl Engine {
             }
         }
         claim::describe_metrics();
-        let kinds: Vec<_> = self
-            .groups()
-            .flat_map(|group| group.registry.names())
-            .collect();
-        maintenance::init_metrics(&kinds);
+        maintenance::init_metrics(kinds);
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
             metrics::Unit::Count,
             "Failed worker database operations"
         );
-        kinds
     }
 
     #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
-        let kinds = self.init_metrics();
+        let kinds: Vec<_> = self.kind_names().collect();
+        self.init_metrics(&kinds);
         let groups = 1 + self.additional.len();
         tracing::info!(worker.id = %self.shared.worker_id, groups, "jobs_engine_starting");
         let engine = Arc::new(self);
@@ -197,11 +197,7 @@ impl Engine {
 
 impl fmt::Debug for Engine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kinds = fmt::from_fn(|f| {
-            f.debug_list()
-                .entries(self.groups().flat_map(|group| group.registry.names()))
-                .finish()
-        });
+        let kinds = fmt::from_fn(|f| f.debug_list().entries(self.kind_names()).finish());
         formatter
             .debug_struct("Engine")
             .field("kinds", &kinds)
@@ -299,9 +295,9 @@ fn spawn_guarded(
         let _guard = guard;
         match run {
             _claim @ Run::Claim { .. } => claim::run_claim_loop(shared, token, failure).await,
-            Run::Retention => maintenance::run_retention(shared, token).await,
+            Run::Retention => maintenance::run_retention(&shared, token).await,
             Run::Listener(engine) => listener::run_listener(&shared, &engine, token).await,
-            Run::Sampling(kinds) => maintenance::run_sampling(shared, &kinds, token).await,
+            Run::Sampling(kinds) => maintenance::run_sampling(&shared, &kinds, token).await,
         }
     });
 }
@@ -504,8 +500,7 @@ pub(crate) struct AttemptLifecycle {
 
 #[derive(Default)]
 pub(crate) struct ForcedCleanup {
-    force: CancellationToken,
-    window: OnceLock<CleanupWindow>,
+    window: SetOnce<CleanupWindow>,
     timed_out: OnceLock<bool>,
 }
 
@@ -516,22 +511,22 @@ struct CleanupWindow {
 
 impl ForcedCleanup {
     fn begin(&self, budget: Duration) -> Instant {
-        let window = self.window.get_or_init(|| {
-            let started_at = Instant::now();
-            let deadline = started_at
-                .checked_add(budget)
-                .unwrap_or(started_at + CLEANUP_OVERFLOW_FALLBACK);
-            CleanupWindow {
-                started_at,
-                deadline,
-            }
+        if let Some(window) = self.window.get() {
+            return window.deadline;
+        }
+        let started_at = Instant::now();
+        let deadline = started_at
+            .checked_add(budget)
+            .unwrap_or(started_at + CLEANUP_OVERFLOW_FALLBACK);
+        let _ = self.window.set(CleanupWindow {
+            started_at,
+            deadline,
         });
-        self.force.cancel();
-        window.deadline
+        self.window.get().map_or(deadline, |window| window.deadline)
     }
 
     pub(crate) async fn forced(&self) {
-        self.force.cancelled().await;
+        let _ = self.window.wait().await;
     }
 
     pub(crate) fn requested_before(&self, deadline: Instant) -> bool {
@@ -541,11 +536,8 @@ impl ForcedCleanup {
     }
 
     pub(crate) async fn ended(&self) {
-        self.force.cancelled().await;
-        match self.window.get() {
-            Some(window) => tokio::time::sleep_until(window.deadline).await,
-            None => std::future::pending().await,
-        }
+        let window = self.window.wait().await;
+        tokio::time::sleep_until(window.deadline).await;
     }
 
     pub(crate) fn has_ended(&self) -> bool {
