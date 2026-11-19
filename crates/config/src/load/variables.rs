@@ -159,22 +159,23 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, Error> {
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
-        let Some(scan_dir) = generation.as_deref() else {
-            generation = projected_generation(dir)?;
-            continue;
+        let next_generation = if let Some(scan_dir) = generation.as_deref() {
+            let variables = read_secret_files(dir, scan_dir);
+            let current = projected_generation(dir)?;
+            let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
+                && matches!(
+                    &variables,
+                    Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
+                        if error.kind() == io::ErrorKind::NotFound
+                );
+            if current == generation && !retry_not_found {
+                return variables;
+            }
+            current
+        } else {
+            projected_generation(dir)?
         };
-        let variables = read_secret_files(dir, scan_dir);
-        let current = projected_generation(dir)?;
-        let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
-            && matches!(
-                &variables,
-                Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
-                    if error.kind() == io::ErrorKind::NotFound
-            );
-        if current == generation && !retry_not_found {
-            return variables;
-        }
-        generation = current;
+        generation = next_generation;
     }
 
     Err(Error::ReadSecretsDir {
