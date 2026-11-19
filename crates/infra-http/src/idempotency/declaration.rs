@@ -4,11 +4,11 @@ use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
 use axum::routing::MethodFilter;
 use itertools::Itertools as _;
-use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
+use utoipa::openapi::path::{Operation, Parameter, ParameterIn, Paths};
 use utoipa::openapi::response::Response;
 use utoipa::openapi::{Content, RefOr, Schema};
 
-use crate::contract::{fixed_operations_mut, same_definition};
+use crate::contract::{path_operations_mut, same_definition};
 
 use super::openapi::{
     can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
@@ -97,18 +97,21 @@ pub(super) fn prepare(
         &mut fingerprint_headers,
     )
     .map_err(|rule| CompositionError::new(&subject, rule))?;
-    let (method, operation) = one_operation_mut(item).ok_or_else(shape)?;
+    let has_additional = !item.additional_operations.is_empty();
+    let (method, operation) = path_operations_mut(item)
+        .exactly_one()
+        .map_err(|_| shape())?;
     let operation_id = operation
         .operation_id
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
     let at_operation = |rule| CompositionError::new(&operation_id, rule);
-    let method = match method {
-        "POST" => MethodFilter::POST,
-        "PUT" => MethodFilter::PUT,
-        "PATCH" => MethodFilter::PATCH,
-        "DELETE" => MethodFilter::DELETE,
+    let method = match (!has_additional, method) {
+        (true, "POST") => MethodFilter::POST,
+        (true, "PUT") => MethodFilter::PUT,
+        (true, "PATCH") => MethodFilter::PATCH,
+        (true, "DELETE") => MethodFilter::DELETE,
         _ => return Err(at_operation(Rule::Method).into()),
     };
 
@@ -356,17 +359,6 @@ fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), 
         });
     }
     Ok(())
-}
-
-fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operation)> {
-    fixed_operations_mut(item)
-        .chain(
-            item.additional_operations
-                .values_mut()
-                .map(|operation| ("additional", operation)),
-        )
-        .exactly_one()
-        .ok()
 }
 
 fn route_subject(paths: &Paths) -> String {

@@ -7,7 +7,7 @@ use utoipa::openapi::schema::{AnyOfBuilder, Schema};
 use utoipa::openapi::{Components, OpenApi, Ref, RefOr};
 use utoipa::{OpenApi as _, ToResponse};
 
-use super::{FinalizeError, fixed_operations_mut};
+use super::{FinalizeError, path_operations_mut};
 // template:begin authn:http-outcomes-policy-import
 use super::Policy;
 // template:end authn:http-outcomes-policy-import
@@ -30,11 +30,7 @@ pub(super) fn compose(
     }
     for (path, item) in &mut document.paths.paths {
         let path = path.as_str();
-        for (method, operation) in fixed_operations_mut(item).chain(
-            item.additional_operations
-                .iter_mut()
-                .map(|(method, operation)| (method.as_str(), operation)),
-        ) {
+        for (method, operation) in path_operations_mut(item) {
             // template:begin authn:http-outcomes-operation-policy
             let protected = policy.is_protected(path, method);
             // template:end authn:http-outcomes-operation-policy

@@ -29,7 +29,7 @@ mod policy;
 // template:begin authn:http-contract-policy-reexports
 pub(crate) use policy::{Access, contract_path};
 // template:end authn:http-contract-policy-reexports
-pub(crate) use policy::{Policy, fixed_operations_mut};
+pub(crate) use policy::{Policy, path_operations_mut};
 use policy::{StandardMethod, enforce_public, fixed_operations};
 
 #[macro_export]

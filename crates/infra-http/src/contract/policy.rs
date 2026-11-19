@@ -106,9 +106,9 @@ pub(super) fn fixed_operations(
         .filter_map(move |method| method.operation(item).map(|op| (method.as_str(), op)))
 }
 
-pub(crate) fn fixed_operations_mut(
-    item: &mut PathItem,
-) -> impl Iterator<Item = (&'static str, &mut Operation)> {
+pub(crate) fn path_operations_mut<'a>(
+    item: &'a mut PathItem,
+) -> impl Iterator<Item = (&'a str, &'a mut Operation)> {
     [
         (StandardMethod::Get, &mut item.get),
         (StandardMethod::Put, &mut item.put),
@@ -121,7 +121,14 @@ pub(crate) fn fixed_operations_mut(
         (StandardMethod::Query, &mut item.query),
     ]
     .into_iter()
-    .filter_map(|(method, op)| op.as_mut().map(|op| (method.as_str(), op)))
+    .filter_map(|(method, op)| -> Option<(&'a str, &'a mut Operation)> {
+        op.as_mut().map(|op| (method.as_str(), op))
+    })
+    .chain(
+        item.additional_operations
+            .iter_mut()
+            .map(|(method, op)| (method.as_str(), op)),
+    )
 }
 
 #[derive(Clone)]
