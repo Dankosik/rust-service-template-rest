@@ -111,11 +111,11 @@ pub struct IssuerUrl(EndpointUrl);
 
 impl IssuerUrl {
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
-        let url = admit(raw)?;
-        if url.url.query().is_some() {
+        let endpoint = parse_endpoint_url(raw)?;
+        if endpoint.url().query().is_some() {
             return Err(invalid_url());
         }
-        Ok(Self(url))
+        Ok(Self(endpoint))
     }
 
     #[must_use]
@@ -139,7 +139,7 @@ pub struct EndpointUrl {
 
 impl EndpointUrl {
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
-        admit(raw)
+        parse_endpoint_url(raw)
     }
 
     #[must_use]
@@ -152,7 +152,7 @@ impl EndpointUrl {
     }
 }
 
-fn admit(raw: &str) -> Result<EndpointUrl, PreparationError> {
+fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, PreparationError> {
     if uri::has_whitespace_or_control(raw) {
         return Err(invalid_url());
     }
@@ -183,21 +183,18 @@ pub(crate) struct ProviderClient {
 
 impl ProviderClient {
     pub(crate) fn try_new() -> Result<Self, PreparationError> {
-        Self::from_builder(client_builder()).map_err(|()| {
+        Self::from_builder(client_builder()).map_err(|_| {
             PreparationError::new(PreparationPhase::Client, PreparationReason::ClientBuild)
         })
     }
 
-    fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, ()> {
+    fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
         metrics::describe_histogram!(
             REQUEST_DURATION_METRIC,
             metrics::Unit::Seconds,
             "Authentication provider exchange duration by operation and closed outcome"
         );
-        builder
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| ())
+        builder.build().map(|client| Self { client })
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
@@ -311,10 +308,9 @@ impl Exchange {
         request: reqwest::RequestBuilder,
         mode: ExchangeMode<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let span = self.span.clone();
-        let caller_stop = match mode {
-            ExchangeMode::Introspection { caller_stop } => Some(caller_stop),
-            ExchangeMode::Document { .. } => None,
+        let (caller_stop, require_json_content_type, deadline) = match mode {
+            ExchangeMode::Introspection { caller_stop } => (Some(caller_stop), true, None),
+            ExchangeMode::Document { deadline } => (None, false, deadline),
         };
         let guard = std::mem::DropGuard::new(self, |exchange| {
             exchange.record(Some(
@@ -323,15 +319,11 @@ impl Exchange {
                     .map_or("cancelled", stopped_label),
             ));
         });
-        let require_json_content_type = matches!(mode, ExchangeMode::Introspection { .. });
-        let receive = receive(request, require_json_content_type, &span).instrument(span.clone());
-        let result = match mode {
-            ExchangeMode::Introspection { .. } | ExchangeMode::Document { deadline: None } => {
-                receive.await
-            }
-            ExchangeMode::Document {
-                deadline: Some(deadline),
-            } => tokio::time::timeout_at(deadline, receive)
+        let response_body =
+            receive(request, require_json_content_type, &guard.span).instrument(guard.span.clone());
+        let result = match deadline {
+            None => response_body.await,
+            Some(deadline) => tokio::time::timeout_at(deadline, response_body)
                 .await
                 .unwrap_or(Err(ProviderFailure::Timeout)),
         };
@@ -435,7 +427,7 @@ pub(crate) fn new_fixture_client(
             .dns_resolver(resolver)
             .tls_certs_only([root]),
     )
-    .map_err(|()| Failure::Unavailable)
+    .map_err(|_| Failure::Unavailable)
 }
 
 #[cfg(

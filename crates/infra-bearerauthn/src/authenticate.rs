@@ -126,7 +126,7 @@ impl Verifier {
         context: &OperationContext,
     ) -> Result<(Principal, PresentedToken<'a>), Failure> {
         let counters = &self.counters.transport;
-        let outcome = DropGuard::new(transport, |transport| {
+        let refusal_guard = DropGuard::new(transport, |transport| {
             let refusal = context
                 .stopped()
                 .map_or(Refusal::Cancelled, Refusal::from_stopped);
@@ -141,14 +141,14 @@ impl Verifier {
         };
         if let Err(stopped) = context.check() {
             counters.record_refusal(transport, Refusal::from_stopped(stopped));
-            DropGuard::dismiss(outcome);
+            DropGuard::dismiss(refusal_guard);
             return Err(Failure::Unavailable);
         }
         match &result {
             Ok(_) => counters.record_success(transport),
             Err(failure) => counters.record_refusal(transport, Refusal::Failure(*failure)),
         }
-        DropGuard::dismiss(outcome);
+        DropGuard::dismiss(refusal_guard);
         result
     }
 }

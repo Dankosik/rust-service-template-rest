@@ -13,7 +13,7 @@ use futures_util::{
 use moka::{Expiry, future::Cache};
 use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
 
@@ -200,36 +200,40 @@ impl IntrospectionVerifier {
         self: &Arc<Self>,
         token: &PresentedToken<'_>,
         context: &OperationContext,
-        now: impl Fn() -> Result<u64, VerificationError> + Clone + Send + Sync + 'static,
+        unix_now_secs: impl Fn() -> Result<u64, VerificationError> + Clone + Send + Sync + 'static,
     ) -> Result<Principal, VerificationError> {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token.to_secret(), &|| context.stopped(), &now)
+                .introspect(token.as_str(), &|| context.stopped(), &unix_now_secs)
                 .await?
-                .into_principal_checked_at(Duration::from_secs(now()?));
+                .into_principal_checked_at(Duration::from_secs(unix_now_secs()?));
         };
         let key = token_digest(token);
         loop {
             if let Some(value) = cache.retained.get(&key).await
-                && value.reusable_at(now()?)
+                && value.is_reusable_at(unix_now_secs()?)
             {
-                return Ok(value.identity);
+                return Ok(value.principal);
             }
             let filled = cache
                 .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
-                    let now = now.clone();
+                    let unix_now_secs = unix_now_secs.clone();
                     let token = token.to_secret();
                     async move {
                         if let Some(value) = retained.get(&key).await
-                            && value.reusable_at(now()?)
+                            && value.is_reusable_at(unix_now_secs()?)
                         {
                             return Ok(Fill::RecheckCache);
                         }
                         let value = verifier
-                            .introspect(token, &|| last_waiter_stop.get().copied(), &now)
+                            .introspect(
+                                token.expose_secret(),
+                                &|| last_waiter_stop.get().copied(),
+                                &unix_now_secs,
+                            )
                             .await?;
                         retained.insert(key, value.clone()).await;
                         Ok(Fill::Fresh(value))
@@ -237,18 +241,18 @@ impl IntrospectionVerifier {
                 })
                 .await?;
             if let Fill::Fresh(value) = filled {
-                return value.into_principal_checked_at(Duration::from_secs(now()?));
+                return value.into_principal_checked_at(Duration::from_secs(unix_now_secs()?));
             }
         }
     }
 
     async fn introspect(
         &self,
-        token: SecretString,
+        token: &str,
         caller_stop: CallerStop<'_>,
-        now: &impl Fn() -> Result<u64, VerificationError>,
+        unix_now_secs: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedClaims, VerificationError> {
-        now()?;
+        unix_now_secs()?;
         let _permit = self
             .permits
             .try_acquire()
@@ -259,14 +263,11 @@ impl IntrospectionVerifier {
                 self.endpoint.url(),
                 &self.client_id,
                 self.client_secret.expose_secret(),
-                &[
-                    ("token", token.expose_secret()),
-                    ("token_type_hint", "access_token"),
-                ],
+                &[("token", token), ("token_type_hint", "access_token")],
                 caller_stop,
             )
             .await?;
-        validate_introspection_claims(&response, &self.policy, now()?)
+        validate_introspection_claims(&response, &self.policy, unix_now_secs()?)
     }
 }
 
@@ -281,7 +282,7 @@ impl Expiry<TokenDigest, VerifiedClaims> for Retention {
         value: &VerifiedClaims,
         _: std::time::Instant,
     ) -> Option<Duration> {
-        Some(retention(&value.identity, self.ttl, SystemTime::now()))
+        Some(retention(&value.principal, self.ttl, SystemTime::now()))
     }
 
     fn expire_after_update(
@@ -291,15 +292,16 @@ impl Expiry<TokenDigest, VerifiedClaims> for Retention {
         _: std::time::Instant,
         _: Option<Duration>,
     ) -> Option<Duration> {
-        Some(retention(&value.identity, self.ttl, SystemTime::now()))
+        Some(retention(&value.principal, self.ttl, SystemTime::now()))
     }
 }
 
-fn retention(identity: &Principal, ttl: Duration, now: SystemTime) -> Duration {
+fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
     match now.duration_since(UNIX_EPOCH) {
-        Ok(now) if identity.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
-            Duration::from_secs(identity.expires_at())
-                .saturating_sub(now)
+        Ok(now_from_epoch) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
+            principal
+                .expiry_from_epoch()
+                .saturating_sub(now_from_epoch)
                 .min(ttl)
         }
         _ => Duration::ZERO,
@@ -1432,7 +1434,7 @@ mod tests {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
             validate_introspection_claims(response.to_string().as_bytes(), &policy, 100)
                 .unwrap()
-                .identity
+                .principal
         };
         let small = identity("");
         let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
@@ -1456,7 +1458,7 @@ mod tests {
             &policy,
             100,
         )
-        .unwrap().identity;
+        .unwrap().principal;
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
         for (length, expected) in [
             (MAX_RETAINED_PAYLOAD_BYTES, Duration::from_millis(30_500)),
@@ -1467,7 +1469,7 @@ mod tests {
             let padded = format!(" \t\r\n{response}\n\r\t ");
             let identity = validate_introspection_claims(padded.as_bytes(), &policy, 100)
                 .unwrap()
-                .identity;
+                .principal;
             assert_eq!(identity.payload_len(), length);
             assert_eq!(retention(&identity, ttl, at(100_500)), expected);
         }

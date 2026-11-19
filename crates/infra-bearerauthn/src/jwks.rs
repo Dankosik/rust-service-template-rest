@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     sync::{
         Arc,
@@ -158,7 +159,25 @@ impl KeyRejection {
     }
 }
 
-fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
+struct ParsedKeySet {
+    keys: Vec<JwtKey>,
+    rejected: BTreeMap<KeyRejection, u64>,
+}
+
+impl ParsedKeySet {
+    fn has_no_usable_keys(&self) -> bool {
+        self.keys.is_empty()
+            && self
+                .rejected
+                .keys()
+                .any(|reason| *reason != KeyRejection::EncryptionOnly)
+    }
+}
+
+fn parse_jwks_entries(
+    bytes: &[u8],
+    configured: &[JwtAlgorithm],
+) -> Result<ParsedKeySet, KeySetFailure> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
     let mut rejected = BTreeMap::<KeyRejection, u64>::new();
@@ -184,11 +203,12 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
             *rejected.entry(KeyRejection::AlgorithmBinding).or_default() += conflicts;
         }
     }
-    let no_usable_keys = keys.is_empty()
-        && rejected
-            .keys()
-            .any(|reason| *reason != KeyRejection::EncryptionOnly);
-    for (reason, count) in rejected {
+    Ok(ParsedKeySet { keys, rejected })
+}
+
+fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, KeySetFailure> {
+    let no_usable_keys = parsed.has_no_usable_keys();
+    for (reason, count) in parsed.rejected {
         tracing::debug!(
             reason = reason.label(),
             count,
@@ -200,29 +220,41 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
         return Err(KeySetFailure::NoUsableKeys);
     }
     Ok(KeySet {
-        keys,
+        keys: parsed.keys,
         generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
-        acquired_at: tokio::time::Instant::now(),
+        acquired_at,
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
+    let parsed = parse_jwks_entries(bytes, configured)?;
+    build_key_set(parsed, Instant::now())
+}
+
 fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
-    let mut bindings = HashMap::<Box<[u8]>, Option<JwtAlgorithm>>::new();
+    #[derive(Eq, PartialEq)]
+    enum RsaBinding {
+        Single(JwtAlgorithm),
+        Conflicting,
+    }
+
+    let mut bindings = HashMap::<Box<[u8]>, RsaBinding>::new();
     for key in keys
         .iter()
         .filter(|key| key.algorithm.family() == KeyFamily::Rsa)
     {
         let bound = bindings
             .entry(key.public_key.as_ref().into())
-            .or_insert(Some(key.algorithm));
-        if *bound != Some(key.algorithm) {
-            *bound = None;
+            .or_insert(RsaBinding::Single(key.algorithm));
+        if *bound != RsaBinding::Single(key.algorithm) {
+            *bound = RsaBinding::Conflicting;
         }
     }
     let original_len = keys.len();
     keys.retain(|key| {
         key.algorithm.family() != KeyFamily::Rsa
-            || bindings.get(key.public_key.as_ref()) != Some(&None)
+            || bindings.get(key.public_key.as_ref()) != Some(&RsaBinding::Conflicting)
     });
     (original_len - keys.len()) as u64
 }
@@ -457,12 +489,11 @@ impl JwksSource {
         algorithms: &[JwtAlgorithm],
         deadline: Instant,
     ) -> Result<Arc<KeySet>, KeySetFailure> {
-        let started = Instant::now();
-        let discovered;
-        let uri = match self {
-            Self::Configured(uri) => uri,
+        let (uri, acquired_at) = match self {
+            Self::Configured(uri) => (Cow::Borrowed(uri), None),
             Self::Discovery(issuer) => {
-                discovered = discover_jwks_uri(provider, issuer, deadline)
+                let started = Instant::now();
+                let discovered = discover_jwks_uri(provider, issuer, deadline)
                     .await
                     .map_err(KeySetFailure::Discovery)?;
                 if Instant::now() >= deadline {
@@ -471,17 +502,15 @@ impl JwksSource {
                         PreparationReason::Timeout,
                     )));
                 }
-                &discovered
+                (Cow::Owned(discovered), Some(started))
             }
         };
         let bytes = provider
             .get_document(uri.url(), Document::Jwks, Some(deadline))
             .await
             .map_err(KeySetFailure::Fetch)?;
-        let mut keys = parse_key_set(&bytes, algorithms)?;
-        if matches!(self, Self::Discovery(_)) {
-            keys.acquired_at = started;
-        }
+        let parsed = parse_jwks_entries(&bytes, algorithms)?;
+        let keys = build_key_set(parsed, acquired_at.unwrap_or_else(Instant::now))?;
         Ok(Arc::new(keys))
     }
 }
@@ -544,11 +573,11 @@ pub(crate) mod fixtures {
         signing: &EncodingKey,
         algorithm: Algorithm,
         kid: Option<&str>,
-        alg: bool,
+        include_alg: bool,
     ) -> serde_json::Value {
         let mut jwk = Jwk::from_encoding_key(signing, algorithm).unwrap();
         jwk.common.key_id = kid.map(str::to_owned);
-        if !alg {
+        if !include_alg {
             jwk.common.key_algorithm = None;
         }
         serde_json::to_value(jwk).unwrap()

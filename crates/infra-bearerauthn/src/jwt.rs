@@ -193,16 +193,16 @@ impl JwtVerifier {
         keys.require_fresh(self.jwks_max_age)?;
         if let Some(remembered) = self.remembered.get(bytes) {
             if remembered.key_generation == keys.generation() {
-                let verified = remembered.verified.into_principal_checked_at(now()?);
-                if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
+                let result = remembered.verified.into_principal_checked_at(now()?);
+                if matches!(&result, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
-                return verified;
+                return result;
             }
             self.remembered.invalidate(bytes);
         }
         let remembered = self.verify_uncached(token, &now, keys).await?;
-        let principal = remembered.verified.identity.clone();
+        let principal = remembered.verified.principal.clone();
         self.remembered.insert(bytes.into(), remembered);
         Ok(principal)
     }
@@ -254,7 +254,7 @@ impl JwtVerifier {
         signing_keys.require_fresh(self.jwks_max_age)?;
         Ok(Remembered {
             held_for: MAX_REMEMBERED_FOR
-                .min(verified.identity.expiry_from_epoch().saturating_sub(now)),
+                .min(verified.principal.expiry_from_epoch().saturating_sub(now)),
             sampled_at,
             verified,
             key_generation: signing_keys.generation(),
