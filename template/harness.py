@@ -120,7 +120,12 @@ OUTPUT_SCHEMA_LINES = {
         "Design It Twice, return "
         "`docs/spec-first-workflow/phases/technical-design/design-it-twice.md#candidate-proposal`."
     ),
-    "review-result-v1": "Return `docs/spec-first-workflow/shared/review.md#review-result`.",
+    "review-result-v1": (
+        "Return fields: candidate, verdict (PASS | CONCERNS | FAIL | NEEDS_PARENT | "
+        "REVIEW_HANDOFF_INVALID), findings (anchored surviving findings grouped by "
+        "axis, or none), evidence_boundary, reopen_owner (see "
+        "`docs/spec-first-workflow/shared/review.md#review-result`)."
+    ),
     "delegated-result-v1": (
         "Return fields: result, changed_paths, proof (checks actually run "
         "with their results, or none), candidate, gap."
