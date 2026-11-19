@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobState {
     Pending,
@@ -32,6 +34,18 @@ impl JobState {
     }
 }
 
+impl fmt::Display for JobState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for JobState {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureReason {
     Permanent,
@@ -53,6 +67,18 @@ impl FailureReason {
         Self::ALL
             .into_iter()
             .find(|reason| reason.as_str() == value)
+    }
+}
+
+impl fmt::Display for FailureReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for FailureReason {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 

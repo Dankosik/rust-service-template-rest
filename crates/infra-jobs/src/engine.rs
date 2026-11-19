@@ -5,17 +5,18 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use enum_map::EnumMap;
+use infra_postgres::CleanupError;
 use sqlx::{Postgres, pool::PoolConnection, postgres::PgPool};
 use tokio::sync::{Notify, Semaphore, SetOnce, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::Kinds;
 use crate::claim;
 use crate::listener;
 use crate::maintenance;
 use crate::session::StartupError;
-use crate::{KindError, Kinds};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const LEASE_RESERVE: Duration = Duration::from_mins(1);
@@ -58,14 +59,30 @@ pub struct DrainEnd {
     pub timed_out: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("job kind {kind:?} is registered in another group")]
+pub struct DuplicateKind {
+    pub kind: &'static str,
+}
+
 #[derive(Debug, thiserror::Error)]
-pub enum OperationError {
+pub(crate) enum OperationError {
     #[error("acquire")]
     Acquire(#[source] sqlx::Error),
     #[error("statement")]
     Statement(#[from] sqlx::Error),
     #[error("timed out")]
     TimedOut,
+}
+
+impl From<OperationError> for CleanupError {
+    fn from(error: OperationError) -> Self {
+        match error {
+            OperationError::Acquire(_) => Self::Acquire,
+            OperationError::Statement(_) => Self::Statement,
+            OperationError::TimedOut => Self::TimedOut,
+        }
+    }
 }
 
 impl OperationError {
@@ -105,12 +122,16 @@ impl Engine {
         }
     }
 
-    pub fn add_group(&mut self, registry: Kinds, max_workers: NonZeroU32) -> Result<(), KindError> {
-        if let Some(duplicate) = registry
+    pub fn add_group(
+        &mut self,
+        registry: Kinds,
+        max_workers: NonZeroU32,
+    ) -> Result<(), DuplicateKind> {
+        if let Some(kind) = registry
             .names()
             .find(|name| self.group_for_kind(name).is_some())
         {
-            return Err(KindError::Duplicate(duplicate));
+            return Err(DuplicateKind { kind });
         }
         self.additional_groups.push(Arc::new(WorkerGroup::new(
             self.primary_group.pool.clone(),
@@ -120,6 +141,10 @@ impl Engine {
             Arc::clone(&self.primary_group.lifecycle),
         )));
         Ok(())
+    }
+
+    pub(crate) fn primary_group(&self) -> &WorkerGroup {
+        &self.primary_group
     }
 
     pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<WorkerGroup>> {
@@ -136,8 +161,8 @@ impl Engine {
         crate::session::check_startup(&self.primary_group.pool).await
     }
 
-    pub async fn remove_expired(&self) -> Result<u64, OperationError> {
-        maintenance::remove_expired(&self.primary_group).await
+    pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+        Ok(maintenance::remove_expired(&self.primary_group).await?)
     }
 
     fn kind_names(&self) -> impl Iterator<Item = &'static str> + '_ {
@@ -179,28 +204,51 @@ impl Engine {
         let lifecycle = Arc::clone(&engine.primary_group.lifecycle);
         lifecycle.drain.start_claim_loops(groups);
         for group in engine.groups() {
+            let group = Arc::clone(group);
+            let signals = Arc::clone(&signals);
+            let exit = DrainParticipant::ClaimLoop(Arc::clone(&lifecycle.drain));
             spawn_guarded(
                 tracker,
-                Arc::clone(group),
-                Run::Claim {
-                    _exit: DrainParticipant::ClaimLoop(Arc::clone(&lifecycle.drain)),
-                },
+                "claim",
                 signals.stop.clone(),
-                Arc::clone(&signals),
+                signals.failure.clone(),
+                async move {
+                    let _exit = exit;
+                    claim::run_claim_loop(group, signals).await;
+                },
             );
         }
-        let listener = infra_postgres::notifications_enabled(&engine.primary_group.pool)
-            .then(|| Run::Listener(Arc::clone(&engine)));
-        let background_tasks = [Run::Retention, Run::Sampling { kinds, gauges }]
-            .into_iter()
-            .chain(listener);
-        for run in background_tasks {
+        spawn_guarded(
+            tracker,
+            "retention",
+            background.clone(),
+            signals.failure.clone(),
+            {
+                let group = Arc::clone(&engine.primary_group);
+                let cancel = background.clone();
+                async move { maintenance::run_retention(&group, cancel).await }
+            },
+        );
+        spawn_guarded(
+            tracker,
+            "sampling",
+            background.clone(),
+            signals.failure.clone(),
+            {
+                let group = Arc::clone(&engine.primary_group);
+                let cancel = background.clone();
+                async move { maintenance::run_sampling(&group, &kinds, gauges, cancel).await }
+            },
+        );
+        if infra_postgres::notifications_enabled(&engine.primary_group.pool) {
+            let engine = Arc::clone(&engine);
+            let cancel = background.clone();
             spawn_guarded(
                 tracker,
-                Arc::clone(&engine.primary_group),
-                run,
+                "listener",
                 background.clone(),
-                Arc::clone(&signals),
+                signals.failure.clone(),
+                async move { listener::run_listener(&engine, cancel).await },
             );
         }
         Started {
@@ -267,6 +315,11 @@ impl Started {
         }
     }
 
+    #[must_use]
+    pub fn has_failed(&self) -> bool {
+        self.signals.failure.is_cancelled()
+    }
+
     pub async fn failed(&self) {
         self.signals.failure.cancelled().await;
     }
@@ -281,47 +334,17 @@ impl fmt::Debug for Started {
     }
 }
 
-enum Run {
-    Claim {
-        _exit: DrainParticipant,
-    },
-    Retention,
-    Listener(Arc<Engine>),
-    Sampling {
-        kinds: Vec<&'static str>,
-        gauges: maintenance::SampleGauges,
-    },
-}
-
-impl Run {
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Claim { .. } => "claim",
-            Self::Retention => "retention",
-            Self::Listener(_) => "listener",
-            Self::Sampling { .. } => "sampling",
-        }
-    }
-}
-
-fn spawn_guarded(
+fn spawn_guarded<F: Future<Output = ()> + Send + 'static>(
     tracker: &TaskTracker,
-    group: Arc<WorkerGroup>,
-    run: Run,
+    task: &'static str,
     token: CancellationToken,
-    signals: Arc<EngineSignals>,
+    failure: CancellationToken,
+    future: F,
 ) {
-    let guard = task_guard(run.label(), token.clone(), signals.failure.clone());
+    let guard = task_guard(task, token, failure);
     tracker.spawn(async move {
         let _guard = guard;
-        match run {
-            _claim @ Run::Claim { .. } => claim::run_claim_loop(group, signals).await,
-            Run::Retention => maintenance::run_retention(&group, token).await,
-            Run::Listener(engine) => listener::run_listener(&group, &engine, token).await,
-            Run::Sampling { kinds, gauges } => {
-                maintenance::run_sampling(&group, &kinds, gauges, token).await;
-            }
-        }
+        future.await;
     });
 }
 
@@ -666,14 +689,14 @@ mod tests {
     struct Ordinary;
 
     impl crate::JobKind for Ordinary {
-        const NAME: &'static str = "ordinary";
+        const NAME: crate::KindName = crate::KindName::new("ordinary");
     }
 
     #[derive(Deserialize, Serialize)]
     struct Publisher;
 
     impl crate::JobKind for Publisher {
-        const NAME: &'static str = "publisher";
+        const NAME: crate::KindName = crate::KindName::new("publisher");
     }
 
     #[tokio::test]
@@ -845,7 +868,7 @@ mod tests {
         let mut engine = Engine::new(pool, kinds(), NonZeroU32::MIN);
         assert_eq!(
             engine.add_group(kinds(), NonZeroU32::MIN),
-            Err(KindError::Duplicate("ordinary"))
+            Err(DuplicateKind { kind: "ordinary" })
         );
     }
 

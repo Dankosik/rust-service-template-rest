@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use infra_jobs::operator::{
-    self, Inspection, InspectionResult, JobState, OperatorError, RecoveryTarget,
+    self, HandledKinds, JobState, OneInspection, OperatorError, PageInspection, PageQuery,
+    RecoveryTarget,
 };
-use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
+use infra_jobs::{Enqueued, JobId, JobKind, KindName, enqueue_unique};
 use infra_postgres::{Isolation, PgPool, TxOptions, in_tx, in_tx_with};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,10 @@ use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const KIND: &str = "test.operator";
 const SECRET: &str = "private-job-content";
+const READ_ONLY: TxOptions = TxOptions {
+    isolation: Isolation::ReadCommitted,
+    read_only: true,
+};
 
 #[derive(Serialize, Deserialize)]
 struct Note {
@@ -20,7 +27,7 @@ struct Note {
 }
 
 impl JobKind for Note {
-    const NAME: &'static str = KIND;
+    const NAME: KindName = KindName::new(KIND);
 }
 
 async fn open(pool: &PgPool) -> PgPool {
@@ -58,15 +65,30 @@ async fn stored(pool: &PgPool, target: &RecoveryTarget) -> Value {
         .expect("the durable job")
 }
 
-async fn inspect(pool: &PgPool, request: &Inspection) -> InspectionResult {
-    in_tx_with(
-        pool,
-        TxOptions {
-            isolation: Isolation::ReadCommitted,
-            read_only: true,
-        },
-        async |tx| operator::inspect(tx, request).await,
-    )
+async fn inspect_one(pool: &PgPool, id: JobId) -> OneInspection {
+    in_tx_with(pool, READ_ONLY, async |tx| {
+        operator::inspect_one(tx, id).await
+    })
+    .await
+    .expect("read-only inspection commits")
+}
+
+async fn inspect_failed(pool: &PgPool, page: PageQuery) -> PageInspection {
+    in_tx_with(pool, READ_ONLY, async |tx| {
+        operator::inspect_failed(tx, page).await
+    })
+    .await
+    .expect("read-only inspection commits")
+}
+
+async fn inspect_unhandled(
+    pool: &PgPool,
+    handled_kinds: &HandledKinds,
+    page: PageQuery,
+) -> PageInspection {
+    in_tx_with(pool, READ_ONLY, async |tx| {
+        operator::inspect_unhandled(tx, handled_kinds, page).await
+    })
     .await
     .expect("read-only inspection commits")
 }
@@ -89,7 +111,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     let receipt = in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
         .await
         .expect("redrive commits");
-    assert_ne!(receipt.new_version, target.version().to_string());
+    assert_ne!(receipt.new_version, target.version());
     let after = stored(&pool, &target).await;
     for field in [
         "id",
@@ -104,7 +126,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     }
     assert_eq!(after["state"], "pending");
     assert_eq!(after["attempts"], 0);
-    assert_eq!(after["claim_generation"].to_string(), receipt.new_version);
+    assert_eq!(after["claim_generation"], receipt.new_version);
     assert_eq!(after["errors"], json!([]));
     for field in [
         "claim_expires_at",
@@ -152,8 +174,12 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
         .unwrap_err();
         std::assert_matches!(error, OperatorError::Stale);
     }
-    let next =
-        RecoveryTarget::try_new(&target.id().to_string(), KIND, &receipt.new_version).unwrap();
+    let next = RecoveryTarget::try_new(
+        &target.id().to_string(),
+        KIND,
+        &receipt.new_version.to_string(),
+    )
+    .unwrap();
     in_tx(&jobs, async |tx| operator::redrive(tx, &next).await)
         .await
         .unwrap();
@@ -161,7 +187,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     let history = final_row["recovery_history"].as_array().unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0], after["recovery_history"][0]);
-    assert_eq!(history[1]["version"], receipt.new_version);
+    assert_eq!(history[1]["version"], receipt.new_version.to_string());
     assert_eq!(history[1]["attempts"], 1);
     super::close_pools(&[&jobs]).await;
 }
@@ -555,15 +581,13 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
         let jobs = jobs.clone();
         async move {
             in_tx(&jobs, async |tx| {
-                let result = enqueue(
+                let result = enqueue_unique(
                     tx,
                     &Note {
                         text: "new producer".into(),
                     },
-                    EnqueueOptions {
-                        unique_key: Some(SECRET),
-                        ..EnqueueOptions::default()
-                    },
+                    SECRET,
+                    Duration::ZERO,
                 )
                 .await
                 .expect("the producer inserts a new live row");
@@ -672,102 +696,65 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         .execute(&pool)
         .await
         .unwrap();
+    let handled = HandledKinds::parse_csv(KIND).unwrap();
     for unhandled in [false, true] {
-        let request = if unhandled {
-            Inspection::unhandled(KIND, None, 2)
+        let first_page = PageQuery::try_new(None, 2).unwrap();
+        let page = if unhandled {
+            inspect_unhandled(&jobs, &handled, first_page).await
         } else {
-            Inspection::failed(None, 2)
-        }
-        .unwrap();
-        let InspectionResult::Page {
-            scanned,
-            items,
-            next_cursor,
-            ..
-        } = inspect(&jobs, &request).await
-        else {
-            panic!("a page")
+            inspect_failed(&jobs, first_page).await
         };
-        assert_eq!(scanned, 2);
-        assert!(items.is_empty());
+        assert_eq!(page.scanned, 2);
+        assert!(page.items.is_empty());
         assert_eq!(
-            next_cursor.as_deref(),
+            page.next_cursor.map(|cursor| cursor.to_string()).as_deref(),
             Some("v1:00000000-0000-0000-0000-000000000002")
         );
-        let request = if unhandled {
-            Inspection::unhandled(KIND, next_cursor.as_deref(), 2)
+        let second_page = first_page.with_after(page.next_cursor);
+        let result = if unhandled {
+            inspect_unhandled(&jobs, &handled, second_page).await
         } else {
-            Inspection::failed(next_cursor.as_deref(), 2)
-        }
-        .unwrap();
-        let result = inspect(&jobs, &request).await;
-        assert!(!format!("{result:?}").contains(SECRET));
-        let InspectionResult::Page {
-            scanned,
-            items,
-            next_cursor,
-            ..
-        } = result
-        else {
-            panic!("a page")
+            inspect_failed(&jobs, second_page).await
         };
-        assert_eq!(scanned, 2);
+        assert!(!format!("{result:?}").contains(SECRET));
+        assert_eq!(result.scanned, 2);
         assert_eq!(
-            next_cursor.as_deref(),
+            result
+                .next_cursor
+                .map(|cursor| cursor.to_string())
+                .as_deref(),
             Some("v1:00000000-0000-0000-0000-000000000004")
         );
-        assert_eq!(items.len(), 1);
+        assert_eq!(result.items.len(), 1);
         assert_eq!(
-            items[0].id.to_string(),
+            result.items[0].id.to_string(),
             Uuid::from_u128(if unhandled { 4 } else { 3 }).to_string()
         );
         if !unhandled {
-            assert_eq!(items[0].version, "9007199254740993");
+            assert_eq!(result.items[0].version, 9_007_199_254_740_993);
         }
-        let request = Inspection::failed(next_cursor.as_deref(), 2).unwrap();
-        let InspectionResult::Page {
-            scanned,
-            items,
-            next_cursor,
-            ..
-        } = inspect(&jobs, &request).await
-        else {
-            panic!("a page")
-        };
-        assert_eq!(scanned, 0);
-        assert!(items.is_empty() && next_cursor.is_none());
+        let third_page = inspect_failed(&jobs, first_page.with_after(result.next_cursor)).await;
+        assert_eq!(third_page.scanned, 0);
+        assert!(third_page.items.is_empty() && third_page.next_cursor.is_none());
     }
-    let request = Inspection::one(&Uuid::from_u128(3).to_string()).unwrap();
-    let result = in_tx_with(
-        &jobs,
-        TxOptions {
-            isolation: Isolation::ReadCommitted,
-            read_only: true,
-        },
-        async |tx| {
-            let result = operator::inspect(tx, &request).await?;
-            let budget: String = sqlx::query_scalar("SHOW statement_timeout")
-                .fetch_one(&mut *tx)
-                .await?;
-            assert_eq!(budget, "2s");
-            Ok::<_, OperatorError>(result)
-        },
-    )
+    let id = operator::parse_job_id(&Uuid::from_u128(3).to_string()).unwrap();
+    let result = in_tx_with(&jobs, READ_ONLY, async |tx| {
+        let result = operator::inspect_one(tx, id).await?;
+        let budget: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(budget, "2s");
+        Ok::<_, OperatorError>(result)
+    })
     .await
     .unwrap();
     assert!(!format!("{result:?}").contains(SECRET));
-    let InspectionResult::One {
-        observed_at,
-        item: Some(item),
-    } = result
-    else {
-        panic!("one job")
-    };
+    let item = result.item.expect("one job");
     assert_eq!(item.state, JobState::Failed);
-    assert_eq!(item.version, "9007199254740993");
+    assert_eq!(item.version, 9_007_199_254_740_993);
     assert_eq!(item.recovery_count, 0);
     for timestamp in [
-        &observed_at,
+        &result.observed_at,
         &item.created_at,
         &item.not_before,
         item.finished_at.as_ref().unwrap(),
@@ -777,10 +764,7 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         time::OffsetDateTime::parse(timestamp, &time::format_description::well_known::Rfc3339)
             .unwrap();
     }
-    let missing = Inspection::one(&Uuid::from_u128(5).to_string()).unwrap();
-    std::assert_matches!(
-        inspect(&jobs, &missing).await,
-        InspectionResult::One { item: None, .. }
-    );
+    let missing = operator::parse_job_id(&Uuid::from_u128(5).to_string()).unwrap();
+    assert!(inspect_one(&jobs, missing).await.item.is_none());
     super::close_pools(&[&jobs]).await;
 }

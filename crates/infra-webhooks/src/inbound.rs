@@ -10,7 +10,7 @@ use compact_str::CompactString;
 use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
-use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobKind, enqueue};
+use infra_jobs::{EnqueueError, JobKind, KindName, enqueue};
 use infra_postgres::{
     Isolation, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
 };
@@ -223,10 +223,8 @@ impl Receiver {
                     return Ok(ReceiptOutcome::Duplicate);
                 }
                 let incoming = Incoming::new(endpoint_id, admitted, content_type);
-                match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
-                    Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
-                    Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
-                }
+                enqueue(tx, &incoming).await?;
+                Ok(ReceiptOutcome::Accepted)
             },
         )
         .await
@@ -258,8 +256,6 @@ enum ReceiptFailure {
     Enqueue(#[from] EnqueueError),
     #[error("webhook receipt transaction failed")]
     Transaction(#[from] TxError),
-    #[error("webhook receipt enqueue unexpectedly deduplicated")]
-    UnexpectedDuplicate,
 }
 
 fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
@@ -278,7 +274,6 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
             ("enqueue", "unavailable", Some(err))
         }
         ReceiptFailure::Enqueue(_) => ("enqueue", "unavailable", None),
-        ReceiptFailure::UnexpectedDuplicate => ("enqueue", "integrity", None),
         ReceiptFailure::Transaction(err @ TxError::CommitUnknown(_)) => {
             ("transaction", "commit_unknown", Some(err.driver()))
         }
@@ -391,10 +386,8 @@ impl Incoming {
 }
 
 impl JobKind for Incoming {
-    const NAME: &'static str = "webhooks.process";
+    const NAME: KindName = KindName::new("webhooks.process");
 }
-
-const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
 #[cfg(test)]
 mod tests {

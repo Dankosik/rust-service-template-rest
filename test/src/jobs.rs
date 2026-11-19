@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use infra_jobs::{Job, JobError, JobKind, Policy};
+use infra_jobs::{Job, JobError, JobKind, KindName, Policy};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -9,10 +9,8 @@ pub struct Probe {
 }
 
 impl JobKind for Probe {
-    const NAME: &'static str = "test.probe";
+    const NAME: KindName = KindName::new("test.probe");
 }
-
-const _: () = infra_jobs::assert_valid_kind_name(Probe::NAME);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

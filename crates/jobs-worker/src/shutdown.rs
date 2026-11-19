@@ -191,7 +191,7 @@ async fn finish_background(
         && work
             .started_engine
             .as_ref()
-            .is_some_and(|engine| engine.failed().now_or_never().is_some())
+            .is_some_and(Started::has_failed)
     {
         outcome = Outcome::Degraded;
     }

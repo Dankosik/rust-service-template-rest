@@ -4,11 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::FutureExt as _;
 use infra_jobs::{
-    DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueOptions, Enqueued, Job, JobError, JobKind,
-    KindsBuilder, LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL, Policy,
-    StartupError, compare_live_payload, enqueue,
+    DEFAULT_TIMEOUT, DrainEnd, Engine, Enqueued, Job, JobError, JobKind, KindName, KindsBuilder,
+    LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError,
+    compare_live_payload, enqueue, enqueue_delayed, enqueue_unique,
 };
 use infra_postgres::{Dsn, PgPool, Tx, in_tx};
 use integration_tests::jobs::{self, Probe, ProbeAction};
@@ -33,10 +32,8 @@ struct Gate {
 }
 
 impl JobKind for Gate {
-    const NAME: &'static str = "test.gate";
+    const NAME: KindName = KindName::new("test.gate");
 }
-
-const _: () = infra_jobs::assert_valid_kind_name(Gate::NAME);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TransactionGate {
@@ -44,7 +41,7 @@ struct TransactionGate {
 }
 
 impl JobKind for TransactionGate {
-    const NAME: &'static str = "test.transaction_gate";
+    const NAME: KindName = KindName::new("test.transaction_gate");
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,7 +50,7 @@ struct Stranded {
 }
 
 impl JobKind for Stranded {
-    const NAME: &'static str = "test.stranded";
+    const NAME: KindName = KindName::new("test.stranded");
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,7 +61,7 @@ enum NumericPayload {
 }
 
 impl JobKind for NumericPayload {
-    const NAME: &'static str = "test.numeric_payload";
+    const NAME: KindName = KindName::new("test.numeric_payload");
 }
 
 fn must<T>(result: Result<T, AttemptError>, what: &str) -> T {
@@ -92,13 +89,6 @@ struct EngineRun {
     tracker: TaskTracker,
     cancel: CancellationToken,
     _cancel_guard: DropGuard,
-}
-
-fn created(enqueued: Enqueued) -> infra_jobs::JobId {
-    match enqueued {
-        Enqueued::Created(id) => id,
-        Enqueued::Duplicate => panic!("expected Created, got Duplicate"),
-    }
 }
 
 fn probe_registry(max_attempts: u16, timeout: Duration) -> infra_jobs::Kinds {
@@ -179,10 +169,6 @@ async fn finish(run: EngineRun, pools: &[&PgPool]) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn numeric_payloads_keep_handler_distinctions(pool: PgPool) {
     let jobs = open(&pool, 1).await;
-    let keyed = |unique_key: &'static str| EnqueueOptions {
-        unique_key: Some(unique_key),
-        ..EnqueueOptions::default()
-    };
     must(
         in_tx(&jobs, async |tx| {
             for (key, stored, proposed) in [
@@ -197,9 +183,12 @@ async fn numeric_payloads_keep_handler_distinctions(pool: PgPool) {
                     NumericPayload::Float(1.0),
                 ),
             ] {
-                created(enqueue(tx, &stored, keyed(key)).await?);
+                std::assert_matches!(
+                    enqueue_unique(tx, &stored, key, Duration::ZERO).await?,
+                    Enqueued::Created(_)
+                );
                 assert_eq!(
-                    enqueue(tx, &proposed, keyed(key)).await?,
+                    enqueue_unique(tx, &proposed, key, Duration::ZERO).await?,
                     Enqueued::Duplicate
                 );
                 assert_eq!(
@@ -325,9 +314,7 @@ async fn hold_claim_transition(pool: &PgPool) -> Transaction<'_, Postgres> {
 async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
     let id = must(
         in_tx(pool, async |tx| -> Result<_, AttemptError> {
-            Ok(created(
-                enqueue(tx, &Probe { action }, EnqueueOptions::default()).await?,
-            ))
+            Ok(enqueue(tx, &Probe { action }).await?)
         })
         .await,
         "enqueue commits",
@@ -340,10 +327,7 @@ async fn enqueue_many(pool: &PgPool, action: ProbeAction, count: i64) -> Vec<Str
         in_tx(pool, async |tx| -> Result<Vec<String>, AttemptError> {
             let mut ids = Vec::new();
             for _ in 0..count {
-                ids.push(
-                    created(enqueue(tx, &Probe { action }, EnqueueOptions::default()).await?)
-                        .to_string(),
-                );
+                ids.push(enqueue(tx, &Probe { action }).await?.to_string());
             }
             Ok(ids)
         })
@@ -465,7 +449,7 @@ async fn stage_running(pool: &PgPool, payload: &str, expired: bool) -> (String, 
          RETURNING id::text AS id, claim_generation"
     };
     let row = sqlx::query(sql)
-        .bind(Probe::NAME)
+        .bind(Probe::NAME.as_str())
         .bind(payload)
         .fetch_one(pool)
         .await
@@ -485,7 +469,7 @@ async fn stage_expired_gate(pool: &PgPool) -> String {
                  statement_timestamp() - interval '1 second') \
          RETURNING id::text AS id",
     )
-    .bind(Gate::NAME)
+    .bind(Gate::NAME.as_str())
     .bind(serde_json::to_string(&Gate { token: 1 }).expect("gate payload"))
     .fetch_one(pool)
     .await
@@ -594,7 +578,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     for token in [1, 2] {
         must(
             in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
-                let _ = enqueue(tx, &Stranded { token }, EnqueueOptions::default()).await?;
+                let _ = enqueue(tx, &Stranded { token }).await?;
                 Ok(())
             })
             .await,
@@ -688,10 +672,7 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
     prepare(&jobs).await;
     let stranded = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Stranded { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Stranded { token: 1 }).await?.to_string())
         })
         .await,
         "the stranded job commits",
@@ -704,7 +685,7 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
         let completed: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM background_jobs WHERE kind = $1 AND state = 'completed'",
         )
-        .bind(Probe::NAME)
+        .bind(Probe::NAME.as_str())
         .fetch_one(&jobs)
         .await
         .expect("completed probes");
@@ -822,11 +803,15 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let listener = wake_listener_ready(&jobs, &recorder, 1).await;
     let mut clock = WakeClock::pause().await;
-    prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME]).await;
+    prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME.as_str()]).await;
     let id = clock
         .wait(
             "a due job and its wake commit",
-            insert_notified(&jobs, Probe::NAME, probe_json(ProbeAction::Succeed)),
+            insert_notified(
+                &jobs,
+                Probe::NAME.as_str(),
+                probe_json(ProbeAction::Succeed),
+            ),
         )
         .await;
     clock.advance_cooldown().await;
@@ -1244,12 +1229,17 @@ async fn x2_isolated_groups_share_one_listener_and_worker_id(pool: PgPool) {
     let run = engine.start(&tracker, &cancel);
     let listener = wake_listener_ready(&jobs, &recorder, 2).await;
     let mut clock = WakeClock::pause().await;
-    prove_empty_notification_rounds(&jobs, &recorder, &mut clock, &[Probe::NAME, Stranded::NAME])
-        .await;
+    prove_empty_notification_rounds(
+        &jobs,
+        &recorder,
+        &mut clock,
+        &[Probe::NAME.as_str(), Stranded::NAME.as_str()],
+    )
+    .await;
     let reserved_id = clock
         .wait(
             "the reserved job and its wake commit",
-            insert_notified(&jobs, Stranded::NAME, r#"{"token":1}"#.to_owned()),
+            insert_notified(&jobs, Stranded::NAME.as_str(), r#"{"token":1}"#.to_owned()),
         )
         .await;
     clock.advance_cooldown().await;
@@ -1340,9 +1330,9 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
     must(
         in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
             for token in 0..3 {
-                let _ = created(enqueue(tx, &Gate { token }, EnqueueOptions::default()).await?);
+                let _ = enqueue(tx, &Gate { token }).await?;
             }
-            let _ = created(enqueue(tx, &Stranded { token: 0 }, EnqueueOptions::default()).await?);
+            let _ = enqueue(tx, &Stranded { token: 0 }).await?;
             Ok(())
         })
         .await,
@@ -1351,18 +1341,18 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
     let run = start(&jobs, capped_registry(Arc::clone(&capped)), 4);
 
     until("the other kind completes", super::WAIT, async || {
-        (states(&jobs, Stranded::NAME).await == ["completed"]).then_some(())
+        (states(&jobs, Stranded::NAME.as_str()).await == ["completed"]).then_some(())
     })
     .await;
     assert_eq!(
-        states(&jobs, Gate::NAME).await,
+        states(&jobs, Gate::NAME.as_str()).await,
         ["pending", "pending", "running"]
     );
 
     let running: String = sqlx::query_scalar(
         "SELECT id::text FROM background_jobs WHERE kind = $1 AND state = 'running'",
     )
-    .bind(Gate::NAME)
+    .bind(Gate::NAME.as_str())
     .fetch_one(&jobs)
     .await
     .expect("the capped running job");
@@ -1381,7 +1371,7 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
 
     absent_for(POLL_INTERVAL + POLL, async || {
         assert_eq!(
-            states(&jobs, Gate::NAME).await,
+            states(&jobs, Gate::NAME.as_str()).await,
             ["pending", "pending", "running"]
         );
         assert_eq!(capped.running.load(Ordering::SeqCst), 0);
@@ -1395,7 +1385,7 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
     for finished in 2..=3 {
         capped.open.add_permits(1);
         until("the next bounded job completes", super::WAIT, async || {
-            let completed = states(&jobs, Gate::NAME)
+            let completed = states(&jobs, Gate::NAME.as_str())
                 .await
                 .iter()
                 .filter(|state| *state == "completed")
@@ -1423,16 +1413,13 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         let caller = caller.clone();
         tokio::spawn(async move {
             in_tx(&caller, async move |tx| -> Result<String, AttemptError> {
-                let id = created(
-                    enqueue(
-                        tx,
-                        &Probe {
-                            action: ProbeAction::Succeed,
-                        },
-                        EnqueueOptions::default(),
-                    )
-                    .await?,
-                );
+                let id = enqueue(
+                    tx,
+                    &Probe {
+                        action: ProbeAction::Succeed,
+                    },
+                )
+                .await?;
                 entered.notify_one();
                 release.notified().await;
                 Ok(id.to_string())
@@ -1551,10 +1538,7 @@ async fn assert_stale_completion_ignored(pool: &PgPool, advance_generation: bool
     let registry = gate_registry(Arc::clone(&gate));
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 1 }).await?.to_string())
         })
         .await,
         "the gate job commits",
@@ -1728,10 +1712,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
     });
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 1 }).await?.to_string())
         })
         .await,
         "the outcome gate job commits",
@@ -1744,7 +1725,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
     .await;
     proxy.arm(
         Fault::ForwardThenDrop,
-        Boundary::Autocommit("UPDATE background_jobs AS job SET state = 'completed'"),
+        Boundary::Autocommit("SET state = 'completed'"),
     );
     gate.complete.notify_one();
 
@@ -1767,10 +1748,9 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     let gate = Arc::new(TransactionGateState::default());
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(created(
-                enqueue(tx, &TransactionGate { token: 1 }, EnqueueOptions::default()).await?,
-            )
-            .to_string())
+            Ok(enqueue(tx, &TransactionGate { token: 1 })
+                .await?
+                .to_string())
         })
         .await,
         "the transactional gate job commits",
@@ -1837,7 +1817,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
 
     proxy.arm(
         Fault::ForwardThenDrop,
-        Boundary::Autocommit("UPDATE background_jobs AS job SET state = 'completed'"),
+        Boundary::Autocommit("SET state = 'completed'"),
     );
     replacement_gate.complete.notify_one();
     let done = completed(&jobs, &id).await;
@@ -1873,10 +1853,9 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
     });
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(created(
-                enqueue(tx, &TransactionGate { token: 1 }, EnqueueOptions::default()).await?,
-            )
-            .to_string())
+            Ok(enqueue(tx, &TransactionGate { token: 1 })
+                .await?
+                .to_string())
         })
         .await,
         "the transactional gate job commits",
@@ -1960,10 +1939,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     });
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 1 }).await?.to_string())
         })
         .await,
         "the gate job commits",
@@ -1989,10 +1965,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
 
     let pending = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 2 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 2 }).await?.to_string())
         })
         .await,
         "the next due job commits while completion is blocked",
@@ -2105,7 +2078,7 @@ async fn stage_spent(pool: &PgPool, payload: &str, summary: Option<&str>) -> Str
          VALUES (gen_random_uuid(), $1, $2::jsonb, 'pending', 2, statement_timestamp() - interval '1 second', $3) \
          RETURNING id::text AS id",
     )
-    .bind(Probe::NAME)
+    .bind(Probe::NAME.as_str())
     .bind(payload)
     .bind(summary)
     .fetch_one(pool)
@@ -2384,7 +2357,7 @@ async fn r1_pending_drop_panic_keeps_timeout_and_releases_admission_for_later_wo
         Some("attempt timed out after 1s")
     );
     assert!(view.claim_cleared);
-    assert!(run.started.failed().now_or_never().is_none());
+    assert!(!run.started.has_failed());
 
     let later = enqueue_one(&jobs, ProbeAction::Succeed).await;
     assert_eq!(completed(&jobs, &later).await.attempts, 1);
@@ -2420,7 +2393,7 @@ async fn r1_pending_drop_panic_keeps_forced_release_and_refund(pool: PgPool) {
     assert!(released.claim_cleared);
     assert_eq!(released.not_before_us, claimed.not_before_us);
     assert!(released.error_summary.is_none());
-    assert!(run.started.failed().now_or_never().is_none());
+    assert!(!run.started.has_failed());
     join(run, &[&jobs]).await;
 }
 
@@ -2434,7 +2407,7 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
                  statement_timestamp()) \
          RETURNING id::text AS id",
     )
-    .bind(Probe::NAME)
+    .bind(Probe::NAME.as_str())
     .fetch_one(&jobs)
     .await
     .expect("the undecodable job");
@@ -2468,7 +2441,7 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
     .execute(&jobs)
     .await
     .expect("old completed rows");
-    for kind in [Probe::NAME, Stranded::NAME] {
+    for kind in [Probe::NAME.as_str(), Stranded::NAME.as_str()] {
         stage_terminal(&jobs, kind, "completed", None, 23 * 3_600).await;
         stage_terminal(&jobs, kind, "failed", Some("permanent"), 8 * 86_400).await;
         stage_terminal(&jobs, kind, "failed", Some("exhausted"), 6 * 86_400).await;
@@ -2517,7 +2490,7 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
     assert_eq!(count_state(&jobs, "failed").await, 4);
     assert_eq!(count_state(&jobs, "pending").await, 2);
     assert_eq!(count_state(&jobs, "running").await, 2);
-    for kind in [Probe::NAME, Stranded::NAME] {
+    for kind in [Probe::NAME.as_str(), Stranded::NAME.as_str()] {
         assert_eq!(count_kind_state(&jobs, kind, "failed").await, 2);
         assert_eq!(count_kind_state(&jobs, kind, "pending").await, 1);
         assert_eq!(count_kind_state(&jobs, kind, "running").await, 1);
@@ -2593,19 +2566,14 @@ async fn x12_future_not_before_is_not_claimed_until_it_passes(pool: PgPool) {
     prepare(&jobs).await;
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(created(
-                enqueue(
-                    tx,
-                    &Probe {
-                        action: ProbeAction::Succeed,
-                    },
-                    EnqueueOptions {
-                        delay: Duration::from_hours(1),
-                        unique_key: None,
-                    },
-                )
-                .await?,
+            Ok(enqueue_delayed(
+                tx,
+                &Probe {
+                    action: ProbeAction::Succeed,
+                },
+                Duration::from_hours(1),
             )
+            .await?
             .to_string())
         })
         .await,
@@ -2670,10 +2638,7 @@ async fn force_cancel_cooperative(
     });
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 1 }).await?.to_string())
         })
         .await,
         "the grace job commits",
@@ -2742,10 +2707,7 @@ async fn x1_stop_allows_an_already_dispatched_claim_to_settle(pool: PgPool) {
     });
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 1 }).await?.to_string())
         })
         .await,
         "the claim-race job commits",
@@ -2785,10 +2747,7 @@ async fn x1_spent_forced_cleanup_leaves_a_late_acknowledged_claim_for_expiry(poo
     });
     let id = must(
         in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
-            Ok(
-                created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
-                    .to_string(),
-            )
+            Ok(enqueue(tx, &Gate { token: 1 }).await?.to_string())
         })
         .await,
         "the spent-cleanup job commits",

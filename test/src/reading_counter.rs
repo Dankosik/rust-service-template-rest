@@ -1,7 +1,7 @@
 use std::fmt;
 
 use domain_events::{Event, EventPayload};
-use infra_jobs::{EnqueueOptions, Enqueued, JobKind};
+use infra_jobs::{JobKind, KindName};
 use infra_messaging::{
     PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
 };
@@ -71,7 +71,7 @@ impl Operation {
 }
 
 impl JobKind for Operation {
-    const NAME: &'static str = "reading.record";
+    const NAME: KindName = KindName::new("reading.record");
 }
 impl EventPayload for Operation {
     const EVENT_TYPE: &'static str = "reading.accepted";
@@ -243,10 +243,7 @@ async fn enqueue_intents(
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     let operation = &prepared.operation;
-    let local_job_id = match infra_jobs::enqueue(tx, operation, EnqueueOptions::default()).await? {
-        Enqueued::Created(id) => id.to_string(),
-        Enqueued::Duplicate => return Err(Error::MissingIntent),
-    };
+    let local_job_id = infra_jobs::enqueue(tx, operation).await?.to_string();
     prepared.event.enqueue(tx).await?;
     let outbox_job_id: String = sqlx::query_scalar("SELECT id::text FROM background_jobs WHERE kind='publish_domain_event' AND COALESCE(payload_text::jsonb, payload)->>'message_id'=$1 AND state IN ('pending','running')")
         .bind(prepared.event.message_id()).fetch_one(&mut *tx).await?;
