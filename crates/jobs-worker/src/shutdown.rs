@@ -13,7 +13,9 @@ use infra_messaging::CloseOutcome;
 // template:begin jobs:worker-shutdown-postgres-imports
 use infra_postgres::PgPool;
 // template:end jobs:worker-shutdown-postgres-imports
-use infra_telemetry::{LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK};
+use infra_telemetry::{
+    LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
+};
 use service_config::{ShutdownTail, WorkerHttpConfig};
 use tokio::time::Instant;
 
@@ -25,16 +27,16 @@ use crate::resources::{Listeners, Resources};
 use crate::signals::Signals;
 
 const ATTEMPT_CLEANUP: Duration = Duration::from_secs(2);
-const LISTENERS: Duration = Duration::from_secs(2);
+const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(2);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(3);
-pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
+pub(crate) const DEPENDENCY_CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
 const TELEMETRY_STAGE: Duration = TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK);
 const LOG_CLOSE_RESERVE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TAIL: Duration = ATTEMPT_CLEANUP
-    .saturating_add(LISTENERS)
+    .saturating_add(LISTENER_CLOSE_BUDGET)
     .saturating_add(BACKGROUND_JOIN)
-    .saturating_add(DEPENDENCY_CLOSE)
+    .saturating_add(DEPENDENCY_CLOSE_BUDGET)
     .saturating_add(TELEMETRY_STAGE)
     .saturating_add(RUNTIME_SHUTDOWN_TIMEOUT);
 
@@ -97,41 +99,25 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         deadline,
     } = plan;
     let budget = Budget::for_process_deadline(deadline);
-    let mut outcome = stage("stop_work", async {
+    let mut outcome = isolate_stage("stop_work", async {
         stop_work(http, &resources);
         Outcome::Graceful
     })
     .await;
-    let drain_outcome = stage_or(
-        "drain",
-        drain(&mut resources, http.drain_timeout, &budget, signals),
-        DrainOutcome::NeedsForcedCleanup,
-    )
-    .await;
-    if matches!(drain_outcome, DrainOutcome::NeedsForcedCleanup) {
-        outcome = Outcome::Degraded;
-        stage_or(
-            "attempt_cleanup",
-            clean_up_after_forced_drain(&mut resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
-            (),
-        )
-        .await;
-    }
-    // template:begin messaging:worker-shutdown-drop-consumer
-    drop(resources.consumer.take());
-    // template:end messaging:worker-shutdown-drop-consumer
+    let drain_outcome = drain_work(&mut resources, http.drain_timeout, &budget, signals).await;
+    outcome = outcome.max(drain_outcome);
     let listeners_outcome = close_listeners(
         std::mem::take(&mut resources.listeners),
-        budget.clamp(LISTENERS),
+        budget.clamp(LISTENER_CLOSE_BUDGET),
     )
     .await;
     outcome = outcome.max(listeners_outcome);
-    let background_outcome = stage(
+    let background_outcome = isolate_stage(
         "background_join",
         join_background(&background, budget.clamp(BACKGROUND_JOIN)),
     )
     .await;
-    let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
+    let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE_BUDGET);
     let background_outcome = finish_background(
         &background,
         &resources,
@@ -157,6 +143,35 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     .await
 }
 
+async fn drain_work(
+    resources: &mut Resources,
+    drain_timeout: Duration,
+    budget: &Budget,
+    signals: &mut Signals,
+) -> Outcome {
+    let drain_outcome = isolate_stage_or(
+        "drain",
+        drain(resources, drain_timeout, budget, signals),
+        DrainOutcome::NeedsForcedCleanup,
+    )
+    .await;
+    let outcome = if matches!(drain_outcome, DrainOutcome::NeedsForcedCleanup) {
+        isolate_stage_or(
+            "attempt_cleanup",
+            clean_up_after_forced_drain(resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
+            (),
+        )
+        .await;
+        Outcome::Degraded
+    } else {
+        Outcome::Graceful
+    };
+    // template:begin messaging:worker-shutdown-drop-consumer
+    drop(resources.consumer.take());
+    // template:end messaging:worker-shutdown-drop-consumer
+    outcome
+}
+
 async fn finish_background(
     background: &Background,
     #[allow(
@@ -171,7 +186,7 @@ async fn finish_background(
         outcome = Outcome::Degraded;
         background.abort();
         tracing::warn!("background join expired; abort requested");
-        stage_or(
+        isolate_stage_or(
             "background_abort",
             wait_for_background_abort(background, abort_deadline),
             (),
@@ -196,11 +211,15 @@ async fn finish_background(
     outcome
 }
 
-async fn stage(name: &'static str, operation: impl Future<Output = Outcome>) -> Outcome {
-    stage_or(name, operation, Outcome::Degraded).await
+async fn isolate_stage(name: &'static str, operation: impl Future<Output = Outcome>) -> Outcome {
+    isolate_stage_or(name, operation, Outcome::Degraded).await
 }
 
-async fn stage_or<T>(name: &'static str, operation: impl Future<Output = T>, on_panic: T) -> T {
+async fn isolate_stage_or<T>(
+    name: &'static str,
+    operation: impl Future<Output = T>,
+    on_panic: T,
+) -> T {
     if let Ok(outcome) = AssertUnwindSafe(operation).catch_unwind().await {
         outcome
     } else {
@@ -381,8 +400,8 @@ async fn close_listeners(listeners: Listeners, budget: Duration) -> Outcome {
         diagnostics,
     } = listeners;
     let (health_outcome, diagnostics_outcome) = tokio::join!(
-        stage(Listeners::HEALTH, close_health(health, budget)),
-        stage(
+        isolate_stage(Listeners::HEALTH, close_health(health, budget)),
+        isolate_stage(
             Listeners::DIAGNOSTICS,
             close_diagnostics(diagnostics, budget)
         ),
@@ -501,10 +520,9 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> Out
         // template:begin jobs:worker-shutdown-close-jobs
         use crate::resources::PoolResource;
 
-        if let Some(pool) = resources.pool.as_ref() {
-            let pool = match pool {
-                PoolResource::Starting(pool) | PoolResource::Admitted(pool) => pool,
-            };
+        if let Some(PoolResource::Starting(pool) | PoolResource::Admitted(pool)) =
+            resources.pool.as_ref()
+        {
             return close_pool(pool, deadline.saturating_duration_since(Instant::now())).await;
         }
         // template:end jobs:worker-shutdown-close-jobs
@@ -523,8 +541,8 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> Out
         outcome
     };
     let (pool_outcome, messaging_outcome) = tokio::join!(
-        stage("postgres_close", pool_close),
-        stage("messaging_close", messaging_close),
+        isolate_stage("postgres_close", pool_close),
+        isolate_stage("messaging_close", messaging_close),
     );
     pool_outcome.max(messaging_outcome)
 }
@@ -541,42 +559,50 @@ async fn finish_telemetry(
         Duration::ZERO
     };
     if let Some(provider) = resources.tracer_provider.take() {
-        let trace_outcome = stage("telemetry", async {
-            match provider.shutdown(deadline - log_reserve).await {
-                ProviderShutdown::Completed => {
-                    tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
-                    Outcome::Graceful
-                }
-                ProviderShutdown::Incomplete(reasons) => {
-                    tracing::warn!(
-                        reasons = reasons.bits(),
-                        reason_flags = ?reasons,
-                        "trace_shutdown_incomplete"
-                    );
-                    Outcome::Degraded
-                }
-            }
-        })
-        .await;
+        let trace_outcome = close_tracer_provider(provider, deadline - log_reserve).await;
         outcome = outcome.max(trace_outcome);
     }
     tracing::info!(?outcome, logger_pending = true, "shutdown_finishing");
     if let Some(logger) = resources.logger.take() {
-        let logger_outcome = stage("logger", async {
-            let close = tokio::task::spawn_blocking(move || logger.shutdown(deadline.into_std()));
-            if matches!(
-                tokio::time::timeout_at(deadline, close).await,
-                Ok(Ok(LoggerShutdown::Completed(_)))
-            ) {
-                Outcome::Graceful
-            } else {
-                Outcome::Degraded
-            }
-        })
-        .await;
+        let logger_outcome = close_logger(logger, deadline).await;
         outcome = outcome.max(logger_outcome);
     }
     outcome
+}
+
+async fn close_tracer_provider(provider: TracerProviderHandle, deadline: Instant) -> Outcome {
+    isolate_stage("telemetry", async {
+        match provider.shutdown(deadline).await {
+            ProviderShutdown::Completed => {
+                tracing::info!(delivery_confirmed = false, "trace_shutdown_completed");
+                Outcome::Graceful
+            }
+            ProviderShutdown::Incomplete(reasons) => {
+                tracing::warn!(
+                    reasons = reasons.bits(),
+                    reason_flags = ?reasons,
+                    "trace_shutdown_incomplete"
+                );
+                Outcome::Degraded
+            }
+        }
+    })
+    .await
+}
+
+async fn close_logger(logger: LoggerGuard, deadline: Instant) -> Outcome {
+    isolate_stage("logger", async {
+        let close = tokio::task::spawn_blocking(move || logger.shutdown(deadline.into_std()));
+        if matches!(
+            tokio::time::timeout_at(deadline, close).await,
+            Ok(Ok(LoggerShutdown::Completed(_)))
+        ) {
+            Outcome::Graceful
+        } else {
+            Outcome::Degraded
+        }
+    })
+    .await
 }
 
 #[cfg(test)]

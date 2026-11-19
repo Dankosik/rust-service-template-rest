@@ -13,16 +13,16 @@ use crate::resources::{PoolResource, Resources};
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 const CREDENTIAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) fn validate_pool_config(
+pub(super) fn required_pool_config(
     config: &WorkerConfig,
-    ordinary_jobs: bool,
+    has_ordinary_jobs: bool,
 ) -> Result<Option<&PostgresConfig>, WorkerError> {
     #[allow(unused_variables, reason = "retained outbox needs a publisher")]
-    let publisher = false;
+    let has_publisher = false;
     // template:begin outbox:worker-bootstrap-outbox-pool
-    let publisher = true;
+    let has_publisher = true;
     // template:end outbox:worker-bootstrap-outbox-pool
-    if !ordinary_jobs && !publisher {
+    if !has_ordinary_jobs && !has_publisher {
         return Ok(None);
     }
     let postgres = config
@@ -30,8 +30,8 @@ pub(super) fn validate_pool_config(
         .as_ref()
         .ok_or(WorkerError::PostgresDisabled)?;
     super::jobs::validate_pool_capacity(
-        ordinary_jobs.then_some(config.jobs.max_workers),
-        publisher,
+        has_ordinary_jobs.then_some(config.jobs.max_workers),
+        has_publisher,
         postgres.max_connections,
     )?;
     Ok(Some(postgres))
@@ -66,14 +66,7 @@ async fn open_pool(
     resources: &mut Resources,
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<PgPool, WorkerError> {
-    let deadline = tokio::time::Instant::now() + CREDENTIAL_PREPARATION_TIMEOUT;
-    let preparation = tokio::task::spawn_blocking(prepare);
-    let dsn = match tokio::time::timeout_at(deadline, preparation).await {
-        Ok(result) if tokio::time::Instant::now() < deadline => {
-            result.map_err(|_| WorkerError::PostgresPreparationJoin)??
-        }
-        _ => return Err(WorkerError::PostgresPreparationTimeout),
-    };
+    let dsn = prepare_dsn(prepare).await?;
     let application_name = application_name(&config.observability.otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
@@ -92,6 +85,24 @@ async fn open_pool(
         postgres.max_connections = postgres.max_connections.get(),
         "postgres_pool_opened"
     );
+    spawn_pool_tasks(&pool, &dsn, background);
+    Ok(pool)
+}
+
+async fn prepare_dsn(
+    prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
+) -> Result<Dsn, WorkerError> {
+    let deadline = tokio::time::Instant::now() + CREDENTIAL_PREPARATION_TIMEOUT;
+    let preparation = tokio::task::spawn_blocking(prepare);
+    match tokio::time::timeout_at(deadline, preparation).await {
+        Ok(result) if tokio::time::Instant::now() < deadline => {
+            Ok(result.map_err(|_| WorkerError::PostgresPreparationJoin)??)
+        }
+        _ => Err(WorkerError::PostgresPreparationTimeout),
+    }
+}
+
+fn spawn_pool_tasks(pool: &PgPool, dsn: &Dsn, background: &Background) {
     background.spawn("postgres_pool_metrics", |cancel| {
         infra_postgres::record_metrics_periodically(
             pool.clone(),
@@ -106,7 +117,6 @@ async fn open_pool(
             infra_postgres::refresh_password_periodically(pool.clone(), password_file, cancel)
         });
     }
-    Ok(pool)
 }
 
 pub(crate) fn pool_options(
