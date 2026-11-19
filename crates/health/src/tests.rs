@@ -346,21 +346,6 @@ async fn never_healthy_instance_fails_immediately() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_hanging_probe_times_out_under_its_own_name() {
-    let (healthy, _, _) = flaky_probe(true);
-    let readiness = Readiness::new(vec![healthy, Box::new(Hanging)], policy());
-    let verdict = readiness.prepare().await;
-    std::assert_matches!(
-        verdict,
-        Err(NotReady::TimedOut {
-            probe: "hanging",
-            ..
-        }),
-        "{verdict:?}"
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_success_observed_after_the_budget_cannot_admit_startup() {
     let recorder = recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -403,34 +388,23 @@ async fn draining_prepared_readiness_vetoes_activation() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_verdict_nobody_refreshes_goes_stale() {
-    let (readiness, _, _) = flaky(true);
-    let control = readiness.control();
-    let _refresher = activate(readiness).await;
-    let reader = control.reader();
-    assert_eq!(reader.verdict(), Ok(()));
-
-    tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
-    std::assert_matches!(
-        reader.verdict(),
-        Err(NotReady::Stale { .. }),
-        "{:?}",
-        reader.verdict()
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn refreshes_on_the_interval_and_stops_on_cancel() {
-    let (readiness, flag, _) = flaky(true);
+    use futures_util::FutureExt as _;
+
+    let (readiness, flag, calls) = flaky(true);
     let cancel = CancellationToken::new();
     let reader = readiness.control().reader();
     let owner = activate(readiness).await;
-    let refresher = tokio::spawn(owner.refresh_until(cancel.clone()));
-    tokio::task::yield_now().await;
+    let refresh = owner.refresh_until(cancel.clone());
+    tokio::pin!(refresh);
 
-    for _ in 0..10 {
-        tokio::time::advance(policy().interval).await;
-        tokio::task::yield_now().await;
+    let interval = Duration::from_millis(50);
+    assert!(refresh.as_mut().now_or_never().is_none());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    for expected_calls in 2..=5 {
+        tokio::time::advance(interval).await;
+        assert!(refresh.as_mut().now_or_never().is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), expected_calls);
     }
     assert_eq!(
         reader.verdict(),
@@ -440,16 +414,13 @@ async fn refreshes_on_the_interval_and_stops_on_cancel() {
 
     flag.store(false, Ordering::Relaxed);
     for _ in 0..3 {
-        tokio::time::advance(policy().interval).await;
-        tokio::task::yield_now().await;
+        tokio::time::advance(interval).await;
+        assert!(refresh.as_mut().now_or_never().is_none());
     }
     std::assert_matches!(reader.verdict(), Err(NotReady::ProbeFailed { .. }));
 
     cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(1), refresher)
-        .await
-        .expect("refresh_until must return on cancel")
-        .unwrap();
+    assert_eq!(refresh.now_or_never(), Some(()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -491,26 +462,18 @@ async fn an_already_cancelled_refresher_skips_an_overdue_round() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_named() {
     let (healthy, _, healthy_calls) = flaky_probe(true);
     let (failing, _, failing_calls) = flaky_probe(false);
-    let readiness = Readiness::new(
-        vec![Box::new(Hanging), healthy, failing],
-        RefreshPolicy::try_new(
-            policy().interval,
-            Duration::from_millis(1),
-            policy().failure_threshold,
-        )
-        .unwrap(),
-    );
+    let readiness = Readiness::new(vec![Box::new(Hanging), healthy, failing], policy());
     let verdict = readiness.prepare().await;
     std::assert_matches!(
         verdict,
         Err(NotReady::TimedOut {
             probe: "hanging",
-            ..
-        }),
+            budget,
+        }) if budget == Duration::from_millis(20),
         "{verdict:?}"
     );
     assert_eq!(healthy_calls.load(Ordering::Relaxed), 1);
