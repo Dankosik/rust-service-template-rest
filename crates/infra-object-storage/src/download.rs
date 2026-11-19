@@ -64,7 +64,7 @@ impl Completion {
                     body,
                     progress,
                     guard,
-                    _permit,
+                    _permit: permit,
                 },
             outcome,
             discarded,
@@ -77,7 +77,7 @@ impl Completion {
             Outcome::Cancelled => drop(guard),
         }
         drop(discarded);
-        drop((context, body, progress, _permit));
+        drop((context, body, progress, permit));
         if let Some(waker) = waker {
             waker.wake();
         }

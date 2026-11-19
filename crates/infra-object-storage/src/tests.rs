@@ -1256,14 +1256,14 @@ async fn metrics_carry_only_operation_and_outcome() {
             .succeed();
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(Failure {
+            .fail(&Failure {
                 error: ObjectStorageError::NotFound,
                 error_type: "404".into(),
                 timeout_source: None,
             });
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(LocalFailure::ContentLength);
+            .fail(&Failure::from(LocalFailure::ContentLength));
     });
     let rendered = handle.render();
     assert!(
