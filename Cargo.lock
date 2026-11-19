@@ -1488,17 +1488,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "delegate"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2634,7 +2623,6 @@ dependencies = [
  "async-stream",
  "axum",
  "bytes",
- "delegate",
  "derive_more",
  "enum-map",
  "foldhash",
@@ -2663,7 +2651,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "secrecy",
- "serde",
  "serde_json",
  "service-failure",
  "shared-rules",
@@ -2696,7 +2683,6 @@ dependencies = [
  "compact_str",
  "const-hex",
  "const_format",
- "delegate",
  "derive-where",
  "derive_more",
  "enum-map",
@@ -2830,7 +2816,6 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "async-nats",
- "async-trait",
  "base64 0.23.1",
  "bstr",
  "bytes",
@@ -3037,7 +3022,6 @@ name = "infra-postgres"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "async-trait",
  "enum-map",
  "foldhash",
  "futures-util",
@@ -3098,7 +3082,6 @@ dependencies = [
  "bitflags 2.13.2",
  "const-hex",
  "crossbeam-channel",
- "delegate",
  "derive_more",
  "enum-map",
  "futures-util",

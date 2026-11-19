@@ -27,6 +27,21 @@ pub(crate) enum Identifiers {
     ClientOnly(CompactString),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum PrincipalIdentity<'a> {
+    Subject {
+        subject: &'a str,
+        client_id: Option<&'a str>,
+    },
+    ClientOnly(&'a str),
+}
+
+impl std::fmt::Debug for PrincipalIdentity<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PrincipalIdentity([VERIFIED_IDENTITY_REDACTED])")
+    }
+}
+
 impl Principal {
     pub(crate) fn new(identity: Identity, expiry_from_epoch: Duration) -> Self {
         Self {
@@ -42,6 +57,17 @@ impl Principal {
     #[must_use]
     pub fn issuer(&self) -> &str {
         &self.identity.issuer
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> PrincipalIdentity<'_> {
+        match &self.identity.identifiers {
+            Identifiers::Subject { subject, client_id } => PrincipalIdentity::Subject {
+                subject,
+                client_id: client_id.as_deref(),
+            },
+            Identifiers::ClientOnly(client_id) => PrincipalIdentity::ClientOnly(client_id),
+        }
     }
 
     #[must_use]
@@ -66,7 +92,7 @@ impl Principal {
     }
 
     #[must_use]
-    pub fn has_scopes(&self, required: &[String]) -> bool {
+    pub fn has_scopes(&self, required: impl IntoIterator<Item: AsRef<str>>) -> bool {
         self.identity.scopes.contains_all(required)
     }
 

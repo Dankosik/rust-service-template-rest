@@ -1,10 +1,11 @@
 use std::{
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::{Client, Origin};
+use infra_outbound_http::{BuildError, Client, Origin};
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -14,8 +15,8 @@ use tokio::{
 };
 
 use crate::{
-    AcquisitionError, ConfigurationError, EmptySubject, ExchangeTokenTarget, Options,
-    PreparationError, ServiceTokenTarget, TransportBuildFailure,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
+    ServiceTokenTarget, TransportBuildFailure,
     assertion::Signer,
     options::{Scheme, ValidatedOptions, validate_options},
     token::Token,
@@ -30,6 +31,10 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(1);
 const REFRESH_AHEAD: Duration = Duration::from_mins(5);
 const REFRESH_RETRY: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("on-behalf-of subject token must not be empty")]
+pub struct EmptySubject;
+
 #[derive(Clone, derive_more::Debug)]
 #[debug("OnBehalfOf([REDACTED])")]
 pub struct OnBehalfOf(SecretString);
@@ -42,7 +47,7 @@ impl OnBehalfOf {
         Ok(Self(subject_token))
     }
 
-    pub(crate) const fn secret(&self) -> &SecretString {
+    pub(crate) const fn as_secret(&self) -> &SecretString {
         &self.0
     }
 }
@@ -145,7 +150,6 @@ struct ServiceState {
 
 #[derive(Default)]
 struct Cached {
-    service: Option<Arc<ServiceToken>>,
     failure: Option<CachedFailure>,
     refresh_pending: bool,
 }
@@ -172,10 +176,10 @@ struct CachedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let validated = validate_options(options, Scheme::Https, Scheme::Https)?;
-        let origin = Origin::parse_https(&validated.endpoint.origin().ascii_serialization())
-            .map_err(|error| TransportBuildFailure::token_url(error.into()))?;
-        let token_http =
-            Client::try_new(origin, TOKEN_LIMITS).map_err(TransportBuildFailure::token_url)?;
+        let token_http = Origin::parse_https(&validated.endpoint().origin().ascii_serialization())
+            .map_err(BuildError::from)
+            .and_then(|origin| Client::try_new(origin, TOKEN_LIMITS))
+            .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }
 
@@ -183,7 +187,7 @@ impl Registration {
     pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
         let validated = validate_options(options, Scheme::Http, Scheme::Https)?;
         let token_http = Client::try_new_for_test_http(
-            &validated.endpoint.origin().ascii_serialization(),
+            &validated.endpoint().origin().ascii_serialization(),
             TOKEN_LIMITS,
         )
         .map_err(|_| ConfigurationError {
@@ -240,7 +244,7 @@ impl Registration {
         &self,
         target: ExchangeTokenTarget,
         resource_origin: http::Uri,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> Result<ExchangeTokens, ConfigurationError> {
         ExchangeTokens::try_new(self.shared.clone(), target, resource_origin, capacity)
     }
@@ -331,16 +335,18 @@ impl ServiceTokens {
     }
 
     fn reuse_service_token_and_schedule_refresh(&self, now: Instant) -> Option<Arc<Token>> {
-        if let Some(service) = self.0.inner.active.load().as_deref()
+        let active = self.0.inner.active.load();
+        if let Some(service) = active.as_deref()
             && service.token.is_reusable(now)
             && now < service.refresh_after
         {
             return Some(Arc::clone(&service.token));
         }
+        drop(active);
         let mut cached = self.0.inner.lock_cached();
-        let service = cached
-            .service
-            .as_ref()
+        let active = self.0.inner.active.load();
+        let service = active
+            .as_deref()
             .filter(|service| service.token.is_reusable(now))?;
         let token = Arc::clone(&service.token);
         if now >= service.refresh_after {
@@ -419,24 +425,20 @@ impl ServiceState {
             return false;
         };
         let refresh_after = service_refresh_after(token.requested_at, reuse_until);
-        let service = Arc::new(ServiceToken {
+        self.active.store(Some(Arc::new(ServiceToken {
             token: Arc::clone(token),
             refresh_after,
-        });
-        cached.service = Some(Arc::clone(&service));
-        self.active.store(Some(service));
+        })));
         true
     }
 
-    fn defer_refresh(&self, cached: &mut Cached, from: Instant) {
+    fn defer_refresh(&self, _cached: &mut Cached, from: Instant) {
         let next = from + refresh_retry();
-        if let Some(service) = cached.service.as_ref() {
-            let updated = Arc::new(ServiceToken {
+        if let Some(service) = self.active.load().as_deref() {
+            self.active.store(Some(Arc::new(ServiceToken {
                 token: Arc::clone(&service.token),
                 refresh_after: service.refresh_after.max(next),
-            });
-            cached.service = Some(Arc::clone(&updated));
-            self.active.store(Some(updated));
+            })));
         }
     }
 
@@ -450,7 +452,7 @@ impl ServiceState {
         if now >= request.deadline || self.cached_failure(now).is_some() {
             return;
         }
-        if !self.lock_cached().service.as_ref().is_some_and(|service| {
+        if !self.active.load().as_deref().is_some_and(|service| {
             Arc::ptr_eq(&service.token, &request.current) && !service.token.is_rejected()
         }) {
             return;

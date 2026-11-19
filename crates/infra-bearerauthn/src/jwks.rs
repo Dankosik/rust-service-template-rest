@@ -21,8 +21,8 @@ use serde::Deserialize;
 use tokio::time::Instant;
 
 use crate::{
-    EndpointUrl, IssuerUrl, JsonObject, PreparationError, PreparationPhase, PreparationReason,
-    ProviderFailure, VerificationError, VerificationReason,
+    DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwksError, PreparationError,
+    PreparationPhase, ProviderFailure, VerificationError, VerificationReason,
     jwt::discover_jwks_uri,
     provider::{Document, ProviderClient},
 };
@@ -84,7 +84,7 @@ struct JwtKey {
 }
 
 pub(crate) struct KeySet {
-    by_algorithm: HashMap<JwtAlgorithm, AlgorithmKeys>,
+    by_algorithm: EnumMap<JwtAlgorithm, AlgorithmKeys>,
     generation: u64,
     acquired_at: tokio::time::Instant,
 }
@@ -99,7 +99,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
     pub(crate) fn is_empty(&self) -> bool {
-        self.by_algorithm.is_empty()
+        self.by_algorithm.values().all(|keys| keys.all.is_empty())
     }
 
     pub(crate) fn require_fresh(
@@ -122,10 +122,10 @@ impl KeySet {
         &self,
         input: &SignatureInput<'_>,
     ) -> Result<(), SignatureVerificationError> {
-        let keys = self
-            .by_algorithm
-            .get(&input.algorithm)
-            .ok_or(SignatureVerificationError::NoCandidate)?;
+        let keys = &self.by_algorithm[input.algorithm];
+        if keys.all.is_empty() {
+            return Err(SignatureVerificationError::NoCandidate);
+        }
         let verifies =
             |key: &ParsedPublicKey| key.verify_sig(input.message, input.signature).is_ok();
         let signature_matches = if let Some(kid) = input.kid {
@@ -247,9 +247,9 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
     if parsed.has_non_encryption_rejections_without_keys() {
         return Err(KeySetFailure::NoUsableKeys);
     }
-    let mut by_algorithm = HashMap::<JwtAlgorithm, AlgorithmKeys>::new();
+    let mut by_algorithm = EnumMap::<JwtAlgorithm, AlgorithmKeys>::default();
     for key in parsed.keys {
-        let keys = by_algorithm.entry(key.algorithm).or_default();
+        let keys = &mut by_algorithm[key.algorithm];
         if let Some(kid) = key.kid {
             keys.by_kid.entry(kid).or_default().push(keys.all.len());
         }
@@ -542,10 +542,7 @@ impl JwksSource {
                     .await
                     .map_err(KeySetFailure::Discovery)?;
                 if Instant::now() >= deadline {
-                    return Err(KeySetFailure::Discovery(PreparationError::new(
-                        PreparationPhase::Discovery,
-                        PreparationReason::Timeout,
-                    )));
+                    return Err(KeySetFailure::DiscoveryTimeout);
                 }
                 (Cow::Owned(discovered), Some(started))
             }
@@ -562,7 +559,8 @@ impl JwksSource {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum KeySetFailure {
-    Discovery(PreparationError),
+    Discovery(DiscoveryError),
+    DiscoveryTimeout,
     Fetch(ProviderFailure),
     Parse,
     NoUsableKeys,
@@ -570,20 +568,20 @@ pub(crate) enum KeySetFailure {
 
 impl From<KeySetFailure> for PreparationError {
     fn from(failure: KeySetFailure) -> Self {
-        let reason = match failure {
-            KeySetFailure::Discovery(error) => return error,
-            KeySetFailure::Fetch(failure) => PreparationReason::Fetch(failure),
-            KeySetFailure::Parse => PreparationReason::Parse,
-            KeySetFailure::NoUsableKeys => PreparationReason::NoUsableKeys,
-        };
-        Self::new(PreparationPhase::Jwks, reason)
+        match failure {
+            KeySetFailure::Discovery(error) => Self::Discovery(error),
+            KeySetFailure::DiscoveryTimeout => Self::Timeout(PreparationPhase::Discovery),
+            KeySetFailure::Fetch(failure) => Self::Jwks(JwksError::Fetch(failure)),
+            KeySetFailure::Parse => Self::Jwks(JwksError::Parse),
+            KeySetFailure::NoUsableKeys => Self::Jwks(JwksError::NoUsableKeys),
+        }
     }
 }
 
 impl KeySetFailure {
-    pub(crate) fn label(&self) -> &'static str {
+    pub(crate) const fn label(&self) -> &'static str {
         match self {
-            Self::Discovery(_) => "discovery",
+            Self::Discovery(_) | Self::DiscoveryTimeout => "discovery",
             Self::Fetch(_) => "fetch",
             Self::Parse => "parse",
             Self::NoUsableKeys => "no_usable_keys",

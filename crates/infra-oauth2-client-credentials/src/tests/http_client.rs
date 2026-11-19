@@ -2,29 +2,20 @@ use super::*;
 use std::assert_matches;
 
 #[tokio::test]
-async fn each_grant_enforces_its_subject_policy_before_any_io() {
+async fn each_grant_sends_its_own_request_type_and_authorization() {
     let fixture = Fixture::new().await;
     let service = fixture.service_client();
     let delegated = fixture.exchange_client();
-    assert_eq!(
-        OnBehalfOf::try_new(SecretString::from("")).unwrap_err(),
-        EmptySubject
-    );
-    assert_eq!(service.origin(), fixture.resource_client().origin());
-    assert_eq!(delegated.origin(), service.origin());
-    assert_eq!(fixture.token_request_count(), 0);
-    assert_eq!(fixture.resource_request_count(), 0);
-
-    let ctx = context(Duration::from_secs(10));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
     service
-        .with_context(&ctx)
+        .with_context(&context)
         .execute(fixture.request())
         .await
         .unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     delegated
-        .with_context(&ctx)
-        .execute(fixture.request(), &subject_token("alice"))
+        .with_context(&context)
+        .execute(fixture.request(), &subject("alice"))
         .await
         .unwrap();
     assert_eq!(
@@ -101,14 +92,14 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let client = fixture.service_client();
         let budget = Duration::from_secs(2);
-        let ctx = OperationContext::with_timeout(budget);
-        let client = client.with_context(&ctx);
+        let context = OperationContext::with_timeout(budget);
+        let client = client.with_context(&context);
         let mut exchange = Box::pin(client.execute(fixture.request()));
         fixture.drive_until_token_received(exchange.as_mut()).await;
         if deadline_expires {
             advance(budget).await;
         } else {
-            ctx.cancel();
+            context.cancel();
         }
         let result = tokio::time::timeout(Duration::from_secs(1), exchange)
             .await
@@ -155,13 +146,12 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() 
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
     let client = fixture.service_client();
-    let parent = OperationContext::with_timeout(Duration::from_secs(1));
-    let child = parent.child_context();
-    let mut exchange = Box::pin(client.execute(fixture.request(), &child));
+    let operation = OperationContext::with_timeout(Duration::from_secs(1));
+    let mut exchange = Box::pin(client.execute(fixture.request(), &operation));
     fixture.drive_until_token_received(exchange.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    child.cancel();
+    operation.cancel();
     assert_matches!(
         exchange.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
@@ -206,8 +196,8 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
             .unwrap(),
         )
         .unwrap();
-    let ctx = OperationContext::with_timeout(Duration::from_secs(30));
-    let mut call = Box::pin(client.execute(fixture.request(), &ctx));
+    let context = OperationContext::with_timeout(Duration::from_secs(30));
+    let mut call = Box::pin(client.execute(fixture.request(), &context));
     tokio::select! { () = fixture.token_received() => {}, result = &mut call => panic!("token must be gated: {result:?}"), }
     advance(Duration::from_secs(2)).await;
     token_gate.add_permits(1);
@@ -318,7 +308,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         fixture.token_raw(response);
         let error = fixture
             .service_client()
-            .execute(fixture.request(), &context(Duration::from_secs(10)))
+            .execute(fixture.request(), &deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
         assert_matches!(&error, Error::Acquisition(actual) if *actual == expected);
@@ -400,7 +390,6 @@ async fn a_stopped_call_preserves_cancellation_and_a_live_call_refuses_conflicti
         header::AUTHORIZATION,
         "Bearer caller-token".parse().unwrap(),
     );
-
     let service = fixture.service_client();
     assert_matches!(
         fixture.send_request(&service, conflicting.clone()).await,
@@ -410,9 +399,8 @@ async fn a_stopped_call_preserves_cancellation_and_a_live_call_refuses_conflicti
         service.execute(conflicting.clone(), &cancelled).await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
     );
-
     let exchange = fixture.exchange_client();
-    let subject = subject_token("subject");
+    let alice = subject("subject");
     assert_matches!(
         fixture
             .send_exchange_request(&exchange, conflicting.clone(), "subject")
@@ -420,10 +408,9 @@ async fn a_stopped_call_preserves_cancellation_and_a_live_call_refuses_conflicti
         Err(Error::AuthorizationConflict)
     );
     assert_matches!(
-        exchange.execute(conflicting, &subject, &cancelled).await,
+        exchange.execute(conflicting, &alice, &cancelled).await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
     );
-
     assert_eq!(fixture.token_request_count(), 0);
     assert_eq!(fixture.resource_request_count(), 0);
     fixture.finish().await;

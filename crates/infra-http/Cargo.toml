@@ -29,7 +29,6 @@ pin-project-lite = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 # template:begin authn:http-authn-dependency
-delegate = { workspace = true }
 infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin object-storage:http-object-storage-dependencies

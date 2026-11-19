@@ -14,10 +14,13 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    AcquisitionError, Algorithm, Options, Rejection, TOKEN_LIMITS, acquisition_deadline,
-    exchange_target, service_target, token_context,
+    AcquisitionError, Algorithm, EXCHANGE_CAPACITY, Options, Rejection, TOKEN_LIMITS,
+    acquisition_deadline, exchange_target, nonzero, service_target, token_context,
 };
-use crate::{Registration, ServiceTokenTarget, ServiceTokens, token::Token};
+use crate::{
+    IssuerUrl, PrivateKeyJwt, Registration, ServiceTokenTarget, ServiceTokens, TokenUrl,
+    token::Token,
+};
 
 const KEY_ID: &str = "key-1";
 const CATALOG: &str = "catalog";
@@ -289,16 +292,19 @@ impl Realm {
         key_id: &str,
     ) -> Registration {
         let endpoint = self.token_endpoint(&self.name);
+        let issuer = IssuerUrl::parse_for_test_http(&self.issuer()).unwrap();
         let options = Options {
-            token_url: endpoint.to_string(),
+            token_url: TokenUrl::parse_for_test_http(endpoint.as_str()).unwrap(),
             client_id: caller(algorithm),
-            private_key: SecretString::from(key.serialize_pem()),
-            key_id: key_id.to_owned(),
-            algorithm,
-            assertion_audience: self.issuer(),
-            provider_concurrency: 32,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(key.serialize_pem()),
+                key_id: key_id.to_owned(),
+                algorithm,
+                audience: issuer.clone(),
+            },
+            provider_concurrency: nonzero(32),
         };
-        Registration::prepare_keycloak_for_test_http(options)
+        Registration::prepare_with_oidc_discovery_for_test_http(issuer, options)
             .await
             .unwrap()
     }
@@ -500,7 +506,7 @@ async fn one_registration_issues_recipient_specific_service_tokens_and_exchanges
             .exchange_tokens(
                 exchange_target(&[CATALOG_SCOPE, BILLING_SCOPE], Some(CATALOG)),
                 resource_origin(CATALOG),
-                1024,
+                EXCHANGE_CAPACITY,
             )
             .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))
@@ -658,7 +664,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
             .exchange_tokens(
                 exchange_target(&[CATALOG_SCOPE], Some(CATALOG)),
                 resource_origin(CATALOG),
-                1024,
+                EXCHANGE_CAPACITY,
             )
             .unwrap()
             .exchange(&subject, acquisition_deadline(&token_context()))

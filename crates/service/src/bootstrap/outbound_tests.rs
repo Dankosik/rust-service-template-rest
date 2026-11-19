@@ -1,10 +1,13 @@
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
-use infra_oauth2_client_credentials::{Algorithm, Options, Registration, ServiceTokenTarget};
+use infra_oauth2_client_credentials::{
+    Algorithm, IssuerUrl, Options, PrivateKeyJwt, Registration, ServiceTokenTarget, TokenUrl,
+};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -144,13 +147,15 @@ async fn assert_resource_unavailable(address: SocketAddr) {
 
 fn token_options(peer_addr: SocketAddr) -> Options {
     Options {
-        token_url: format!("http://{peer_addr}/token"),
-        assertion_audience: format!("https://{peer_addr}"),
+        token_url: TokenUrl::parse_for_test_http(&format!("http://{peer_addr}/token")).unwrap(),
         client_id: "service".to_owned(),
-        key_id: "test-key".to_owned(),
-        algorithm: Algorithm::Es256,
-        private_key: tls_test_support::new_issuer().key().serialize_pem().into(),
-        provider_concurrency: 1,
+        auth: PrivateKeyJwt {
+            private_key: tls_test_support::new_issuer().key().serialize_pem().into(),
+            key_id: "test-key".to_owned(),
+            algorithm: Algorithm::Es256,
+            audience: IssuerUrl::parse(&format!("https://{peer_addr}")).unwrap(),
+        },
+        provider_concurrency: NonZeroU32::MIN,
     }
 }
 

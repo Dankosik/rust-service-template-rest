@@ -349,18 +349,17 @@ impl PreparedRequest<'_> {
             context.check().map_err(|s| SendError::Error(s.into()))?;
             Ok(response)
         });
-        let status = attempt.status();
         match result {
             Ok(value) => {
-                std::mem::DropGuard::dismiss(attempt).finish(None);
+                attempt.finish(None);
                 Ok(value)
             }
             Err(SendError::Refused(refused)) => {
-                std::mem::DropGuard::dismiss(attempt).finish_dispatch_refused();
+                attempt.finish_dispatch_refused();
                 Err(DispatchError::Refused(refused))
             }
             Err(SendError::Error(error)) => {
-                std::mem::DropGuard::dismiss(attempt).finish(Some(&error));
+                let status = attempt.finish(Some(&error));
                 Err(DispatchError::Exchange(match status {
                     Some(status) => ExchangeError::AfterResponse {
                         status,

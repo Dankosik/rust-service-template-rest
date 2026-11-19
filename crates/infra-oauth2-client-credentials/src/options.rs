@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::{cell::Cell, num::NonZeroU32, str::FromStr};
 
 use secrecy::{ExposeSecret as _, SecretString};
 use shared_rules::uri;
@@ -25,16 +25,104 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
     }
 }
 
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("IssuerUrl([REDACTED])")]
+pub struct IssuerUrl {
+    exact: String,
+    url: Url,
+}
+
+impl IssuerUrl {
+    pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
+        parse_issuer_url(raw, "issuer", Scheme::Https)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn parse_for_test_http(raw: &str) -> Result<Self, ConfigurationError> {
+        parse_issuer_url(raw, "issuer", Scheme::Http)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.exact
+    }
+
+    pub(crate) const fn url(&self) -> &Url {
+        &self.url
+    }
+}
+
+impl AsRef<str> for IssuerUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for IssuerUrl {
+    type Err = ConfigurationError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("TokenUrl([REDACTED])")]
+pub struct TokenUrl {
+    exact: String,
+    url: Url,
+}
+
+impl TokenUrl {
+    pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
+        parse_token_url(raw, Scheme::Https)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn parse_for_test_http(raw: &str) -> Result<Self, ConfigurationError> {
+        parse_token_url(raw, Scheme::Http)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.exact
+    }
+
+    pub(crate) const fn url(&self) -> &Url {
+        &self.url
+    }
+}
+
+impl AsRef<str> for TokenUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for TokenUrl {
+    type Err = ConfigurationError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
 #[derive(Clone, derive_more::Debug)]
-#[debug("Options([REDACTED])")]
-pub struct Options {
-    pub token_url: String,
-    pub client_id: String,
+#[debug("PrivateKeyJwt([REDACTED])")]
+pub struct PrivateKeyJwt {
     pub private_key: SecretString,
     pub key_id: String,
     pub algorithm: Algorithm,
-    pub assertion_audience: String,
-    pub provider_concurrency: u32,
+    pub audience: IssuerUrl,
+}
+
+#[derive(Clone, derive_more::Debug)]
+#[debug("Options([REDACTED])")]
+pub struct Options {
+    pub token_url: TokenUrl,
+    pub client_id: String,
+    pub auth: PrivateKeyJwt,
+    pub provider_concurrency: NonZeroU32,
 }
 
 #[derive(Clone, Default, derive_more::Debug)]
@@ -44,7 +132,9 @@ pub struct ServiceTokenTarget {
 }
 
 impl ServiceTokenTarget {
-    pub fn try_new(scopes: &[String]) -> Result<Self, ConfigurationError> {
+    pub fn try_new(
+        scopes: impl IntoIterator<Item: AsRef<str>>,
+    ) -> Result<Self, ConfigurationError> {
         Ok(Self {
             scope: scope_parameter(scopes)?,
         })
@@ -60,7 +150,7 @@ pub struct ExchangeTokenTarget {
 
 impl ExchangeTokenTarget {
     pub fn try_new(
-        scopes: &[String],
+        scopes: impl IntoIterator<Item: AsRef<str>>,
         audience: Option<String>,
     ) -> Result<Self, ConfigurationError> {
         let scope = scope_parameter(scopes)?;
@@ -77,39 +167,49 @@ impl ExchangeTokenTarget {
     }
 }
 
-fn scope_parameter(scopes: &[String]) -> Result<Option<String>, ConfigurationError> {
-    if !scopes
-        .iter()
-        .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
-    {
-        return Err(ConfigurationError {
-            key: "scopes",
-            reason: "must contain RFC 6749 scope tokens",
-        });
+fn scope_parameter(
+    scopes: impl IntoIterator<Item: AsRef<str>>,
+) -> Result<Option<String>, ConfigurationError> {
+    let mut joined = String::new();
+    for scope in scopes {
+        let scope = scope.as_ref();
+        if !shared_rules::rfc6749::is_scope_token(scope) {
+            return Err(ConfigurationError {
+                key: "scopes",
+                reason: "must contain RFC 6749 scope tokens",
+            });
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(scope);
     }
-    Ok((!scopes.is_empty()).then(|| scopes.join(" ")))
+    Ok((!joined.is_empty()).then_some(joined))
 }
 
 pub(crate) struct ValidatedOptions {
     pub(crate) options: Options,
-    pub(crate) issuer: Url,
-    pub(crate) endpoint: Url,
     permits: usize,
 }
 
 impl ValidatedOptions {
+    pub(crate) fn endpoint(&self) -> &Url {
+        self.options.token_url.url()
+    }
+
     pub(crate) fn into_parts(self) -> (Options, Url, usize) {
-        (self.options, self.endpoint, self.permits)
+        let endpoint = self.options.token_url.url.clone();
+        (self.options, endpoint, self.permits)
     }
 }
 
-fn validate_provider_concurrency(value: u32) -> Result<usize, ConfigurationError> {
-    usize::try_from(value)
+fn validate_provider_concurrency(value: NonZeroU32) -> Result<usize, ConfigurationError> {
+    usize::try_from(value.get())
         .ok()
-        .filter(|&permits| permits > 0 && permits <= Semaphore::MAX_PERMITS)
+        .filter(|&permits| permits <= Semaphore::MAX_PERMITS)
         .ok_or(ConfigurationError {
             key: "provider_concurrency",
-            reason: "must be positive and supported on this target",
+            reason: "must be supported on this target",
         })
 }
 
@@ -129,7 +229,7 @@ impl Scheme {
         }
     }
 
-    const fn token_url_mismatch_reason(self) -> &'static str {
+    const fn mismatch_reason(self) -> &'static str {
         match self {
             Self::Https => "must use HTTPS",
             #[cfg(any(test, feature = "test-support"))]
@@ -138,87 +238,111 @@ impl Scheme {
     }
 }
 
-pub(crate) fn strict_provider_url(raw: &str) -> Option<Url> {
-    if uri::has_whitespace_or_control(raw) || uri::authority_has_userinfo(raw) {
-        return None;
+fn parse_provider_url(
+    raw: &str,
+    key: &'static str,
+    scheme: Option<Scheme>,
+    allow_query: bool,
+) -> Result<Url, ConfigurationError> {
+    let error = |reason| Err(ConfigurationError { key, reason });
+    if uri::has_whitespace_or_control(raw) {
+        return error("must not contain whitespace or controls");
+    }
+    if uri::authority_has_userinfo(raw) {
+        return error("must not include userinfo");
     }
     let syntax_valid = Cell::new(true);
-    let url = Url::options()
+    let Ok(url) = Url::options()
         .syntax_violation_callback(Some(&|_| syntax_valid.set(false)))
         .parse(raw)
-        .ok()?;
-    (syntax_valid.get()
-        && url.host().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.fragment().is_none())
-    .then_some(url)
+    else {
+        return error("must be a valid HTTPS URL");
+    };
+    if !syntax_valid.get() {
+        return error("must be a valid HTTPS URL");
+    }
+    if let Some(expected) = scheme
+        && url.scheme() != expected.as_str()
+    {
+        return error(expected.mismatch_reason());
+    }
+    if url.host().is_none() {
+        return error("must have a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return error("must not include userinfo");
+    }
+    if !allow_query && url.query().is_some() {
+        return error("must not include a query");
+    }
+    if url.fragment().is_some() {
+        return error("must not include a fragment");
+    }
+    Ok(url)
+}
+
+fn parse_issuer_url(
+    raw: &str,
+    key: &'static str,
+    scheme: Scheme,
+) -> Result<IssuerUrl, ConfigurationError> {
+    let url = parse_provider_url(raw, key, Some(scheme), false)?;
+    Ok(IssuerUrl {
+        exact: raw.to_owned(),
+        url,
+    })
+}
+
+fn parse_token_url(raw: &str, scheme: Scheme) -> Result<TokenUrl, ConfigurationError> {
+    let url = parse_provider_url(raw, "token_url", Some(scheme), true)?;
+    Ok(TokenUrl {
+        exact: raw.to_owned(),
+        url,
+    })
+}
+
+pub(crate) fn parse_discovered_token_endpoint(raw: &str) -> Option<Url> {
+    parse_provider_url(raw, "token_endpoint", None, true).ok()
+}
+
+pub(crate) fn check_url_scheme(
+    url: &Url,
+    key: &'static str,
+    scheme: Scheme,
+) -> Result<(), ConfigurationError> {
+    if url.scheme() != scheme.as_str() {
+        return Err(ConfigurationError {
+            key,
+            reason: scheme.mismatch_reason(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_options(
     options: Options,
     endpoint_scheme: Scheme,
-    issuer_scheme: Scheme,
+    audience_scheme: Scheme,
 ) -> Result<ValidatedOptions, ConfigurationError> {
     let permits = validate_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
     if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
-    if options.key_id.trim().is_empty() {
+    if options.auth.key_id.trim().is_empty() {
         return error("key_id", "must be nonempty");
     }
-    let issuer = assertion_issuer(&options.assertion_audience, issuer_scheme)?;
-    if options.private_key.expose_secret().trim().is_empty() {
+    check_url_scheme(
+        options.auth.audience.url(),
+        "assertion_audience",
+        audience_scheme,
+    )?;
+    if options.auth.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
-    let endpoint = token_endpoint(&options.token_url, endpoint_scheme, &issuer)?;
-    Ok(ValidatedOptions {
-        options,
-        issuer,
-        endpoint,
-        permits,
-    })
-}
-
-pub(crate) fn assertion_issuer(raw: &str, scheme: Scheme) -> Result<Url, ConfigurationError> {
-    strict_provider_url(raw)
-        .filter(|issuer| issuer.scheme() == scheme.as_str() && issuer.query().is_none())
-        .ok_or(ConfigurationError {
-            key: "assertion_audience",
-            reason: "must be an HTTPS issuer URL without userinfo, a query, or a fragment",
-        })
-}
-
-pub(crate) fn token_endpoint(
-    raw: &str,
-    scheme: Scheme,
-    issuer: &Url,
-) -> Result<Url, ConfigurationError> {
-    let error = |key, reason| Err(ConfigurationError { key, reason });
-    if uri::has_whitespace_or_control(raw) {
-        return error("token_url", "must not contain whitespace or controls");
-    }
-    let Ok(endpoint) = Url::parse(raw) else {
-        return error("token_url", "must be a valid HTTPS URL");
-    };
-    if endpoint.scheme() != scheme.as_str() {
-        return error("token_url", scheme.token_url_mismatch_reason());
-    }
-    if endpoint.host_str().is_none() {
-        return error("token_url", "must have a host");
-    }
-    if !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || uri::authority_has_userinfo(raw)
-    {
-        return error("token_url", "must not include userinfo");
-    }
-    if endpoint.fragment().is_some() {
-        return error("token_url", "must not include a fragment");
-    }
-    if issuer == &endpoint {
+    check_url_scheme(options.token_url.url(), "token_url", endpoint_scheme)?;
+    if options.auth.audience.url() == options.token_url.url() {
         return error("assertion_audience", "must differ from the token endpoint");
     }
-    Ok(endpoint)
+    Ok(ValidatedOptions { options, permits })
 }

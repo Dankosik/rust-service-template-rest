@@ -214,9 +214,8 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
         .unwrap()
         .unwrap();
 
-    let subject = subject_token("alice");
-    assert_closed_calls(&fixture, ClosedClient::Service(&service_clone)).await;
-    assert_closed_calls(&fixture, ClosedClient::Exchange(&exchange_clone, &subject)).await;
+    assert_closed_service_calls(&service_clone, || fixture.request()).await;
+    assert_closed_exchange_calls(&exchange_clone, || fixture.request(), &subject("alice")).await;
     assert_eq!(fixture.token_request_count(), 3);
     assert_eq!(fixture.resource_request_count(), 4);
     drop(gate);
@@ -343,7 +342,7 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
     fixture.send_exchange(&exchange, "warm").await.unwrap();
 
     drop(driver);
-    assert_closed_calls(&fixture, ClosedClient::Service(&service.clone())).await;
+    assert_closed_service_calls(&service.clone(), || fixture.request()).await;
     assert_eq!(fixture.token_request_count(), 2);
     assert_eq!(fixture.resource_request_count(), 2);
 
@@ -351,8 +350,11 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
         StatusCode::OK,
         &exchange_response("exchanged-after-shutdown"),
     );
-    for subject in ["warm", "cold"] {
-        fixture.send_exchange(&exchange, subject).await.unwrap();
+    for subject_token in ["warm", "cold"] {
+        fixture
+            .send_exchange(&exchange, subject_token)
+            .await
+            .unwrap();
     }
     assert_eq!(fixture.token_request_count(), 3);
     let resources = fixture.resource_requests();
@@ -367,17 +369,13 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
     fixture.finish().await;
 }
 
-#[derive(Clone, Copy)]
-enum ClosedClient<'a> {
-    Service(&'a ServiceHttpClient),
-    Exchange(&'a ExchangeHttpClient, &'a OnBehalfOf),
-}
-
-async fn assert_closed_calls(fixture: &Fixture, client: ClosedClient<'_>) {
-    let expired_parent = OperationContext::with_timeout(Duration::ZERO);
-    let cancelled = OperationContext::with_timeout(Duration::from_secs(10));
+async fn assert_closed_service_calls(
+    client: &ServiceHttpClient,
+    request: impl Fn() -> Request<Bytes>,
+) {
+    let cancelled = OperationContext::unbounded();
     cancelled.cancel();
-    for (ctx, expected) in [
+    for (context, expected) in [
         (
             OperationContext::with_timeout(Duration::from_secs(10)),
             AcquisitionError::Unavailable,
@@ -386,22 +384,40 @@ async fn assert_closed_calls(fixture: &Fixture, client: ClosedClient<'_>) {
             OperationContext::with_timeout(Duration::ZERO),
             AcquisitionError::Timeout,
         ),
-        (expired_parent.child_context(), AcquisitionError::Timeout),
-        (cancelled.clone(), AcquisitionError::Cancelled),
-        (cancelled.child_context(), AcquisitionError::Cancelled),
+        (cancelled, AcquisitionError::Cancelled),
     ] {
-        let error = match client {
-            ClosedClient::Service(service) => service
-                .with_context(&ctx)
-                .execute(fixture.request())
-                .await
-                .unwrap_err(),
-            ClosedClient::Exchange(exchange, subject) => exchange
-                .with_context(&ctx)
-                .execute(fixture.request(), subject)
-                .await
-                .unwrap_err(),
-        };
+        let error = client
+            .with_context(&context)
+            .execute(request())
+            .await
+            .unwrap_err();
+        assert_matches!(error, Error::Acquisition(actual) if actual == expected);
+    }
+}
+
+async fn assert_closed_exchange_calls(
+    client: &ExchangeHttpClient,
+    request: impl Fn() -> Request<Bytes>,
+    subject_token: &OnBehalfOf,
+) {
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    for (context, expected) in [
+        (
+            OperationContext::with_timeout(Duration::from_secs(10)),
+            AcquisitionError::Unavailable,
+        ),
+        (
+            OperationContext::with_timeout(Duration::ZERO),
+            AcquisitionError::Timeout,
+        ),
+        (cancelled, AcquisitionError::Cancelled),
+    ] {
+        let error = client
+            .with_context(&context)
+            .execute(request(), subject_token)
+            .await
+            .unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
     }
 }
@@ -627,7 +643,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}),
     );
     let registration = prepare_registration(Options {
-        provider_concurrency: 1,
+        provider_concurrency: nonzero(1),
         ..fixture.options()
     });
     let (service_tokens, driver) =

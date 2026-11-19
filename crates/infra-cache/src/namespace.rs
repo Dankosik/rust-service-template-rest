@@ -8,7 +8,7 @@ use tokio::time::Instant;
 
 use crate::connection::reply_data;
 use crate::error::{CommandError, ErrorType};
-use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, Outcome};
+use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, SuccessOutcome};
 use crate::{Cache, MutationError, OperationError, SetError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -166,8 +166,8 @@ impl CacheNamespace {
             },
             |value| match value {
                 Some(bytes) if bytes.len() > max_value_bytes => Err(ErrorType::ValueTooLarge),
-                Some(_) => Ok(Outcome::Hit),
-                None => Ok(Outcome::Miss),
+                Some(_) => Ok(SuccessOutcome::Hit),
+                None => Ok(SuccessOutcome::Miss),
             },
         )
         .await
@@ -197,9 +197,11 @@ impl CacheNamespace {
                 |value| matches!(value, redis::Value::Okay),
             )
         };
-        self.run(parent, Operation::Set, build_query, |()| Ok(Outcome::Ok))
-            .await
-            .map_err(Into::into)
+        self.run(parent, Operation::Set, build_query, |()| {
+            Ok(SuccessOutcome::Ok)
+        })
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
@@ -209,9 +211,11 @@ impl CacheNamespace {
                 matches!(value, redis::Value::Int(0 | 1))
             })
         };
-        self.run(parent, Operation::Delete, build_query, |()| Ok(Outcome::Ok))
-            .await
-            .map_err(Into::into)
+        self.run(parent, Operation::Delete, build_query, |()| {
+            Ok(SuccessOutcome::Ok)
+        })
+        .await
+        .map_err(Into::into)
     }
 
     async fn run<T: Send + 'static, F>(
@@ -219,7 +223,7 @@ impl CacheNamespace {
         parent: &OperationContext,
         operation: Operation,
         build_query: impl FnOnce(MultiplexedConnection) -> F,
-        outcome: impl FnOnce(&T) -> Result<Outcome, ErrorType>,
+        outcome: impl FnOnce(&T) -> Result<SuccessOutcome, ErrorType>,
     ) -> Result<T, CommandError>
     where
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,

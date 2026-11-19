@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::{Request, Response, StatusCode, header};
-use infra_outbound_http::{Client, DispatchError, Error as HttpError, Origin, PreparedRequest};
+use http::{Request, Response, StatusCode, header::AUTHORIZATION};
+use infra_outbound_http::{Client, DispatchError, Error as HttpError, Origin};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 
 use crate::{
     AcquisitionError, ConfigurationError, Error, ExchangeTokens, OnBehalfOf, ServiceTokens,
-    credentials::acquisition_deadline, token::Token,
+    credentials::{AcquisitionDeadline, acquisition_deadline},
+    token::Token,
 };
 
 #[derive(Clone, derive_more::Debug)]
@@ -83,18 +84,13 @@ impl ServiceHttpClient {
         request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let has_auth = request.headers().contains_key(header::AUTHORIZATION);
-        let prepared = self
-            .resource
-            .prepare(request, context)
-            .map_err(Error::at_prepare)?;
-        let deadline = acquisition_deadline(prepared.context());
-        self.tokens.check_active(deadline)?;
-        if has_auth {
-            return Err(Error::AuthorizationConflict);
-        }
-        let acquired = self.tokens.acquire_for_request(deadline).await?;
-        send_authorized(prepared, acquired).await
+        execute_authenticated(
+            &self.resource,
+            request,
+            context,
+            Grant::Service(&self.tokens),
+        )
+        .await
     }
 }
 
@@ -132,18 +128,13 @@ impl ExchangeHttpClient {
         subject: &OnBehalfOf,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let has_auth = request.headers().contains_key(header::AUTHORIZATION);
-        let prepared = self
-            .resource
-            .prepare(request, context)
-            .map_err(Error::at_prepare)?;
-        let deadline = acquisition_deadline(prepared.context());
-        self.tokens.check_active(deadline)?;
-        if has_auth {
-            return Err(Error::AuthorizationConflict);
-        }
-        let acquired = self.tokens.acquire_for_request(subject, deadline).await?;
-        send_authorized(prepared, acquired).await
+        execute_authenticated(
+            &self.resource,
+            request,
+            context,
+            Grant::Exchange(&self.tokens, subject),
+        )
+        .await
     }
 }
 
@@ -162,10 +153,47 @@ impl ExchangeRequestClient<'_> {
     }
 }
 
-async fn send_authorized(
-    mut prepared: PreparedRequest<'_>,
-    acquired: Arc<Token>,
+#[derive(Clone, Copy)]
+enum Grant<'a> {
+    Service(&'a ServiceTokens),
+    Exchange(&'a ExchangeTokens, &'a OnBehalfOf),
+}
+
+impl Grant<'_> {
+    fn check_active(self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+        match self {
+            Self::Service(tokens) => tokens.check_active(deadline),
+            Self::Exchange(tokens, _) => tokens.check_active(deadline),
+        }
+    }
+
+    async fn acquire_for_request(
+        self,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        match self {
+            Self::Service(tokens) => tokens.acquire_for_request(deadline).await,
+            Self::Exchange(tokens, subject) => tokens.acquire_for_request(subject, deadline).await,
+        }
+    }
+}
+
+async fn execute_authenticated(
+    resource: &Client,
+    request: Request<Bytes>,
+    context: &OperationContext,
+    grant: Grant<'_>,
 ) -> Result<Response<Bytes>, Error> {
+    let has_authorization = request.headers().contains_key(AUTHORIZATION);
+    let mut prepared = resource
+        .prepare(request, context)
+        .map_err(Error::at_prepare)?;
+    let deadline = acquisition_deadline(prepared.context());
+    grant.check_active(deadline)?;
+    if has_authorization {
+        return Err(Error::AuthorizationConflict);
+    }
+    let acquired = grant.acquire_for_request(deadline).await?;
     prepared.set_authorization(acquired.header.clone());
     prepared
         .send_checked(

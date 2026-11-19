@@ -1,4 +1,4 @@
-use std::{collections::hash_map::Entry, sync::Arc, time::Duration};
+use std::{collections::hash_map::Entry, num::NonZeroU32, sync::Arc, time::Duration};
 
 use foldhash::HashMap;
 use moka::Expiry;
@@ -10,7 +10,7 @@ use super::{AcquisitionDeadline, RegistrationState, timeout_as_unavailable};
 use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, OnBehalfOf, token::Token};
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
-const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
+const MAX_EXCHANGE_CACHE_CAPACITY: u32 = 65_536;
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("ExchangeTokens([REDACTED])")]
@@ -42,14 +42,14 @@ impl ExchangeOwner {
         }
         let token = result.map_err(timeout_as_unavailable)?;
         if token.is_reusable(Instant::now()) {
-            self.state.cache.insert(key, token.clone()).await;
+            self.state.cache.insert(key, token.clone());
         }
         Ok(token)
     }
 }
 
 type ExchangedTokenCache =
-    moka::future::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>;
+    moka::sync::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>;
 
 struct ExchangeState {
     cache: ExchangedTokenCache,
@@ -57,10 +57,11 @@ struct ExchangeState {
 }
 
 impl ExchangeState {
-    fn new(capacity: u32) -> Self {
+    fn new(capacity: NonZeroU32) -> Self {
+        let capacity = capacity.get();
         let minimum_weight = EXCHANGE_CACHE_BYTES / capacity;
         Self {
-            cache: moka::future::Cache::builder()
+            cache: moka::sync::Cache::builder()
                 .max_capacity(u64::from(minimum_weight * capacity))
                 .weigher(move |_: &SubjectKey, token: &Arc<Token>| {
                     u32::try_from(token.header.as_bytes().len())
@@ -73,10 +74,9 @@ impl ExchangeState {
         }
     }
 
-    async fn reusable(&self, key: SubjectKey) -> Option<Arc<Token>> {
+    fn reusable(&self, key: SubjectKey) -> Option<Arc<Token>> {
         self.cache
             .get(&key)
-            .await
             .filter(|token| token.is_reusable(Instant::now()))
     }
 
@@ -174,9 +174,9 @@ impl ExchangeTokens {
         registration: Arc<RegistrationState>,
         target: ExchangeTokenTarget,
         resource_origin: http::Uri,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> Result<Self, ConfigurationError> {
-        if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&capacity) {
+        if capacity.get() > MAX_EXCHANGE_CACHE_CAPACITY {
             return Err(ConfigurationError {
                 key: "exchange_cache_capacity",
                 reason: "must be from 1 to 65536",
@@ -190,10 +190,6 @@ impl ExchangeTokens {
         })))
     }
 
-    fn registration(&self) -> &RegistrationState {
-        &self.0.registration
-    }
-
     pub(crate) fn resource_origin(&self) -> &http::Uri {
         &self.0.resource_origin
     }
@@ -202,7 +198,7 @@ impl ExchangeTokens {
         &self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<(), AcquisitionError> {
-        self.registration().check_active(deadline)
+        self.0.registration.check_active(deadline)
     }
 
     pub(crate) async fn acquire_for_request(
@@ -210,16 +206,15 @@ impl ExchangeTokens {
         subject: &OnBehalfOf,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        let registration = self.registration();
-        registration.check_active(deadline)?;
-        let mut registration_closed = registration.closed.clone();
+        self.check_active(deadline)?;
+        let mut registration_closed = self.0.registration.closed.clone();
         let acquired = tokio::select! {
             biased;
             stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
             _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
-            result = self.exchange(subject.secret(), deadline) => result,
+            result = self.exchange(subject.as_secret(), deadline) => result,
         };
-        registration.check_active(deadline)?;
+        self.check_active(deadline)?;
         let acquired = acquired?;
         acquired.check_expiry(Instant::now())?;
         Ok(acquired)
@@ -236,9 +231,9 @@ impl ExchangeTokens {
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         let key = SubjectKey::of(subject);
-        let registration = self.registration();
+        let registration = &self.0.registration;
         registration.check_active(deadline)?;
-        let result = if let Some(token) = self.0.state.reusable(key).await {
+        let result = if let Some(token) = self.0.state.reusable(key) {
             Ok(token)
         } else {
             tokio::time::timeout_at(
@@ -258,13 +253,13 @@ impl ExchangeTokens {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let registration = self.registration();
+        let registration = &self.0.registration;
         let state = &self.0.state;
         loop {
             registration.check_active(deadline)?;
             match state.join(key) {
                 ExchangeFlight::Leader(leader) => {
-                    let result = if let Some(token) = state.reusable(key).await {
+                    let result = if let Some(token) = state.reusable(key) {
                         Ok(token)
                     } else {
                         self.0.fetch(key, subject, deadline).await
@@ -297,16 +292,16 @@ mod tests {
     #[tokio::test]
     async fn short_tokens_cannot_use_the_weight_remainder_for_an_extra_subject()
     -> Result<(), AcquisitionError> {
-        const CAPACITY: u32 = 4_160;
+        const CAPACITY: NonZeroU32 = NonZeroU32::new(4_160).unwrap();
         let cache = ExchangeState::new(CAPACITY).cache;
         let token = Arc::new(Token::bearer("short", Instant::now(), Some(3600))?);
-        for subject in 0..=CAPACITY {
+        for subject in 0..=CAPACITY.get() {
             let mut key = [0; 32];
             key[..4].copy_from_slice(&subject.to_be_bytes());
-            cache.insert(SubjectKey(key), token.clone()).await;
+            cache.insert(SubjectKey(key), token.clone());
         }
-        cache.run_pending_tasks().await;
-        assert!(cache.entry_count() <= u64::from(CAPACITY));
+        cache.run_pending_tasks();
+        assert!(cache.entry_count() <= u64::from(CAPACITY.get()));
         Ok(())
     }
 }

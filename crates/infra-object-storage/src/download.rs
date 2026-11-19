@@ -74,7 +74,7 @@ impl Completion {
             Outcome::Failure(failure) => {
                 guard.fail(&failure);
             }
-            Outcome::Cancelled => guard.cancel(),
+            Outcome::Cancelled => drop(guard),
         }
         drop(discarded);
         drop(body);

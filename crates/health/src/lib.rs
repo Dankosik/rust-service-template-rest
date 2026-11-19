@@ -10,7 +10,9 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-#[async_trait::async_trait]
+pub use async_trait::async_trait;
+
+#[async_trait]
 pub trait Probe: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     async fn check(&self) -> Result<(), ProbeError>;
@@ -80,27 +82,11 @@ const CHECKS_METRIC: &str = "readiness_checks_total";
 
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 
-fn outcome_metric_parts(
-    outcome: &Result<(), ProbeFailure>,
-) -> (&'static str, &'static metrics::Key) {
-    const OK: &str = "ok";
-    const TIMED_OUT: &str = "timed_out";
-    const FAILED: &str = "failed";
-    static OK_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts("outcome", OK)];
-    static TIMED_OUT_LABELS: [metrics::Label; 1] =
-        [metrics::Label::from_static_parts("outcome", TIMED_OUT)];
-    static FAILED_LABELS: [metrics::Label; 1] =
-        [metrics::Label::from_static_parts("outcome", FAILED)];
-    static OK_KEY: metrics::Key = metrics::Key::from_static_parts(CHECKS_METRIC, &OK_LABELS);
-    static TIMED_OUT_KEY: metrics::Key =
-        metrics::Key::from_static_parts(CHECKS_METRIC, &TIMED_OUT_LABELS);
-    static FAILED_KEY: metrics::Key =
-        metrics::Key::from_static_parts(CHECKS_METRIC, &FAILED_LABELS);
-
+fn outcome_label(outcome: &Result<(), ProbeFailure>) -> &'static str {
     match outcome {
-        Ok(()) => (OK, &OK_KEY),
-        Err(ProbeFailure::TimedOut { .. }) => (TIMED_OUT, &TIMED_OUT_KEY),
-        Err(ProbeFailure::Failed { .. }) => (FAILED, &FAILED_KEY),
+        Ok(()) => "ok",
+        Err(ProbeFailure::TimedOut { .. }) => "timed_out",
+        Err(ProbeFailure::Failed { .. }) => "failed",
     }
 }
 
@@ -251,13 +237,13 @@ impl State {
         Ok(check)
     }
 
-    fn readiness(&self, stale_after: Duration) -> (bool, Option<Instant>) {
+    fn readiness(&self, now: Instant, stale_after: Duration) -> (bool, Option<Instant>) {
         let checked_at = match self {
             Self::Evaluated(check) if check.verdict.is_ready() => check.checked_at,
             _ => return (false, None),
         };
         let deadline = stale_at(checked_at, stale_after);
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if deadline.is_some_and(|deadline| now >= deadline) {
             (false, None)
         } else {
             (true, deadline)
@@ -538,9 +524,6 @@ impl ReadinessRefresher {
 
 impl Readiness {
     async fn check_probes(&self) -> Result<(), ProbeFailure> {
-        static METADATA: metrics::Metadata<'static> =
-            metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
         let budget = self.control.policy.probe_budget;
         let deadline = Instant::now() + budget;
         let observed = match self.probes.as_slice() {
@@ -555,8 +538,7 @@ impl Readiness {
                     .collect::<Result<(), _>>()
             }
         };
-        let (_, key) = outcome_metric_parts(&observed);
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA)).increment(1);
+        metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
         observed
     }
 }
@@ -580,11 +562,10 @@ async fn check_probe(
             budget,
         }),
     };
-    let (outcome_label, _) = outcome_metric_parts(&outcome);
     metrics::counter!(
         PROBE_CHECKS_METRIC,
         "probe" => probe_name,
-        "outcome" => outcome_label
+        "outcome" => outcome_label(&outcome)
     )
     .increment(1);
     outcome
@@ -598,7 +579,7 @@ impl ReadinessReader {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        let (ready, _) = self.rx.borrow().readiness(self.stale_after);
+        let (ready, _) = self.rx.borrow().readiness(Instant::now(), self.stale_after);
         ready
     }
 
@@ -618,7 +599,7 @@ impl ReadinessReader {
         loop {
             let stale_deadline = {
                 let state = self.rx.borrow_and_update();
-                let (ready, stale_deadline) = state.readiness(self.stale_after);
+                let (ready, stale_deadline) = state.readiness(Instant::now(), self.stale_after);
                 if ready != seen {
                     return Some(ready);
                 }

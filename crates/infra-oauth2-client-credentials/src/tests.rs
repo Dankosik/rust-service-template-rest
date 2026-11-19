@@ -8,6 +8,7 @@
 use std::{
     collections::BTreeMap,
     future::poll_fn,
+    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, Mutex},
     task::Poll,
@@ -31,8 +32,8 @@ use url::Url;
 
 use crate::{
     AcquisitionError, Algorithm, EmptySubject, Error, ExchangeHttpClient, ExchangeTokenTarget,
-    ExchangeTokens, OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceHttpClient,
-    ServiceTokenTarget, ServiceTokens,
+    ExchangeTokens, IssuerUrl, OnBehalfOf, Options, PrivateKeyJwt, RefreshDriver, Registration,
+    Rejection, ServiceHttpClient, ServiceTokenTarget, ServiceTokens, TokenUrl,
     credentials::acquisition_deadline,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
@@ -59,7 +60,15 @@ const RESOURCE_PATH: &str = "/resource";
 const ASSERTION_AUDIENCE: &str = "https://issuer.example";
 const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-const EXCHANGE_CAPACITY: u32 = 1024;
+const EXCHANGE_CAPACITY: NonZeroU32 = NonZeroU32::new(1024).unwrap();
+
+fn nonzero(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).unwrap()
+}
+
+fn subject(value: &str) -> OnBehalfOf {
+    OnBehalfOf::try_new(SecretString::from(value)).unwrap()
+}
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -143,13 +152,15 @@ impl Fixture {
 
     fn options(&self) -> Options {
         Options {
-            token_url: self.endpoint.to_string(),
+            token_url: TokenUrl::parse_for_test_http(self.endpoint.as_str()).unwrap(),
             client_id: "client:id".to_owned(),
-            private_key: SecretString::from(self.key.serialize_pem()),
-            key_id: "key-1".to_owned(),
-            algorithm: Algorithm::Rs256,
-            assertion_audience: ASSERTION_AUDIENCE.to_owned(),
-            provider_concurrency: 32,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(self.key.serialize_pem()),
+                key_id: "key-1".to_owned(),
+                algorithm: Algorithm::Rs256,
+                audience: IssuerUrl::parse(ASSERTION_AUDIENCE).unwrap(),
+            },
+            provider_concurrency: nonzero(32),
         }
     }
 
@@ -178,7 +189,7 @@ impl Fixture {
         &self,
         scopes: &[&str],
         audience: Option<&str>,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> ExchangeTokens {
         self.exchange_tokens_with(self.options(), scopes, audience, capacity)
     }
@@ -188,7 +199,7 @@ impl Fixture {
         options: Options,
         scopes: &[&str],
         audience: Option<&str>,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> ExchangeTokens {
         let registration = prepare_registration(options);
         let tokens = registration
@@ -238,16 +249,16 @@ impl Fixture {
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         client
-            .execute(request, &context(Duration::from_secs(10)))
+            .execute(request, &deadline(Duration::from_secs(10)))
             .await
     }
 
     async fn send_exchange(
         &self,
         client: &ExchangeHttpClient,
-        subject: &str,
+        subject_token: &str,
     ) -> Result<Response<Bytes>, Error> {
-        self.send_exchange_request(client, self.request(), subject)
+        self.send_exchange_request(client, self.request(), subject_token)
             .await
     }
 
@@ -255,13 +266,13 @@ impl Fixture {
         &self,
         client: &ExchangeHttpClient,
         request: Request<Bytes>,
-        subject: &str,
+        subject_token: &str,
     ) -> Result<Response<Bytes>, Error> {
         client
             .execute(
                 request,
-                &subject_token(subject),
-                &context(Duration::from_secs(10)),
+                &subject(subject_token),
+                &deadline(Duration::from_secs(10)),
             )
             .await
     }
@@ -356,23 +367,11 @@ impl Fixture {
 }
 
 fn service_target(scopes: &[&str]) -> ServiceTokenTarget {
-    let scopes = scopes
-        .iter()
-        .map(|&scope| scope.to_owned())
-        .collect::<Vec<_>>();
-    ServiceTokenTarget::try_new(&scopes).unwrap()
+    ServiceTokenTarget::try_new(scopes).unwrap()
 }
 
 fn exchange_target(scopes: &[&str], audience: Option<&str>) -> ExchangeTokenTarget {
-    let scopes = scopes
-        .iter()
-        .map(|&scope| scope.to_owned())
-        .collect::<Vec<_>>();
-    ExchangeTokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
-}
-
-fn subject_token(subject: &str) -> OnBehalfOf {
-    OnBehalfOf::try_new(SecretString::from(subject)).unwrap()
+    ExchangeTokenTarget::try_new(scopes, audience.map(str::to_owned)).unwrap()
 }
 
 async fn take_event(events: &Semaphore) {
@@ -506,7 +505,7 @@ fn prepare_registration(options: Options) -> Registration {
     Registration::prepare_for_test_http(options).unwrap()
 }
 
-fn context(after: Duration) -> OperationContext {
+fn deadline(after: Duration) -> OperationContext {
     OperationContext::with_timeout(after)
 }
 
@@ -520,7 +519,7 @@ async fn advance(duration: Duration) {
     tokio::time::resume();
 }
 
-async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
+async fn poll_pending<F: Future + ?Sized>(mut future: Pin<&mut F>) {
     assert!(
         poll_fn(|context| Poll::Ready(future.as_mut().poll(context)))
             .await

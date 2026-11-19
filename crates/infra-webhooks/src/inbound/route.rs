@@ -227,7 +227,7 @@ async fn receive(
         SystemTime::now(),
         attempt_end,
     );
-    let Ok(result) = tokio::time::timeout_at(attempt_end, receipt).await else {
+    let Ok(result) = tokio::time::timeout_at(attempt_end, Box::pin(receipt)).await else {
         return receipt_deadline_exceeded(metrics);
     };
     match result {

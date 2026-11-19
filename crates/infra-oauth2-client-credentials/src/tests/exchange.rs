@@ -28,18 +28,18 @@ async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
 async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_token() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    let exchange_tokens = fixture.exchange_tokens(&[], None, 1);
+    let exchange_tokens = fixture.exchange_tokens(&[], None, nonzero(1));
     let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     let cache = exchange_tokens.cache();
-    for subject in ["alice", "bob"] {
-        fixture.send_exchange(&client, subject).await.unwrap();
+    for subject_token in ["alice", "bob"] {
+        fixture.send_exchange(&client, subject_token).await.unwrap();
     }
     assert_eq!(fixture.token_request_count(), 2);
-    cache.run_pending_tasks().await;
+    cache.run_pending_tasks();
     assert!(cache.entry_count() <= 1);
-    for subject in ["alice", "bob"] {
-        fixture.send_exchange(&client, subject).await.unwrap();
-        cache.run_pending_tasks().await;
+    for subject_token in ["alice", "bob"] {
+        fixture.send_exchange(&client, subject_token).await.unwrap();
+        cache.run_pending_tasks();
     }
     assert!(fixture.token_request_count() > 2);
     assert!(cache.entry_count() <= 1);
@@ -51,16 +51,16 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
     const SUBJECTS: u32 = 5;
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    let exchange_tokens = fixture.exchange_tokens(&[], None, SUBJECTS);
+    let exchange_tokens = fixture.exchange_tokens(&[], None, nonzero(SUBJECTS));
     let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     let cache = exchange_tokens.cache();
     for _ in 0..2 {
-        for subject in 0..SUBJECTS {
+        for subject_id in 0..SUBJECTS {
             fixture
-                .send_exchange(&client, &format!("subject-{subject}"))
+                .send_exchange(&client, &format!("subject-{subject_id}"))
                 .await
                 .unwrap();
-            cache.run_pending_tasks().await;
+            cache.run_pending_tasks();
         }
     }
     assert_eq!(fixture.token_request_count(), SUBJECTS as usize);
@@ -86,7 +86,7 @@ async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
             .unwrap();
     }
     let cache = exchange_tokens.cache();
-    cache.run_pending_tasks().await;
+    cache.run_pending_tasks();
     let payload = cache
         .iter()
         .map(|(_, token)| token.header.as_bytes().len())
@@ -176,7 +176,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     let client = fixture
         .exchange_tokens_with(
             Options {
-                provider_concurrency: 1,
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],
@@ -208,7 +208,7 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
     let registration = prepare_registration(Options {
-        provider_concurrency: 2,
+        provider_concurrency: nonzero(2),
         ..fixture.options()
     });
     let exchange_tokens = registration
@@ -242,12 +242,13 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
             Err(Error::Acquisition(AcquisitionError::AtCapacity))
         );
     }
+    let expired_subject = subject("expired");
     assert_matches!(
         client
             .execute(
                 fixture.request(),
-                &subject_token("expired"),
-                &context(Duration::ZERO),
+                &expired_subject,
+                &deadline(Duration::ZERO),
             )
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
@@ -276,7 +277,7 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
     let registration = prepare_registration(Options {
-        provider_concurrency: 1,
+        provider_concurrency: nonzero(1),
         ..fixture.options()
     });
     let exchange_tokens = registration
@@ -294,11 +295,11 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(fixture.send_exchange(&client, "subject"));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
-    let wait_context = context(Duration::from_secs(10));
-    let subject = subject_token("subject");
-    let mut waiter = Box::pin(client.execute(fixture.request(), &subject, &wait_context));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let waiter_subject = subject("subject");
+    let mut waiter = Box::pin(client.execute(fixture.request(), &waiter_subject, &context));
     poll_pending(waiter.as_mut()).await;
-    wait_context.cancel();
+    context.cancel();
     assert_matches!(
         waiter.await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
@@ -309,7 +310,7 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     );
     assert_matches!(
         service_client
-            .execute(fixture.request(), &context(Duration::ZERO))
+            .execute(fixture.request(), &deadline(Duration::ZERO))
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
@@ -339,7 +340,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     let client = fixture
         .exchange_tokens_with(
             Options {
-                provider_concurrency: 1,
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],
@@ -349,9 +350,9 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
         .http(resource)
         .unwrap();
     let gate = fixture.block_tokens();
-    let leader_context = context(Duration::from_secs(4));
-    let subject = subject_token("subject");
-    let mut leader = Box::pin(client.execute(fixture.request(), &subject, &leader_context));
+    let subject_token = subject("subject");
+    let leader_context = deadline(Duration::from_secs(4));
+    let mut leader = Box::pin(client.execute(fixture.request(), &subject_token, &leader_context));
     fixture.drive_until_token_received(leader.as_mut()).await;
     let mut waiter = Box::pin(fixture.send_exchange(&client, "subject"));
     poll_pending(waiter.as_mut()).await;
@@ -396,7 +397,7 @@ async fn a_failed_exchange_is_not_cached() {
     let client = fixture
         .exchange_tokens_with(
             Options {
-                provider_concurrency: 1,
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],
