@@ -167,6 +167,19 @@ impl fmt::Debug for TrustRegistry {
     }
 }
 
+fn drain_map<'de, A: de::MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
+    while map
+        .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
+        .is_some()
+    {}
+    Ok(())
+}
+
+fn drain_seq<'de, A: de::SeqAccess<'de>>(seq: &mut A) -> Result<(), A::Error> {
+    while seq.next_element::<de::IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
 enum Entries {
     Unique(IndexMap<String, DuplicateCheckedJson, foldhash::quality::RandomState>),
     RepeatedCaller(String),
@@ -189,10 +202,7 @@ impl<'de> Deserialize<'de> for Entries {
                         }
                         Entry::Occupied(entry) => {
                             let (repeated, _) = entry.swap_remove_entry();
-                            while map
-                                .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
-                                .is_some()
-                            {}
+                            drain_map(&mut map)?;
                             return Ok(Entries::RepeatedCaller(repeated));
                         }
                     }
@@ -239,7 +249,7 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
                 let mut items = Vec::new();
                 while let Some(child) = seq.next_element()? {
                     let DuplicateCheckedJson::Value(value) = child else {
-                        while seq.next_element::<de::IgnoredAny>()?.is_some() {}
+                        drain_seq(&mut seq)?;
                         return Ok(DuplicateCheckedJson::DuplicateMember);
                     };
                     items.push(value);
@@ -254,10 +264,7 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
                     {
                         continue;
                     }
-                    while map
-                        .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
-                        .is_some()
-                    {}
+                    drain_map(&mut map)?;
                     return Ok(DuplicateCheckedJson::DuplicateMember);
                 }
                 Ok(DuplicateCheckedJson::Value(serde_json::Value::Object(
