@@ -139,16 +139,15 @@ impl Verifier {
                 .map(|principal| (principal, token)),
             Err(failure) => Err(failure),
         };
+        DropGuard::dismiss(refusal_guard);
         if let Err(stopped) = context.check() {
             counters.record_refusal(transport, Refusal::from_stopped(stopped));
-            DropGuard::dismiss(refusal_guard);
             return Err(Failure::Unavailable);
         }
         match &result {
             Ok(_) => counters.record_success(transport),
             Err(failure) => counters.record_refusal(transport, Refusal::Failure(*failure)),
         }
-        DropGuard::dismiss(refusal_guard);
         result
     }
 }

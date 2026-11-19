@@ -124,8 +124,7 @@ pub enum TokenProfile {
 struct Remembered {
     verified: VerifiedClaims,
     key_generation: u64,
-    sampled_at: MonotonicInstant,
-    held_for: Duration,
+    remember_until: MonotonicInstant,
 }
 
 struct RememberedExpiry;
@@ -137,9 +136,17 @@ impl Expiry<Box<[u8]>, Remembered> for RememberedExpiry {
         remembered: &Remembered,
         created_at: MonotonicInstant,
     ) -> Option<Duration> {
-        let elapsed = created_at.saturating_duration_since(remembered.sampled_at);
-        Some(remembered.held_for.saturating_sub(elapsed))
+        Some(
+            remembered
+                .remember_until
+                .saturating_duration_since(created_at),
+        )
     }
+}
+
+struct AdmittedHeader {
+    kid: Option<String>,
+    algorithm: JwtAlgorithm,
 }
 
 #[derive(derive_more::Debug)]
@@ -186,14 +193,14 @@ impl JwtVerifier {
     async fn verify_with_now(
         &self,
         token: &PresentedToken<'_>,
-        now: impl Fn() -> Result<Duration, VerificationError>,
+        unix_now: impl Fn() -> Result<Duration, VerificationError>,
     ) -> Result<Principal, VerificationError> {
         let bytes = token.as_bytes();
         let keys = self.key_store.current();
         keys.require_fresh(self.jwks_max_age)?;
         if let Some(remembered) = self.remembered.get(bytes) {
             if remembered.key_generation == keys.generation() {
-                let result = remembered.verified.into_principal_checked_at(now()?);
+                let result = remembered.verified.into_principal_checked_at(unix_now()?);
                 if matches!(&result, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
@@ -201,7 +208,7 @@ impl JwtVerifier {
             }
             self.remembered.invalidate(bytes);
         }
-        let remembered = self.verify_uncached(token, &now, keys).await?;
+        let remembered = self.verify_uncached(token, &unix_now, keys).await?;
         let principal = remembered.verified.principal.clone();
         self.remembered.insert(bytes.into(), remembered);
         Ok(principal)
@@ -210,7 +217,7 @@ impl JwtVerifier {
     async fn verify_uncached(
         &self,
         token: &PresentedToken<'_>,
-        now: &impl Fn() -> Result<Duration, VerificationError>,
+        unix_now: &impl Fn() -> Result<Duration, VerificationError>,
         keys: Arc<KeySet>,
     ) -> Result<Remembered, VerificationError> {
         let rfc7515::Compact {
@@ -220,7 +227,7 @@ impl JwtVerifier {
             signature,
         } = rfc7515::compact(token.as_bytes())
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
-        let (header, algorithm) = self.admit_header(header)?;
+        let admitted = self.admit_header(header)?;
         let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
         let signature = URL_SAFE_NO_PAD
             .decode_slice(signature, &mut signature_bytes)
@@ -237,31 +244,31 @@ impl JwtVerifier {
         let input = SignatureInput {
             message,
             signature,
-            kid: header.kid.as_deref(),
-            algorithm,
+            kid: admitted.kid.as_deref(),
+            algorithm: admitted.algorithm,
         };
         let signing_keys = self
             .verify_signature(keys, &input, || {
                 decode_payload()
-                    .and_then(|payload| validate_claims(payload, now()?))
+                    .and_then(|payload| validate_claims(payload, unix_now()?))
                     .is_ok()
             })
             .await?;
         let payload = decode_payload()?;
         let sampled_at = MonotonicInstant::now();
-        let now = now()?;
+        let now = unix_now()?;
         let verified = validate_claims(payload, now)?;
         signing_keys.require_fresh(self.jwks_max_age)?;
+        let held_for =
+            MAX_REMEMBERED_FOR.min(verified.principal.expiry_from_epoch().saturating_sub(now));
         Ok(Remembered {
-            held_for: MAX_REMEMBERED_FOR
-                .min(verified.principal.expiry_from_epoch().saturating_sub(now)),
-            sampled_at,
+            remember_until: sampled_at + held_for,
             verified,
             key_generation: signing_keys.generation(),
         })
     }
 
-    fn admit_header(&self, header: &[u8]) -> Result<(Header, JwtAlgorithm), VerificationError> {
+    fn admit_header(&self, header: &[u8]) -> Result<AdmittedHeader, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
         let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
@@ -283,7 +290,10 @@ impl JwtVerifier {
         if !admitted_type {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
-        Ok((header, algorithm))
+        Ok(AdmittedHeader {
+            kid: header.kid,
+            algorithm,
+        })
     }
 
     async fn verify_signature(
@@ -1907,20 +1917,34 @@ mod tests {
     async fn an_entry_is_held_no_longer_than_its_token_or_one_refresh_period() {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
-        for (exp, ttl_millis) in [(1_060.625, 59_575), (865_000.0, 899_750)] {
+        for (exp, expected_held_millis, ttl_millis) in
+            [(1_060.625, 59_825, 59_575), (865_000.0, 900_000, 899_750)]
+        {
             let token = ec_token(&signing, "k", &serde_json::json!({ "exp": exp }));
             let header = format!("Bearer {token}");
             let bearer = parse_bearer([header.as_bytes()]).unwrap();
+            let before = std::time::Instant::now();
             memo.verify_with_now(&bearer, || Ok(Duration::from_millis(1_000_800)))
                 .await
                 .unwrap();
+            let after = std::time::Instant::now();
             let remembered = memo.remembered.get(token.as_bytes()).unwrap();
+            let expected_held = Duration::from_millis(expected_held_millis);
+            assert!(
+                (before + expected_held..=after + expected_held)
+                    .contains(&remembered.remember_until),
+                "{exp}"
+            );
             let insertion_delay = Duration::from_millis(250);
             let ttl = moka::Expiry::expire_after_create(
                 &super::RememberedExpiry,
                 &token.into_bytes().into_boxed_slice(),
                 &remembered,
-                remembered.sampled_at + insertion_delay,
+                remembered
+                    .remember_until
+                    .checked_sub(expected_held)
+                    .unwrap()
+                    + insertion_delay,
             );
             assert_eq!(ttl, Some(Duration::from_millis(ttl_millis)), "{exp}");
         }

@@ -190,29 +190,26 @@ impl IntrospectionVerifier {
         token: &PresentedToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
-        self.verify_with_now(token, context, || {
-            crate::unix_now().map(|now| now.as_secs())
-        })
-        .await
+        self.verify_with_now(token, context, crate::unix_now).await
     }
 
     async fn verify_with_now(
         self: &Arc<Self>,
         token: &PresentedToken<'_>,
         context: &OperationContext,
-        unix_now_secs: impl Fn() -> Result<u64, VerificationError> + Clone + Send + Sync + 'static,
+        unix_now: impl Fn() -> Result<Duration, VerificationError> + Clone + Send + Sync + 'static,
     ) -> Result<Principal, VerificationError> {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token.as_str(), &|| context.stopped(), &unix_now_secs)
+                .introspect(token.as_str(), &|| context.stopped(), &unix_now)
                 .await?
-                .into_principal_checked_at(Duration::from_secs(unix_now_secs()?));
+                .into_principal_checked_at(unix_now()?);
         };
         let key = token_digest(token);
         loop {
             if let Some(value) = cache.retained.get(&key).await
-                && value.is_reusable_at(unix_now_secs()?)
+                && value.is_reusable_at(unix_now()?)
             {
                 return Ok(value.principal);
             }
@@ -220,11 +217,11 @@ impl IntrospectionVerifier {
                 .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
-                    let unix_now_secs = unix_now_secs.clone();
+                    let unix_now = unix_now.clone();
                     let token = token.to_secret();
                     async move {
                         if let Some(value) = retained.get(&key).await
-                            && value.is_reusable_at(unix_now_secs()?)
+                            && value.is_reusable_at(unix_now()?)
                         {
                             return Ok(Fill::RecheckCache);
                         }
@@ -232,7 +229,7 @@ impl IntrospectionVerifier {
                             .introspect(
                                 token.expose_secret(),
                                 &|| last_waiter_stop.get().copied(),
-                                &unix_now_secs,
+                                &unix_now,
                             )
                             .await?;
                         retained.insert(key, value.clone()).await;
@@ -241,7 +238,7 @@ impl IntrospectionVerifier {
                 })
                 .await?;
             if let Fill::Fresh(value) = filled {
-                return value.into_principal_checked_at(Duration::from_secs(unix_now_secs()?));
+                return value.into_principal_checked_at(unix_now()?);
             }
         }
     }
@@ -250,9 +247,9 @@ impl IntrospectionVerifier {
         &self,
         token: &str,
         caller_stop: CallerStop<'_>,
-        unix_now_secs: &impl Fn() -> Result<u64, VerificationError>,
+        unix_now: &impl Fn() -> Result<Duration, VerificationError>,
     ) -> Result<VerifiedClaims, VerificationError> {
-        unix_now_secs()?;
+        unix_now()?;
         let _permit = self
             .permits
             .try_acquire()
@@ -267,7 +264,7 @@ impl IntrospectionVerifier {
                 caller_stop,
             )
             .await?;
-        validate_introspection_claims(&response, &self.policy, unix_now_secs()?)
+        validate_introspection_claims(&response, &self.policy, unix_now()?)
     }
 }
 
@@ -1151,20 +1148,20 @@ mod tests {
             response["nbf"] = not_before.into();
             fixture.respond(StatusCode::OK, &serde_json::to_vec(&response).unwrap());
             verifier
-                .verify_with_now(&token, &context, move || Ok(base))
+                .verify_with_now(&token, &context, move || Ok(Duration::from_secs(base)))
                 .await
                 .unwrap();
             let before = fixture.calls();
             fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
             let error = verifier
-                .verify_with_now(&token, &context, move || Ok(changed))
+                .verify_with_now(&token, &context, move || Ok(Duration::from_secs(changed)))
                 .await
                 .unwrap_err();
             assert_eq!(error.failure, Failure::Unavailable);
             assert_eq!(fixture.calls(), before + 1);
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, move || Ok(base))
+                    .verify_with_now(&token, &context, move || Ok(Duration::from_secs(base)))
                     .await
                     .unwrap()
                     .subject(),
@@ -1174,7 +1171,7 @@ mod tests {
             fixture.respond(StatusCode::OK, &active_response("replacement", base + 900));
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, move || Ok(changed))
+                    .verify_with_now(&token, &context, move || Ok(Duration::from_secs(changed)))
                     .await
                     .unwrap()
                     .subject(),
@@ -1182,7 +1179,7 @@ mod tests {
             );
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, move || Ok(changed))
+                    .verify_with_now(&token, &context, move || Ok(Duration::from_secs(changed)))
                     .await
                     .unwrap()
                     .subject(),
@@ -1204,7 +1201,7 @@ mod tests {
             fixture.respond(StatusCode::OK, &active_response("old", base + 60));
             let verifier = fixture.verifier(Some(cache_options(1)));
             verifier
-                .verify_with_now(&token, &context, move || Ok(base))
+                .verify_with_now(&token, &context, move || Ok(Duration::from_secs(base)))
                 .await
                 .unwrap();
             let cache = verifier.cache.as_ref().unwrap();
@@ -1220,15 +1217,15 @@ mod tests {
             if elapsed_seconds == 0 {
                 cache.retained.invalidate(&key).await;
             }
-            let mut waiter = Box::pin(
-                verifier.verify_with_now(&token, &context, move || Ok(base + elapsed_seconds)),
-            );
+            let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
+                Ok(Duration::from_secs(base + elapsed_seconds))
+            }));
             assert!(futures_util::poll!(waiter.as_mut()).is_pending());
             if replacement {
                 let newer = validate_introspection_claims(
                     &active_response("new", base + 600),
                     &verifier.policy,
-                    base,
+                    Duration::from_secs(base),
                 )
                 .unwrap();
                 cache.retained.insert(key, newer).await;
@@ -1264,12 +1261,11 @@ mod tests {
         for options in [None, Some(cache_options(1))] {
             let verifier = fixture.verifier(options);
             let before = fixture.calls();
-            let unavailable =
-                || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)).map(|now| now.as_secs());
+            let unavailable = || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1));
             for warmed in [false, true] {
                 if warmed {
                     verifier
-                        .verify_with_now(&token, &context, move || Ok(100))
+                        .verify_with_now(&token, &context, move || Ok(Duration::from_secs(100)))
                         .await
                         .unwrap();
                 }
@@ -1285,7 +1281,7 @@ mod tests {
             }
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, move || Ok(100))
+                    .verify_with_now(&token, &context, move || Ok(Duration::from_secs(100)))
                     .await
                     .unwrap()
                     .subject(),
@@ -1331,15 +1327,16 @@ mod tests {
             let gate = fixture.block_responses();
             let before = fixture.calls();
             let clock = Arc::new(Mutex::new(Some(base)));
-            let mut leader = Box::pin(verifier.verify_with_now(&token, &context, move || Ok(base)));
+            let mut leader = Box::pin(
+                verifier.verify_with_now(&token, &context, move || Ok(Duration::from_secs(base))),
+            );
             tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
             let waiter_clock = clock.clone();
             let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
                 let now = *waiter_clock.lock().unwrap();
                 match now {
-                    Some(now) => Ok(now),
-                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1))
-                        .map(|now| now.as_secs()),
+                    Some(now) => Ok(Duration::from_secs(now)),
+                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)),
                 }
             }));
             assert!(futures_util::poll!(waiter.as_mut()).is_pending());
@@ -1358,7 +1355,7 @@ mod tests {
             );
             assert_eq!(fixture.calls(), before + 1);
             verifier
-                .verify_with_now(&token, &context, move || Ok(base))
+                .verify_with_now(&token, &context, move || Ok(Duration::from_secs(base)))
                 .await
                 .unwrap();
             assert_eq!(fixture.calls(), before + 1);
@@ -1378,20 +1375,22 @@ mod tests {
         ));
         let token = parse_bearer([b"Bearer replaced".as_slice()]).unwrap();
         verifier
-            .verify_with_now(&token, &context, move || Ok(base))
+            .verify_with_now(&token, &context, move || Ok(Duration::from_secs(base)))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
         fixture.respond(StatusCode::OK, &active_response("new", base + 600));
         verifier
-            .verify_with_now(&token, &context, move || Ok(base + 60))
+            .verify_with_now(&token, &context, move || Ok(Duration::from_secs(base + 60)))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1000)).await;
         fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
         assert_eq!(
             verifier
-                .verify_with_now(&token, &context, move || Ok(base + 60))
+                .verify_with_now(&token, &context, move || {
+                    Ok(Duration::from_secs(base + 60))
+                })
                 .await
                 .unwrap()
                 .subject(),
@@ -1430,9 +1429,13 @@ mod tests {
                 .unwrap();
         let identity = |custom: &str| {
             let response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":custom});
-            validate_introspection_claims(response.to_string().as_bytes(), &policy, 100)
-                .unwrap()
-                .principal
+            validate_introspection_claims(
+                response.to_string().as_bytes(),
+                &policy,
+                Duration::from_secs(100),
+            )
+            .unwrap()
+            .principal
         };
         let small = identity("");
         let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
@@ -1454,7 +1457,7 @@ mod tests {
         let unbounded = validate_introspection_claims(
             format!(r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{},"sub":"subject"}}"#, u64::MAX).as_bytes(),
             &policy,
-            100,
+            Duration::from_secs(100),
         )
         .unwrap().principal;
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
@@ -1465,9 +1468,10 @@ mod tests {
             let prefix = r#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":""#;
             let response = format!("{prefix}{}\"}}", "x".repeat(length - prefix.len() - 2));
             let padded = format!(" \t\r\n{response}\n\r\t ");
-            let identity = validate_introspection_claims(padded.as_bytes(), &policy, 100)
-                .unwrap()
-                .principal;
+            let identity =
+                validate_introspection_claims(padded.as_bytes(), &policy, Duration::from_secs(100))
+                    .unwrap()
+                    .principal;
             assert_eq!(identity.payload_len(), length);
             assert_eq!(retention(&identity, ttl, at(100_500)), expected);
         }
