@@ -5,11 +5,15 @@ planned tasks and their tests; validate the assembled result at the end.
 
 ## Carrier
 
-Use one root-local Acceptance-Unit Lead for a single fixed unit. Use the Ledger
-Orchestrator when several units, isolated handoffs, or durable scheduling need
-one routing owner. The Orchestrator schedules; Leads implement their assigned
-units. The [Planning Ledger Contract](planning/ledger-contract.md) owns
-implementation progress, dependency unlocking, and final acceptance.
+In the session the user starts to execute a plan, open the named `tasks.md`
+and check its current state under [Resume](../shared/resume.md). Report a
+completed ledger as done and route an unready plan to its recorded owner.
+For a ready ledger, bind this session as [Ledger Orchestrator](../../../.agents/skills/orchestrator/SKILL.md)
+through the selected [Agent Harness](../../agent-harness.md) adapter, including
+for a one-task ledger. The Orchestrator schedules and Leads implement. The
+[Planning Ledger Contract](planning/ledger-contract.md) owns dependency
+unlocking and final acceptance. A single fixed inline unit uses a root-local
+Acceptance-Unit Lead.
 
 ## Execution
 

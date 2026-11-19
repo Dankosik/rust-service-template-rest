@@ -8,6 +8,12 @@ gap.
 
 ## Native Map
 
+- In the App or CLI, start each preparation phase with a new
+  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) using
+  `self`, the phase brief, and workspace `inherit`. This gives the child the
+  caller's tools and checkout with a fresh conversation. Track its returned
+  conversation ID. On an IDE surface without this control, preserve the
+  completed input and report the phase that needs the App or CLI.
 - Antigravity reads `AGENTS.md`, `.agents/rules/antigravity-harness.md`, and
   `.agents/skills` directly; skills load by description or `/<skill-name>`.
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by
@@ -16,7 +22,7 @@ gap.
 - Dispatch ready units via `invoke_subagent` with role
   `acceptance-unit-lead` within capacity, consuming [Acceptance
   Result](../spec-first-workflow/interfaces/acceptance-result-v1.md). Never
-  substitute the built-in `self`, `research`, or `define_subagent` roles;
+  substitute `self`, `research`, or `define_subagent` for this implementation Lead;
   report a missing `acceptance-unit-lead` or missing conversation ID as a
   carrier gap before dispatch.
 - Delegated lanes use `invoke_subagent` with `worker-agent`,
