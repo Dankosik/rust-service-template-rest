@@ -1,41 +1,51 @@
 # Task Ledger V1
 
-A persisted `tasks.md` contains only execution-changing state:
+`specs/<task>/tasks.md` holds execution-changing state: the task graph index,
+global completion target, and runtime receipts. Detailed sources, boundaries,
+locks, and validation claims live in each task's [Task Packet
+V1](task-packet-v1.md).
+
+## Authoring Schema (Planning-owned)
 
 ```markdown
 # Goal
 status: draft | ready | blocked | done
-Completion: <observable successful condition>
-Blocked stop: <unavailable required input and owner; omit when none>
-Global constraints: <active execution instructions and shared constraints; omit when none>
+Completion: <falsifiable observable condition for the entire request>
+Global constraints: <active execution instructions or carried review CONCERNS; omit when none>
 
 ## Tasks
 
-- [ ] T<ID>: <one independently acceptable postcondition>
-  - Depends on: <ID and consumed output or gate | none; annotate acceptance or a named external effect when later than implementation>
-  - Provides: <stable output or final outcome>
+- [ ] T<ID>: <one-line outcome>
+  - Depends on: <T<ID> [stage], <gate> [effect:<action>], or none>
+  - Provides: <short handle consumed downstream or by Completion>
   - Packet: tasks/<ID>-<slug>.md
-  - Execution: <native task or agent locator; omit until dispatched or when unavailable>
-  - Resume: <remaining action and indispensable verified context; omit when recoverable from native state>
 ```
 
-Every persisted task has one [Task Packet V1](task-packet-v1.md). Keep detailed
-sources, boundaries, proof, writable surfaces, exclusive locks, and reopen
-conditions in that packet, not in the index. `Global constraints` holds active
-execution instructions (replaced in place when guidance changes) and references
-accepted owners instead of copying their full constraints.
+- Start at `status: draft`; flip to `status: ready` only after readiness review
+  permits handoff.
+- **Dependency stage syntax:** unannotated (`T1`) gates coding on integrated
+  `Implemented` code or an agreed contract; `[acceptance]` gates only final
+  validation; `[effect:<action>]` gates only a named external action (e.g.
+  deploy, release). Keep IDs and tags identical in each packet's `Depends on`.
+- `Global constraints` links accepted owners instead of copying specs and is
+  updated in place when guidance changes.
 
-Execution identifies the unit's current Lead; record the returned identity
-after dispatch and replace it if the Lead changes. Read live execution status
-from that native owner. Keep Resume only across an interruption when native
-state cannot recover the next action; refresh or remove it when work resumes.
-These fields are routing context, not acceptance evidence.
+## Runtime State (Orchestrator-owned)
 
-Tasks retain their outcome boundaries. Checkboxes record integrated
-implementation. Completion covers final validation and any requested external
-outcomes. Return one replaceable
-[Acceptance Result V1](acceptance-result-v1.md) per task, and a final result for
-Completion after assembly:
+Managed under [Ledger Execution](../phases/implementation/ledger-execution.md);
+Planning omits these fields.
+
+- `Blocked stop: <unavailable required input and owner>` (header, only when
+  blocked).
+- Routing fields per task (not acceptance evidence): `Execution: <native task or
+  agent locator>` (set on dispatch, clear when writers stop) and `Resume:
+  <remaining action and indispensable verified context>` (only when native state
+  cannot recover after interruption; delete on resume).
+- Checkboxes (`[x]`) record integrated `Implemented` code only; `Blocked` stays
+  unchecked, and a checked task makes no acceptance claim while final validation
+  or later gates remain open.
+- Replace one [Acceptance Result V1](acceptance-result-v1.md) in place per task
+  and one for `Completion` (Git keeps history):
 
 ```text
 Implemented: <unit>; verification: pending final validation; candidate: <bounded diff, tree, or commit>; decisions: <carried from the Lead's result; omit when none>; unverified: <carried from the Lead's result; omit when none>
@@ -43,14 +53,4 @@ Accepted: Completion; evidence: <claim-matched result>; candidate: <identity>
 Blocked: <unit>; unverified: <claim>; evidence: <narrower result>; next owner: <owner and condition>; candidate: <identity or none>
 ```
 
-Replace that result in place. Git owns superseded candidates, prior review
-receipts, and repair history.
-
-Check a task after its Implemented result is recorded and integrated. A Blocked implementation stays unchecked. An implemented task
-may remain checked while final validation is blocked; it supplies no acceptance
-claim. Clear Execution when its writers stop. Mark the goal done only after
-final Accepted proves Completion. Keep a later acceptance or effect gate visible
-even when its implementation is checked.
-
-Keep task status, dependencies, unit membership, receipts, completion, and
-blockers in the index.
+Mark `status: done` only after final `Accepted` proves `Completion`.

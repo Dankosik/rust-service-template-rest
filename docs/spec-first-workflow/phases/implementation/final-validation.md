@@ -63,8 +63,8 @@ attempts add no discriminating evidence.
 Report the Completion Result for the requested scope once all of these hold,
 carrying forward the local validation evidence:
 
-- Every Claim in every packet and the ledger's Completion has a current result
-  at its required boundary, or a named gap.
+- Every `Observable claim` in every packet and the ledger's Completion has a
+  current result at its required boundary, or a named gap.
 - Every material behavior change in the candidate serves an accepted
   obligation.
 - Blocking findings are closed and any selected review has returned.

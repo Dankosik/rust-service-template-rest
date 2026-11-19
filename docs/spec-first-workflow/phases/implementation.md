@@ -25,22 +25,22 @@ Owner under [Final Validation](implementation/final-validation.md).
 ## Orchestrator Loop
 
 The Orchestrator routes. Each unit's code, tests, and validation belong to its
-Lead; the Orchestrator's own writes are the ledger and integration. The
-[Planning Ledger Contract](planning/ledger-contract.md) holds the rules each
-step applies.
+Lead; the Orchestrator's own writes are the ledger and integration. [Ledger
+Execution](implementation/ledger-execution.md) holds the rules each step
+applies.
 
 1. **Verify controls.** Confirm the selected [Agent
    Harness](../../agent-harness.md) adapter's full-ledger controls before any
    dispatch. Report a capability gap that prevents full-ledger execution.
 2. **Dispatch the ready frontier.** Choose tasks from the [Ready
-   Frontier](planning/ledger-contract.md#ready-frontier) under
-   [Dispatch](planning/ledger-contract.md#dispatch) and dispatch one Lead per
-   task. The brief names the packet and the ledger; the packet
-   carries the outcome, writable scope, and locks. Record each Lead in the
-   task's `Execution` field. This step is complete when no ready task with a
-   disjoint scope waits while capacity is free.
+   Frontier](implementation/ledger-execution.md#ready-frontier) under
+   [Dispatch](implementation/ledger-execution.md#dispatch) and dispatch one Lead
+   per task. The brief names the packet and the ledger; the packet carries the
+   outcome, writable scope, and locks. Record each Lead in the task's
+   `Execution` field. This step is complete when no ready task with a disjoint
+   scope waits while capacity is free.
 3. **Consume each return.** Apply the [Acceptance
-   Transition](planning/ledger-contract.md#acceptance-transition): tie the
+   Transition](implementation/ledger-execution.md#acceptance-transition): tie the
    result to its current assignment, integrate an `Implemented` change, record
    it, release its locks, and return to step 2. Route a `Blocked` result
    through [Parent-Owned

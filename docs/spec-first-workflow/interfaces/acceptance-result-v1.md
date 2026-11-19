@@ -27,7 +27,7 @@ Return `Implemented` when the unit meets this bar:
 
 [Checks While Coding](../phases/implementation/unit.md#checks-while-coding)
 owns permitted coding feedback. For a ledger, the Orchestrator follows the
-[Acceptance Transition](../phases/planning/ledger-contract.md#acceptance-transition)
+[Acceptance Transition](../phases/implementation/ledger-execution.md#acceptance-transition)
 before unlocking tasks that require the integrated code. After reassignment or
 a change to consumed inputs, identify the dispatch or steering update the
 result answers, including when returning `Blocked`. Blocked retains partial

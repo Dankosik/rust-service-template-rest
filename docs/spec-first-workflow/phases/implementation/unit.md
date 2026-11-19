@@ -9,7 +9,7 @@ Validation](final-validation.md) owns proof of the assembled candidate.
 
 ## Implement
 
-Read the task packet's Outcome and the outputs it consumes. Locate the code
+Read the task packet's `Outcome`, `Depends on`, `Sources`, and `Boundary`. Locate the code
 that owns the behavior and the entry point or downstream consumer that must
 observe the change. Implement the outcome along that path, including the
 wiring and cleanup the packet requires. Writing tests, generating required
