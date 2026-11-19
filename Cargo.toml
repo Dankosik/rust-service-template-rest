@@ -388,7 +388,7 @@ verbose_file_reads = "warn"
 while_float = "warn"
 # Module names repeat in paths by design (`health::health_ready` reads worse).
 module_name_repetitions = "allow"
-# `AGENTS.md` keeps `missing_docs` off and avoids restating typed `Result` or panic contracts.
+# Agents are the sole readers (`AGENTS.md`): keep `missing_docs` off and express typed `Result` or panic contracts in code.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 

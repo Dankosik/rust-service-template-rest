@@ -1,0 +1,4 @@
+# Gitignored paths copied into new worktrees (Worktrunk CoW reflink via
+# `wt step copy-ignored --require-include`; Claude Code desktop copies matching paths).
+# Keep `.env*` out so credentials never copy implicitly across agent sessions.
+/target/

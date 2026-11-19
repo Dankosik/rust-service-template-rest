@@ -55,24 +55,38 @@ Give each instruction one disposition before editing it.
 | Structure or process justified only by hypothetical future reuse | Remove; retain only when a current accepted constraint and owner require it. |
 | Behavior guaranteed by a tool, schema, sandbox, or generator | Remove from prose or emit once only where the guarantee is absent. |
 | Mechanical prohibition checkable by a lint, architecture rule, or structural script | Graduate into `Cargo.toml`, `clippy.toml`, `quality/architecture.json`, or `scripts/harness-sync.py` and remove the prose ban. |
-| Fact apparent from canonical code, contract, test, or file layout | Remove. |
+| Fact apparent from canonical code, contract, test, or file layout | Remove; cache an environment lookup in prose (such as a `Makefile` command table) only when re-deriving it costs more than its lines. |
 | Restatement of another owner | Replace with a trigger and link. |
 | Example that defines required behavior | Replace with a schema or fixture when possible; otherwise retain it with its contract. |
 | Example of only the ordinary path | Remove unless it makes a non-obvious engineering choice visible; retain its selecting condition and the condition that changes the choice under [Skill Authoring](skill-authoring.md#decision-examples). |
 
 Keep hard boundaries explicit; express judgment as the broadest principle that
-preserves the intended behavior, and delete rules already derivable from
-ordinary repository context. Reduce context cost by deleting whole no-op
-sentences and consolidating duplicate owners rather than compressing clauses
-into telegraphic prose.
+preserves the intended behavior, and run a model-relative **no-op test**
+sentence by sentence (does deleting this sentence change behavior versus the
+current model's default?). Delete whole no-op sentences on model upgrades to
+clear **sediment**, rather than compressing clauses into telegraphic legalese.
+Prefer **leading words**—compact concepts already in model pretraining
+(`one-way door`, `deletion test`, `fail closed`, `tight`, `red`) repeated as
+tokens rather than restated as prose—over coined jargon.
 
 ## Ownership And Interfaces
 
-One file owns one meaning. Bootstrap files contain only rules needed before
-routing. Routers choose the next owner; the selected owner explains its method.
-Move repeatable fields, allowed values, tool capabilities, sandbox guarantees,
-and generated carriers into interfaces, tables, or branch lists rather than
-narrative walls of text.
+One file owns one meaning. Every always-loaded line (`AGENTS.md`, model-invoked
+skill descriptions) spends permanent **context load** on every turn, while
+user-invoked skills spend human **cognitive load**. Bootstrap files contain only
+unconditional boundaries and **context pointers**; push branch-specific material
+down the **information hierarchy** (`steps -> in-file reference -> disclosed
+reference`) by branching—inline what every branch needs and disclose what only
+some branches reach. Co-locate a concept's rules and caveats under one heading
+rather than scattering them, and split or disclose when **sprawl** thins
+attention even if every line is unique.
+
+A context pointer names its target and front-loads one observable trigger per
+distinct branch without synonym fluff; if an agent misses a required target,
+sharpen the pointer wording before inlining the content. Routers choose the next
+owner; the selected owner explains its method. Move repeatable fields, allowed
+values, tool capabilities, sandbox guarantees, and generated carriers into
+interfaces, tables, or branch lists rather than narrative walls of text.
 
 The instruction graph flows `bootstrap -> router -> phase -> method ->
 reference`, strictly downward. A selector selects its target owner and stops
@@ -84,11 +98,18 @@ encode expertise and method. Model-invoked skills carry an independent
 observable trigger that changes the method; user-invoked workflows carry
 human-facing picker descriptions and stay out of implicit discovery.
 
-Write durable instructions as observable triggers, target actions, completion
-criteria, or stop conditions. State the desired action directly and reserve
-negative prohibitions for safety, authority, or decisive exclusions. Expose only
-material the current task can act on. A local stop identifies the dependent
-action and receiving owner; [Decision Ownership](../AGENTS.md#decision-ownership)
+Write durable instructions as observable triggers, target actions, checkable
+**completion criteria**, or stop conditions. Pair clarity (binary done vs.
+not-done) with demand so the criterion drives underlying legwork without
+micromanaging steps; split a sequence across a real context boundary (fresh
+session or subagent) when visible later steps cause premature completion.
+Prompt the **positive** target behavior directly and reserve prohibitions for
+hard guardrails paired immediately with the positive target so negation does not
+prime the banned behavior. Keep domain judgment in conditional skills and
+reserve final verification of judgment-based standards for triggered fresh,
+low-context-pressure reviews rather than bloating the always-loaded bootstrap.
+Expose only material the current task can act on. A local stop identifies the
+dependent action and receiving owner; [Decision Ownership](../AGENTS.md#decision-ownership)
 and [Parent-Owned
 Recovery](spec-first-workflow/shared/transition.md#parent-owned-recovery) govern
 whether the enclosing task continues. Preserve specialist rigor while keeping

@@ -12,7 +12,18 @@ and `Cargo.toml` documents `[profile.dev]` and `[profile.release]` settings.
   `CARGO_TARGET_DIR` at a separate directory with `CARGO_PROFILE_DEV_DEBUG=full`
   and `--config 'profile.dev.package."*".debug="full"'`.
 - Keep each Git worktree's `target/` separate to avoid Cargo lock serialization
-  and artifact corruption ([cargo#16804][cargo-16804]).
+  and artifact corruption ([cargo#16804][cargo-16804]). On CoW filesystems
+  (macOS APFS, Linux btrfs/XFS, Windows ReFS), warm a new worktree's `target/`
+  via reflink instead of a cold build: run `wt step copy-ignored
+  --require-include` over `.worktreeinclude` directly (no hook approval needed)
+  or approve `.config/wt.toml` once (`wt config approvals add`) so `wt switch -c`
+  runs it automatically (or clone manually with
+  `cp -c -R ../<primary>/target ./target` on macOS). On non-CoW
+  filesystems (ext4/NTFS), exclude `target/` in
+  `~/.config/worktrunk/config.toml` (`[step.copy-ignored] exclude = ["target/"]`)
+  and rely on `sccache`; note that Claude Code desktop reads `.worktreeinclude`
+  directly and ignores Worktrunk's user-config exclude. See
+  [Branches and Worktrees](worktrees.md).
 - Add new integration cases as submodules under `tests/<area>/main.rs` rather
   than separate `tests/*.rs` binaries that re-link the dependency graph; profile
   compile bottlenecks with `cargo build --timings --locked`.

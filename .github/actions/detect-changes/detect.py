@@ -61,11 +61,13 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "*.md", "docs/**", ".agents/**", ".github/**", "scripts/**", "template/**",
         "env/monitoring/**", "quality/architecture.json", "tools/versions.env",
         ".typos.toml", "ruff.toml", "Makefile", "crates/**", "Cargo.toml",
+        ".config/wt.toml", ".worktreeinclude",
     ),
     "template": (
         "template/**", "Makefile", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
         "tools/versions.env", "build/docker/**", ".github/**", "scripts/**", "crates/**",
         "test/**", "env/**", ".railway/**", "README.md", "AGENTS.md", ".agents/**",
+        ".config/wt.toml", ".worktreeinclude", "docs/worktrees.md",
     ),
     "codeql_actions": (".github/**",),
     "codeql_rust": (
