@@ -295,6 +295,60 @@ class CheckLedgerTests(unittest.TestCase):
         self.assertIn("upstream artifact spec.md has status 'draft'", joined)
         self.assertIn("workflow-plan.md must be deleted", joined)
 
+    def test_validates_intent_status_and_decision_anchor_references(self) -> None:
+        _build_valid_multi_task_fixture(self.task_dir)
+        _write(
+            self.task_dir / "intent.md",
+            """
+            # Intent: Enforce per-tenant rate limit
+
+            status: ready
+
+            ## Settled decisions
+
+            ### I1 — Per-tenant 429 behavior
+
+            - **Binding:** `hard`
+            - **Decision:** Reject requests over quota with 429.
+            - **Why:** Prevents noisy neighbors from starving other tenants.
+            """,
+        )
+        spec_path = self.task_dir / "spec.md"
+        spec_path.write_text(
+            spec_path.read_text(encoding="utf-8")
+            + "\nTraces to `intent.md#i1-per-tenant-429-behavior`.\n",
+            encoding="utf-8",
+        )
+        ok_report = check_ledger.check_ledger(self.task_dir)
+        self.assertEqual(ok_report.errors, [])
+        self.assertEqual(ok_report.upstream_statuses["intent.md"], "ready")
+
+        # Draft intent.md and broken intent.md#i99 anchor must both fail.
+        (self.task_dir / "intent.md").write_text(
+            (self.task_dir / "intent.md").read_text(encoding="utf-8").replace("status: ready", "status: draft"),
+            encoding="utf-8",
+        )
+        t2_path = self.task_dir / "tasks/02-http-limit.md"
+        t2_path.write_text(
+            t2_path.read_text(encoding="utf-8").replace(
+                "- spec.md#r1-enforce-per-tenant-rate-limit — 429 behavior",
+                "- spec.md#r1-enforce-per-tenant-rate-limit — 429 behavior\n"
+                "- intent.md#i99-deleted-decision — stale reference",
+            ),
+            encoding="utf-8",
+        )
+        bad_report = check_ledger.check_ledger(self.task_dir)
+        joined = "\n".join(bad_report.errors)
+        self.assertIn("upstream artifact intent.md has status 'draft'", joined)
+        self.assertIn("T2: references unknown intent.md decision anchor I99", joined)
+
+        # Removing intent.md while references remain must also report dangling anchors.
+        (self.task_dir / "intent.md").unlink()
+        missing_intent_report = check_ledger.check_ledger(self.task_dir)
+        missing_joined = "\n".join(missing_intent_report.errors)
+        self.assertIn("spec.md: references intent.md#I1, but intent.md is missing", missing_joined)
+        self.assertIn("T2: references intent.md#I99, but intent.md is missing", missing_joined)
+
     def test_rejects_cycle_distinctly_from_non_topological_order(self) -> None:
         # Non-topological order without any cycle.
         _build_valid_multi_task_fixture(self.task_dir)

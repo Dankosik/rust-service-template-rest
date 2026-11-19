@@ -22,13 +22,18 @@ skipping Definition, a no-open-decisions exit, or a blocked exit, load
 
 1. **Ground in primary sources and map the Decision Frontier (static —
    read-only; skip builds, tests, and live services).**
-   - Verify `specs/<task>/spec.md` is `status: ready` (waived only for a
-     skipped-Definition fixed external contract in [Non-Standard
-     Paths](technical-design/non-standard-paths.md); otherwise exit via
-     [Blocked Exit](technical-design/non-standard-paths.md#blocked-exit) with
+   - Verify `specs/<task>/intent.md` (when present) is `status: ready`
+     (otherwise exit via [Blocked
+     Exit](technical-design/non-standard-paths.md#blocked-exit) with
+     `reopen_owner: Intake`) and `specs/<task>/spec.md` is `status: ready`
+     (waived only for a skipped-Definition fixed external contract in
+     [Non-Standard Paths](technical-design/non-standard-paths.md); otherwise
+     exit via [Blocked
+     Exit](technical-design/non-standard-paths.md#blocked-exit) with
      `reopen_owner: Specification`).
-   - Read `specs/<task>/intent.md` (settled decisions `I<n>`, `Rejected`
-     options, `Why`, and `Priority / tie-breakers`), `specs/<task>/spec.md`
+   - Read `specs/<task>/intent.md` (settled decisions `I<n>` including
+     `Binding` strength, `Rejected` options, and `Why`, `Concrete scenarios`,
+     and `Priority / tie-breakers`), `specs/<task>/spec.md`
      (all obligations:
      `R<n>` including every `Open to Technical Design:` marker, `G<n>`,
      `Terminology`, `Non-goals`, `Downstream handoff`, `Durable contract

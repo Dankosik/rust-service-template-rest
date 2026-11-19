@@ -45,6 +45,8 @@ PACKET_TASK_DEP_RE = re.compile(
 PACKET_EXTERNAL_DEP_RE = re.compile(
     r"^(.+?)\s+\[(effect:[A-Za-z0-9_:-]+)\](?:\s+(?:\u2014|--|-)\s+.*)?$"
 )
+INTENT_I_HEADING_RE = re.compile(r"^###\s+(I\d+)\b", re.MULTILINE)
+INTENT_ANCHOR_REF_RE = re.compile(r"intent\.md#(i\d+)\b", re.IGNORECASE)
 SPEC_R_HEADING_RE = re.compile(r"^###\s+(R\d+)\b", re.MULTILINE)
 SPEC_G_BULLET_RE = re.compile(r"^-\s+\*\*(G\d+)\b", re.MULTILINE)
 DESIGN_D_HEADING_RE = re.compile(r"^###\s+(D\d+)\b", re.MULTILINE)
@@ -744,12 +746,19 @@ def check_ledger(target: Path) -> CheckReport:
                 f"{prod_id}: downstream tasks depend on {prod_id}, so Provides cannot be 'none'"
             )
 
+    intent_path = task_dir / "intent.md"
     spec_path = task_dir / "spec.md"
     design_path = task_dir / "design/design.md"
+    intent_i: set[str] = set()
+    spec_text = ""
+    design_text = ""
     spec_r: list[str] = []
     spec_g: list[str] = []
     design_d: list[str] = []
     design_s: list[str] = []
+    if intent_path.is_file():
+        intent_text = intent_path.read_text(encoding="utf-8")
+        intent_i = {m.upper() for m in INTENT_I_HEADING_RE.findall(intent_text)}
     if spec_path.is_file():
         spec_text = spec_path.read_text(encoding="utf-8")
         spec_r = sorted(set(SPEC_R_HEADING_RE.findall(spec_text)), key=lambda s: int(s[1:]))
@@ -758,6 +767,30 @@ def check_ledger(target: Path) -> CheckReport:
         design_text = design_path.read_text(encoding="utf-8")
         design_d = sorted(set(DESIGN_D_HEADING_RE.findall(design_text)), key=lambda s: int(s[1:]))
         design_s = sorted(set(DESIGN_S_HEADING_RE.findall(design_text)), key=lambda s: int(s[1:]))
+
+    checked_intent_sources: list[tuple[str, str]] = [("tasks.md", ledger_raw)]
+    if spec_text:
+        checked_intent_sources.append(("spec.md", spec_text))
+    if design_text:
+        checked_intent_sources.append(("design/design.md", design_text))
+    for tid, pkt in sorted(packets.items()):
+        checked_intent_sources.append((tid, pkt.raw_text))
+    for label, text in checked_intent_sources:
+        seen_bad: set[str] = set()
+        for match in INTENT_ANCHOR_REF_RE.finditer(text):
+            ref_id = match.group(1).upper()
+            if ref_id in seen_bad:
+                continue
+            if not intent_path.is_file():
+                seen_bad.add(ref_id)
+                errors.append(
+                    f"{label}: references intent.md#{ref_id}, but intent.md is missing"
+                )
+            elif ref_id not in intent_i:
+                seen_bad.add(ref_id)
+                errors.append(
+                    f"{label}: references unknown intent.md decision anchor {ref_id}"
+                )
 
     if len(tasks) >= 2:
         for tid, pkt in packets.items():
