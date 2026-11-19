@@ -42,7 +42,7 @@ output interface without exposing another candidate, and assign each lane a
 genuinely different architectures instead of collapsing onto one median answer.
 The root compares only viable same-level substitutes against the same drivers,
 synthesizes compatible elements, and owns the selection. Candidate count is
-evidence-driven, not a ceremony. For Technical Design forks, load [Design It
+evidence-driven, not a ceremony. For Spec And Design forks, load [Design It
 Twice](../phases/technical-design/design-it-twice.md).
 
 ## Lane Result V1

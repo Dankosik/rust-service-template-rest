@@ -1,62 +1,66 @@
 # Unit Implementation
 
-Implement the packet's unit-local `Outcome` and `Provides`. The Delivery
-Owner proves its assembled `Observable claim`.
+Implement the assigned task packet's unit-local `Outcome` and `Provides` cleanly
+on top of the integration tip, then return an [Implementation
+Result](../../interfaces/acceptance-result-v1.md#implementation-result). The
+Orchestrator owns assembled validation and review.
 
-### 1. Ground In Primary Sources
+## Steps
 
-Read the entire assigned packet, ledger constraints, relevant landed decisions
-and prerequisite, shared-lock and same-crate changes. Start from the brief's
-integration tip. Inspect cited sources, direct callers and a local sibling
-before tests. Identify the seam, base deficiency (green baseline for a
-prefactor), reusable owners, focused proving command and any active
-`Reopen if`. Route an already-satisfied Outcome through [Escalation](#escalation).
+1. **Ground in primary sources.**
+   - Read the entire assigned packet, `tasks.md` `Global constraints`, and
+     relevant landed `decisions` or diffs from prerequisites and same-crate
+     tasks.
+   - Inspect cited sources, direct callers, and one local sibling before writing
+     tests. Identify the seam, reusable owners, focused proving command, and any
+     active `Reopen if`.
+   - For Rust edits, follow [Rust Change
+     Surface](../../../../AGENTS.md#rust-change-surface) and load only the
+     domain `rust-*` skills matching open decisions.
+   - *Done when:* the target seam, base deficiency (or green baseline for a
+     prefactor), and focused check command are verified in live code.
 
-For Rust edits use [Rust Change Surface](../../../../AGENTS.md#rust-change-surface)
-and the matching domain skills. Load [Sub-Lanes](sub-lanes.md) when independent
-subtasks justify delegation.
+2. **Build in tight vertical slices (red -> green).**
+   - Follow the packet's [shape](../planning.md#task-shapes-and-granularity):
+     - *New behavior or rejection:* establish the seam, observe a compiled
+       assertion go **red** for the intended reason, implement the fix, and
+       watch it turn **green**. Check that inverting or deleting the guarded
+       branch would turn the test red again.
+     - *Prefactor / migration batch:* keep existing seam tests green throughout.
+     - *Integration-first:* wire real production code through the seam and
+       escalate immediately if the risk assumption falsifies.
+     - *Shared contract / expand / contract:* verify the compiling boundary,
+       both forms on expansion, and the withdrawn path plus preserved `G<n>` on
+       removal.
+   - Run focused Cargo checks and tests with `--locked`, confirming selected
+     tests actually executed. Use [Validation
+     Routing](../../../validation-routing.md) for generated contracts (`api/`,
+     `.sqlx/`, proto).
+   - *Done when:* `Outcome`, downstream `Provides`, rejection paths, and
+     preserved `G<n>` are implemented and green locally.
 
-### 2. Build In Tight Vertical Slices
-
-Use the [packet shape](../../interfaces/task-packet-v1.md#field-rules) to
-choose the smallest observable slice. For new behavior or rejection, establish
-the seam and observe a compiled assertion fail for the intended reason before
-implementing the fix. A minimal stub is appropriate only for the first slice
-of a new entry point. Reuse adequate tests for preserved behavior. Check that
-the test would catch an inverted or deleted branch. Use focused Cargo checks
-and tests with `--locked` for Rust. Confirm selected tests actually executed.
-
-For an integration-first slice, exercise production wiring through the named
-seam and route a falsified assumption to its reopen owner. Keep prefactors
-and migration batches green. Check a shared contract at its compiling boundary,
-new and old forms on expansion, and the withdrawn path plus surviving
-guarantees on removal or contraction. For a quantitative or non-code outcome,
-use its accepted witness. For generated surfaces follow [Validation
-Routing](../../../validation-routing.md).
-
-### 3. Pre-Return Self-Audit And Return
-
-- Verify the unit's Outcome, downstream Provides, rejection paths and preserved
-  guarantees at their assigned boundaries. Remove superseded in-scope paths,
-  check the diff against the granted owners and locks, and apply
-  [Engineering](../../../../AGENTS.md#engineering). Exclude the task bundle
-  and unrelated edits.
-- Join delegated lanes. Leave shared-checkout edits uncommitted. In isolation,
-  commit scoped changes on the unit branch, merge the current integration tip
-  if it advanced, and inspect newly landed sibling changes for divergence on
-  shared seams. On conflict use [Merge Conflict Resolution](../../../../.agents/skills/merge-conflict-resolution/SKILL.md).
-  Recheck affected surfaces and return a clean fast-forwardable candidate.
-- For touched Rust crates, check formatting, lint and package tests or the
-  proving consumer if a crate has no tests. Count executed tests and record unavailable checks with their exact reason. For other surfaces select the
-  applicable checks. Keep assembled validation with the Delivery Owner.
-- Return the [Implementation Result](../../interfaces/acceptance-result-v1.md#implementation-result)
-  with downstream decisions and exact remaining proof gaps.
+3. **Self-audit and return.**
+   - Remove superseded in-scope paths, confirm the diff stays inside granted
+     `Mutable owners` and `Exclusive locks` (excluding `specs/<task>/` and
+     unrelated edits), and apply [Engineering](../../../../AGENTS.md#engineering).
+   - For touched Rust crates, verify formatting, lint, and package tests (or
+     the proving consumer if a crate has no tests); record any unavailable check
+     with its exact reason in `unverified`.
+   - In an isolated worktree, commit scoped changes on the unit branch, merge
+     the current integration tip if it advanced (resolving conflicts via
+     [Merge Conflict
+     Resolution](../../../../.agents/skills/merge-conflict-resolution/SKILL.md)
+     and rechecking affected seams), and return a clean fast-forwardable
+     candidate. In a shared checkout, leave edits uncommitted.
+   - *Done when:* [Implementation
+     Result](../../interfaces/acceptance-result-v1.md#implementation-result) is
+     returned with diff-independent `decisions` and exact `unverified` gaps.
 
 ## Escalation
 
-Repair a local oracle, fixture, caller or runner within scope. Get any path or
-lock expansion from the Orchestrator before editing. For an ungranted Cargo
-crate or feature, preserve the manifests and lockfile and return the dependency
-decision to the Orchestrator. When live evidence invalidates behavior,
-architecture or the planned delta, finish independent work and return
-`Blocked` with the evidence, preserved work and smallest decision owner.
+- Request any path or lock expansion from the Orchestrator before editing.
+- For an ungranted Cargo crate or feature, keep manifests and `Cargo.lock`
+  untouched and return the dependency request to the Orchestrator.
+- If live evidence shows `Outcome` already holds or invalidates behavior or
+  architecture, preserve partial work (as a WIP commit in an isolated worktree)
+  and return `Blocked` naming the exact evidence and smallest owner.

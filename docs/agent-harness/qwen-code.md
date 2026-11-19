@@ -5,9 +5,9 @@ outrank prose.
 
 ## Native Map
 
-- Start a new [regular subagent](https://qwenlm.github.io/qwen-code-docs/en/users/features/sub-agents/#fork-subagent)
-  for each preparation phase. Call `agent` with the phase brief and omit
-  `subagent_type` to select general-purpose. An explicit `fork` inherits history.
+- Keep preparation (Intake through Planning) in the root session, using fresh
+  [regular subagents](https://qwenlm.github.io/qwen-code-docs/en/users/features/sub-agents/#fork-subagent)
+  (`agent`, never `fork`) for evidence scans, `Design It Twice`, and `Plan Review`.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds Ledger Orchestrator. Dispatch ready units via `agent`
   (`subagent_type: "acceptance-unit-lead"`, display name `Agent`, not `task`)
@@ -21,8 +21,8 @@ outrank prose.
   isolation.
 - Top-level ordinary agents run in background by default; nested agents and
   caller-owned `working_dir` launches are foreground-only and reject
-  `run_in_background: true`. When overlap helps, let the root broker a
-  background reviewer from the Lead's fixed brief and return its result.
+  `run_in_background: true`. Top-level Orchestrator sessions dispatch
+  background reviewers directly.
 - Agent Teams are an explicitly selected, preconfigured route only: the root
   brokers descendants from teammate Lead briefs (`task_create`/`task_update`
   mirror execution only). Never require Teams for full-ledger work.
@@ -44,5 +44,5 @@ if no continuation exists rather than inventing a resume field).
 
 At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
 [Implementation Review](../spec-first-workflow/phases/implementation-review.md)
-once local checks pass under [Final
-Validation](../spec-first-workflow/phases/implementation/final-validation.md).
+once local checks pass under [Implementation Step
+4](../spec-first-workflow/phases/implementation.md#4-final-verification-review-and-repair).

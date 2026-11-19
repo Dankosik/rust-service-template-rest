@@ -6,7 +6,7 @@ temporary resources remain, or for explicitly scoped cleanup.
 Within the accepted effect authority, retire resources created for the task
 after their consumers finish and required results, evidence, and recovery
 material are retained. This includes temporary files, task-local build outputs,
-execution-only `tasks.md`, `tasks/`, `workflow-plan.md`, and task worktrees.
+execution-only `tasks.md`, `tasks/`, and task worktrees.
 Shared caches, persistent data, and unrelated workspaces retain their own
 owners and cleanup authority.
 

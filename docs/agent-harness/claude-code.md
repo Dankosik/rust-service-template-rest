@@ -5,9 +5,10 @@ schemas outrank prose.
 
 ## Native Map
 
-- For each preparation phase, call `Agent` with `subagent_type: "general-purpose"`
-  and the phase brief. This writable, [non-fork subagent](https://code.claude.com/docs/en/sub-agents#what-loads-at-startup)
-  starts with its own history. Use its returned ID for same-phase follow-ups.
+- Keep preparation (Intake through Planning) in the root session, dispatching
+  fresh [non-fork subagents](https://code.claude.com/docs/en/sub-agents#what-loads-at-startup)
+  (`evidence-agent`, `specialist-agent`, `reviewer-agent`) for wide scans,
+  `Design It Twice`, and `Plan Review`.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator. Dispatch ready units via `Agent`
   (`subagent_type: "acceptance-unit-lead"`) within capacity; the

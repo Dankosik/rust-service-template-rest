@@ -49,19 +49,17 @@ leaf lanes via `evidence-agent`, `specialist-agent`, `worker-agent`,
 | Owner | Lifetime |
 | --- | --- |
 | Orchestrator | The ledger; recover from canonical state if unreliable. |
-| Architect / phase owner | Macro phase; independent design or new phase uses a fresh actor. |
+| Preparation session | Continuous root session from Intake through Planning (fresh subagents only for evidence scans, `Design It Twice`, and `Plan Review`). |
 | Lead | Its unit until integrated; fresh Lead per task and per final-validation repair under [Implementation](spec-first-workflow/phases/implementation.md#orchestrator-loop). |
 | Execution lane | One bounded brief and its corrections, including smaller models. |
 | Evidence lane | One bounded evidence brief and related follow-ups below. |
 
-A fresh phase session starts with the adapter's normal project instructions
-and a brief naming the phase, accepted input files, writable scope, and expected
-result. Exclude the coordinator's and earlier phases' chat turns, tool outputs,
-and conversation summaries. Give the actor access to the checkout containing
-those inputs, including uncommitted artifacts. A new worktree or session ID
-alone does not establish fresh history.
+Start every independent review, evidence scan, `Design It Twice` candidate
+lane, and Implementation Lead with a fresh conversation (no parent chat turns,
+tool outputs, or summaries) and access to the checkout containing accepted
+inputs. A new worktree or session ID alone does not establish fresh history.
 
-Keep steps and repairs of the same macro phase with its owner. Independent
+Keep preparation steps and repairs in the continuous root session. Independent
 review gets its own actor under [Review](spec-first-workflow/shared/review.md).
 Start execution and evidence lanes, including descendants, with the same
 history boundary and the tools and permissions appropriate to their brief.
@@ -88,13 +86,12 @@ resetting context.
 
 ## Nested Execution
 
-Orchestrator owns the ledger; Leads return `Implemented`; one assigned Delivery
-Owner owns final validation and acceptance. Workers delegate strict subsets
-only if the adapter permits descendants and Implementation's benefit,
-ownership, and lock rules hold. Missing product/architecture decisions return to
-their owner; unwritten tests do not block delegation. At a depth/tool limit, the
-nearest capable parent dispatches or completes the subset without inventing an
-acceptance unit or unsupported carrier.
+Orchestrator owns the ledger, assembled verification, and review routing; Leads
+return `Implemented`. Workers delegate strict subsets only if the adapter
+permits descendants and ownership and lock rules hold. Missing product/architecture
+decisions return to their owner; unwritten tests do not block delegation. At a
+depth/tool limit, the nearest capable parent dispatches or completes the subset
+without inventing an acceptance unit or unsupported carrier.
 
 Each delegating parent owns its subtree: retain child identities, assign
 disjoint writable scopes (never edited concurrently by the parent), integrate

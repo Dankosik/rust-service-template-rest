@@ -6,29 +6,27 @@ Use the native tool schema for the installed OpenCode generation. Check
 ## Preparation and handoff
 
 Start an ordinary request in `build` under [Work Selection](../../AGENTS.md#work-selection-and-loading).
-The preparation coordinator writes the intent. For each applicable macro phase,
-dispatch `general` with its phase brief and accepted artifact paths. Each
-phase may call `reviewer-agent` for its independent review. When nesting is
-unavailable, the coordinator brokers that review and returns its verdict to
-the same phase owner under [Transition](../spec-first-workflow/shared/transition.md#cross-phase-continuation).
-Broker with the same read-only `reviewer-agent`. If its model is unavailable,
-preserve the candidate and report the pending review. A writable `general`
-session cannot supply that verdict.
+Keep preparation (Intake through Planning) in that root session, dispatching
+fresh `evidence-agent`, `specialist-agent`, or read-only `reviewer-agent` lanes
+as needed for grounding, `Design It Twice`, and `Plan Review`. If `reviewer-agent`'s
+model is unavailable, preserve the candidate and report the pending review—a
+writable `general` session cannot supply that verdict.
 After ready Planning, return the [user's launch message](../spec-first-workflow/shared/transition.md#implementation-handoff).
 A new `build` or `orchestrator` session executes the named ledger.
 
-| Installed generation | New phase, reviewer, or implementation Lead | Same assignment follow-up |
+| Installed generation | New subagent, reviewer, or implementation Lead | Same assignment follow-up |
 | --- | --- | --- |
 | 1.x | `Task` with `subagent_type`, `description`, and `prompt`. Omit `task_id`. | Set `task_id` to the returned child ID. |
 | 2.x | `subagent` with `agent`, `description`, and `prompt`. Omit `sessionID`. | Pass the returned `sessionID` to `subagent`. |
 
 ## OpenCode 2
 
-Use the result of a foreground call when the next phase depends on it.
+Use the result of a foreground call when the next step depends on it.
 In [2.2.7](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/core/src/tool/plugin/subagent.ts)
 foreground is the default. If a call returns `running`, retain its ID and
-consume the completion notification before moving the phase. A new ID is
-required for each new macro phase. A follow-up keeps that child's history.
+consume the completion notification before proceeding. Use a new session ID for
+each fresh subagent (evidence scan, `Design It Twice`, reviewer, or
+implementation Lead); a follow-up keeps that child's history.
 
 Dispatch each ready implementation unit to `acceptance-unit-lead` and
 independent reviews to `reviewer-agent`. A configured role model takes

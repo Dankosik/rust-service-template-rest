@@ -41,11 +41,11 @@ Match output weight to downstream reuse:
 - **Single-phase lookup:** return [Lane Result
   V1](../shared/read-only-delegation.md#lane-result-v1) inline.
 - **Evidence reused downstream or needing refresh:** persist
-  `specs/<task>/research/<topic>.md` through [Artifacts](../shared/artifacts.md)
-  with: **Question & affected decision**, **Verified facts** (primary locator,
-  scope/version, and `valid as of`), **Counter-evidence or conflicts**,
-  **Unknowns & refresh triggers**, and **Decision implication**—keeping fact,
-  inference, assumption, and unknown explicitly separated.
+  `specs/<task>/research/<topic>.md` with: **Question & affected decision**,
+  **Verified facts** (primary locator, scope/version, and `valid as of`),
+  **Counter-evidence or conflicts**, **Unknowns & refresh triggers**, and
+  **Decision implication**—keeping fact, inference, assumption, and unknown
+  explicitly separated.
 
 ## Review
 

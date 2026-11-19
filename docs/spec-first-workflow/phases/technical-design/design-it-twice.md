@@ -1,6 +1,6 @@
 # Design It Twice
 
-Triggered from [Technical Design](../technical-design.md#steps) under
+Triggered from [Spec And Design](../spec-and-design.md#steps) under
 [Generative Candidate
 Lanes](../../shared/read-only-delegation.md#generative-candidate-lanes) for a
 qualifying **one-way door** open fork.
@@ -50,6 +50,6 @@ qualifying **one-way door** open fork.
    **hybrid synthesis** only when combining pieces removes complexity or an
    abstraction while keeping the winning invariant. Select under [Decision
    Ownership](../../../../AGENTS.md#decision-ownership), recording `D<n>` with
-   the strongest rejected candidate as steelman, or take [Blocked
-   Exit](non-standard-paths.md#blocked-exit) only when surviving candidates
-   differ strictly on a user-owned trade-off.
+   the strongest rejected candidate as steelman; escalate to the user only when
+   surviving candidates differ strictly on a user-owned product or risk
+   trade-off.

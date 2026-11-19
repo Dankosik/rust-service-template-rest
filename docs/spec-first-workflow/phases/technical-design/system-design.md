@@ -1,6 +1,6 @@
 # System Design
 
-Disclosed branch of [Technical Design](../technical-design.md). Own system
+Disclosed branch of [Spec And Design](../spec-and-design.md). Own system
 mechanisms, runtime **crossings**, data and trust invariants, and rollout
 compatibility.
 
@@ -30,12 +30,14 @@ loading only the domain skills whose probes fire.
 
 Load `rust-delivery-platform` when delivery gates or profiles change. Record
 deployment impact (`no deployment impact`, `standard single-step deploy`, or
-[Release Closure](../../rubrics/release-closure.md) in `rollout.md`), covering
-rolling mixed-version overlap across `crates/migrate`, `crates/service`, and
-`crates/jobs-worker`: lock-safe DDL (`rust-sqlx`) **and** forward/backward
-compatibility of serialized rows/`JSONB`, cache (`infra-cache`), job
-(`infra-jobs`), and event (`infra-messaging`) payloads.
+embedded [Release Closure](../../rubrics/release-closure.md) gates in
+`spec.md` / `design.md`), covering rolling mixed-version overlap across
+`crates/migrate`, `crates/service`, and `crates/jobs-worker`: lock-safe DDL
+(`rust-sqlx`) **and** forward/backward compatibility of serialized rows/`JSONB`,
+cache (`infra-cache`), job (`infra-jobs`), and event (`infra-messaging`)
+payloads.
 
 When `expand -> migrate -> contract` applies, state explicitly whether
 `Contract` lands in **`same-release`** (compile/blast-radius refactor) or
-**`multi-release`** (rolling mixed-version deploy boundary in `rollout.md`).
+**`multi-release`** (rolling mixed-version deploy boundary in the Rollout
+section).

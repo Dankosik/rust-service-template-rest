@@ -1,46 +1,44 @@
 # Repair Assignment
 
-Use as a fresh Repair Lead (`ACCEPTANCE_UNIT_LEAD`) dispatched on a Final
-Validation [Repair
-Request](../../interfaces/acceptance-result-v1.md#repair-request). For
-`no-commit` or inline-unit overrides, follow [Execution Modes](modes.md).
+Fix one batched set of confirmed final-validation or review defects as a fresh
+`ACCEPTANCE_UNIT_LEAD` inside the granted writable scope, then return an
+[Implementation
+Result](../../interfaces/acceptance-result-v1.md#implementation-result).
 
 ## Steps
 
-### 1. Ground And Confirm Each Finding
+1. **Confirm each finding against live code.**
+   - Read every finding, affected packet, prior `decisions`, and (on Round 2)
+     the prior attempt's hypothesis and failure. Load `rust-debugging` for an
+     uncertain/async cause or a Round 2 attempt, stating 2–3 ranked falsifiable
+     hypotheses before editing.
+   - Verify each finding by kind before touching production code:
+     - *Failing check or test:* run the exact failing command and observe `red`.
+     - *Behavioral, runtime, or seam counterexample:* verify reachability in
+       live callers and write or reuse a minimal seam regression test that goes
+       `red` first.
+     - *Structural violation:* confirm callers and [Engineering](../../../../AGENTS.md#engineering)
+       constraints while keeping existing seam tests `green -> green`.
+     - *Weak or tautological test:* confirm the named surviving mutant and
+       strengthen the seam test so the broken branch goes `red`.
+   - **Refutation bar:** refute a finding only when primary code or a direct
+     check disproves the exact counterexample path (unrelated passing tests do
+     not refute it). Leave refuted paths untouched and record the refuting
+     anchor in `decisions`. If every finding is refuted, return `Blocked`
+     (`next_owner: Orchestrator — refuted findings`).
+   - *Done when:* every finding is either reproduced (`red`) or refuted with a
+     primary anchor.
 
-- Read every finding in `Repair Request`, affected packets, prior `decisions`,
-  and — on **Round 2** — `prior_attempt` (Round 1 candidate, attempted
-  hypothesis, and recheck failure).
-- For Rust repairs apply [Rust Change Surface](../../../../AGENTS.md#rust-change-surface) and load `rust-debugging` for an uncertain or async/flaky cause or a second attempt.
-- **Uncertain cause or Round 2:** before editing, state 2–3 ranked falsifiable
-  hypotheses as `If <X> is the cause, then <changing/observing Y> produces <Z>`.
-- Confirm each finding against live code and surrounding callers:
-
-| Finding type | Confirmation bar |
-| --- | --- |
-| Failing check or existing test | Run the exact failing command on the assembled candidate and observe `red`. |
-| Behavioral, runtime, or seam counterexample (Axis 1–2) | Verify the path in live code/callers, reuse or write a minimal seam-level regression test reproducing it, and observe `red` before editing production code (or record why no seam exists — itself a structural finding). |
-| Structural or diff-hygiene violation (Axis 3) | Verify callers and invariants against [Engineering](../../../../AGENTS.md#engineering) and [Rust Change Surface](../../../../AGENTS.md#rust-change-surface); confirm existing seam tests start `green` (`green -> green`). |
-| Weak or tautological test (Axis 4) | Confirm the named surviving mutant against live code; prepare a seam test that fails on the broken branch and passes on live behavior. |
-
-- **Refutation bar:** refute a finding only when primary code or a direct check
-  disproves the exact counterexample path — a passing existing test never
-  refutes unless it exercises that counterexample. Edit nothing for a refuted
-  finding and record the refuting anchor and proof in `decisions`. If **every**
-  finding is refuted, return `Blocked` (`next_owner: Delivery Owner — refuted
-  findings`); on partial refutation, record refuted items in `decisions` and
-  fix the confirmed ones.
-
-### 2. Repair Confirmed Defects
-
-Fix each confirmed root cause inside the grant. For an integration defect reconcile both sides of the seam. Evaluate proposed remedies under [Review Lifecycle](../../shared/review.md#lifecycle).
-
-### 3. Verify (`green`) And Return
-
-Rerun the reproducer or strengthened test and apply the [Pre-Return Self-Audit](unit.md#3-pre-return-self-audit-and-return) to the repaired surface. Record in the result's `decisions`: (1) each repaired root cause (and confirmed Round 2
-hypothesis), (2) any refuted finding with anchor and proof, and (3) exact
-invalidated check surface.
-
-For scope expansion, an ungranted Cargo crate/feature, or an exposed
-`UPSTREAM_GAP`, follow [Unit Escalation](unit.md#escalation).
+2. **Repair root causes and re-verify (`green`).**
+   - Fix each confirmed root cause cleanly inside the granted scope (reconciling
+     both sides of a seam for an `INTEGRATION_DEFECT`), weighing any suggested
+     remedy against [Engineering](../../../../AGENTS.md#engineering) so the fix
+     adds no unjustified structure.
+   - Re-run every reproducer and follow [Unit Implementation](unit.md#steps)
+     Step 3 for the repaired surface, recording repaired root causes,
+     refutations, and invalidated checks in `decisions`.
+   - Escalate scope expansions, ungranted crates, or exposed `UPSTREAM_GAP`s
+     under [Unit Escalation](unit.md#escalation).
+   - *Done when:* every confirmed defect is `green`, self-audited, and returned
+     in [Implementation
+     Result](../../interfaces/acceptance-result-v1.md#implementation-result).

@@ -4,16 +4,14 @@ Use installed subagent, skill, Goal, and worktree controls as native authority;
 callable tool fields outrank public prose. Custom subagents exist in the
 Antigravity App and CLI; the IDE has no custom-subagent carrier, so report a
 full-ledger capability gap on the IDE surface instead of shrinking the ledger
-workflow (a fixed inline unit or Direct Work still runs in-session).
+workflow (Direct Work still runs in-session).
 
 ## Native Map
 
-- In the App or CLI, start each preparation phase with a new
-  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) using
-  `self`, the phase brief, and workspace `inherit`. This gives the child the
-  caller's tools and checkout with a fresh conversation. Track its returned
-  conversation ID. On an IDE surface without this control, preserve the
-  completed input and report the phase that needs the App or CLI.
+- Keep preparation (Intake through Planning) in the root session, using fresh
+  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) lanes
+  (`evidence-agent`, `specialist-agent`, `reviewer-agent`) on workspace
+  `inherit` for wide scans, `Design It Twice`, and `Plan Review`.
 - Antigravity reads `AGENTS.md`, `.agents/rules/antigravity-harness.md`, and
   `.agents/skills` directly; skills load by description or `/<skill-name>`.
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by

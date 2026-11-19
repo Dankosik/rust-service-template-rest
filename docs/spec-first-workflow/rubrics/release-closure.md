@@ -18,9 +18,8 @@ For every gate record:
 owner/node | prerequisite | action | success signal | distinct safe-failure signal | duration or behavior-changing horizon | rollback/roll-forward | proof/readback
 ```
 
-Persist `rollout.md` only when the sequence is non-trivial, using [Artifact
-Lifecycle V1](../shared/artifacts.md#artifact-lifecycle-v1) (`status: draft |
-ready | blocked`). It contains the affected graph, last rollback-safe state,
-ordered gates, and completion signal.
+When the sequence is non-trivial, embed the affected graph, last rollback-safe
+state, ordered gates, and completion signal directly in the Rollout section of
+`spec.md` (or `design.md` when architecture is split out).
 A remote latency-sensitive edge without current budget evidence is blocked;
 missing authority or target-only proof narrows the completion claim.

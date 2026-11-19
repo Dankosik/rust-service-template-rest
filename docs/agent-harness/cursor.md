@@ -5,11 +5,9 @@ callable Task fields outrank public prose.
 
 ## Native Map
 
-- For each preparation phase, start a fresh writable general-purpose Task
-  from the callable subagent catalog and omit `resume`. Pass the phase brief
-  and use the workspace containing its input files.
+- Keep preparation (Intake through Planning) in the root session, using fresh
   [Cursor subagents](https://cursor.com/docs/subagents#how-subagents-work)
-  start without prior conversation history.
+  (omit `resume`) for wide scans, `Design It Twice`, and `Plan Review`.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator; Cursor reads `.agents/skills`
   directly.
