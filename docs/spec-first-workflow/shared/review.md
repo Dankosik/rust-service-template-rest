@@ -53,6 +53,15 @@ Contract](evidence-contract.md), including their original source and scope.
 For mechanical identity refreshes, use [Transition](transition.md)'s unchanged
 semantic-scope rule instead of restarting an unaffected review.
 
+For non-Implementation reviews, on `FAIL` the author verifies every finding's
+citation and witness against primary sources before repairing or blocking.
+Never self-approve past `FAIL`: present refuting primary anchors in one bounded
+delta recheck (or replacement reviewer), escalating any surviving
+evidence-backed conflict to `adjudicator-agent` under [Route](#route) while
+repairing confirmed defects. When `adjudicator-agent` resolves all surviving
+disputed findings with zero remaining blockers, synthesis closes the review and
+records the adjudication anchor in `review`.
+
 For non-Implementation reviews, use a bounded delta recheck by the same
 reviewer when repair addresses only that reviewer's anchored findings, leaves
 Outcome, Boundary, accepted inputs, interfaces, and risk surface unchanged, and
