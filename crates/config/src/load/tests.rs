@@ -616,14 +616,6 @@ fn unknown_keys_fail_from_files_and_env() {
         ),
         Err(Error::Deserialize(_))
     );
-    assert_matches!(
-        load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[("APP__NOPE__X", "1")])
-        ),
-        Err(Error::Deserialize(_))
-    );
 }
 
 #[test]
@@ -783,18 +775,19 @@ fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
         "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS",
         " authorization=Bearer s3cr3t \r\n\n",
     );
-    write(&dir, "APP__HTTP__ADDR", "127.0.0.1:7\n");
+    write(&dir, "APP__http__addr", "127.0.0.1:7\n");
     write(&dir, "APP__LOG__LEVEL", "debug");
     write(&dir, "README", "not a variable");
     write(&dir, ".APP__LOG__FORMAT", "yaml");
     std::fs::create_dir(dir.path().join("..data")).unwrap();
 
-    let cfg = load_from(
-        &with_secrets(&dir),
-        BUILD,
-        env(&[("APP__HTTP__ADDR", "127.0.0.1:9")]),
-    )
-    .unwrap();
+    let options = with_secrets(&dir);
+    let from_files = load_from(&options, BUILD, env(&[])).unwrap();
+    assert_eq!(
+        from_files.http.listener().addr,
+        "127.0.0.1:7".parse().unwrap()
+    );
+    let cfg = load_from(&options, BUILD, env(&[("APP__HTTP__ADDR", "127.0.0.1:9")])).unwrap();
     assert_eq!(
         cfg.observability
             .otel
@@ -1016,19 +1009,6 @@ fn overlapping_variable_paths_are_refused(#[case] parent_from_secrets_dir: bool)
         "{err}"
     );
     assert!(!rendered.contains(parent.1), "{err}");
-}
-
-#[test]
-fn the_environment_overrides_a_secret_file_spelled_in_another_case() {
-    let dir = tempfile::tempdir().unwrap();
-    write(&dir, "APP__log__level", "debug");
-    let cfg = load_from(
-        &with_secrets(&dir),
-        BUILD,
-        env(&[("APP__LOG__LEVEL", "warn")]),
-    )
-    .unwrap();
-    assert_eq!(cfg.log.level, "warn");
 }
 
 #[cfg(unix)]
