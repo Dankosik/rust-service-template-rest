@@ -1,41 +1,26 @@
-# Planning Ledger Contract
+# Ledger Execution
 
-Use the [Ready Frontier](#ready-frontier) for the readiness dry run. The other
-sections govern a persisted [Task Ledger V1](../../interfaces/task-ledger-v1.md).
-
-## Task And Acceptance Boundaries
-
-Give each independently usable repository change one task and its acceptance
-criteria. Keep the layers of that outcome together. Lanes can implement
-them in parallel and report partial results under the same task.
-
-Place a required external action at its consuming stage, with its owner and
-success condition. A change to release tooling can have its own task. Approval
-to publish gates publication.
-
-The Lead returns `Implemented` at the [Implemented
-bar](../../interfaces/acceptance-result-v1.md#implementation-result). The
-ledger records that milestone after integration. Global Completion owns acceptance of the requested outcome.
+Use as Ledger Orchestrator when executing a ready
+[Task Ledger V1](../../interfaces/task-ledger-v1.md). Each Lead returns
+`Implemented` at the
+[Implemented bar](../../interfaces/acceptance-result-v1.md#implementation-result).
+The ledger records that milestone after integration. Global Completion owns
+acceptance of the requested outcome.
 
 ## Ready Frontier
 
-At handoff, check each task as if it were the next one dispatched. Its required
-decisions, inputs, and implementation authority must be available and its
-accepted ordering constraints satisfied. Check its writable scope against active
-writers and its exclusive locks against held locks. If two otherwise ready tasks
-need the same free lock, both belong to the frontier.
-
-Record a predecessor only when its output is required or an accepted sequencing
-constraint requires that order. An agreed contract can supply a coding input
-immediately. A task that consumes implemented code waits for it to be integrated.
-Use [Task Packet V1](../../interfaces/task-packet-v1.md) to place each dependency
-where coding, final acceptance, or an external action first needs it.
+A task enters the frontier when its required decisions, coding inputs (agreed
+contracts or integrated `Implemented` code), accepted ordering constraints, and
+implementation authority are available, keeping `[acceptance]` and
+`[effect:<action>]` gates at final validation or release. Check its writable
+scope against active writers and its exclusive locks against held locks. If two
+otherwise ready tasks need the same free lock, both belong to the frontier.
 
 ## Dispatch
 
 Choose concurrent tasks from the frontier up to capacity, with disjoint writable
-scopes and exclusive locks. Use priority to choose among eligible tasks. Refill the
-frontier as each `Implemented` result integrates and its locks are released.
+scopes and exclusive locks. Use priority to choose among eligible tasks. Refill
+the frontier as each `Implemented` result integrates and its locks are released:
 
 - **Pending later gates**: Complete local contract-backed coding, return
   `Implemented`, and leave later acceptance or provider gates in the ledger;
@@ -76,9 +61,9 @@ Record the result with its `decisions` and `unverified` entries, release its
 locks, and refill the ready frontier. A repeat after all four steps requires no action. If interrupted,
 resume at the first unfinished step. Preserve external-effect boundaries
 (push, deploy, auto-deploy branches). Return semantic merge conflicts to the
-owning Lead against the assembled tree and invalidate affected proof.
-On a current `Blocked`, retain
-partial code and the missing input, reconcile writers, and route [Parent-Owned
+owning Lead against the assembled tree and invalidate affected proof. On a
+current `Blocked`, retain partial code and the missing input, reconcile writers,
+and route [Parent-Owned
 Recovery](../../shared/transition.md#parent-owned-recovery). A duplicate of
 that result leaves the existing recovery with its owner.
 
@@ -99,7 +84,7 @@ is pending.
 ### Delivery
 
 - **Consolidated proof and review**: The Delivery Owner follows [Final
-  Validation](../implementation/final-validation.md) and reports one
+  Validation](final-validation.md) and reports one
   [Completion Result](../../interfaces/acceptance-result-v1.md#completion-result)
   for the requested scope.
 - **Repairs and verdict**: Route defects back to their implementation Leads
@@ -110,10 +95,3 @@ is pending.
 
 Mark `done` once final `Accepted` closes Completion, then apply
 [Cleanup](../../shared/cleanup.md).
-
-## Stop Rule
-
-Apply the [Readiness Dry Run](../planning.md#readiness-dry-run) and the
-[Planning review verdict](../task-review-readiness.md#verdict) to the fixed
-ledger. Name a future live prerequisite as a final gate only when the accepted
-task explicitly requires that execution or external effect.

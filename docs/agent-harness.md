@@ -48,7 +48,7 @@ leaf lanes via `evidence-agent`, `specialist-agent`, `worker-agent`,
 | --- | --- |
 | Orchestrator | The ledger; recover from canonical state if unreliable. |
 | Architect / phase owner | Macro phase; independent design or new phase uses a fresh actor. |
-| Lead | Its unit; related-unit reuse only under Planning Ledger Contract. |
+| Lead | Its unit; related-unit reuse only under [Ledger Execution](spec-first-workflow/phases/implementation/ledger-execution.md#dispatch). |
 | Execution lane | One bounded brief and its corrections, including smaller models. |
 | Evidence lane | One bounded evidence brief and related follow-ups below. |
 

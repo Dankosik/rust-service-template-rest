@@ -1,64 +1,114 @@
 # Planning
 
-Use when structured work lacks one ready fixed implementation unit or the
-smallest dependency-ordered ledger. Own order, unit boundaries, dependencies,
-and final success conditions; never invent product behavior or architecture.
-Leave test cases, fixtures, assertions, proving layers, and exact test commands
-to Implementation. Do not require their prior design or approval.
+Use when structured work needs a ready task ledger for implementation. Own task
+slicing, dependency ordering, writable boundaries, and final validation claims
+from accepted inputs. Preserve upstream behavior and architecture; leave test
+cases, fixtures, proving layers, and exact test commands to Implementation.
 
-Consume ready behavior, design, rollout, risk, and repository-owner inputs.
-For each accepted obligation, identify the task deltas, final validation, or
-external action that will satisfy it, current evidence that it is already met,
-or its authorized scope exit. Trace each task to the obligation it serves,
-directly or through a prerequisite.
-Compare its current-to-target change and acceptance criteria with the source,
-including limits and exceptions. Anchor the accepted mechanism and its owner.
+## Steps
 
-Before detailing a packet, assume its prerequisites are met and the remaining
-work is deferred. Who can use this outcome now, and what can they do with it?
-Use the [atomicity criterion](task-review-readiness.md#atomicity-gate) to adjust
-the boundaries until each task has one such outcome, its dependencies, and a
-final observable.
+1. **Reconcile inputs and check delta.** Read all accepted artifacts
+   (`intent.md`, `spec.md`, `design/`, `rollout.md`, `research/*.md`, and
+   `workflow-plan.md` when present). Map every material obligation—including
+   limits, exceptions, and preserved consumer guarantees—to a task delta,
+   current evidence proving it is already met, or an authorized scope exit.
+   - Missing required product, mechanism, or ownership decision: stop and return
+     [Transition Result V1](../shared/transition.md#transition-result-v1) with
+     `status: blocked` and `reopen_owner` naming the smallest upstream owner.
+   - No implementation delta remains: create no ledger and submit the supporting
+     evidence (naming owners and stages of any outstanding proof or external
+     effects) directly to step 5.
 
-For the [implementation handoff](../shared/transition.md#implementation-handoff),
-persist [Task Ledger V1](../interfaces/task-ledger-v1.md) even for one executable
-unit. If no implementation delta remains, submit the supporting sources in the
-phase result for independent review without creating a ledger. Name the owner
-and stage of any outstanding proof or external effect. If a missing required
-input prevents a conclusion, record the blocker and its owner. A fixed unit may
-stay inline only when no durable boundary exists.
+2. **Design the task graph before expanding packets.** Slice under [Task Shapes
+   And Granularity](#task-shapes-and-granularity). Load [Conditional Planning
+   Branches](planning/conditional-branches.md) when either (a) an unverified
+   integration seam is the primary risk (**integration-first slice**), or (b) a
+   **wide refactor** with broad **blast radius** cannot land green atomically
+   (**expand–migrate–contract**). Place any required external action at its
+   consuming stage with its owner and success condition (a change to release
+   tooling can be its own task; approval to publish gates publication).
+   Complete this step only when:
+   - every accepted obligation traces to at least one task;
+   - every task's `Provides` feeds a downstream task or `Completion` (merge or
+     delete any task that fails this deletion test);
+   - every task fits one valid shape and one fresh Lead session;
+   - all tasks reach `Implemented` before final validation (acyclic; no coding
+     edge depends on `Accepted` or a post-implementation gate).
 
-Keep dependencies, status, and results in `tasks.md` and each [Task Packet
-V1](../interfaces/task-packet-v1.md) in `tasks/<ID>-<slug>.md`. Packets cover
-implementation and test writing. [Checks While Coding](implementation/unit.md#checks-while-coding)
-governs checks during implementation. Completion owns required validation and
-any selected review of the assembled candidate.
-Use [Task and Acceptance Boundaries](planning/ledger-contract.md#task-and-acceptance-boundaries)
-to place repository changes and external gates. Load
-[Conditional Planning Branches](planning/conditional-branches.md) only for
-integration-first uncertainty or broad contract fan-out.
+3. **Persist draft ledger and packets.** Write `specs/<task>/tasks.md` at
+   `status: draft` using [Task Ledger V1](../interfaces/task-ledger-v1.md) (even
+   for one task), migrating active execution instructions from `workflow-plan.md`
+   into `Global constraints`. Write each `specs/<task>/tasks/<ID>-<slug>.md`
+   using [Task Packet V1](../interfaces/task-packet-v1.md). Record a predecessor
+   only when its output or an accepted sequencing constraint is required,
+   attaching each dependency to its earliest consuming stage with identical IDs
+   and stage tags in both files.
 
-## Readiness Dry Run
+4. **Run the Readiness Dry Run (static — run no builds, tests, or services).**
+   Verify **every task** against all four checks before review:
+   - **Completion coverage:** try to satisfy every `Outcome` and `Observable
+     claim` while breaking an accepted obligation; close any gap.
+   - **Source truth (all tasks):** read current code and—for external crates—the
+     source of the version locked in `Cargo.lock` to confirm the existence and
+     semantics of every consumed symbol, type, trait, config key, or crate API
+     (reusing shared checks). Record verified non-obvious anchors in each
+     packet's `Sources`. If a locked crate source is uncached locally, flag the
+     unverified assumption in `Reopen if` instead of relying on memory; if
+     source contradicts planned use, repair the plan or reopen upstream.
+   - **Cold-start & base-commit falsifiability:** walk every task from
+     `tasks.md`, its packet, cited `Sources`, and current code alone (zero chat
+     history). Confirm a fresh Lead needs no guesswork on behavior, mechanism,
+     or placement, and every `Outcome` and `Observable claim` fails on the base
+     commit and distinguishes accepted behavior from a plausible incomplete
+     change (or satisfies the removal/prefactor rule in Task Packet V1).
+   - **Ready Frontier & write-lock disjointness:** identify every individually
+     ready task (coding prerequisites met, including both tasks when two
+     otherwise ready tasks share a free lock; dispatch chooses priority) and
+     every pair of tasks able to run concurrently. Confirm their `Mutable
+     owners` and `Exclusive locks` are either genuinely disjoint or declare the
+     shared lock so dispatch serializes them; add missing locks or sequence
+     colliding tasks.
 
-Check the whole plan against Completion. Could every task meet its criteria
-while an accepted outcome still fails? Trace each dependency to the source,
-producer, or external owner that can supply it by the stage that consumes it.
-Walk the order through the [Completion gates](planning/ledger-contract.md#completion-gates).
-Every coding task must be able to reach `Implemented` before final validation.
+5. **Submit for independent review.** Route the fixed `draft` ledger (or
+   no-implementation evidence) to a fresh reviewer running [Task Review /
+   Readiness](task-review-readiness.md) under [Review](../shared/review.md).
+   Repair plan-local `FAIL` findings in place; return `status: blocked` with
+   `reopen_owner` in [Transition Result
+   V1](../shared/transition.md#transition-result-v1) for upstream gaps or source
+   contradictions.
 
-Walk each task in the [Ready Frontier](planning/ledger-contract.md#ready-frontier)
-through implementation from the handoff alone, regardless of listing order or
-worker capacity. Check each existing API, type, configuration key, or other
-input the task consumes against the current source for existence and semantics.
-For a crate, use the version locked in `Cargo.lock`. Reuse source checks shared by
-several tasks. If a task marked ready lacks a required input or its source
-contradicts the planned use, correct its dependencies or reopen the input.
+6. **Finalize and hand off.** After review returns `PASS` or `CONCERNS`:
+   - persist any bounded `CONCERNS` risk into `Global constraints` or the
+     affected packet (`Reopen if` / `Final validation`) so the fresh
+     Implementation session receives it;
+   - set `status: ready` in `tasks.md` and delete `workflow-plan.md` when
+     present ([Artifacts](../shared/artifacts.md));
+   - return [Transition Result V1](../shared/transition.md#transition-result-v1)
+     (`status: ready`, `result: specs/<task>/tasks.md`, `next_owner:
+     Implementation`) for [Implementation
+     Handoff](../shared/transition.md#implementation-handoff). Stop here; never
+     start implementation inside Planning.
 
-For later tasks, check their promised inputs, outputs, and dependency timing.
-Leave dispatch order to the Orchestrator as the frontier changes. This is a
-written walkthrough without tests, services, or probes.
+## Task Shapes And Granularity
 
-Submit the fixed plan or no-implementation result to independent
-[Task Review / Readiness](task-review-readiness.md) under shared
-[Review](../shared/review.md). Reopen the smallest owner of any missing
-decision or required input.
+- **Smallest valid ledger first.** Default to one cohesive task when the change
+  fits one fresh Lead session without mixing independent outcomes or lock
+  contention. Split only to isolate independent outcomes or external gates, fit
+  one context window, unlock parallel disjoint scopes, or extract a prerequisite
+  below.
+- **Four valid task shapes** (horizontal layer splits like `types -> repo ->
+  handler -> tests` for one feature are invalid):
+  - **Vertical slice (tracer bullet):** default—a narrow, complete path through
+    all touched layers that compiles, stays valid, and delivers an observable
+    behavior alone. Litmus test: *"Assume its prerequisites are met and all
+    remaining work is deferred: who can use this outcome now, and what
+    observable behavior can they verify end-to-end?"*
+  - **Prefactoring / Shared seam:** design-authorized behavior-preserving
+    refactor or shared Rust seam (types, traits, signatures, schema/migration)
+    ordered first *only* when it stays compiling/valid alone and either unlocks
+    ≥2 parallel downstream slices or materially simplifies the next slice ("make
+    the change easy, then make the easy change").
+  - **Integration-first slice** and **Expand–migrate–contract**: see
+    [Conditional Planning Branches](planning/conditional-branches.md).
+- **Task vs lane:** parallel work inside one outcome belongs to Lead-chosen
+  lanes, not separate ledger tasks.

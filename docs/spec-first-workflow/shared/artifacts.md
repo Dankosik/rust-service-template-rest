@@ -22,8 +22,8 @@ Task-local artifacts live under `specs/<task>/`:
 Task artifacts preserve accepted behavior, design, and scope; current workflow
 owners govern execution timing. Keep at most one active coordination record:
 when persisted, `workflow-plan.md` holds pre-ledger coordination and is deleted
-once Planning persists `tasks.md` (carrying any active execution instructions
-into `Global constraints`).
+once Planning finalizes a ready `tasks.md` (carrying any active execution
+instructions into `Global constraints`).
 
 When new guidance or a mid-task decision changes scope, contracts, completion
 criteria, or execution policy, reconcile it against work already underway:

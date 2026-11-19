@@ -16,10 +16,10 @@ and reopen condition. Package next-session prompts through [Prompt
 Composition](../../prompt-composition.md), and report same-phase repair or
 context rollover as resume state.
 
-For a persisted Implementation ledger, the [Planning Ledger
-Contract](../phases/planning/ledger-contract.md#acceptance-transition) owns the
-immediate `Implemented`, `Accepted`, or `Blocked` transition, while fixed inline
-units move directly.
+For a persisted Implementation ledger, [Ledger
+Execution](../phases/implementation/ledger-execution.md#acceptance-transition)
+owns the immediate `Implemented`, `Accepted`, or `Blocked` transition, while
+fixed inline units move directly.
 
 Reopen only the smallest owner invalidated by current evidence while preserving
 unaffected decisions and proof. Pause the current phase actor at an explicit
@@ -57,12 +57,14 @@ state and result-delivery route to a single successor.
 ## Implementation Handoff
 
 When Planning returns a reviewed, ready `tasks.md`, leave the ledger and its
-inputs available in the same checkout. Tell the user that planning is complete
-and give them one message to send in a new session there, in their language,
-with the actual ledger path, such as “Implement the plan in
-`specs/order-export/tasks.md`.” Include the selected adapter's native invocation
-in the handoff when needed. End the planning session's work here. Only the
-user starts the implementation session.
+inputs available in the same checkout. Present a compact one-screen plan
+overview in the user's language—each task's `T<ID>`, one-line deliverable,
+`Depends on`, initial Ready Frontier, and any carried `CONCERNS` risks—so the
+user can verify slicing and granularity at a glance. Follow with one message to
+send in a new session there, in their language, with the actual ledger path,
+such as “Implement the plan in `specs/order-export/tasks.md`.” Include the
+selected adapter's native invocation in the handoff when needed. End the
+planning session's work here. Only the user starts the implementation session.
 
 If Planning proves there is no implementation work, report that outcome.
 If the plan is blocked, return the missing input and its owner under

@@ -1,63 +1,71 @@
 # Task Review / Readiness
 
-Use when shared [Review](../shared/review.md) routes a fixed Planning result
-or the user requests standalone readiness review. For an inline unit or
-ledger, apply the checks below. For a no-implementation result, go directly
-to its [verdict](#verdict).
+Use when [Review](../shared/review.md) routes a fixed Planning result (a draft
+ledger or no-implementation disposition) or on an explicit standalone readiness
+review. Run statically over repository and locked-dependency sources—no builds,
+tests, or services. Stay read-only: report anchored findings and their smallest
+owner without reslicing, rewriting packets, or inventing missing decisions.
 
-## Atomicity Gate
+For a no-implementation result, jump directly to [Verdict](#verdict).
 
-Before simulating execution, test whether each packet is one independently
-acceptable repository outcome. Return `FAIL` to Planning and name the
-boundaries when the packet contains more than one Outcome, or when it is only a
-layer of another Outcome and cannot be consumed without still-planned companion
-work. Independent implementation, investigation, or repair inside one
-postcondition is not a split. Do not author the replacement ledger.
+## Adversarial Falsifiers
 
-## Lenses
+Run every falsifier below against the draft ledger and its packets. Stop any
+broken path at its earliest missing choice or source contradiction while
+continuing independent paths so one review pass surfaces all material defects.
 
-Compare the whole plan with the accepted sources in both directions. Look for
-an omitted obligation, a packet that changes a cited rule, or a task whose
-removal would leave all obligations and prerequisites satisfied. Trace a path
-to Completion through the recorded dependencies at their consuming stages.
-An unknown producer, a cycle, or a result needed before it can exist breaks
-that path.
-
-Independently reconstruct the [Ready Frontier](planning/ledger-contract.md#ready-frontier)
-and apply the [Readiness Dry Run](planning.md#readiness-dry-run) to each task
-in it individually. Trace each expected outcome through its real entry point,
-including canonical and generated sources, writable owners and exclusive locks. Inspect
-deferred work in detail only when a dependency or contract is in doubt.
-
-Trace persisted artifact custody and status through each actor boundary; the
-next actor must proceed from canonical state without chat reconstruction.
-
-Falsify each changed contract/authority against current producers, consumers,
-derived outputs, mirrors, proof carriers, and replacement surfaces. A companion
-must be inside the unit, behind a dependency whose intermediate state remains
-valid, or proved unchanged. Stop a blocked path at its earliest unrecorded
-choice or unavailable input and continue checking independent paths.
-
-Do not reslice tasks, author replacement packets, or choose missing behavior,
-mechanism, ownership, rollout, authority, or concurrency.
+1. **Coverage & deletion.** Construct a scenario where every task meets its
+   `Outcome` and `Observable claim` yet an accepted obligation in `intent.md`,
+   `spec.md`, `design/`, or `rollout.md` (or a preserved consumer guarantee)
+   still fails. Conversely, test whether deleting or merging any task leaves all
+   obligations and prerequisites satisfied.
+2. **Slicing & granularity.** Verify each packet fits one valid shape (vertical
+   slice / tracer bullet, authorized prefactoring / shared seam, integration-first
+   slice, or expand–migrate–contract) and one fresh Lead session. `FAIL` if a
+   packet mixes independent outcomes or cuts a single feature into a horizontal
+   layer that cannot be consumed alone. If slicing fails, skip detailed dry-runs
+   of malformed packets, but still report upstream gaps or source contradictions
+   found in the same pass.
+3. **Base-commit falsifiability (anti-vacuity).** Check each `Outcome` and
+   `Observable claim` against current code. `FAIL` if it already holds on the
+   base commit, cannot distinguish accepted behavior from a plausible incomplete
+   change, requires another task's unlanded code to become meaningful, or
+   restates the prompt without a concrete observable delta (or removal/prefactor
+   invariant per [Task Packet V1](../interfaces/task-packet-v1.md#field-rules)).
+4. **Cold-start execution & source truth.** Walk every task from `tasks.md`, its
+   packet, cited `Sources`, and current code alone—zero chat history. Confirm
+   every cited anchor exists, every consumed symbol, config key, and
+   `Cargo.lock`-locked crate API matches actual source (reusing shared checks),
+   and a fresh Lead needs no guesswork on behavior, mechanism, or placement.
+   Check canonical handoff parity: `tasks.md` and packets match on IDs, `Depends
+   on` stage tags, and `Provides`; no orphan packets exist; active instructions
+   from `workflow-plan.md` (when present) appear in `Global constraints`.
+5. **DAG, blast radius & lock collisions.** Verify an acyclic path where all
+   tasks reach `Implemented` before final validation and every dependency uses
+   its earliest consuming stage. Falsify each changed contract against its
+   **blast radius** (callers, consumers, generated schemas, migrations, removed
+   paths): every companion sits inside the unit, behind a valid intermediate
+   dependency, or is proved unchanged. Independently reconstruct the Ready
+   Frontier (including tasks sharing a free lock) and all concurrently eligible
+   task pairs; `FAIL` on frontier mismatch or undeclared collisions across
+   `Mutable owners` or shared `Exclusive locks`.
+6. **Boundary & proof discipline.** Confirm no packet invents behavior or
+   architecture, prescribes test cases, fixtures, proving layers, or commands,
+   or adds `Additional proof` without an accepted source anchor.
 
 ## Verdict
 
-For an implementation handoff, `PASS` requires a plan that covers the accepted
-outcome, justifies its tasks, and has a feasible path to Completion. At least
-one task can start. The plan's frontier must match the tasks the reviewer
-could start individually from verified inputs, without chat history or a
-new product or design decision. Specific test cases and commands belong to
-Implementation. A required external gate applies at its consuming action.
-Missing optional integration evidence does not block readiness.
-
-For a no-implementation result, check the grounds directly in the phase
-result. `PASS` requires current evidence that each implementation obligation
-is already satisfied or a scope exit authorized by its decision owner.
-Separately requested proof or external effects remain outstanding until
-their owners supply the result.
-
-`CONCERNS` may carry a bounded later risk consistent with readiness.
-Return `FAIL` for an unmet readiness criterion, an invalid split, or a hidden
-decision. Name the smallest owner that can repair the plan or supply the
-missing decision or input.
+- **Draft ledger:**
+  - `PASS`: all six falsifiers clear, at least one task is on the Ready
+    Frontier, the plan's frontier matches the tasks the reviewer can start
+    individually from source-verified inputs without chat history, and shared
+    locks are declared accurately. Absent test cases/commands or optional
+    integration infrastructure never block readiness.
+  - `CONCERNS`: only a bounded later risk consistent with readiness (including
+    an uncached crate check noted in `Reopen if`); name the risk, task, and
+    where Planning must carry it before setting `status: ready`.
+  - `FAIL`: any surviving falsifier; anchor each finding and name the smallest
+    repair or upstream reopen owner.
+- **No-implementation result:** `PASS` requires current evidence that every
+  obligation is already met or an authorized scope exit, with owners named for
+  any outstanding proof or external effects; otherwise `FAIL`.
