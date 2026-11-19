@@ -12,7 +12,7 @@ Task-local artifacts live under `specs/<task>/`:
 | Trigger | Artifact | Owns |
 | --- | --- | --- |
 | New structured work completes requester interview | [`intent.md`](../interfaces/intent.md) | Requester meaning synthesized after interview |
-| Behavior delta must survive | `spec.md` | Outcome, behavior delta, constraints, proof expectations |
+| Behavior delta must survive | [`spec.md`](../interfaces/spec-v1.md) | Observable behavior delta, preserved guarantees, falsifiers, assumptions, carried concerns |
 | A later phase needs a decision about a system mechanism, Rust ownership, or file placement | `design/` | Selected system and ownership decisions |
 | Several units/dependencies or durable execution state exist | `tasks.md`, `tasks/<ID>-<slug>.md` | Index order/status/results and each task's outcome/boundary/acceptance |
 | Evidence must be reused or refreshed | `research/*.md` | Findings, limits, conflicts, decision effect |

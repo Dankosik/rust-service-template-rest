@@ -62,7 +62,7 @@ Evaluate these triggers before loading a phase owner:
 | --- | --- |
 | New structured work lacks a complete [Intent](spec-first-workflow/interfaces/intent.md), or outcome, scope, authority, observable success, or first owner is ambiguous | [Intake](spec-first-workflow/phases/intake.md) |
 | Current or external evidence can change a named decision | [Research](spec-first-workflow/phases/research.md) |
-| Structured work lacks a ready behavior delta | [Specification](spec-first-workflow/phases/specification.md) |
+| Structured work lacks a reviewed behavioral contract ([Specification V1](spec-first-workflow/interfaces/spec-v1.md)) | [Specification](spec-first-workflow/phases/specification.md) |
 | Implementation would otherwise choose a runtime boundary, truth, material flow, failure/recovery behavior, or rollout mechanism | [System / Integration Design](spec-first-workflow/phases/system-integration-design.md) |
 | Rust placement is open, or a choice changes which module enforces an invariant, what its callers must guarantee, or which module may depend on another, even with fixed files | [Rust Code / Ownership Design](spec-first-workflow/phases/rust-code-ownership-design.md) |
 | Preparation needs a ready ledger for handoff, or structured work lacks a ready ledger | [Planning](spec-first-workflow/phases/planning.md) |
