@@ -6,7 +6,8 @@ Use fresh independent review at the boundaries selected by this contract.
 
 Run one fresh independent review for a standalone Research synthesis and for
 each completed Specification, Technical Design, and Planning result before phase
-movement. Keep implementation tasks, subtask lanes, and test authoring moving
+movement, plus triggered pre-Gate-1 `draft` `intent.md` checks under
+[Intake](../phases/intake.md#cold-start-intent-review). Keep implementation tasks, subtask lanes, and test authoring moving
 directly along the ready frontier, reserving implementation review strictly for
 the final assembled delivery boundary (or an explicit standalone review
 request).
@@ -112,6 +113,7 @@ The phase adapter owns lenses and threshold, while the artifact, ledger, or
 
 | Fixed boundary | Adapter |
 | --- | --- |
+| Draft Intent (triggered before Gate 1) | [Cold-Start Intent Review](../phases/intake.md#cold-start-intent-review) |
 | Standalone research synthesis | [Research](../phases/research.md#review) |
 | Definition result (specification or no-delta package) | [Specification Review](../phases/specification-review.md) |
 | Technical design (system and Rust architecture) | [Technical Design Review](../phases/technical-design-review.md) |

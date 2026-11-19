@@ -188,7 +188,11 @@ requested boundaries.
 For a clear, local, reversible, single-owner outcome with bounded proof and
 closed protected decisions, execute directly without workflow artifacts or
 delegation, finish under Validation budget, and report the outcome, executed
-checks, and material limitations. Load [Review](docs/spec-first-workflow/shared/review.md#trigger)
+checks, and material limitations. If even a small request leaves user-owned
+decisions ambiguous, close them first via short
+[Grilling](docs/spec-first-workflow/shared/grilling.md) (escalating to the
+[workflow router](docs/spec-first-workflow.md) if scope outgrows Direct Work)
+rather than assuming product behavior. Load [Review](docs/spec-first-workflow/shared/review.md#trigger)
 at the final boundary when requested, when touching authorization, money, data
 integrity, concurrency, or hard-to-reverse migration, when a non-trivial
 behavior change relies on tests authored in the same thread without a
