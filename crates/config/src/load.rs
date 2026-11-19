@@ -99,7 +99,10 @@ pub enum Error {
     SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
     UnaddressableKey { key: String, path: PathBuf },
-    #[error("configuration inputs are invalid: {}", join_input_errors(.0))]
+    #[error(
+        "configuration inputs are invalid: {}",
+        crate::validate::join_errors(.0)
+    )]
     InputErrors(Vec<Error>),
     #[error("load configuration: {0}")]
     Merge(String),
@@ -113,14 +116,6 @@ impl From<ValidationErrors> for Error {
     fn from(errors: ValidationErrors) -> Self {
         Self::Validate(errors)
     }
-}
-
-fn join_input_errors(errors: &[Error]) -> String {
-    errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 pub fn load(

@@ -326,9 +326,8 @@ impl PublishDomainEvent {
             return Err("outbox_format_unsupported");
         }
         let occurred_at = OffsetDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
-            .ok()
-            .and_then(|time| time.replace_nanosecond(self.occurred_at_nanosecond).ok())
-            .ok_or("outbox_timestamp_invalid")?;
+            .and_then(|time| time.replace_nanosecond(self.occurred_at_nanosecond))
+            .map_err(|_| "outbox_timestamp_invalid")?;
         let payload = self
             .payload
             .clone()

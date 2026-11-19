@@ -10,7 +10,6 @@ pub mod jobs;
 
 // template:begin jobs-reference:test-lib-reading-counter
 pub mod reading_counter;
-pub mod reading_counter_receiver;
 // template:end jobs-reference:test-lib-reading-counter
 
 use std::num::NonZeroU32;

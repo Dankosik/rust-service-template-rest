@@ -14,7 +14,7 @@ use tower::Service;
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokens, OnBehalfOf, ServiceTokens,
     credentials::{TokenSource, acquisition_deadline},
-    request_admission::{AdmissionRefusal, take_request_subject},
+    request_admission::{AdmissionRefusal, take_request_auth},
 };
 
 type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
@@ -76,7 +76,7 @@ impl AuthenticatedClient {
             }
             request.extensions_mut().insert(context.clone());
         }
-        let subject = take_request_subject(&mut request);
+        let auth = take_request_auth(&mut request);
         let prepared =
             self.resource
                 .prepare_call(request)
@@ -86,7 +86,7 @@ impl AuthenticatedClient {
                     _ => status,
                 })?;
         let context = infra_outbound_http::RequestContext::from(prepared.opening_context());
-        let admitted_tokens = match self.tokens.admit(subject, acquisition_deadline(&context)) {
+        let admitted_tokens = match self.tokens.admit(auth, acquisition_deadline(&context)) {
             Ok(admitted_tokens) => admitted_tokens,
             Err(refusal) => return Err(prepared.refuse(admission_status(refusal))),
         };

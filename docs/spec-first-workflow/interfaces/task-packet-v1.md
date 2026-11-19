@@ -27,7 +27,7 @@ Exclusive locks:
 Final validation:
 - Claim: <what must be true in the assembled ledger>
 - Checks: <local completion checks; any explicit additional requirement with its source, or none; concrete test commands remain executor-owned>
-- Observable: <observable result and any proof boundary explicitly required by an accepted source>
+- Observable: <what result at the affected entry point distinguishes the accepted behavior from a plausible incomplete change? Include any proof boundary the accepted source requires.>
 
 Reopen if:
 <smallest upstream invalidation condition>
@@ -52,9 +52,9 @@ code or agreed contracts without passing checks. Keep annotations consistent
 with the ledger. A later acceptance or effect dependency does not block local
 implementation from closed inputs. Boundary names that work and the actual stop
 before the pending gate. Final validation describes proof for the entire
-assembled ledger; implementation alone does not satisfy it. [Ready
-Frontier](../phases/planning/ledger-contract.md#ready-frontier) owns dispatch and
-resumption.
+assembled ledger; implementation alone does not satisfy it. At execution,
+follow [Dispatch](../phases/planning/ledger-contract.md#dispatch) to assign
+or resume ready work.
 
 Outcome and Provides describe code to implement; Final validation defines
 the behavior to establish after the whole ledger is assembled.

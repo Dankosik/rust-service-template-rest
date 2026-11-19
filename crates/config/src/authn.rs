@@ -270,13 +270,9 @@ where
     const EXPECTED: &str = "a list of supported JWT algorithms or a comma-separated string";
 
     #[derive(Deserialize)]
-    #[serde(transparent)]
-    struct StrictAlgorithm(#[serde(deserialize_with = "crate::de::string_enum")] JwtAlgorithm);
-
-    #[derive(Deserialize)]
     #[serde(untagged)]
     enum Input {
-        List(Vec<StrictAlgorithm>),
+        List(Vec<crate::de::StrictEnum<JwtAlgorithm>>),
         Text(StrictString),
     }
 

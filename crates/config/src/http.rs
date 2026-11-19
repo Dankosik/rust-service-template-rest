@@ -163,21 +163,27 @@ impl HttpConfig {
     }
 }
 
+enum DrainTimeoutBasis {
+    Usable,
+    Unusable,
+}
+
 fn validate_grace_and_drain(
     grace_period: Duration,
     drain_timeout: Duration,
     tail: Option<ShutdownTail>,
     v: &mut Violations,
-) -> bool {
+) -> DrainTimeoutBasis {
     let range = Duration::from_secs(1)..=Duration::from_mins(10);
-    let grace_range = duration_range("http.grace_period", grace_period, range.clone());
-    let drain_range = duration_range("http.drain_timeout", drain_timeout, range);
-    let ranges_ok = grace_range.is_ok() && drain_range.is_ok();
-    v.check(grace_range);
-    v.check(drain_range);
-    if !ranges_ok {
-        return false;
-    }
+    let grace = v.record(duration_range(
+        "http.grace_period",
+        grace_period,
+        range.clone(),
+    ));
+    let drain = v.record(duration_range("http.drain_timeout", drain_timeout, range));
+    let (Ok(()), Ok(())) = (grace, drain) else {
+        return DrainTimeoutBasis::Unusable;
+    };
     if drain_timeout > grace_period {
         v.reject(ValidationError::new(
             "http.drain_timeout",
@@ -187,7 +193,7 @@ fn validate_grace_and_drain(
                 crate::de::display_duration(drain_timeout)
             ),
         ));
-        return false;
+        return DrainTimeoutBasis::Unusable;
     }
     if let Some(tail) = tail
         && grace_period < drain_timeout.saturating_add(tail.duration)
@@ -203,7 +209,7 @@ fn validate_grace_and_drain(
             ),
         ));
     }
-    true
+    DrainTimeoutBasis::Usable
 }
 
 impl<Propagation> HttpFields<Propagation> {
@@ -257,26 +263,25 @@ impl HttpInput {
         tail: Option<ShutdownTail>,
         v: &mut Violations,
     ) -> (HttpConfig, Option<Duration>) {
-        let drain_fits_grace =
-            validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
+        let drain_basis = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
         let readiness_propagation_delay = self.readiness_propagation_delay.0;
-        let drain_budget = if !drain_fits_grace {
-            None
-        } else if readiness_propagation_delay >= self.drain_timeout {
-            v.reject(ValidationError::new(
-                "http.readiness_propagation_delay",
-                format!(
-                    "must be less than http.drain_timeout ({}), got {}",
-                    crate::de::display_duration(self.drain_timeout),
-                    crate::de::display_duration(readiness_propagation_delay)
-                ),
-            ));
-            None
-        } else {
-            Some(
+        let drain_budget = match drain_basis {
+            DrainTimeoutBasis::Unusable => None,
+            DrainTimeoutBasis::Usable if readiness_propagation_delay >= self.drain_timeout => {
+                v.reject(ValidationError::new(
+                    "http.readiness_propagation_delay",
+                    format!(
+                        "must be less than http.drain_timeout ({}), got {}",
+                        crate::de::display_duration(self.drain_timeout),
+                        crate::de::display_duration(readiness_propagation_delay)
+                    ),
+                ));
+                None
+            }
+            DrainTimeoutBasis::Usable => Some(
                 self.drain_timeout
                     .saturating_sub(readiness_propagation_delay),
-            )
+            ),
         };
         let listener = self.admit_listener(drain_budget, v);
         let config = HttpConfig {
@@ -308,7 +313,7 @@ impl WorkerHttpConfig {
 
 impl WorkerHttpInput {
     pub(crate) fn admit(self, tail: Option<ShutdownTail>, v: &mut Violations) -> WorkerHttpConfig {
-        validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
+        let _ = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
         let listener = self.admit_listener(None, v);
         WorkerHttpConfig {
             listener,

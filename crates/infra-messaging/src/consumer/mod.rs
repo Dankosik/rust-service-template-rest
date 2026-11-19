@@ -334,12 +334,12 @@ impl Consumer {
                 status = self.refresh_durable_status() => status,
             };
             let limits = match status {
-                DurableStatus::Ready(limits) => limits,
                 DurableStatus::Lost => return Err(ConsumerError::ConsumerLost),
+                DurableStatus::Ready(_) | DurableStatus::Unavailable(_) if drain.is_cancelled() => {
+                    break 'pulls;
+                }
+                DurableStatus::Ready(limits) => limits,
                 DurableStatus::Unavailable(error) => {
-                    if drain.is_cancelled() {
-                        break 'pulls;
-                    }
                     pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
                     if wait_for_backoff(drain).await.is_break() {
                         break 'pulls;
@@ -347,9 +347,6 @@ impl Consumer {
                     continue;
                 }
             };
-            if drain.is_cancelled() {
-                break 'pulls;
-            }
             let budget = self.pull_budget(mode, deliveries.len(), limits);
             let opened = self.open_batch(&budget, deliveries, drain).await?;
             let messages = match opened {
@@ -370,39 +367,47 @@ impl Consumer {
                     }
                 }
                 BatchEnd::Stopped => break 'pulls,
-                BatchEnd::Incomplete(incomplete) => {
-                    if self.recheck_durable_consumer(drain).await?.is_break() {
-                        break 'pulls;
-                    }
-                    match incomplete {
-                        BatchIncomplete::MaxBytesExceededBeforeFirstDelivery => {
-                            pull_failed(
-                                "batch_receive",
-                                BatchReceiveError::MaxBytesExceeded.label(),
-                            );
-                            if mode == PullMode::SingleRetainedMessage {
-                                return Err(ConsumerError::RetainedMessageTooLarge);
-                            }
-                            mode = PullMode::SingleRetainedMessage;
-                        }
-                        BatchIncomplete::Closed => {
-                            mode = PullMode::Normal;
-                        }
-                        BatchIncomplete::Failed { phase, error_kind } => {
-                            mode = PullMode::Normal;
-                            pull_failed(phase, error_kind);
-                            if wait_for_backoff(drain).await.is_break() {
-                                break 'pulls;
-                            }
-                        }
-                    }
-                }
+                BatchEnd::Incomplete(incomplete) => match self
+                    .recover_incomplete_batch(incomplete, mode, drain)
+                    .await?
+                {
+                    ControlFlow::Continue(next_mode) => mode = next_mode,
+                    ControlFlow::Break(()) => break 'pulls,
+                },
             }
         }
         while let Some(joined) = deliveries.join_next().await {
             check_delivery_task_result(joined)?;
         }
         Ok(())
+    }
+
+    async fn recover_incomplete_batch(
+        &self,
+        incomplete: BatchIncomplete,
+        mode: PullMode,
+        drain: &CancellationToken,
+    ) -> Result<ControlFlow<(), PullMode>, ConsumerError> {
+        if self.recheck_durable_consumer(drain).await?.is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        match incomplete {
+            BatchIncomplete::MaxBytesExceededBeforeFirstDelivery => {
+                pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
+                if mode == PullMode::SingleRetainedMessage {
+                    return Err(ConsumerError::RetainedMessageTooLarge);
+                }
+                Ok(ControlFlow::Continue(PullMode::SingleRetainedMessage))
+            }
+            BatchIncomplete::Closed => Ok(ControlFlow::Continue(PullMode::Normal)),
+            BatchIncomplete::Failed { phase, error_kind } => {
+                pull_failed(phase, error_kind);
+                if wait_for_backoff(drain).await.is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
+                Ok(ControlFlow::Continue(PullMode::Normal))
+            }
+        }
     }
 
     async fn open_batch(
@@ -421,32 +426,31 @@ impl Consumer {
                 .messages(),
         );
         tokio::pin!(request);
-        loop {
+        let result = loop {
             tokio::select! {
                 biased;
                 () = drain.cancelled() => return Ok(BatchOpen::Stop),
                 Some(joined) = deliveries.join_next(), if !deliveries.is_empty() => {
                     check_delivery_task_result(joined)?;
                 }
-                result = &mut request => {
-                    let error_kind = match result {
-                        Ok(Ok(messages)) => return Ok(BatchOpen::Ready(Box::new(messages))),
-                        Ok(Err(error)) => batch_create_error_kind(error.kind()),
-                        Err(_) => "local_timeout",
-                    };
-                    if drain.is_cancelled() {
-                        return Ok(BatchOpen::Stop);
-                    }
-                    pull_failed("batch_create", error_kind);
-                    if self.recheck_durable_consumer(drain).await?.is_break()
-                        || wait_for_backoff(drain).await.is_break()
-                    {
-                        return Ok(BatchOpen::Stop);
-                    }
-                    return Ok(BatchOpen::Retry);
-                }
+                result = &mut request => break result,
             }
+        };
+        let error_kind = match result {
+            Ok(Ok(messages)) => return Ok(BatchOpen::Ready(Box::new(messages))),
+            Ok(Err(error)) => batch_create_error_kind(error.kind()),
+            Err(_) => "local_timeout",
+        };
+        if drain.is_cancelled() {
+            return Ok(BatchOpen::Stop);
         }
+        pull_failed("batch_create", error_kind);
+        if self.recheck_durable_consumer(drain).await?.is_break()
+            || wait_for_backoff(drain).await.is_break()
+        {
+            return Ok(BatchOpen::Stop);
+        }
+        Ok(BatchOpen::Retry)
     }
 
     async fn recheck_durable_consumer(

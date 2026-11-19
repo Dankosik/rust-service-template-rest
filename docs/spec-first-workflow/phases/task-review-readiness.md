@@ -23,10 +23,10 @@ to Completion through the recorded dependencies at their consuming stages.
 An unknown producer, a cycle, or a result needed before it can exist breaks
 that path.
 
-Independently reconstruct the ready frontier and apply the [Readiness Dry
-Run](planning.md#readiness-dry-run) to every task eligible for immediate
-dispatch. Trace each expected outcome through its real entry point, including
-canonical and generated sources, writable owners and exclusive locks. Inspect
+Independently reconstruct the [Ready Frontier](planning/ledger-contract.md#ready-frontier)
+and apply the [Readiness Dry Run](planning.md#readiness-dry-run) to each task
+in it individually. Trace each expected outcome through its real entry point,
+including canonical and generated sources, writable owners and exclusive locks. Inspect
 deferred work in detail only when a dependency or contract is in doubt.
 
 Trace persisted artifact custody and status through each actor boundary; the
@@ -45,8 +45,8 @@ mechanism, ownership, rollout, authority, or concurrency.
 
 For an implementation handoff, `PASS` requires a plan that covers the accepted
 outcome, justifies its tasks, and has a feasible path to Completion. At least
-one task can start. The tasks the plan makes eligible for dispatch must match
-those the reviewer can start from verified inputs, without chat history or a
+one task can start. The plan's frontier must match the tasks the reviewer
+could start individually from verified inputs, without chat history or a
 new product or design decision. Specific test cases and commands belong to
 Implementation. A required external gate applies at its consuming action.
 Missing optional integration evidence does not block readiness.

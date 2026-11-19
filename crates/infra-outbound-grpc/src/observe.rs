@@ -20,8 +20,8 @@ pub(crate) const CLIENT_STARTED_METRIC: &str = "grpc_client_started_total";
 pub(crate) const CLIENT_HANDLED_METRIC: &str = "grpc_client_handled_total";
 pub(crate) const CLIENT_HANDLING_METRIC: &str = "grpc_client_handling_seconds";
 
-const CLIENT_METHOD_LIMIT: usize = 256;
-const CLIENT_COMPONENT_MAX_BYTES: usize = 256;
+const MAX_ADMITTED_METHODS: usize = 256;
+const MAX_RPC_NAME_PART_BYTES: usize = 256;
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SECONDS_BUCKETS)];
 
@@ -191,7 +191,7 @@ impl Series {
         if let Some(existing) = current.get(path) {
             return Some(Arc::clone(existing));
         }
-        if current.len() >= CLIENT_METHOD_LIMIT {
+        if current.len() >= MAX_ADMITTED_METHODS {
             return None;
         }
         let metrics = Arc::new(MethodMetrics::for_method(rpc));
@@ -262,8 +262,8 @@ impl MethodMetrics {
 
 fn verified_client_path<B>(request: &http::Request<B>) -> Option<(&str, RpcName<'_>)> {
     let declared = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
-    if declared.service().len() > CLIENT_COMPONENT_MAX_BYTES
-        || declared.method().len() > CLIENT_COMPONENT_MAX_BYTES
+    if declared.service().len() > MAX_RPC_NAME_PART_BYTES
+        || declared.method().len() > MAX_RPC_NAME_PART_BYTES
     {
         return None;
     }

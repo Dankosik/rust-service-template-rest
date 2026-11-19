@@ -397,7 +397,6 @@
   "jobs-reference": {
     "remove_when_unselected": [
       "test/src/reading_counter.rs",
-      "test/src/reading_counter_receiver.rs",
       "test/src/bin/reading_counter_fixture.rs",
       "test/fixtures/migrations/reading_counter/",
       "test/tests/jobs/reliability.rs"

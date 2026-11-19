@@ -1,24 +1,12 @@
-use std::{
-    fmt,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::fmt;
 
 use domain_events::{Event, EventPayload};
-use infra_jobs::{
-    EnqueueOptions, Enqueued, Job, JobError, JobKind, Policy, TransactionalHandler,
-    TransactionalJob,
-};
+use infra_jobs::{EnqueueOptions, Enqueued, JobKind};
 use infra_messaging::{
     PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
 };
-use infra_postgres::{Dsn, Tx, TxError, in_tx};
+use infra_postgres::{Tx, TxError, in_tx};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
-use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use time::{UtcDateTime, format_description::well_known::Rfc3339};
@@ -41,9 +29,6 @@ pub fn publication(
 ) -> Result<PublicationRoute<Operation>, RegistryError> {
     PUBLICATIONS.declare(registry, &Route::new(subject))
 }
-pub const POOL_PRESSURE_DIR: &str = "READING_POOL_PRESSURE_DIR";
-pub const LOCAL_CHECKPOINT_DIR: &str = "READING_LOCAL_CHECKPOINT_DIR";
-pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -284,37 +269,6 @@ async fn enqueue_intents(
     })
 }
 
-pub async fn replay(
-    pool: &PgPool,
-    operation: &Operation,
-    outbound: &Producer,
-    endpoint: &str,
-) -> Result<Accepted, Error> {
-    operation.validate()?;
-    in_tx(pool, async |tx| {
-        let row = sqlx::query("SELECT operation,event_id,event_time,event_subject,local_job_id::text,outbox_job_id::text,webhook_job_id::text FROM reading_requests WHERE scope=$1::uuid AND operation_id=$2::uuid FOR UPDATE")
-            .bind(&operation.scope).bind(&operation.operation_id).fetch_optional(&mut *tx).await?.ok_or(Error::MissingIntent)?;
-        let original = accepted_row(&row, operation)?;
-        let remaining: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM background_jobs WHERE id IN ($1::uuid,$2::uuid,$3::uuid) OR (kind='publish_domain_event' AND COALESCE(payload_text::jsonb, payload)->>'message_id'=$4 AND state IN ('pending','running')))")
-            .bind(&original.local_job_id).bind(&original.outbox_job_id).bind(&original.webhook_job_id).bind(&original.event_id).fetch_one(&mut *tx).await?;
-        if remaining { return Err(Error::MissingIntent); }
-        let occurred_at = UtcDateTime::parse(&original.event_time, &Rfc3339).map_err(|_| Error::InvalidOperation)?;
-        let subject: String = row.try_get("event_subject")?;
-        let event = Event { id: operation.local_event_id(), occurred_at, payload: operation.clone() };
-        let publication = publication(&mut Registry::default(), &subject).map_err(|_| Error::InvalidOperation)?;
-        let event = if event.id == original.event_id {
-            publication.prepare(&event)
-        } else {
-            publication.for_outbox(PUBLISHER_ID).prepare(&event)
-        }.map_err(|_| Error::InvalidOperation)?;
-        if event.message_id() != original.event_id {
-            return Err(Error::Conflict);
-        }
-        let prepared = PreparedRequest { operation: operation.clone(), event, event_time: original.event_time };
-        enqueue_intents(tx, &prepared, outbound, endpoint).await
-    }).await
-}
-
 fn accepted_row(row: &sqlx::postgres::PgRow, operation: &Operation) -> Result<Accepted, Error> {
     same_operation(row.try_get("operation")?, operation)?;
     Ok(Accepted {
@@ -417,186 +371,4 @@ pub async fn read_effect(
         })
     })
     .transpose()
-}
-
-#[derive(Default)]
-struct Controls {
-    pressure: Option<PathBuf>,
-    checkpoint: Option<PathBuf>,
-    fail_operation: Option<String>,
-    pressure_released: AtomicBool,
-    checkpoint_used: AtomicBool,
-}
-
-impl Controls {
-    async fn hold_connections(&self, pool: &PgPool) -> Result<(), Error> {
-        let Some(directory) = &self.pressure else {
-            return Ok(());
-        };
-        let until = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut held = Vec::with_capacity(8);
-        for _ in 0..8 {
-            held.push(
-                tokio::time::timeout_at(
-                    until,
-                    infra_postgres::acquire(pool, "reading fixture pressure"),
-                )
-                .await
-                .map_err(|_| Error::Control)??,
-            );
-        }
-        tokio::time::timeout_at(until, tokio::fs::write(directory.join("held"), b"8\n"))
-            .await
-            .map_err(|_| Error::Control)?
-            .map_err(|_| Error::Control)?;
-        wait_release(directory, until).await?;
-        drop(held);
-        self.pressure_released.store(true, Ordering::Release);
-        Ok(())
-    }
-
-    async fn before_completion(&self) -> Result<(), Error> {
-        let Some(directory) = &self.checkpoint else {
-            return Ok(());
-        };
-        if self.checkpoint_used.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let until = tokio::time::Instant::now() + Duration::from_secs(5);
-        tokio::time::timeout_at(
-            until,
-            tokio::fs::write(directory.join("reached"), b"uncommitted_effect\n"),
-        )
-        .await
-        .map_err(|_| Error::Control)?
-        .map_err(|_| Error::Control)?;
-        wait_release(directory, until).await?;
-        Ok(())
-    }
-}
-
-async fn wait_release(
-    directory: &std::path::Path,
-    until: tokio::time::Instant,
-) -> Result<(), Error> {
-    while tokio::time::Instant::now() < until {
-        match tokio::time::timeout_at(until, tokio::fs::try_exists(directory.join("release"))).await
-        {
-            Ok(Ok(true)) | Err(_) => return Ok(()),
-            Ok(Ok(false)) => {}
-            Ok(Err(_)) => return Err(Error::Control),
-        }
-        tokio::time::sleep_until(
-            until.min(tokio::time::Instant::now() + Duration::from_millis(10)),
-        )
-        .await;
-    }
-    Ok(())
-}
-
-impl TransactionalHandler<Operation> for Arc<Controls> {
-    async fn run(&self, job: TransactionalJob<Operation>, tx: &mut Tx<'_>) -> Result<(), JobError> {
-        if self.pressure.is_some() && !self.pressure_released.load(Ordering::Acquire) {
-            return Err(JobError::snooze(Duration::from_millis(100)).expect("valid fixture delay"));
-        }
-        if self.fail_operation.as_deref() == Some(job.payload().operation_id.as_str()) {
-            return Err(JobError::permanent(
-                "reading fixture selected permanent failure",
-            ));
-        }
-        apply_effect_in_tx(tx, Channel::Local, job.payload())
-            .await
-            .map_err(|error| match error {
-                Error::InvalidOperation => JobError::permanent("reading operation is invalid"),
-                Error::Conflict => JobError::permanent("reading identity conflicts"),
-                Error::Database(error) => error.into(),
-                _ => JobError::retryable("reading effect failed"),
-            })?;
-        self.before_completion()
-            .await
-            .map_err(|_| JobError::retryable("reading fixture control failed"))
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct HoldConnections;
-
-impl JobKind for HoldConnections {
-    const NAME: &'static str = "test.reading_hold_connections";
-}
-
-pub fn register(
-    registration: &mut jobs_worker::Registration<'_>,
-) -> Result<(), jobs_worker::BuildError> {
-    let subject = std::env::var("READING_EVENT_SUBJECT").unwrap_or_else(|_| SUBJECT.to_owned());
-    publication(&mut registration.messages, &subject)?;
-    let controls = Arc::new(Controls {
-        pressure: std::env::var_os(POOL_PRESSURE_DIR).map(PathBuf::from),
-        checkpoint: std::env::var_os(LOCAL_CHECKPOINT_DIR).map(PathBuf::from),
-        fail_operation: std::env::var(FAIL_OPERATION).ok(),
-        ..Controls::default()
-    });
-    if controls.pressure.is_some() {
-        let options = service_config::LoadOptions::try_parse_from(std::env::args_os().skip(1))?;
-        let config = service_config::load_jobs_operator(&options)?;
-        let postgres = config.postgres();
-        let dsn = Dsn::admit_for_environment(
-            postgres.dsn.expose_secret(),
-            postgres.password_file.as_deref(),
-            postgres.local_development,
-        )?;
-        let holder = Arc::clone(&controls);
-        registration
-            .jobs
-            .register(Policy::default(), move |job: Job<HoldConnections>| {
-                let holder = Arc::clone(&holder);
-                async move {
-                    holder
-                        .hold_connections(job.pool())
-                        .await
-                        .map_err(|_| JobError::retryable("reading fixture pressure failed"))
-                }
-            });
-        registration.spawn("reading_pressure_request", move |cancel| async move {
-            if matches!(
-                cancel
-                    .run_until_cancelled(Box::pin(enqueue_pressure(&dsn)))
-                    .await,
-                Some(Ok(()))
-            ) {
-                cancel.cancelled().await;
-            }
-        });
-    }
-    registration.jobs.register_transactional(
-        Policy {
-            max_attempts: 25,
-            timeout: Duration::from_secs(30),
-            max_running: None,
-        },
-        controls,
-    );
-    Ok(())
-}
-
-async fn enqueue_pressure(dsn: &Dsn) -> Result<(), Error> {
-    let pool = infra_postgres::connect(
-        dsn,
-        &infra_postgres::PoolOptions {
-            max_connections: std::num::NonZeroU32::MIN,
-            application_name: "reading-pressure-producer",
-            default_isolation: infra_postgres::Isolation::ServerDefault,
-            session_settings_source: infra_postgres::SessionSettingsSource::Startup,
-            wait_order: infra_postgres::WaitOrder::Arrival,
-        },
-    )
-    .await
-    .map_err(|_| Error::Control)?;
-    let result = in_tx(&pool, async |tx| -> Result<(), Error> {
-        let _ = infra_jobs::enqueue(tx, &HoldConnections, EnqueueOptions::default()).await?;
-        Ok(())
-    })
-    .await;
-    pool.close().await;
-    result
 }

@@ -58,13 +58,13 @@ impl ClientObservation {
     }
 }
 
-pub(crate) fn client_deadline() -> tonic::Status {
+pub(crate) fn client_deadline_status() -> tonic::Status {
     tonic::Status::deadline_exceeded("request deadline exceeded")
 }
 
-pub(crate) fn client_stopped(reason: Stopped) -> tonic::Status {
+pub(crate) fn client_stopped_status(reason: Stopped) -> tonic::Status {
     match reason {
-        Stopped::Deadline => client_deadline(),
+        Stopped::Deadline => client_deadline_status(),
         Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
     }
 }
@@ -151,7 +151,7 @@ impl<B> StreamPhase<B> {
         let Self::Open(active) = self else {
             return None;
         };
-        active.lifetime.stopped().map(client_stopped)
+        active.lifetime.stopped().map(client_stopped_status)
     }
 
     fn transition(&mut self, next: Self, outcome: ClientOutcome) -> Option<StreamCompletion<B>> {
@@ -164,7 +164,7 @@ impl<B> StreamPhase<B> {
         }
     }
 
-    fn complete_stopped(&mut self, status: &tonic::Status) -> Option<StreamCompletion<B>> {
+    fn stage_stopped_trailers(&mut self, status: &tonic::Status) -> Option<StreamCompletion<B>> {
         let Self::Open(active) = self else {
             return None;
         };
@@ -178,7 +178,7 @@ impl<B> StreamPhase<B> {
     }
 
     fn poll_stopped(&mut self, status: &tonic::Status) -> (FramePoll, Option<StreamCompletion<B>>) {
-        let completion = self.complete_stopped(status);
+        let completion = self.stage_stopped_trailers(status);
         (self.take_terminal(), completion)
     }
 
@@ -219,7 +219,7 @@ where
             return (Ok(self.take_terminal()), None);
         };
         if let Some(reason) = active.lifetime.stopped() {
-            let (frame, completion) = self.poll_stopped(&client_stopped(reason));
+            let (frame, completion) = self.poll_stopped(&client_stopped_status(reason));
             return (Ok(frame), completion);
         }
         store_waker(&mut active.waker, context.waker());
@@ -259,7 +259,7 @@ pub(crate) fn attach_client_response(
     custody: ClientCustody,
 ) -> http::Response<tonic::body::Body> {
     let initial = if let Some(reason) = custody.lifetime.stopped() {
-        let status = client_stopped(reason);
+        let status = client_stopped_status(reason);
         observation.record_local_stop(&status);
         for name in [
             tonic::Status::GRPC_STATUS,
@@ -310,7 +310,7 @@ where
         let completion = if let Some(outcome) = initial {
             phase.transition(StreamPhase::Done, outcome)
         } else if let Some(status) = phase.stopped_status() {
-            phase.complete_stopped(&status)
+            phase.stage_stopped_trailers(&status)
         } else if ended {
             phase.transition(StreamPhase::Done, missing_status)
         } else {
@@ -349,7 +349,7 @@ where
             let result = AssertUnwindSafe(async {
                 let reason = lifetime.wait_stopped().await;
                 if let Some(state) = weak.upgrade() {
-                    terminate_stream(&state, &client_stopped(reason));
+                    terminate_stream(&state, &client_stopped_status(reason));
                 }
             })
             .catch_unwind()
@@ -375,7 +375,7 @@ where
 }
 
 fn terminate_stream<B>(state: &Mutex<StreamPhase<B>>, status: &tonic::Status) {
-    let completion = state.lock().complete_stopped(status);
+    let completion = state.lock().stage_stopped_trailers(status);
     if let Some(mut completion) = completion {
         if let Some(waker) = completion.active.waker.take() {
             waker.wake();
