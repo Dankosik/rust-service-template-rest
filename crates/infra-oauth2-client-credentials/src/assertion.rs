@@ -40,13 +40,13 @@ impl Signer {
             client_id: options.client_id,
             assertion_audience: options.assertion_audience,
         };
-        let elapsed = now
+        let since_unix_epoch = now
             .duration_since(UNIX_EPOCH)
             .map_err(|_| ConfigurationError {
                 key: "system_clock",
                 reason: "must be at or after the Unix epoch",
             })?;
-        signer.sign_at(elapsed).map_err(|_| invalid_key)?;
+        signer.sign_at(since_unix_epoch).map_err(|_| invalid_key)?;
         Ok(signer)
     }
 
@@ -60,15 +60,20 @@ impl Signer {
 
     /// RFC 10070 §4
     pub(crate) fn sign(&self) -> Result<Zeroizing<String>, AcquisitionError> {
-        let elapsed = SystemTime::now()
+        let since_unix_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AcquisitionError::Assertion)?;
-        self.sign_at(elapsed)
+        self.sign_at(since_unix_epoch)
             .map_err(|_| AcquisitionError::Assertion)
     }
 
-    fn sign_at(&self, elapsed: Duration) -> jsonwebtoken::errors::Result<Zeroizing<String>> {
-        let issued = elapsed.as_secs().saturating_sub(ASSERTION_BACKDATE_SECS);
+    fn sign_at(
+        &self,
+        since_unix_epoch: Duration,
+    ) -> jsonwebtoken::errors::Result<Zeroizing<String>> {
+        let issued = since_unix_epoch
+            .as_secs()
+            .saturating_sub(ASSERTION_BACKDATE_SECS);
         let claims = AssertionClaims {
             iss: &self.client_id,
             sub: &self.client_id,

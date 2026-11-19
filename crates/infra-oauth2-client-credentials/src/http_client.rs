@@ -7,7 +7,7 @@ use tokio::time::Instant;
 use crate::{
     AcquisitionError, ConfigurationError, Error, ExchangeTokens, ServiceTokens,
     credentials::{TokenSource, acquisition_deadline},
-    request_admission::take_request_subject,
+    request_admission::take_request_auth,
 };
 
 #[derive(Clone, derive_more::Debug)]
@@ -68,13 +68,13 @@ impl AuthenticatedClient {
         mut request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let subject = take_request_subject(&mut request);
+        let auth = take_request_auth(&mut request);
         let mut prepared = self
             .resource
             .prepare(request, context)
             .map_err(Error::at_prepare)?;
         let deadline = acquisition_deadline(prepared.context());
-        let admitted_tokens = self.tokens.admit(subject, deadline)?;
+        let admitted_tokens = self.tokens.admit(auth, deadline)?;
         let acquired = admitted_tokens.acquire_for_request(deadline).await?;
         prepared.set_authorization(acquired.header.clone());
         prepared
