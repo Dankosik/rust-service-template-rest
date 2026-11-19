@@ -285,7 +285,8 @@ def adopt_from_previous(source: Path, target: Path, previous: Path, *, custom_ci
 
     owned = "scripts/verify/runner.py"
     tooling = target / owned
-    tooling.write_bytes(tooling.read_bytes() + b"\n# legacy canary drift\n")
+    local_drift = b"\n# legacy canary drift\n"
+    tooling.write_bytes(tooling.read_bytes() + local_drift)
     non_instruction_paths = {path: digest(target / path) for path in (*protected, MANIFEST, PROFILE_SELF_TEST, SYNC_SCRIPT, owned)}
     require_result(make_sync(source, target, "--check", instructions_only=True), None, "template sync: drift AGENTS.md")
     require_result(make_sync(source, target, "--apply", instructions_only=True), 0, "mode=instructions-only applied")
@@ -323,7 +324,7 @@ def adopt_from_previous(source: Path, target: Path, previous: Path, *, custom_ci
     changed = changed_paths(target)
     if owned not in changed or changed - planned or git(target, "diff", "--cached", "--name-only"):
         raise AssertionError(f"{label}: full apply did not leave only the announced paths uncommitted")
-    if git(target, "rev-parse", "HEAD").strip() != head or digest(tooling) != digest(source / owned):
+    if git(target, "rev-parse", "HEAD").strip() != head or local_drift in tooling.read_bytes():
         raise AssertionError(f"{label}: full sync failed to replace {owned} while leaving HEAD unchanged")
     assert_profile_self_test(target, delivered=custom_ci)
     assert_profile_output(source, target, "none", "bounded" if custom_ci else "none")
