@@ -31,8 +31,8 @@ Load only methods exposed by the decision:
   `rust-observability`;
 - task lifetime, cancellation, or channel ownership -> `rust-tokio`;
 - CI gates, tool pins, the image, or publication -> `rust-delivery-platform`;
-- migration, mixed versions, or managed dependency -> [Release
-  Closure](../rubrics/release-closure.md);
+- potential impact on deployment, operation, or recovery, including changes to
+  runtime configuration or trust material -> [Release Closure](../rubrics/release-closure.md);
 - non-mechanical Rust placement -> [Rust Code / Ownership
   Design](rust-code-ownership-design.md).
 
@@ -86,9 +86,9 @@ remain authoritative.
 
 Return the selected mechanism, driver and alternative dispositions, material
 flows, operator signals, unit costs, affected authorities and contracts,
-measurable proof boundaries, and reopen conditions. Persist only through [Artifacts](../shared/artifacts.md),
-then apply [Technical Design Review](technical-design-review.md) through shared
-[Review](../shared/review.md).
+measurable proof boundaries, and reopen conditions. Persist only through
+[Artifacts](../shared/artifacts.md). Include this result in the phase candidate
+for [Technical Design Review](technical-design-review.md).
 
 Ready when every material flow and owner is closed without downstream invention.
 Reopen Specification for behavior, Research for evidence, or the named external

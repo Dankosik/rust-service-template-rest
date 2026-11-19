@@ -21,10 +21,10 @@ and proof; preserve unaffected boundaries.
 
 ## Review
 
-Use root self-review for unambiguous placement. Load [Rust Ownership
-Review](#rust-ownership-review) only when its conditional trigger is present. A
-broader shared [Review](../shared/review.md) routes through Technical Design
-Review and consumes any current panel receipts.
+Check the ownership map locally for unambiguous placement. Use the
+[Rust Ownership Review](#rust-ownership-review) panel when its trigger applies.
+Include the map and any current panel receipts in the phase candidate for
+[Technical Design Review](technical-design-review.md).
 
 Done when every responsibility has one owner, every changed file one present
 reason, the crate graph keeps feature crates free of transport and provider
@@ -66,8 +66,7 @@ implementation-local facts prevent an exact path now.
 Load this complementary panel only when a real responsibility/placement fork
 survives, several crates or ownership boundaries change, generated/manual
 containment is non-obvious, the restructure is broad or hard to reverse, or
-current evidence/reviewers materially disagree. Ordinary unambiguous placement
-uses root self-review.
+current evidence/reviewers materially disagree.
 
 Partition one fixed [Ownership Map V1](#ownership-map-v1) into:
 
@@ -82,5 +81,4 @@ Each read-only lane returns only its lens result through shared
 [Review](../shared/review.md). The root synthesizes compatibility. The panel
 passes only when every triggered lens is `PASS` on the same candidate; repair or
 reopen findings, then re-run only each materially affected lens in fresh
-context. A broader triggered Technical Design Review consumes these receipts
-without repeating them.
+context.
