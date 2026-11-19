@@ -156,8 +156,12 @@ mod tests {
     struct Ignore;
 
     impl Consumer for Ignore {
-        async fn process(&self, _tx: &mut Tx<'_>, _incoming: &Incoming) -> Result<(), JobError> {
-            Ok(())
+        fn process(
+            &self,
+            _tx: &mut Tx<'_>,
+            _incoming: &Incoming,
+        ) -> impl Future<Output = Result<(), JobError>> + Send {
+            std::future::ready(Ok(()))
         }
     }
 
