@@ -544,7 +544,7 @@ fn parse_payload_header(line: &[u8]) -> Option<PayloadHeader<'_>> {
         _ => return None,
     };
     let subject = fields.next()?;
-    let rest = std::array::from_fn(|_| fields.next());
+    let rest = std::array::from_fn::<_, 5, _>(|_| fields.next());
     let (reply, length) = match (verb, rest) {
         (PayloadVerb::Pub, [Some(length), None, ..]) => (None, length),
         (PayloadVerb::Pub, [Some(reply), Some(length), None, ..]) => (Some(reply), length),
