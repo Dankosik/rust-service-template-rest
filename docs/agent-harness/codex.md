@@ -78,8 +78,8 @@ relying on it for dependent work.
 Use `collaboration.list_agents` to inspect the tree and `collaboration.wait_agent`
 only on lanes with returned identities. `collaboration.send_message` steers an
 active turn without starting one; `collaboration.followup_task` wakes an
-idle/completed agent within [Context And Lifetime](../agent-harness.md#context-and-lifetime)
-or permitted Lead reuse (re-evaluating model/effort). Neither changes
+idle/completed agent within [Context And Lifetime](../agent-harness.md#context-and-lifetime).
+Neither changes
 model/effort: escalate by stopping the old lane, reconciling its edits, and
 spawning a fresh agent. Never wait on an idle lane or blindly repeat uncertain
 dispatch; reconcile once from native status, ledger, and Git candidate identity.

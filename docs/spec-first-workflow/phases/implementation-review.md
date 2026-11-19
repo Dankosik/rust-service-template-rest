@@ -1,103 +1,91 @@
 # Implementation Review
 
-Use when shared [Review](../shared/review.md) routes one fixed implementation
-unit, inline outcome, or integrated candidate. This adapter owns only
-implementation falsifiers and verdicts.
+Use when shared [Review](../shared/review.md) routes a fixed implementation
+candidate (single-unit final delivery, assembled ledger candidate, or explicit
+standalone review). This adapter owns implementation falsifiers and verdicts.
+Stay read-only and perform the review directly without repairing, re-scoping,
+or accepting.
 
-## Final Delivery
+Pin the candidate diff (`<Base>..HEAD` or supplied fixed identity), confirm it
+is non-empty, and **read touched production code before its tests**. Consume
+accepted sources (`intent.md`, `spec.md`, `design/`, `rollout.md`, `tasks.md`,
+packets), current proof receipts, and irreproducible external evidence. Reuse
+valid results; run an existing bounded falsifier only for a concrete diagnostic
+question within [Evidence
+Contract](../shared/evidence-contract.md#required-and-optional-proof). When
+long or external required checks are still running on the fixed candidate,
+inspect code and traces now, report discovered defects promptly, and wait for
+those results before returning `PASS`.
 
-Review one fixed delivery candidate containing the assembled task ledger or
-unit.
+## Adversarial Falsifiers
 
-Read touched production code before its tests, and try to disprove the
-postcondition and important constraints on the real path, retained scope,
-dependencies, and claim-scoped proof. Consume the accepted
-sources, fixed candidate identity when crossing a boundary, current proof, and
-irreproducible external evidence. Reuse valid results. A concrete diagnostic
-question may use an existing bounded falsifier within the [Evidence
-Contract](../shared/evidence-contract.md#required-and-optional-proof); it does not
-expand mandatory checks or authorize building a test environment.
+Evaluate **all four axes** and report surviving findings grouped by axis so a
+clean pass on one axis never masks a defect on another. Continue across
+independent paths so one review pass surfaces all material defects.
 
-When required checks are still running on the fixed candidate, inspect the code
-and supported traces without duplicating those checks. Pending execution alone
-is not a defect or unavailable proof. Receive the results before a final PASS;
-report discovered defects promptly. Failed or unavailable required proof keeps
-its existing failure or NEEDS_PARENT path. If repair changes the candidate,
-apply shared Review's delta and freshness rules.
+1. **Outcome, Spec & Scope Parity.** Start from the accepted sources and
+   `Completion`. Construct a concrete caller or operator scenario where every
+   executed test stays green yet an accepted obligation, preserved guarantee,
+   withdrawn removal path, or `Completion` criterion fails. Trace every
+   material diff hunk back to an accepted obligation; flag unrequested behavior
+   changes or silent scope drift.
+2. **Real-Path Defects & Cross-Unit Seams.** Attack touched production code on
+   concrete boundary, rejection, error-precedence, partial-write,
+   cancellation/drop, concurrency, authorization, money, data-integrity, and
+   migration-reversibility paths. On multi-task candidates, inspect every
+   `Provides -> Depends on` seam, assembly point, and recorded task `decisions`
+   entry for cross-unit mismatches (`INTEGRATION_DEFECT`) and deferred
+   unit-local invariants.
+3. **Structure & Single Ownership.** Apply `rust-structural-quality`'s deletion
+   test and [Engineering](../../../AGENTS.md#engineering). Flag code that
+   reimplements a mechanism already provided with matching boundary semantics
+   by `std`, a declared crate, or an authoritative tool; splits one fact across
+   carriers callers must keep aligned by hand; or adds an unjustified crate,
+   dependency, layer, trait, config key, or retained fallback/shim. Name the
+   violated constraint and exact item to delete, collapse, bind, or delegate.
+4. **Test & Proof Falsifiability.** On candidate-added or edited tests and
+   claimed proof, test whether each guard would actually go **red** when the
+   claimed behavior breaks. Flag **tautological** assertions (recomputing
+   expected values the way the code does), tests that mock away the boundary
+   under claim or mirror internal steps rather than observable contracts,
+   retries or wall-clock sleeps masking nondeterminism, copy-pasted suites
+   duplicating an already-covered path at the same layer, and deleted or
+   weakened independent safety, durability, or sole regression guards.
 
-An intermediate task or lane handoff never triggers this adapter. Review a
-single unit here only as final delivery or under an explicit standalone review
-request; use the integrated-candidate section for multi-task final delivery.
+## Blocking Bar And Verdict
 
-Classify each surviving finding using [Review Result
-V1](../interfaces/review-result-v1.md). A blocking finding must identify the
-exact accepted claim it falsifies, the candidate anchor, a reproducible or
-mechanically checkable failure, and the smallest repair boundary. Style
-preferences, alternative architecture, naming improvements, speculative future
-risks, and unrelated cleanup are `FOLLOW_UP` unless they falsify the current
-Outcome, Boundary, constraint, or final validation claim. A `FOLLOW_UP` cannot fail
-the current task. Missing optional integration, provider, or container evidence
-alone is not a defect, FAIL, or NEEDS_PARENT. An actual in-scope defect found by
-an optional check remains blocking. Do not use a generic risk label to add a
-new acceptance condition.
+Return [Review Result V1](../interfaces/review-result-v1.md) (`PASS | FAIL |
+NEEDS_PARENT`, or `REVIEW_HANDOFF_INVALID` when the fixed delivery boundary is
+missing):
 
-For a structure `TASK_DEFECT`, name the current constraint violated and the
-concrete unnecessary responsibility, dependency, duplication, hand-rolled
-mechanism, unlinked duplicate representation, or retained path. Apply the
-accepted simplicity and dependency constraints, including
-[Engineering](../../../AGENTS.md#engineering): reimplementing a mechanism
-already provided with matching boundary semantics by `std`, a declared crate, or
-an authoritative tool, or splitting one fact across carriers callers must keep
-aligned by hand, is a `TASK_DEFECT` unless a concrete boundary divergence
-justifies keeping it. A shorter equivalent spelling alone does not establish a
-violation; an alternative organization that preserves current responsibilities
-and single ownership is `FOLLOW_UP`.
+| Disposition | Bar |
+| --- | --- |
+| Blocking (`TASK_DEFECT`, `INTEGRATION_DEFECT`, `UPSTREAM_GAP`) | Cites (1) the exact accepted claim or constraint falsified, (2) candidate anchor (`path::Symbol` / hunk), (3) a reproducible trace, counterexample, or mechanical check, and (4) the smallest repair or reopen owner. An actual in-scope defect found by an optional check blocks. |
+| Non-blocking (`FOLLOW_UP`, never blocks `PASS`) | Style preferences, equivalent alternative organizations preserving single ownership, naming polish, speculative future risks, untouched historical test debt, and missing optional integration, provider, or container evidence. |
 
-For a test `TASK_DEFECT` on candidate-added or edited tests, name the falsified
-proof claim or `rust-testing` constraint: a guard that stays green when the
-claimed behavior breaks or mocks away the boundary under claim, assertions that
-mirror internal steps rather than observable contracts, retries or wall-clock
-sleeps masking nondeterminism, copy-pasted suites duplicating an already-covered
-path at the same layer instead of consolidating around the strongest check, or
-deleting/weakening an independent safety, durability, or integration guard (or
-the sole regression guard) to clear a failure without an accepted contract
-change. Untouched historical test debt and stylistic reorganization of valid
-contract checks remain `FOLLOW_UP`.
+## Delta Recheck
 
-`PASS` returns the candidate for acceptance. `FAIL` returns anchored
-candidate-caused findings. `NEEDS_PARENT` names proof or action outside reviewer
-authority. A missing fixed delivery boundary returns `REVIEW_HANDOFF_INVALID`
-through [Review Result V1](../interfaces/review-result-v1.md).
+When Review selects a bounded delta recheck, falsify only the anchored
+findings, their invalidated proof, and any structure the repair added against
+[Engineering](../../../AGENTS.md#engineering). Preserve unaffected closed
+reasoning.
 
-## Delta recheck
+## Structure-Only Review
 
-When Review selects a bounded delta recheck, falsify only the anchored findings,
-their invalidated proof, and structure the repair added. Do not reopen
-unaffected reasoning.
+Use when shared Review triggers review only for added structure. Run **Falsifier
+3** exclusively on each addition the trigger names; behavior and proof stay
+outside this boundary. Classify violations of
+[Engineering](../../../AGENTS.md#engineering) as `TASK_DEFECT` naming the item
+to delete, collapse, bind to its source owner, or replace with `std` or a
+maintained crate; classify other observations as `FOLLOW_UP`.
 
-## Structure-only review
+## Integrated Candidate
 
-Use when shared Review selects review only for added structure. For each
-addition its trigger names, apply the `rust-structural-quality` deletion test
-and check whether existing workspace code, `std`, a declared dependency, or an
-authoritative tool already owns the responsibility with matching boundary
-semantics. A `TASK_DEFECT` names the [Engineering](../../../AGENTS.md#engineering)
-constraint violated and the addition to delete, collapse, bind to its source
-owner, or replace with that owner or a maintained crate; other observations are
-`FOLLOW_UP`. Behavior and proof stay outside this review's boundary.
-
-## Integrated candidate
-
-Use when shared Review selects an integrated candidate. Falsify
-the complete changed outcome: deferred unit-local protected invariants,
-whole-spec coverage, cross-unit compatibility, assembly, and global Completion.
-Implemented units have no prior review verdict to reuse. Reuse only actual
-still-current evidence and review; do not restart unaffected closed findings.
-Each surviving finding names the smallest affected task owner (or affected seam
-owners for `INTEGRATION_DEFECT`) for repair. Reopen Planning only when repairing
-the defect changes accepted behavior or ledger-wide scope rather than a local
-seam between implemented units.
-Keep repair and invalidated checks inside final validation; do not recreate
-individual task acceptance or review cycles. Preserve unaffected implementation
-and current proof.
-`PASS` returns the integrated candidate for ledger completion.
+Multi-task final delivery runs all four Adversarial Falsifiers across the
+complete assembled candidate. Implemented units have no prior review verdict to
+reuse; reuse only still-current proof and do not reopen unaffected closed
+findings. Route each surviving finding to the smallest affected task owner — or
+both seam task owners for `INTEGRATION_DEFECT` — keeping repair and invalidated
+checks inside Final Validation without recreating per-task acceptance or review
+cycles. Reopen Planning only when repair changes accepted behavior or
+ledger-wide scope rather than a local seam between implemented units.

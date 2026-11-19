@@ -16,8 +16,8 @@ and reopen condition. Package next-session prompts through [Prompt
 Composition](../../prompt-composition.md), and report same-phase repair or
 context rollover as resume state.
 
-For a persisted Implementation ledger, [Ledger
-Execution](../phases/implementation/ledger-execution.md#acceptance-transition)
+For a persisted Implementation ledger, [Acceptance
+Transition](../phases/implementation.md#3-acceptance-transition)
 owns the immediate `Implemented`, `Accepted`, or `Blocked` transition, while
 fixed inline units move directly.
 

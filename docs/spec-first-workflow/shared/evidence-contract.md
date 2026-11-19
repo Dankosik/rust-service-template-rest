@@ -87,8 +87,8 @@ Attach commit or tree identity only across a checkout or integration boundary;
 the current bounded diff is enough for local work. Retain actual commands,
 inputs, environment, result, and exercised scope, using [Evidence Result
 V1](#evidence-result-v1) for final verification claims.
-[Checks While Coding](../phases/implementation/unit.md#checks-while-coding) owns
-coding feedback; [Final Validation](../phases/implementation/final-validation.md)
+[Build In Tight Vertical Slices](../phases/implementation/unit.md#2-build-in-tight-vertical-slices)
+owns coding feedback; [Final Validation](../phases/implementation/final-validation.md)
 owns the single assembled boundary.
 
 Reuse passing scoped evidence when covered code, relevant dependencies, command,
