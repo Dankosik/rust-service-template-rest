@@ -25,7 +25,7 @@ use crate::{
 mod prepare;
 
 pub(crate) use prepare::discover_jwks_uri;
-pub use prepare::{JwtOptions, RefreshTask, prepare_jwt};
+pub use prepare::{JwtOptions, RefreshDriver, prepare_jwt};
 
 #[cfg(feature = "test-support")]
 pub use fixtures::JwtFixture;

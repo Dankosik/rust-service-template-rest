@@ -9,7 +9,7 @@ struct Flaky {
     calls: Arc<AtomicU32>,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Probe for Flaky {
     fn name(&self) -> &'static str {
         "flaky"
@@ -26,7 +26,7 @@ impl Probe for Flaky {
 
 struct Hanging;
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Probe for Hanging {
     fn name(&self) -> &'static str {
         "hanging"
@@ -41,7 +41,7 @@ struct Slow {
     delay: Duration,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Probe for Slow {
     fn name(&self) -> &'static str {
         self.name
@@ -57,7 +57,7 @@ struct Gated {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Probe for Gated {
     fn name(&self) -> &'static str {
         "gated"

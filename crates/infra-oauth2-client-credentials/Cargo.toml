@@ -40,7 +40,7 @@ http = { workspace = true }
 infra-outbound-http = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 metrics = { workspace = true }
-moka = { workspace = true, features = ["future"] }
+moka = { workspace = true, features = ["sync"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }

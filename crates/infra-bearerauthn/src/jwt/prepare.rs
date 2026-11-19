@@ -1,18 +1,17 @@
 use std::time::Duration;
 
-use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use super::{JwtVerifier, TokenProfile};
+pub use crate::refresh::RefreshDriver;
 use crate::{
-    EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError, PreparationPhase,
-    PreparationReason, ProviderFailure, Verifier,
+    DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError,
+    PreparationPhase, ProviderFailure, Verifier,
     claims::ClaimPolicy,
     jwks::{JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure, allowed_algorithms},
     provider::{Document, ProviderClient},
-    refresh::{KeyStore, run_refresh_worker},
+    refresh::KeyStore,
 };
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
@@ -29,24 +28,20 @@ pub struct JwtOptions {
     pub jwks_max_age: Duration,
 }
 
-pub type RefreshTask = BoxFuture<'static, ()>;
-
 pub async fn prepare_jwt(
     options: JwtOptions,
-    cancel: CancellationToken,
-) -> Result<(Verifier, RefreshTask), PreparationError> {
+) -> Result<(Verifier, RefreshDriver), PreparationError> {
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
     let provider = ProviderClient::try_new();
     let provider = enforce_startup_deadline(startup_deadline, PreparationPhase::Client, provider)?;
-    prepare_with_provider(options, provider, cancel, startup_deadline).await
+    prepare_with_provider(options, provider, startup_deadline).await
 }
 
 async fn prepare_with_provider(
     options: JwtOptions,
     provider: ProviderClient,
-    cancel: CancellationToken,
     startup_deadline: Instant,
-) -> Result<(Verifier, RefreshTask), PreparationError> {
+) -> Result<(Verifier, RefreshDriver), PreparationError> {
     metrics::describe_counter!(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
@@ -89,18 +84,17 @@ async fn prepare_with_provider(
         key_store.clone(),
         options.jwks_max_age,
     ));
-    let refresh_task: RefreshTask = Box::pin(run_refresh_worker(
+    let refresh_driver = RefreshDriver::new(
         key_store,
         provider,
         source,
         algorithms,
-        cancel,
         options.jwks_max_age,
-    ));
+    );
     enforce_startup_deadline(
         startup_deadline,
         PreparationPhase::Jwks,
-        Ok((verifier, refresh_task)),
+        Ok((verifier, refresh_driver)),
     )
 }
 
@@ -110,12 +104,12 @@ fn enforce_startup_deadline<T>(
     result: Result<T, PreparationError>,
 ) -> Result<T, PreparationError> {
     if Instant::now() >= deadline {
-        return Err(PreparationError::new(phase, PreparationReason::Timeout));
+        return Err(PreparationError::Timeout(phase));
     }
     result
 }
 
-impl PreparationError {
+impl DiscoveryError {
     fn issuer_mismatch(configured: &IssuerUrl, discovered: String) -> Self {
         let discovered = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
             && IssuerUrl::parse(&discovered).is_ok()
@@ -135,54 +129,50 @@ pub(crate) async fn discover_jwks_uri(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
     deadline: Instant,
-) -> Result<EndpointUrl, PreparationError> {
+) -> Result<EndpointUrl, DiscoveryError> {
     let discovery = fetch_discovery(provider, issuer, deadline).await?;
     if discovery.issuer != issuer.as_str() {
-        return Err(PreparationError::issuer_mismatch(issuer, discovery.issuer));
+        return Err(DiscoveryError::issuer_mismatch(issuer, discovery.issuer));
     }
-    EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| {
-        PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
-    })
+    EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| DiscoveryError::InvalidJwksUrl)
 }
 
 async fn fetch_discovery(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
     deadline: Instant,
-) -> Result<Discovery, PreparationError> {
+) -> Result<Discovery, DiscoveryError> {
     let path = issuer.url().path().trim_suffix('/');
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
-    let discovery = match fetch_metadata(provider, &openid, deadline).await {
+    match fetch_metadata(provider, &openid, deadline).await {
         Err(
-            first @ (PreparationReason::Fetch(ProviderFailure::Status(_))
-            | PreparationReason::Parse),
+            first @ (DiscoveryError::Fetch(ProviderFailure::Status(_)) | DiscoveryError::Parse),
         ) => {
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
             match fetch_metadata(provider, &rfc8414, deadline).await {
                 // RFC 8414 §3
-                Err(PreparationReason::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
+                Err(DiscoveryError::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
                 result => result,
             }
         }
         result => result,
-    };
-    discovery.map_err(|reason| PreparationError::new(PreparationPhase::Discovery, reason))
+    }
 }
 
 async fn fetch_metadata(
     provider: &ProviderClient,
     url: &url::Url,
     deadline: Instant,
-) -> Result<Discovery, PreparationReason> {
+) -> Result<Discovery, DiscoveryError> {
     let bytes = provider
         .get_document(url, Document::Discovery, Some(deadline))
         .await
-        .map_err(PreparationReason::Fetch)?;
+        .map_err(DiscoveryError::Fetch)?;
     serde_json::from_slice::<JsonObject<Discovery>>(&bytes)
         .map(|JsonObject(discovery)| discovery)
-        .map_err(|_| PreparationReason::Parse)
+        .map_err(|_| DiscoveryError::Parse)
 }
 
 #[derive(Deserialize)]
@@ -212,20 +202,25 @@ mod tests {
 
     #[test]
     fn preparation_errors_are_closed_and_an_issuer_mismatch_names_both_issuers() {
-        use crate::{IssuerUrl, PreparationError, PreparationPhase, PreparationReason};
+        use crate::{DiscoveryError, IssuerUrl, JwksError, PreparationError, PreparationPhase};
         assert_eq!(
-            PreparationError::new(
-                PreparationPhase::Jwks,
-                PreparationReason::Fetch(crate::ProviderFailure::Status(503))
-            )
-            .to_string(),
+            PreparationError::Jwks(JwksError::Fetch(crate::ProviderFailure::Status(503)))
+                .to_string(),
             "authentication preparation failed during Jwks: Fetch(Status(503))"
         );
         let configured = IssuerUrl::parse("https://issuer.example").unwrap();
-        let error =
-            PreparationError::issuer_mismatch(&configured, "https://issuer.example/".to_owned());
+        let error = PreparationError::Discovery(DiscoveryError::issuer_mismatch(
+            &configured,
+            "https://issuer.example/".to_owned(),
+        ));
         assert_eq!(error.phase(), PreparationPhase::Discovery);
-        assert_eq!(error.reason(), PreparationReason::IssuerMismatch);
+        assert_eq!(
+            error,
+            PreparationError::Discovery(DiscoveryError::IssuerMismatch {
+                configured: "https://issuer.example".to_owned(),
+                discovered: "https://issuer.example/".to_owned(),
+            })
+        );
         assert_eq!(
             error.to_string(),
             "authentication preparation failed during Discovery: IssuerMismatch \
@@ -237,7 +232,11 @@ mod tests {
             format!("https://issuer.example/{}", "a".repeat(256)),
             "not an issuer\nprivate".to_owned(),
         ] {
-            let rendered = PreparationError::issuer_mismatch(&configured, discovered).to_string();
+            let rendered = PreparationError::Discovery(DiscoveryError::issuer_mismatch(
+                &configured,
+                discovered,
+            ))
+            .to_string();
             assert!(rendered.contains("<issuer value omitted>"), "{rendered}");
             assert!(!rendered.contains("private") && !rendered.contains("aaaa"));
         }
@@ -324,7 +323,7 @@ mod tests {
         address: std::net::SocketAddr,
         root: &[u8],
         jwks_uri: Option<&str>,
-    ) -> Result<(crate::Verifier, super::RefreshTask), crate::PreparationError> {
+    ) -> Result<(crate::Verifier, super::RefreshDriver), crate::PreparationError> {
         let startup_deadline = tokio::time::Instant::now() + super::STARTUP_BUDGET;
         let origin = format!("https://{FIXTURE_HOST}:{}", address.port());
         let options = super::JwtOptions {
@@ -336,21 +335,24 @@ mod tests {
             jwks_uri: jwks_uri
                 .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
         };
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let provider =
-            crate::provider::new_fixture_client(FIXTURE_HOST, address, root, cancel.clone())
-                .unwrap();
-        super::prepare_with_provider(options, provider, cancel, startup_deadline).await
+        let provider = crate::provider::new_fixture_client(
+            FIXTURE_HOST,
+            address,
+            root,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        super::prepare_with_provider(options, provider, startup_deadline).await
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_expired_startup_budget_takes_precedence_over_a_stage_failure() {
-        use crate::{PreparationError, PreparationPhase, PreparationReason};
+        use crate::{JwksError, PreparationError, PreparationPhase};
         use tokio::time::{Instant, advance};
 
         let deadline = Instant::now() + Duration::from_secs(6);
         let stage = PreparationPhase::Jwks;
-        let parse_failure = PreparationError::new(stage, PreparationReason::Parse);
+        let parse_failure = PreparationError::Jwks(JwksError::Parse);
         let complete = |result| super::enforce_startup_deadline(deadline, stage, result);
         assert_eq!(
             complete(Err(parse_failure.clone())),
@@ -358,7 +360,7 @@ mod tests {
         );
 
         advance(Duration::from_secs(6)).await;
-        let timeout = PreparationError::new(stage, PreparationReason::Timeout);
+        let timeout = PreparationError::Timeout(stage);
         assert_eq!(complete(Err(parse_failure)), Err(timeout.clone()));
         assert_eq!(complete(Ok(())), Err(timeout));
     }
@@ -404,26 +406,26 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_without_metadata_fails_preparation_with_its_status() {
-        use crate::{PreparationPhase, PreparationReason, ProviderFailure};
+        use crate::{DiscoveryError, PreparationError, PreparationPhase, ProviderFailure};
         let (address, root, requested) = metadata_server(Vec::new()).await;
         let error = prepare(address, &root, None).await.err().unwrap();
         assert_eq!(error.phase(), PreparationPhase::Discovery);
         assert_eq!(
-            error.reason(),
-            PreparationReason::Fetch(ProviderFailure::Status(404))
+            error,
+            PreparationError::Discovery(DiscoveryError::Fetch(ProviderFailure::Status(404)))
         );
         assert_eq!(requested.borrow().len(), 2);
     }
 
     #[tokio::test]
     async fn an_explicitly_empty_jwks_cannot_start_a_verifier() {
-        use crate::{PreparationPhase, PreparationReason};
+        use crate::{JwksError, PreparationError, PreparationPhase};
 
         let (address, root, _) =
             metadata_server(vec![("/keys", StatusCode::OK, r#"{"keys":[]}"#.to_owned())]).await;
         let error = prepare(address, &root, Some("/keys")).await.err().unwrap();
         assert_eq!(error.phase(), PreparationPhase::Jwks);
-        assert_eq!(error.reason(), PreparationReason::NoUsableKeys);
+        assert_eq!(error, PreparationError::Jwks(JwksError::NoUsableKeys));
     }
 
     #[tokio::test]
@@ -455,7 +457,8 @@ mod tests {
             ("/untrusted", StatusCode::OK, document(&old)),
         ])
         .await;
-        let (verifier, mut worker) = prepare(address, &root, None).await.unwrap();
+        let (verifier, driver) = prepare(address, &root, None).await.unwrap();
+        let mut worker = Box::pin(driver.run(std::future::pending()));
         let signed = |key| {
             let mut header = Header::new(ES256);
             header.kid = Some("key".to_owned());
@@ -547,8 +550,8 @@ mod tests {
                 .collect(),
             )
             .await;
-            let (verifier, worker) = prepare(address, &root, Some("/keys")).await.unwrap();
-            let worker = tokio::spawn(worker);
+            let (verifier, driver) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let worker = tokio::spawn(driver.run(std::future::pending()));
             let authorization = |signer: &EncodingKey, kid: &str, subject: &str| {
                 let mut header = Header::new(Algorithm::ES256);
                 header.kid = Some(kid.to_owned());
@@ -621,11 +624,15 @@ mod tests {
         let authorization = format!("Bearer {jwt}");
         let token = crate::parse_bearer([authorization.as_bytes()]).unwrap();
         for abort_started_worker in [false, true] {
-            let (verifier, mut worker) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let (verifier, driver) = prepare(address, &root, Some("/keys")).await.unwrap();
             tokio::time::pause();
-            if abort_started_worker {
+            let running = if abort_started_worker {
+                let mut worker = Box::pin(driver.run(std::future::pending()));
                 assert!(futures_util::poll!(worker.as_mut()).is_pending());
-            }
+                Ok(worker)
+            } else {
+                Err(driver)
+            };
             tokio::time::advance(Duration::from_secs(31)).await;
             let (waiting, registered) = tokio::sync::oneshot::channel();
             let waiter = tokio::spawn({
@@ -640,12 +647,13 @@ mod tests {
                 }
             });
             registered.await.unwrap();
-            if abort_started_worker {
-                let task = tokio::spawn(worker);
-                task.abort();
-                assert!(task.await.unwrap_err().is_cancelled());
-            } else {
-                drop(worker);
+            match running {
+                Ok(worker) => {
+                    let task = tokio::spawn(worker);
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                }
+                Err(driver) => drop(driver),
             }
             let result = tokio::time::timeout(Duration::from_millis(1), waiter)
                 .await
@@ -662,22 +670,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_oidc_location_keeps_its_error_when_rfc8414_is_absent() {
-        use crate::{PreparationPhase, PreparationReason, ProviderFailure};
+        use crate::{DiscoveryError, PreparationError, PreparationPhase, ProviderFailure};
         for ((status, body), fallback, expected) in [
             (
                 (StatusCode::SERVICE_UNAVAILABLE, ""),
                 StatusCode::NOT_FOUND,
-                PreparationReason::Fetch(ProviderFailure::Status(503)),
+                DiscoveryError::Fetch(ProviderFailure::Status(503)),
             ),
             (
                 (StatusCode::SERVICE_UNAVAILABLE, ""),
                 StatusCode::GONE,
-                PreparationReason::Fetch(ProviderFailure::Status(503)),
+                DiscoveryError::Fetch(ProviderFailure::Status(503)),
             ),
             (
                 (StatusCode::OK, "{}"),
                 StatusCode::NOT_FOUND,
-                PreparationReason::Parse,
+                DiscoveryError::Parse,
             ),
         ] {
             let (address, root, requested) = metadata_server(vec![
@@ -695,7 +703,7 @@ mod tests {
             .await;
             let error = prepare(address, &root, None).await.err().unwrap();
             assert_eq!(error.phase(), PreparationPhase::Discovery);
-            assert_eq!(error.reason(), expected);
+            assert_eq!(error, PreparationError::Discovery(expected));
             assert_eq!(
                 *requested.borrow(),
                 [

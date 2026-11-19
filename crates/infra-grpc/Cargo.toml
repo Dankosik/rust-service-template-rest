@@ -28,9 +28,7 @@ http-body = { workspace = true }
 http-body-util = { workspace = true }
 infra-http-transport = { workspace = true }
 # template:begin authn:grpc-bearer-dependency
-delegate = { workspace = true }
 infra-bearerauthn = { workspace = true }
-serde = { workspace = true, features = ["std"] }
 # template:end authn:grpc-bearer-dependency
 # template:begin service-auth:grpc-service-auth-dependency
 infra-serviceauth = { workspace = true }

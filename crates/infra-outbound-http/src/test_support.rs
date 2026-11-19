@@ -81,7 +81,7 @@ pub(crate) fn observation_recorder() -> metrics_exporter_prometheus::PrometheusR
     PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Full(crate::REQUEST_DURATION_METRIC.to_owned()),
-            crate::REQUEST_DURATION_BUCKETS,
+            crate::observe::REQUEST_DURATION_BUCKETS,
         )
         .expect("observation buckets are valid")
         .build_recorder()

@@ -10,7 +10,7 @@ use futures_util::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
-use moka::{Expiry, future::Cache};
+use moka::{Expiry, sync::Cache};
 use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
 use secrecy::ExposeSecret;
@@ -18,8 +18,8 @@ use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
 
 use crate::{
-    PreparationError, PresentedToken, Principal, ProviderFailure, VerificationError,
-    VerificationReason, Verifier,
+    InvalidCacheOptions, PreparationError, PresentedToken, Principal, ProviderFailure,
+    VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedClaims, validate_introspection_claims},
     provider::{CallerStop, ProviderClient},
 };
@@ -51,9 +51,9 @@ pub struct IntrospectionCacheOptions {
 }
 
 impl IntrospectionCacheOptions {
-    pub fn try_new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
+    pub fn try_new(capacity: usize, ttl: Duration) -> Result<Self, InvalidCacheOptions> {
         if !CACHE_CAPACITY.contains(&capacity) || !CACHE_TTL.contains(&ttl) {
-            return Err(PreparationError::invalid_options());
+            return Err(InvalidCacheOptions);
         }
         Ok(Self { capacity, ttl })
     }
@@ -208,7 +208,7 @@ impl IntrospectionVerifier {
         };
         let key = token_digest(token);
         loop {
-            if let Some(value) = cache.retained.get(&key).await
+            if let Some(value) = cache.retained.get(&key)
                 && value.is_reusable_at(unix_now()?)
             {
                 return Ok(value.principal);
@@ -220,7 +220,7 @@ impl IntrospectionVerifier {
                     let unix_now = unix_now.clone();
                     let token = token.to_secret();
                     async move {
-                        if let Some(value) = retained.get(&key).await
+                        if let Some(value) = retained.get(&key)
                             && value.is_reusable_at(unix_now()?)
                         {
                             return Ok(Fill::RecheckCache);
@@ -232,7 +232,7 @@ impl IntrospectionVerifier {
                                 &unix_now,
                             )
                             .await?;
-                        retained.insert(key, value.clone()).await;
+                        retained.insert(key, value.clone());
                         Ok(Fill::Fresh(value))
                     }
                 })
@@ -330,7 +330,7 @@ mod tests {
         MAX_RETAINED_PAYLOAD_BYTES, retention,
     };
     use crate::{
-        EndpointUrl, Failure, IssuerUrl,
+        EndpointUrl, Failure, IssuerUrl, PreparationError,
         claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
         provider::{ProviderClient, fixture_acceptor, new_fixture_client},
@@ -644,7 +644,10 @@ mod tests {
         let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
             panic!("an over-limit concurrency was accepted");
         };
-        assert_eq!(error.reason(), crate::PreparationReason::InvalidOption);
+        assert_eq!(
+            error,
+            PreparationError::Options(crate::OptionsError::InvalidOption)
+        );
         fixture.finish().await;
     }
 
@@ -656,7 +659,10 @@ mod tests {
         let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
             panic!("a blank audience was accepted");
         };
-        assert_eq!(error.reason(), crate::PreparationReason::InvalidOption);
+        assert_eq!(
+            error,
+            PreparationError::Options(crate::OptionsError::InvalidOption)
+        );
         fixture.finish().await;
     }
 
@@ -988,7 +994,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn only_the_last_waiter_supplies_the_shared_exchanges_stop_reason() {
         let cache = super::PositiveCache {
-            retained: moka::future::Cache::builder()
+            retained: moka::sync::Cache::builder()
                 .build_with_hasher(foldhash::quality::RandomState::default()),
             fills: parking_lot::Mutex::default(),
         };
@@ -1215,7 +1221,7 @@ mod tests {
             let mut publication = Box::pin(publication);
             assert!(futures_util::poll!(publication.as_mut()).is_pending());
             if elapsed_seconds == 0 {
-                cache.retained.invalidate(&key).await;
+                cache.retained.invalidate(&key);
             }
             let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
                 Ok(Duration::from_secs(base + elapsed_seconds))
@@ -1228,7 +1234,7 @@ mod tests {
                     Duration::from_secs(base),
                 )
                 .unwrap();
-                cache.retained.insert(key, newer).await;
+                cache.retained.insert(key, newer);
             }
             fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
             gate.add_permits(1);
@@ -1408,10 +1414,10 @@ mod tests {
             (1, Duration::from_millis(999)),
             (1, Duration::from_millis(300_001)),
         ] {
+            let error = IntrospectionCacheOptions::try_new(capacity, ttl).unwrap_err();
+            assert_eq!(error, crate::InvalidCacheOptions);
             assert_eq!(
-                IntrospectionCacheOptions::try_new(capacity, ttl)
-                    .unwrap_err()
-                    .phase(),
+                PreparationError::from(error).phase(),
                 crate::PreparationPhase::Options
             );
         }

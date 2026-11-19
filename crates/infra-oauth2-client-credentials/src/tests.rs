@@ -8,6 +8,7 @@
 use std::{
     collections::BTreeMap,
     future::poll_fn,
+    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, Mutex},
     task::Poll,
@@ -30,8 +31,9 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokenTarget, ExchangeTokens,
-    OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceTokenTarget, ServiceTokens,
+    AcquisitionError, Algorithm, EmptySubject, Error, ExchangeHttpClient, ExchangeTokenTarget,
+    ExchangeTokens, IssuerUrl, OnBehalfOf, Options, PrivateKeyJwt, RefreshDriver, Registration,
+    Rejection, ServiceHttpClient, ServiceTokenTarget, ServiceTokens, TokenUrl,
     credentials::acquisition_deadline,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
@@ -58,7 +60,15 @@ const RESOURCE_PATH: &str = "/resource";
 const ASSERTION_AUDIENCE: &str = "https://issuer.example";
 const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-const EXCHANGE_CAPACITY: u32 = 1024;
+const EXCHANGE_CAPACITY: NonZeroU32 = NonZeroU32::new(1024).unwrap();
+
+fn nonzero(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).unwrap()
+}
+
+fn subject(value: &str) -> OnBehalfOf {
+    OnBehalfOf::try_new(SecretString::from(value)).unwrap()
+}
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -142,13 +152,15 @@ impl Fixture {
 
     fn options(&self) -> Options {
         Options {
-            token_url: self.endpoint.to_string(),
+            token_url: TokenUrl::parse_for_test_http(self.endpoint.as_str()).unwrap(),
             client_id: "client:id".to_owned(),
-            private_key: SecretString::from(self.key.serialize_pem()),
-            key_id: "key-1".to_owned(),
-            algorithm: Algorithm::Rs256,
-            assertion_audience: ASSERTION_AUDIENCE.to_owned(),
-            provider_concurrency: 32,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(self.key.serialize_pem()),
+                key_id: "key-1".to_owned(),
+                algorithm: Algorithm::Rs256,
+                audience: IssuerUrl::parse(ASSERTION_AUDIENCE).unwrap(),
+            },
+            provider_concurrency: nonzero(32),
         }
     }
 
@@ -177,7 +189,7 @@ impl Fixture {
         &self,
         scopes: &[&str],
         audience: Option<&str>,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> ExchangeTokens {
         self.exchange_tokens_with(self.options(), scopes, audience, capacity)
     }
@@ -187,7 +199,7 @@ impl Fixture {
         options: Options,
         scopes: &[&str],
         audience: Option<&str>,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> ExchangeTokens {
         let registration = prepare_registration(options);
         let tokens = registration
@@ -215,25 +227,25 @@ impl Fixture {
         Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
     }
 
-    fn service_client(&self) -> AuthenticatedClient {
+    fn service_client(&self) -> ServiceHttpClient {
         self.service_tokens(&[])
             .http(self.resource_client())
             .unwrap()
     }
 
-    fn exchange_client(&self) -> AuthenticatedClient {
+    fn exchange_client(&self) -> ExchangeHttpClient {
         self.exchange_tokens(&[], None, EXCHANGE_CAPACITY)
             .http(self.resource_client())
             .unwrap()
     }
 
-    async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {
+    async fn send(&self, client: &ServiceHttpClient) -> Result<Response<Bytes>, Error> {
         self.send_request(client, self.request()).await
     }
 
     async fn send_request(
         &self,
-        client: &AuthenticatedClient,
+        client: &ServiceHttpClient,
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         client
@@ -241,18 +253,34 @@ impl Fixture {
             .await
     }
 
+    async fn send_exchange(
+        &self,
+        client: &ExchangeHttpClient,
+        subject_token: &str,
+    ) -> Result<Response<Bytes>, Error> {
+        self.send_exchange_request(client, self.request(), subject_token)
+            .await
+    }
+
+    async fn send_exchange_request(
+        &self,
+        client: &ExchangeHttpClient,
+        request: Request<Bytes>,
+        subject_token: &str,
+    ) -> Result<Response<Bytes>, Error> {
+        client
+            .execute(
+                request,
+                &subject(subject_token),
+                deadline(Duration::from_secs(10)),
+            )
+            .await
+    }
+
     fn request(&self) -> Request<Bytes> {
         Request::get(self.origin.join(RESOURCE_PATH).unwrap().as_str())
             .body(Bytes::new())
             .unwrap()
-    }
-
-    fn on_behalf_of_request(&self, subject: &str) -> Request<Bytes> {
-        let mut request = self.request();
-        request
-            .extensions_mut()
-            .insert(OnBehalfOf::new(SecretString::from(subject)));
-        request
     }
 
     fn token_json(&self, status: StatusCode, body: &serde_json::Value) {
@@ -339,19 +367,11 @@ impl Fixture {
 }
 
 fn service_target(scopes: &[&str]) -> ServiceTokenTarget {
-    let scopes = scopes
-        .iter()
-        .map(|&scope| scope.to_owned())
-        .collect::<Vec<_>>();
-    ServiceTokenTarget::try_new(&scopes).unwrap()
+    ServiceTokenTarget::try_new(scopes).unwrap()
 }
 
 fn exchange_target(scopes: &[&str], audience: Option<&str>) -> ExchangeTokenTarget {
-    let scopes = scopes
-        .iter()
-        .map(|&scope| scope.to_owned())
-        .collect::<Vec<_>>();
-    ExchangeTokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
+    ExchangeTokenTarget::try_new(scopes, audience.map(str::to_owned)).unwrap()
 }
 
 async fn take_event(events: &Semaphore) {
@@ -499,7 +519,7 @@ async fn advance(duration: Duration) {
     tokio::time::resume();
 }
 
-async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
+async fn poll_pending<F: Future + ?Sized>(mut future: Pin<&mut F>) {
     assert!(
         poll_fn(|context| Poll::Ready(future.as_mut().poll(context)))
             .await

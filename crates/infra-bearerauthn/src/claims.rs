@@ -1,5 +1,5 @@
 use crate::{
-    Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
+    Actor, PreparationError, Principal, VerificationError, VerificationReason,
     principal::{Identifiers, Identity},
 };
 use compact_str::CompactString;
@@ -10,6 +10,31 @@ use std::{borrow::Cow, fmt, sync::Arc, time::Duration};
 use crate::TokenProfile;
 use serde_json::value::RawValue;
 // template:end oidc-jwt:authn-claims-jwt-import
+
+pub(crate) struct JsonObject<T>(pub(crate) T);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = JsonObject<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(JsonObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+    }
+}
 
 /// RFC 7519 §4.1.4
 const LEEWAY: Duration = Duration::from_secs(30);
@@ -505,10 +530,13 @@ impl Scopes {
         &self.0
     }
 
-    pub(crate) fn contains_all(&self, required: &[String]) -> bool {
-        required
-            .iter()
-            .all(|scope| self.0.binary_search(scope).is_ok())
+    pub(crate) fn contains_all(&self, required: impl IntoIterator<Item: AsRef<str>>) -> bool {
+        required.into_iter().all(|scope| {
+            let scope = scope.as_ref();
+            self.0
+                .binary_search_by(|candidate| candidate.as_str().cmp(scope))
+                .is_ok()
+        })
     }
 }
 
@@ -607,7 +635,13 @@ mod tests {
         .unwrap();
         assert_eq!(principal.subject(), None);
         assert_eq!(principal.client_id(), Some("client"));
+        assert_eq!(
+            principal.identity(),
+            crate::PrincipalIdentity::ClientOnly("client")
+        );
         assert_eq!(principal.scopes(), ["read", "write"]);
+        assert!(principal.has_scopes(["read", "write"]));
+        assert!(!principal.has_scopes(["read", "admin"]));
         assert_eq!(principal.expires_at(), 130);
         assert_eq!(
             verify(serde_json::json!({"exp": 130, "sub": ""})).unwrap_err(),

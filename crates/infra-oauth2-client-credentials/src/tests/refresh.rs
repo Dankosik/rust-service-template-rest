@@ -82,10 +82,7 @@ async fn an_exchanged_token_is_never_refreshed_in_the_background() {
     fixture.token_json(StatusCode::OK, &response);
     let client = fixture.exchange_client();
     let execute = || async {
-        fixture
-            .send_request(&client, fixture.on_behalf_of_request("alice"))
-            .await
-            .unwrap();
+        fixture.send_exchange(&client, "alice").await.unwrap();
     };
     execute().await;
     fixture.token_received().await;
@@ -198,15 +195,14 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
     let mut response = exchange_response("warm-token");
     response["expires_in"] = 3600.into();
     fixture.token_json(StatusCode::OK, &response);
-    let delegated = || fixture.on_behalf_of_request("alice");
     fixture.send(&service).await.unwrap();
-    fixture.send_request(&exchange, delegated()).await.unwrap();
+    fixture.send_exchange(&exchange, "alice").await.unwrap();
 
     advance(Duration::from_secs(3321)).await;
     let gate = fixture.block_tokens();
     fixture.send(&service).await.unwrap();
     fixture.token_received().await;
-    fixture.send_request(&exchange, delegated()).await.unwrap();
+    fixture.send_exchange(&exchange, "alice").await.unwrap();
     assert_eq!(fixture.token_request_count(), 3);
     assert_eq!(fixture.resource_request_count(), 4);
 
@@ -218,8 +214,8 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
         .unwrap()
         .unwrap();
 
-    assert_closed_calls(&service_clone, || fixture.request()).await;
-    assert_closed_calls(&exchange_clone, delegated).await;
+    assert_closed_service_calls(&service_clone, || fixture.request()).await;
+    assert_closed_exchange_calls(&exchange_clone, || fixture.request(), &subject("alice")).await;
     assert_eq!(fixture.token_request_count(), 3);
     assert_eq!(fixture.resource_request_count(), 4);
     drop(gate);
@@ -321,10 +317,7 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
     *fixture.state.token_gate.lock().unwrap() = None;
     final_gate.add_permits(1);
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    fixture
-        .send_request(&exchange, fixture.on_behalf_of_request("alice"))
-        .await
-        .unwrap();
+    fixture.send_exchange(&exchange, "alice").await.unwrap();
     fixture.finish().await;
 }
 
@@ -346,13 +339,10 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
         .unwrap();
     fixture.send(&service).await.unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    fixture
-        .send_request(&exchange, fixture.on_behalf_of_request("warm"))
-        .await
-        .unwrap();
+    fixture.send_exchange(&exchange, "warm").await.unwrap();
 
     drop(driver);
-    assert_closed_calls(&service.clone(), || fixture.request()).await;
+    assert_closed_service_calls(&service.clone(), || fixture.request()).await;
     assert_eq!(fixture.token_request_count(), 2);
     assert_eq!(fixture.resource_request_count(), 2);
 
@@ -360,9 +350,9 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
         StatusCode::OK,
         &exchange_response("exchanged-after-shutdown"),
     );
-    for subject in ["warm", "cold"] {
+    for subject_token in ["warm", "cold"] {
         fixture
-            .send_request(&exchange, fixture.on_behalf_of_request(subject))
+            .send_exchange(&exchange, subject_token)
             .await
             .unwrap();
     }
@@ -379,7 +369,10 @@ async fn dropping_the_service_driver_closes_only_service_clients() {
     fixture.finish().await;
 }
 
-async fn assert_closed_calls(client: &AuthenticatedClient, request: impl Fn() -> Request<Bytes>) {
+async fn assert_closed_service_calls(
+    client: &ServiceHttpClient,
+    request: impl Fn() -> Request<Bytes>,
+) {
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
     for (after, request_context, expected) in [
@@ -404,6 +397,41 @@ async fn assert_closed_calls(client: &AuthenticatedClient, request: impl Fn() ->
         let error = client
             .with_context(&context)
             .execute(request)
+            .await
+            .unwrap_err();
+        assert_matches!(error, Error::Acquisition(actual) if actual == expected);
+    }
+}
+
+async fn assert_closed_exchange_calls(
+    client: &ExchangeHttpClient,
+    request: impl Fn() -> Request<Bytes>,
+    subject_token: &OnBehalfOf,
+) {
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    for (after, request_context, expected) in [
+        (Duration::from_secs(10), None, AcquisitionError::Unavailable),
+        (Duration::ZERO, None, AcquisitionError::Timeout),
+        (
+            Duration::from_secs(10),
+            Some(OperationContext::with_timeout(Duration::ZERO)),
+            AcquisitionError::Timeout,
+        ),
+        (
+            Duration::from_secs(10),
+            Some(cancelled),
+            AcquisitionError::Cancelled,
+        ),
+    ] {
+        let mut request = request();
+        if let Some(context) = request_context {
+            request.extensions_mut().insert(context);
+        }
+        let context = OperationContext::with_timeout(after);
+        let error = client
+            .with_context(&context)
+            .execute(request, subject_token)
             .await
             .unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
@@ -631,7 +659,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}),
     );
     let registration = prepare_registration(Options {
-        provider_concurrency: 1,
+        provider_concurrency: nonzero(1),
         ..fixture.options()
     });
     let (service_tokens, driver) =
@@ -650,8 +678,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         .unwrap()
         .http(fixture.resource_client())
         .unwrap();
-    let mut exchange =
-        Box::pin(fixture.send_request(&exchange_client, fixture.on_behalf_of_request("active")));
+    let mut exchange = Box::pin(fixture.send_exchange(&exchange_client, "active"));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     fixture.send(&client).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {

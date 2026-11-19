@@ -268,12 +268,12 @@ provisioning, qualify the exact issuer and token endpoint that will be passed
 to the synchronous registration callback. The check requires only those URLs.
 
 ```sh
-cargo run --locked -p infra-oauth2-client-credentials --example keycloak_preflight -- "$ISSUER" "$TOKEN_ENDPOINT"
+cargo run --locked -p infra-oauth2-client-credentials --example oidc_preflight -- "$ISSUER" "$TOKEN_ENDPOINT"
 ```
 
-Install the checked pair as `assertion_audience` and `token_url` after a
+Install the checked pair as `auth.audience` and `token_url` after a
 successful exit. Repeat on changes to either value. An integration with async
-setup can instead call `Registration::prepare_keycloak(options).await` to run
+setup can instead call `Registration::prepare_with_oidc_discovery(issuer, options).await` to run
 the same check before it creates a registration. Discovery must return the
 configured issuer exactly and the configured HTTPS token endpoint. The
 endpoint can have a different host from the issuer. On failure, correct the

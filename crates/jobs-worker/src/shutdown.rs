@@ -587,14 +587,9 @@ async fn close_tracer_provider(provider: TracerProviderHandle, deadline: Instant
 
 async fn close_logger(logger: LoggerGuard, deadline: Instant) -> Outcome {
     isolate_stage("logger", async {
-        let close = tokio::task::spawn_blocking(move || logger.shutdown(deadline.into_std()));
-        if matches!(
-            tokio::time::timeout_at(deadline, close).await,
-            Ok(Ok(LoggerShutdown::Completed(_)))
-        ) {
-            Outcome::Graceful
-        } else {
-            Outcome::Degraded
+        match logger.shutdown_async(deadline).await {
+            LoggerShutdown::Completed => Outcome::Graceful,
+            LoggerShutdown::Incomplete(_) => Outcome::Degraded,
         }
     })
     .await

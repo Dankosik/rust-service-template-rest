@@ -17,7 +17,6 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/sqlx"]
 [dependencies]
 arrayvec = { workspace = true }
 crossbeam-channel = { workspace = true, features = ["std"] }
-delegate = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
@@ -52,7 +51,7 @@ tokio-metrics = { workspace = true, features = ["rt", "metrics-rs-integration"] 
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
-tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
+tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log"] }
 uuid = { workspace = true, features = ["v4"] }
 zeroize = { workspace = true, features = ["alloc"] }
 

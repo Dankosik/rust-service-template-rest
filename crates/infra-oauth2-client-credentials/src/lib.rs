@@ -4,7 +4,6 @@ mod discovery;
 mod error;
 mod http_client;
 mod options;
-mod request_admission;
 mod token;
 mod token_endpoint;
 
@@ -16,11 +15,17 @@ mod tests;
 pub mod grpc;
 // template:end outbound-auth-grpc:oauth-grpc-module
 
-pub use credentials::{ExchangeTokens, OnBehalfOf, RefreshDriver, Registration, ServiceTokens};
-pub use discovery::verify_keycloak_metadata;
+pub use credentials::{
+    EmptySubject, ExchangeTokens, OnBehalfOf, RefreshDriver, Registration, ServiceTokens,
+};
+pub use discovery::verify_oidc_metadata;
 pub use error::{
-    AcquisitionError, ConfigurationError, DiscoveryTransportError, Error, KeycloakError,
+    AcquisitionError, ConfigurationError, DiscoveryError, DiscoveryTransportError, Error,
     PreparationError, Rejection, TransportBuildFailure, TransportFailure,
 };
-pub use http_client::{AuthenticatedClient, RequestClient};
-pub use options::{Algorithm, ExchangeTokenTarget, Options, ServiceTokenTarget};
+pub use http_client::{
+    ExchangeHttpClient, ExchangeRequestClient, ServiceHttpClient, ServiceRequestClient,
+};
+pub use options::{
+    Algorithm, ExchangeTokenTarget, IssuerUrl, Options, PrivateKeyJwt, ServiceTokenTarget, TokenUrl,
+};

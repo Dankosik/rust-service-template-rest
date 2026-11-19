@@ -1,8 +1,6 @@
 use super::*;
 use std::assert_matches;
 
-use crate::credentials::TokenSource;
-
 #[tokio::test]
 async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let fixture = Fixture::new().await;
@@ -88,8 +86,7 @@ async fn a_reusable_service_token_yields_when_the_task_budget_is_exhausted() {
 
     let task = tokio::spawn(async move {
         let context = token_context();
-        let source = TokenSource::Service(tokens);
-        let mut acquisition = Box::pin(source.acquire_for_request(acquisition_deadline(&context)));
+        let mut acquisition = Box::pin(tokens.acquire_for_request(acquisition_deadline(&context)));
         while tokio::task::coop::has_budget_remaining() {
             tokio::task::consume_budget().await;
         }
@@ -130,7 +127,7 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
         let client = fixture
             .service_tokens_with(
                 Options {
-                    provider_concurrency: 1,
+                    provider_concurrency: nonzero(1),
                     ..fixture.options()
                 },
                 &[],
@@ -183,7 +180,7 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     let client = fixture
         .service_tokens_with(
             Options {
-                provider_concurrency: 1,
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],
@@ -299,12 +296,22 @@ async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline(
         .unwrap();
     let context = OperationContext::unbounded();
     let _gate = fixture.block_tokens();
+    let subject_token = subject("subject");
 
-    for (client, request) in [
-        (service, fixture.request()),
-        (exchange, fixture.on_behalf_of_request("subject")),
-    ] {
-        let mut operation = Box::pin(client.execute_with_context(request, &context));
+    {
+        let mut operation = Box::pin(service.execute_with_context(fixture.request(), &context));
+        fixture.drive_until_token_received(operation.as_mut()).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_matches!(
+            operation.await,
+            Err(Error::Acquisition(AcquisitionError::Unavailable))
+        );
+        tokio::time::resume();
+    }
+    {
+        let mut operation =
+            Box::pin(exchange.execute_with_context(fixture.request(), &subject_token, &context));
         fixture.drive_until_token_received(operation.as_mut()).await;
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(5)).await;
@@ -326,7 +333,7 @@ async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     let client = fixture
         .service_tokens_with(
             Options {
-                provider_concurrency: 1,
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],

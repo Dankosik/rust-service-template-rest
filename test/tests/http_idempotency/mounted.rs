@@ -26,8 +26,8 @@ use infra_http::idempotency::{
     CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalProblem, Tx,
 };
 use infra_http::{
-    Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Problem,
-    REQUEST_ID_HEADER, VerifiedPrincipal,
+    Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract,
+    Principal, Problem, REQUEST_ID_HEADER, VerifiedPrincipal,
 };
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
@@ -198,7 +198,7 @@ impl CreateWidgets for SqlWidgets {
 )]
 async fn create_widget(
     request: CommandInput,
-    principal: VerifiedPrincipal,
+    principal: Principal,
     delegation: Option<DelegationCredential>,
     state: WidgetState,
 ) -> Result<CreateWidget, Box<Problem>> {
@@ -238,7 +238,7 @@ async fn create_widget(
 )]
 async fn replace_widget(
     mut request: CommandInput,
-    principal: VerifiedPrincipal,
+    principal: Principal,
     delegation: Option<DelegationCredential>,
     state: WidgetState,
 ) -> Result<CreateWidget, Box<Problem>> {
@@ -309,7 +309,7 @@ fn created_response(widget: Widget) -> CreatedWidget {
     }
 }
 
-fn may_create(principal: &VerifiedPrincipal) -> bool {
+fn may_create(principal: &Principal) -> bool {
     principal.client_id() != Some(REVOKED_CLIENT)
 }
 
@@ -926,7 +926,7 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
     )
 )]
 async fn authorized_without_idempotency(
-    principal: VerifiedPrincipal,
+    VerifiedPrincipal(principal): VerifiedPrincipal,
     credential: Option<Extension<DelegationCredential>>,
     headers: axum::http::HeaderMap,
 ) -> Response {

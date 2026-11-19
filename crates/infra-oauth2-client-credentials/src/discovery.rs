@@ -6,8 +6,9 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
-    DiscoveryTransportError, KeycloakError, Options, Registration, TransportBuildFailure,
-    options::{Scheme, assertion_issuer, strict_provider_url, token_endpoint, validate_options},
+    ConfigurationError, DiscoveryError, DiscoveryTransportError, IssuerUrl, Options, Registration,
+    TokenUrl, TransportBuildFailure,
+    options::{Scheme, check_url_scheme, parse_discovered_token_endpoint, validate_options},
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
 
@@ -18,39 +19,56 @@ struct Metadata {
 }
 
 impl Registration {
-    pub async fn prepare_keycloak(options: Options) -> Result<Self, KeycloakError> {
-        Self::prepare_keycloak_with(options, Scheme::Https).await
+    pub async fn prepare_with_oidc_discovery(
+        issuer: IssuerUrl,
+        options: Options,
+    ) -> Result<Self, DiscoveryError> {
+        Self::prepare_with_oidc_discovery_scheme(issuer, options, Scheme::Https).await
     }
 
     #[cfg(test)]
-    pub(crate) async fn prepare_keycloak_for_test_http(
+    pub(crate) async fn prepare_with_oidc_discovery_for_test_http(
+        issuer: IssuerUrl,
         options: Options,
-    ) -> Result<Self, KeycloakError> {
-        Self::prepare_keycloak_with(options, Scheme::Http).await
+    ) -> Result<Self, DiscoveryError> {
+        Self::prepare_with_oidc_discovery_scheme(issuer, options, Scheme::Http).await
     }
 
-    async fn prepare_keycloak_with(
+    async fn prepare_with_oidc_discovery_scheme(
+        issuer: IssuerUrl,
         options: Options,
         scheme: Scheme,
-    ) -> Result<Self, KeycloakError> {
+    ) -> Result<Self, DiscoveryError> {
+        check_url_scheme(issuer.url(), "issuer", scheme)?;
         let validated = validate_options(options, scheme, scheme)?;
-        verify_metadata(
-            &validated.options.assertion_audience,
-            &validated.issuer,
-            &validated.endpoint,
-            scheme,
-        )
-        .await?;
+        if issuer.url() == validated.endpoint() {
+            return Err(ConfigurationError {
+                key: "issuer",
+                reason: "must differ from the token endpoint",
+            }
+            .into());
+        }
+        verify_metadata(&issuer, validated.endpoint(), scheme).await?;
         let token_http =
-            build_client(scheme, &validated.endpoint).map_err(TransportBuildFailure::token_url)?;
-        Self::build(validated, token_http).map_err(KeycloakError::from)
+            build_client(scheme, validated.endpoint()).map_err(TransportBuildFailure::token_url)?;
+        Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 }
 
-pub async fn verify_keycloak_metadata(issuer: &str, token_url: &str) -> Result<(), KeycloakError> {
-    let issuer_url = assertion_issuer(issuer, Scheme::Https)?;
-    let endpoint = token_endpoint(token_url, Scheme::Https, &issuer_url)?;
-    verify_metadata(issuer, &issuer_url, &endpoint, Scheme::Https).await
+pub async fn verify_oidc_metadata(
+    issuer: &IssuerUrl,
+    token_url: &TokenUrl,
+) -> Result<(), DiscoveryError> {
+    check_url_scheme(issuer.url(), "issuer", Scheme::Https)?;
+    check_url_scheme(token_url.url(), "token_url", Scheme::Https)?;
+    if issuer.url() == token_url.url() {
+        return Err(ConfigurationError {
+            key: "issuer",
+            reason: "must differ from the token endpoint",
+        }
+        .into());
+    }
+    verify_metadata(issuer, token_url.url(), Scheme::Https).await
 }
 
 fn build_client(scheme: Scheme, url: &Url) -> Result<Client, BuildError> {
@@ -62,26 +80,23 @@ fn build_client(scheme: Scheme, url: &Url) -> Result<Client, BuildError> {
 }
 
 async fn verify_metadata(
-    issuer: &str,
-    issuer_url: &Url,
+    issuer: &IssuerUrl,
     endpoint: &Url,
     scheme: Scheme,
-) -> Result<(), KeycloakError> {
+) -> Result<(), DiscoveryError> {
     if scheme == Scheme::Https {
-        prepare_tls()
-            .await
-            .map_err(TransportBuildFailure::assertion_audience)?;
+        prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
     }
     let discovery_http =
-        build_client(scheme, issuer_url).map_err(TransportBuildFailure::assertion_audience)?;
-    let metadata = fetch_metadata(issuer_url, &discovery_http).await?;
-    if metadata.issuer != issuer {
-        return Err(KeycloakError::Discovery(
-            "issuer differs from assertion_audience",
+        build_client(scheme, issuer.url()).map_err(TransportBuildFailure::issuer)?;
+    let metadata = fetch_metadata(issuer.url(), &discovery_http).await?;
+    if metadata.issuer != issuer.as_str() {
+        return Err(DiscoveryError::Metadata(
+            "issuer differs from configured issuer",
         ));
     }
-    if strict_provider_url(&metadata.token_endpoint).as_ref() != Some(endpoint) {
-        return Err(KeycloakError::Discovery(
+    if parse_discovered_token_endpoint(&metadata.token_endpoint).as_ref() != Some(endpoint) {
+        return Err(DiscoveryError::Metadata(
             "token_endpoint is invalid or differs from token_url",
         ));
     }
@@ -89,45 +104,45 @@ async fn verify_metadata(
 }
 
 /// `OpenID` Connect Discovery 1.0 §§4.1–4.3
-async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, KeycloakError> {
+async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, DiscoveryError> {
     let issuer = issuer.as_str();
     let base = issuer.strip_suffix('/').unwrap_or(issuer);
     let request = Request::get(format!("{base}/.well-known/openid-configuration"))
         .header(header::ACCEPT, "application/json")
         .body(Bytes::new())
-        .map_err(|_| KeycloakError::Discovery("issuer discovery URL is invalid"))?;
+        .map_err(|_| DiscoveryError::Metadata("issuer discovery URL is invalid"))?;
     let context = OperationContext::with_timeout(FETCH_TIMEOUT);
     let response = match client.execute_buffered(request, &context).await {
         Ok(response) if response.status() != StatusCode::OK => {
-            return Err(KeycloakError::DiscoveryStatus(response.status()));
+            return Err(DiscoveryError::Status(response.status()));
         }
         Err(ExchangeError::AfterResponse { status, .. }) if status != StatusCode::OK => {
-            return Err(KeycloakError::DiscoveryStatus(status));
+            return Err(DiscoveryError::Status(status));
         }
         Ok(response) => response,
         Err(error) => {
-            return Err(KeycloakError::DiscoveryTransport(
-                DiscoveryTransportError::new(error.into_error()),
-            ));
+            return Err(DiscoveryError::Transport(DiscoveryTransportError::new(
+                error.into_error(),
+            )));
         }
     };
     decode_metadata(&response)
 }
 
-fn decode_metadata(response: &http::Response<Bytes>) -> Result<Metadata, KeycloakError> {
+fn decode_metadata(response: &http::Response<Bytes>) -> Result<Metadata, DiscoveryError> {
     if !response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(shared_rules::rfc9110::is_json_content_type)
     {
-        return Err(KeycloakError::Discovery(
+        return Err(DiscoveryError::Metadata(
             "issuer discovery did not return application/json",
         ));
     }
     let body = response.body();
     if !body.trim_ascii_start().starts_with(b"{") {
-        return Err(KeycloakError::Discovery("invalid issuer metadata"));
+        return Err(DiscoveryError::Metadata("invalid issuer metadata"));
     }
-    serde_json::from_slice(body).map_err(KeycloakError::DiscoveryMetadata)
+    serde_json::from_slice(body).map_err(DiscoveryError::Decode)
 }

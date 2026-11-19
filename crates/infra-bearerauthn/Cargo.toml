@@ -37,15 +37,10 @@ reqwest = { workspace = true, features = [
 # template:end oidc-introspection:authn-introspection-reqwest-form
 ] }
 secrecy = { workspace = true }
-moka = { workspace = true, features = [
-  # template:begin oidc-introspection:authn-introspection-moka-future
-  "future",
-  # template:end oidc-introspection:authn-introspection-moka-future
-  # template:begin oidc-jwt:authn-jwt-moka-sync
-  "sync",
-  # template:end oidc-jwt:authn-jwt-moka-sync
-] }
+moka = { workspace = true, features = ["sync"] }
+# template:begin oidc-introspection:authn-introspection-futures-dependency
 futures-util = { workspace = true, features = ["std"] }
+# template:end oidc-introspection:authn-introspection-futures-dependency
 # template:begin oidc-introspection:authn-secret-dependency
 parking_lot = { workspace = true }
 # template:end oidc-introspection:authn-secret-dependency
@@ -65,7 +60,7 @@ url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 bytes = { workspace = true, features = ["std"] }
-futures-util = { workspace = true, features = ["async-await"] }
+futures-util = { workspace = true, features = ["std", "async-await"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["server", "http1"] }

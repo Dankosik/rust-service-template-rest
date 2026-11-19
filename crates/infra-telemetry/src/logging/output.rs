@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::metrics::static_counter_key;
+use crate::metrics::static_counter;
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 const QUEUE_RECORDS: usize = 512;
@@ -32,7 +32,7 @@ pub(super) fn on_writer_thread() -> bool {
 pub(super) type Record = Vec<u8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-pub enum DropReason {
+pub(super) enum DropReason {
     QueueFull,
     Oversize,
     SpanCapacity,
@@ -42,49 +42,48 @@ pub enum DropReason {
 }
 
 impl DropReason {
-    fn metric_key(self) -> &'static metrics::Key {
+    fn counter(self) -> metrics::Counter {
         match self {
-            Self::QueueFull => static_counter_key!(DROPPED_METRIC, "reason" => "queue_full"),
-            Self::Oversize => static_counter_key!(DROPPED_METRIC, "reason" => "oversize"),
-            Self::SpanCapacity => static_counter_key!(DROPPED_METRIC, "reason" => "span_capacity"),
-            Self::Busy => static_counter_key!(DROPPED_METRIC, "reason" => "busy"),
-            Self::Reentrant => static_counter_key!(DROPPED_METRIC, "reason" => "reentrant"),
-            Self::Closed => static_counter_key!(DROPPED_METRIC, "reason" => "closed"),
+            Self::QueueFull => static_counter!(DROPPED_METRIC, "reason" => "queue_full"),
+            Self::Oversize => static_counter!(DROPPED_METRIC, "reason" => "oversize"),
+            Self::SpanCapacity => static_counter!(DROPPED_METRIC, "reason" => "span_capacity"),
+            Self::Busy => static_counter!(DROPPED_METRIC, "reason" => "busy"),
+            Self::Reentrant => static_counter!(DROPPED_METRIC, "reason" => "reentrant"),
+            Self::Closed => static_counter!(DROPPED_METRIC, "reason" => "closed"),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-pub enum SinkOperation {
+enum SinkOperation {
     Write,
     Flush,
     Worker,
 }
 
 impl SinkOperation {
-    fn metric_key(self) -> &'static metrics::Key {
+    fn counter(self) -> metrics::Counter {
         match self {
-            Self::Write => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "write"),
-            Self::Flush => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "flush"),
-            Self::Worker => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "worker"),
+            Self::Write => static_counter!(SINK_ERRORS_METRIC, "operation" => "write"),
+            Self::Flush => static_counter!(SINK_ERRORS_METRIC, "operation" => "flush"),
+            Self::Worker => static_counter!(SINK_ERRORS_METRIC, "operation" => "worker"),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LogSnapshot {
+pub(super) struct LogSnapshot {
     pub(super) dropped: EnumMap<DropReason, u64>,
     sink_errors: EnumMap<SinkOperation, u64>,
 }
 
+#[cfg(test)]
 impl LogSnapshot {
-    #[must_use]
-    pub fn dropped(&self, reason: DropReason) -> u64 {
+    pub(super) fn dropped(&self, reason: DropReason) -> u64 {
         self.dropped[reason]
     }
 
-    #[must_use]
-    pub fn sink_errors(&self, operation: SinkOperation) -> u64 {
+    fn sink_errors(&self, operation: SinkOperation) -> u64 {
         self.sink_errors[operation]
     }
 }
@@ -102,13 +101,11 @@ bitflags::bitflags! {
 
 const _: () = assert!(LoggerShutdownReasons::all().bits() & DRAINING_BIT == 0);
 
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoggerShutdown {
-    Completed(LogSnapshot),
-    Incomplete {
-        reasons: LoggerShutdownReasons,
-        snapshot: LogSnapshot,
-    },
+    Completed,
+    Incomplete(LoggerShutdownReasons),
 }
 
 #[derive(Debug)]
@@ -220,12 +217,11 @@ impl LoggerGuard {
             .fetch_or(DRAINING_BIT, Ordering::Relaxed);
     }
 
-    #[must_use]
-    pub fn snapshot(&self) -> LogSnapshot {
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> LogSnapshot {
         self.shared.counters.snapshot()
     }
 
-    #[must_use]
     pub fn shutdown(mut self, deadline: Instant) -> LoggerShutdown {
         self.begin_shutdown();
         self.shared.close();
@@ -236,12 +232,27 @@ impl LoggerGuard {
         reasons |= LoggerShutdownReasons::from_bits_truncate(
             self.shared.drain_state.load(Ordering::Relaxed),
         );
-        let snapshot = self.snapshot();
         if reasons.is_empty() {
-            LoggerShutdown::Completed(snapshot)
+            LoggerShutdown::Completed
         } else {
-            LoggerShutdown::Incomplete { reasons, snapshot }
+            LoggerShutdown::Incomplete(reasons)
         }
+    }
+
+    pub async fn shutdown_async(self, deadline: tokio::time::Instant) -> LoggerShutdown {
+        let close = tokio::task::spawn_blocking(move || self.shutdown(deadline.into_std()));
+        match tokio::time::timeout_at(deadline, close).await {
+            Ok(Ok(shutdown)) => shutdown,
+            Ok(Err(_)) => LoggerShutdown::Incomplete(LoggerShutdownReasons::WORKER),
+            Err(_) => LoggerShutdown::Incomplete(LoggerShutdownReasons::DEADLINE),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn shutdown_with_snapshot(self, deadline: Instant) -> (LoggerShutdown, LogSnapshot) {
+        let shared = Arc::clone(&self.shared);
+        let outcome = self.shutdown(deadline);
+        (outcome, shared.counters.snapshot())
     }
 
     fn wait_for_worker(&mut self, deadline: Instant) -> LoggerShutdownReasons {
@@ -530,21 +541,12 @@ pub(super) fn describe_metrics() {
 }
 
 pub(super) fn publish() {
-    static METADATA: metrics::Metadata<'static> =
-        metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
-        metrics::with_recorder(|recorder| {
-            recorder.register_counter(reason.metric_key(), &METADATA)
-        })
-        .absolute(dropped);
+        reason.counter().absolute(dropped);
     }
     for (operation, &errors) in &snapshot.sink_errors {
-        metrics::with_recorder(|recorder| {
-            recorder.register_counter(operation.metric_key(), &METADATA)
-        })
-        .absolute(errors);
+        operation.counter().absolute(errors);
     }
 }
 
@@ -661,11 +663,7 @@ mod tests {
         guard.begin_shutdown();
         gate.release.send(()).expect("resume sink");
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(
-            result,
-            LoggerShutdown::Completed(_),
-            "historical loss: {result:?}"
-        );
+        assert_eq!(result, LoggerShutdown::Completed, "historical loss");
         assert!(
             gate.destroyed.load(Ordering::SeqCst),
             "ack follows sink destruction"
@@ -702,19 +700,20 @@ mod tests {
                 .recv_timeout(TEST_TIMEOUT)
                 .expect("later record written");
             guard.begin_shutdown();
-            let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-            let snapshot = if during_drain {
-                let LoggerShutdown::Incomplete { reasons, snapshot } = result else {
-                    panic!("in-flight failure cannot be hidden by recovery: {result:?}");
-                };
-                assert_eq!(reasons, LoggerShutdownReasons::WRITE);
-                snapshot
+            let (result, snapshot) = guard.shutdown_with_snapshot(Instant::now() + TEST_TIMEOUT);
+            if during_drain {
+                assert_eq!(
+                    result,
+                    LoggerShutdown::Incomplete(LoggerShutdownReasons::WRITE),
+                    "in-flight failure cannot be hidden by recovery"
+                );
             } else {
-                let LoggerShutdown::Completed(snapshot) = result else {
-                    panic!("historical write failure cannot poison clean drain: {result:?}");
-                };
-                snapshot
-            };
+                assert_eq!(
+                    result,
+                    LoggerShutdown::Completed,
+                    "historical write failure cannot poison clean drain"
+                );
+            }
             assert_eq!(snapshot.sink_errors.into_array(), [1, 0, 0]);
             assert_eq!(
                 &*gate.bytes.lock().expect("test output mutex"),
@@ -759,8 +758,7 @@ mod tests {
         output.submit(record(b"first\n"));
         output.submit(record(b"second\n"));
         guard.begin_shutdown();
-        let (LoggerShutdown::Completed(snapshot) | LoggerShutdown::Incomplete { snapshot, .. }) =
-            guard.shutdown(Instant::now() + TEST_TIMEOUT);
+        let (_result, snapshot) = guard.shutdown_with_snapshot(Instant::now() + TEST_TIMEOUT);
 
         assert_eq!(snapshot.sink_errors.into_array(), [1, 0, 0]);
         assert_eq!(&*bytes.lock().expect("test output mutex"), b"fir\nsecond\n");
@@ -781,12 +779,12 @@ mod tests {
         guard.begin_shutdown();
         output.submit(record(b"terminal\n"));
         gate.release.send(()).expect("resume sink");
-        let LoggerShutdown::Incomplete { reasons, snapshot } =
-            guard.shutdown(Instant::now() + TEST_TIMEOUT)
-        else {
-            panic!("a lost final record makes the drain incomplete");
-        };
-        assert_eq!(reasons, LoggerShutdownReasons::DROPPED);
+        let (result, snapshot) = guard.shutdown_with_snapshot(Instant::now() + TEST_TIMEOUT);
+        assert_eq!(
+            result,
+            LoggerShutdown::Incomplete(LoggerShutdownReasons::DROPPED),
+            "a lost final record makes the drain incomplete"
+        );
         assert_eq!(snapshot.dropped.into_array(), [1, 0, 0, 0, 0, 0]);
         assert!(gate.destroyed.load(Ordering::SeqCst));
         assert_eq!(
@@ -808,10 +806,11 @@ mod tests {
             let began = Instant::now();
             if explicit_shutdown {
                 let result = guard.shutdown(began + Duration::from_millis(20));
-                let LoggerShutdown::Incomplete { reasons, .. } = result else {
-                    panic!("blocked writer cannot complete: {result:?}");
-                };
-                assert_eq!(reasons, LoggerShutdownReasons::DEADLINE);
+                assert_eq!(
+                    result,
+                    LoggerShutdown::Incomplete(LoggerShutdownReasons::DEADLINE),
+                    "blocked writer cannot complete"
+                );
             } else {
                 drop(guard);
             }
@@ -851,15 +850,18 @@ mod tests {
             let (output, guard) = start(FailingWriter(panics)).expect("start writer");
             guard.begin_shutdown();
             output.submit(record(b"terminal\n"));
-            let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-            let LoggerShutdown::Incomplete { reasons, snapshot } = result else {
-                panic!("sink failure cannot complete: {result:?}");
-            };
+            let (result, snapshot) = guard.shutdown_with_snapshot(Instant::now() + TEST_TIMEOUT);
             if panics {
-                assert_eq!(reasons, LoggerShutdownReasons::WORKER);
+                assert_eq!(
+                    result,
+                    LoggerShutdown::Incomplete(LoggerShutdownReasons::WORKER)
+                );
                 assert_eq!(snapshot.sink_errors.into_array(), [0, 0, 1]);
             } else {
-                assert_eq!(reasons, LoggerShutdownReasons::FLUSH);
+                assert_eq!(
+                    result,
+                    LoggerShutdown::Incomplete(LoggerShutdownReasons::FLUSH)
+                );
                 assert_eq!(snapshot.sink_errors(SinkOperation::Write), 0);
                 assert!(snapshot.sink_errors(SinkOperation::Flush) >= 1);
                 assert_eq!(snapshot.sink_errors(SinkOperation::Worker), 0);
@@ -946,7 +948,7 @@ mod tests {
         assert_eq!(guard.snapshot().dropped.into_array(), [0; 6]);
         release.send(()).expect("resume sink");
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
+        assert_eq!(result, LoggerShutdown::Completed);
 
         let expected = std::iter::once(b"first\n".to_vec())
             .chain(lines.iter().map(|line| {
@@ -984,7 +986,7 @@ mod tests {
             );
         }
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
+        assert_eq!(result, LoggerShutdown::Completed);
         assert_eq!(counted.sizes.try_iter().count(), 0);
     }
 
@@ -1110,7 +1112,7 @@ mod tests {
             output.submit(record(line.as_bytes()));
         }
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
+        assert_eq!(result, LoggerShutdown::Completed);
         assert_eq!(
             *counted.bytes.lock().expect("test output mutex"),
             lines.concat().as_bytes()
@@ -1128,7 +1130,7 @@ mod tests {
 
         let (output, guard) = start(io::sink()).expect("start writer");
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_));
+        assert_eq!(result, LoggerShutdown::Completed);
         output.submit(record(b"closed\n"));
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -1160,5 +1162,35 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[tokio::test]
+    async fn async_shutdown_completes_and_enforces_deadline() {
+        let (writer, gate) = gated(false);
+        let (output, mut guard) = start(writer).expect("start writer");
+        output.submit(record(b"blocked\n"));
+        gate.entered
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("writer entered sink");
+        let worker = guard.worker.take().expect("owned writer thread");
+        let timed_out = guard
+            .shutdown_async(tokio::time::Instant::now() + Duration::from_millis(20))
+            .await;
+        assert_eq!(
+            timed_out,
+            LoggerShutdown::Incomplete(LoggerShutdownReasons::DEADLINE)
+        );
+        gate.release.send(()).expect("release fixture for cleanup");
+        drop(output);
+        worker.join().expect("join released fixture");
+
+        let (output, guard) = start(io::sink()).expect("start writer");
+        output.submit(record(b"ok\n"));
+        assert_eq!(
+            guard
+                .shutdown_async(tokio::time::Instant::now() + TEST_TIMEOUT)
+                .await,
+            LoggerShutdown::Completed
+        );
     }
 }
