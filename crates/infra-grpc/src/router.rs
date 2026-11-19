@@ -14,21 +14,20 @@ use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
 use infra_http_transport::{ConnectionLimits, Http2Options};
 use opentelemetry::context::FutureExt as _;
-use operation_context::{Deadline, OperationContext};
-use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
+use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService as _;
 use tower::Layer as _;
 use tracing::Instrument as _;
 
-use crate::call::{ServerCustody, check_open, deadline_status, stopped_status, wrap_response};
+use crate::call::{ServerCustody, check_open, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
 use crate::services::{CallType, ListenerLayer, Methods, REFLECTION_PATHS};
-use crate::status::internal_status;
-use crate::{Error, Failure, Services};
+use crate::status::{FixedFailure, internal_status};
+use crate::{Error, Services};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -415,9 +414,10 @@ async fn business_call(
         async {
             let outcome = tokio::select! {
                 biased;
-                reason = lifecycle.opening_context.wait_stopped() => {
-                    Err(stopped_status(reason).into_http())
-                }
+                reason = lifecycle.opening_context.wait_stopped() => match reason {
+                    Stopped::Deadline => return Err(FixedFailure::Deadline.status().into_http()),
+                    Stopped::Cancelled => Err(stopped_status(reason).into_http()),
+                },
                 outcome = open_business(
                     &state,
                     &lifecycle.opening_context,
@@ -527,7 +527,8 @@ async fn acquire_permit(
 }
 
 async fn reject_shed(opening_context: &OperationContext, request: Request) -> Response {
-    let response = reject_with_budget(opening_context, request, shed_status()).await;
+    let response =
+        reject_with_budget(opening_context, request, FixedFailure::AtCapacity.status()).await;
     if let Some(reason) = opening_context.stopped() {
         return stopped_status(reason).into_http();
     }
@@ -535,13 +536,10 @@ async fn reject_shed(opening_context: &OperationContext, request: Request) -> Re
     response
 }
 
-fn shed_status() -> tonic::Status {
-    Failure::new(service_failure::Code::ServiceUnavailable)
-        .retry_after(AT_CAPACITY_RETRY_AFTER)
-        .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL)
-}
-
 fn admission_wait(max_wait: Duration, opening_context: &OperationContext) -> Duration {
+    if max_wait.is_zero() {
+        return Duration::ZERO;
+    }
     opening_context
         .remaining()
         .unwrap_or_default()
@@ -558,28 +556,29 @@ async fn health_call(
         .extensions_mut()
         .remove::<infra_http_transport::ConnectionInfo>();
     let started = start_call(&mut request, &methods, request_timeout);
-    let response = run_in_span(
+    let (response, response_deadline) = run_in_span(
         async {
+            let expired = || (FixedFailure::Deadline.status().into_http(), None);
             tokio::select! {
                 biased;
-                () = started.opening_deadline.wait() => deadline_status().into_http(),
+                () = started.opening_deadline.wait() => expired(),
                 response = next.run(request) => {
                     if started.opening_deadline.expired() {
-                        deadline_status().into_http()
+                        expired()
                     } else {
-                        response
+                        (response, started.response_deadline)
                     }
                 }
             }
         },
         started.call.span(),
         started.fallback.as_ref(),
-        || internal_status().into_http(),
+        || (internal_status().into_http(), started.response_deadline),
     )
     .await;
 
     let custody = ServerCustody {
-        deadline: started.response_deadline,
+        deadline: response_deadline,
         ..ServerCustody::default()
     };
     wrap_response(response, started.call, started.fallback, custody)
@@ -622,7 +621,7 @@ async fn run_in_span<T>(
     future: impl Future<Output = T>,
     span: &tracing::Span,
     fallback: Option<&opentelemetry::Context>,
-    on_panic: fn() -> T,
+    on_panic: impl FnOnce() -> T,
 ) -> T {
     let instrumented = AssertUnwindSafe(future)
         .catch_unwind()

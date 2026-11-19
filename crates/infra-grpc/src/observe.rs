@@ -181,6 +181,9 @@ fn open_server_span(path: &str, metrics: &MethodMetrics) -> tracing::Span {
         otel.name = metrics.span_name(),
         otel.kind = ?SpanKind::Server,
     );
+    if span.is_disabled() {
+        return span;
+    }
     span.set_attribute(RPC_SYSTEM_NAME_ATTR, RPC_SYSTEM_GRPC);
     if let Some(method) = &metrics.rpc_method {
         span.set_attribute(RPC_METHOD_ATTR, Arc::clone(method));
@@ -206,9 +209,10 @@ pub(crate) fn register_shed() {
 #[must_use]
 pub(crate) fn admission_waiting() -> impl Drop {
     describe();
-    metrics::gauge!(SERVER_ADMISSION_WAITING_METRIC).increment(1.0);
-    DropGuard::new(tokio::time::Instant::now(), |started| {
-        metrics::gauge!(SERVER_ADMISSION_WAITING_METRIC).decrement(1.0);
+    let waiting = metrics::gauge!(SERVER_ADMISSION_WAITING_METRIC);
+    waiting.increment(1.0);
+    DropGuard::new(tokio::time::Instant::now(), move |started| {
+        waiting.decrement(1.0);
         metrics::histogram!(SERVER_ADMISSION_WAIT_METRIC).record(started.elapsed());
     })
 }
@@ -256,6 +260,26 @@ pub(crate) fn describe() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_wait_balances_the_gauge_on_the_original_recorder() {
+        let entry = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let exit = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let wait = metrics::with_local_recorder(&entry, admission_waiting);
+        metrics::with_local_recorder(&exit, || drop(wait));
+
+        assert!(
+            entry
+                .handle()
+                .render()
+                .contains("grpc_server_admission_waiting 0")
+        );
+        assert!(
+            exit.handle()
+                .render()
+                .contains("grpc_server_admission_wait_seconds")
+        );
+    }
 
     #[test]
     fn call_types_follow_the_descriptor_streaming_flags() {

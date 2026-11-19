@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use service_failure::SANITIZED_DETAIL;
+use bytes::Bytes;
+use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER, SANITIZED_DETAIL};
 use tonic::Status;
 use tonic_types::{ErrorDetails, StatusExt as _};
 
@@ -55,7 +57,49 @@ impl From<Failure> for Status {
 }
 
 pub(crate) fn internal_status() -> Status {
-    Failure::new(service_failure::Code::InternalServerError).into()
+    FixedFailure::Internal.status()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FixedFailure {
+    Deadline,
+    Internal,
+    AtCapacity,
+}
+
+impl FixedFailure {
+    pub(crate) const fn catalog_code(self) -> service_failure::Code {
+        match self {
+            Self::Deadline => service_failure::Code::GatewayTimeout,
+            Self::Internal => service_failure::Code::InternalServerError,
+            Self::AtCapacity => service_failure::Code::ServiceUnavailable,
+        }
+    }
+
+    pub(crate) fn status(self) -> Status {
+        static DEADLINE: OnceLock<Status> = OnceLock::new();
+        static INTERNAL: OnceLock<Status> = OnceLock::new();
+        static AT_CAPACITY: OnceLock<Status> = OnceLock::new();
+        let cache = match self {
+            Self::Deadline => &DEADLINE,
+            Self::Internal => &INTERNAL,
+            Self::AtCapacity => &AT_CAPACITY,
+        };
+        let template = cache.get_or_init(|| {
+            let failure = Failure::new(self.catalog_code());
+            match self {
+                Self::AtCapacity => failure
+                    .retry_after(AT_CAPACITY_RETRY_AFTER)
+                    .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL),
+                Self::Deadline | Self::Internal => failure.into(),
+            }
+        });
+        Status::with_details(
+            template.code(),
+            template.message(),
+            Bytes::from_static(template.details()),
+        )
+    }
 }
 
 pub(crate) fn catalog_code(status: &Status) -> Option<service_failure::Code> {
