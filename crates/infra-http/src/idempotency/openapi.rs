@@ -18,9 +18,9 @@ const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
 const QUOTED_KEY_EXAMPLE: &str = "\"8e03978e-40d5-43e8-bc93-6894a57f9324\"";
 
 pub(super) fn key_rules_link(
-    docs: Option<&utoipa::openapi::external_docs::ExternalDocs>,
+    docs: &utoipa::openapi::external_docs::ExternalDocs,
 ) -> Option<HeaderValue> {
-    let uri = UriStr::new(&docs?.url).ok()?;
+    let uri = UriStr::new(&docs.url).ok()?;
     let authority = uri.authority_components()?;
     if !(uri.scheme_str().eq_ignore_ascii_case("https")
         || uri.scheme_str().eq_ignore_ascii_case("http"))
@@ -227,7 +227,7 @@ mod tests {
         let docs =
             utoipa::openapi::external_docs::ExternalDocs::new("https://docs.example/orders#retry");
         assert_eq!(
-            key_rules_link(Some(&docs)).unwrap(),
+            key_rules_link(&docs).unwrap(),
             "<https://docs.example/orders#retry>; rel=\"describedby\""
         );
         for invalid in [
@@ -236,7 +236,7 @@ mod tests {
             "https://docs.example/#bad%escape",
         ] {
             let docs = utoipa::openapi::external_docs::ExternalDocs::new(invalid);
-            assert!(key_rules_link(Some(&docs)).is_none());
+            assert!(key_rules_link(&docs).is_none());
         }
     }
 

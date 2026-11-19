@@ -33,7 +33,7 @@ use crate::request_id;
 
 struct Admission {
     permits: Arc<Semaphore>,
-    patience: Duration,
+    max_wait: Duration,
     probes: ProbeRoutes,
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
         middleware::from_fn_with_state(
             Arc::new(Admission {
                 permits: Arc::new(Semaphore::new(limit.get() as usize)),
-                patience: options.admission_wait.min(options.request_timeout),
+                max_wait: options.admission_wait.min(options.request_timeout),
                 probes: probes.clone(),
             }),
             admit,
@@ -95,7 +95,7 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
         .layer(option_layer(in_flight))
         .layer(middleware::from_fn_with_state(
             options.request_timeout,
-            crate::context::opening,
+            crate::context::enforce_request_budget,
         ))
         .layer(CatchPanicLayer::custom(panic_to_problem))
         .layer(middleware::from_fn_with_state(
@@ -186,7 +186,7 @@ async fn admit(
     }
     let arrived = tokio::time::Instant::now();
     let acquired =
-        infra_http_transport::acquire_within(&admission.permits, admission.patience, || ()).await;
+        infra_http_transport::acquire_within(&admission.permits, admission.max_wait, || ()).await;
     let waited = match &acquired {
         Ok((_, waited)) => *waited,
         Err(waited) => Some(*waited),
@@ -195,6 +195,7 @@ async fn admit(
         metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
     }
     let Ok((_permit, _)) = acquired else {
+        metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
         return shed_response();
     };
     request
@@ -207,7 +208,6 @@ async fn admit(
 pub(super) struct AdmissionShed;
 
 fn shed_response() -> Response {
-    metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
     let problem = Problem::new(Code::ServiceUnavailable)
         .detail(service_failure::AT_CAPACITY_DETAIL)
         .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER);

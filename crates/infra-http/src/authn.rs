@@ -113,7 +113,11 @@ async fn authenticate(
     };
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => policy.unregistered(Some(path), request.method()).await,
+        None => {
+            policy
+                .unregistered_response(Some(path), request.method())
+                .await
+        }
         Some(Access::Protected(required)) => {
             authenticate_protected(&verifier, required, request, next).await
         }
@@ -180,9 +184,6 @@ fn authorize(
         .any(|scopes| principal.has_scopes(scopes))
     {
         return Err(insufficient_scope_response());
-    }
-    if let Some(stopped) = operation.stopped() {
-        return Err(Problem::from(stopped).into_response());
     }
     Ok((
         principal,

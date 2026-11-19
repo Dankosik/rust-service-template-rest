@@ -13,11 +13,17 @@ const LIVE_BODY: &str = "ok";
 const READY_BODY: &str = "ok";
 const NOT_READY_BODY: &str = "not ready";
 
+#[derive(Clone, Debug)]
+pub(crate) struct ProbeRoute {
+    pub(crate) path: Box<str>,
+    pub(crate) implicit_head: bool,
+}
+
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ProbeRoutes(Arc<[(Box<str>, bool)]>);
+pub(crate) struct ProbeRoutes(Arc<[ProbeRoute]>);
 
 impl ProbeRoutes {
-    pub(crate) fn new(routes: Vec<(Box<str>, bool)>) -> Self {
+    pub(crate) fn new(routes: Vec<ProbeRoute>) -> Self {
         Self(routes.into())
     }
 
@@ -26,8 +32,9 @@ impl ProbeRoutes {
     }
 
     pub(crate) fn contains_method(&self, method: &str, route: &str) -> bool {
-        self.0.iter().any(|(path, implicit_head)| {
-            path.as_ref() == route && (method == "GET" || (*implicit_head && method == "HEAD"))
+        self.0.iter().any(|probe| {
+            probe.path.as_ref() == route
+                && (method == "GET" || (probe.implicit_head && method == "HEAD"))
         })
     }
 }

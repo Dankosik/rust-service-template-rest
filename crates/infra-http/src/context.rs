@@ -26,11 +26,11 @@ use crate::request_id::REQUEST_ID_HEADER;
 #[derive(Clone, Debug)]
 pub struct RequestContext {
     operation: OperationContext,
-    upload_reads: Option<Arc<UploadReads>>,
+    tracking: Option<Arc<RequestTracking>>,
 }
 
 #[derive(Debug, Default)]
-struct UploadReads {
+struct RequestTracking {
     pending: AtomicUsize,
     pending_at_deadline: AtomicBool,
     // template:begin object-storage:http-request-put-outcomes
@@ -60,8 +60,8 @@ impl RequestContext {
         &self,
         body: infra_object_storage::PutBody,
     ) -> infra_object_storage::PutBody {
-        match &self.upload_reads {
-            Some(reads) => reads
+        match &self.tracking {
+            Some(tracking) => tracking
                 .put_outcomes
                 .get_or_init(Default::default)
                 .observe(body),
@@ -72,9 +72,9 @@ impl RequestContext {
 
     fn stopped_response(&self, reason: Stopped, version: Version) -> Response {
         if reason == Stopped::Deadline
-            && self.upload_reads.as_ref().is_some_and(|reads| {
-                reads.pending.load(Ordering::Acquire) != 0
-                    || reads.pending_at_deadline.load(Ordering::Relaxed)
+            && self.tracking.as_ref().is_some_and(|tracking| {
+                tracking.pending.load(Ordering::Acquire) != 0
+                    || tracking.pending_at_deadline.load(Ordering::Relaxed)
             })
         {
             return upload_timeout_response(version);
@@ -82,9 +82,9 @@ impl RequestContext {
         let problem = Problem::from(reason);
         // template:begin object-storage:http-stopped-put-outcome
         if self
-            .upload_reads
+            .tracking
             .as_ref()
-            .and_then(|reads| reads.put_outcomes.get())
+            .and_then(|tracking| tracking.put_outcomes.get())
             .is_some_and(infra_object_storage::PutOutcomes::has_unconfirmed_write)
         {
             return crate::object_storage::unconfirmed_write(problem).into_response();
@@ -109,9 +109,9 @@ pub(crate) async fn collect_body(
 // template:end http-idempotency:http-idempotency-collect-body
 
 async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
-    let Some((reads, deadline)) = context.and_then(|context| {
+    let Some((tracking, deadline)) = context.and_then(|context| {
         context
-            .upload_reads
+            .tracking
             .as_deref()
             .zip(context.operation.deadline())
     }) else {
@@ -122,12 +122,12 @@ async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -
     std::future::poll_fn(|cx| {
         let polled = read.as_mut().poll(cx);
         if polled.is_pending() && pending.is_none() && !deadline.expired() {
-            reads.pending.fetch_add(1, Ordering::Relaxed);
-            pending = Some(DropGuard::new(reads, move |reads| {
+            tracking.pending.fetch_add(1, Ordering::Relaxed);
+            pending = Some(DropGuard::new(tracking, move |tracking| {
                 if deadline.expired() {
-                    reads.pending_at_deadline.store(true, Ordering::Relaxed);
+                    tracking.pending_at_deadline.store(true, Ordering::Relaxed);
                 }
-                reads.pending.fetch_sub(1, Ordering::Release);
+                tracking.pending.fetch_sub(1, Ordering::Release);
             }));
         }
         polled
@@ -239,7 +239,7 @@ pub(crate) async fn finish_response(mut request: Request, next: Next) -> Respons
     response.map(|body| hold_guard_until_end(body, guard))
 }
 
-pub(crate) async fn opening(
+pub(crate) async fn enforce_request_budget(
     State(budget): State<Duration>,
     response_context: ResponseContext,
     mut request: Request,
@@ -250,16 +250,16 @@ pub(crate) async fn opening(
         .get::<Arrival>()
         .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
     let deadline = Deadline::new(origin, budget);
-    let track_upload = !request.body().is_end_stream();
+    let track_request = !request.body().is_end_stream();
     // template:begin object-storage:http-opening-put-outcomes
-    let track_upload = track_upload || !request.method().is_safe();
+    let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
     let context = RequestContext {
         operation: OperationContext::new(
             Some(deadline),
             response_context.operation().cancellation().clone(),
         ),
-        upload_reads: track_upload.then(Arc::default),
+        tracking: track_request.then(Arc::default),
     };
     let version = request.version();
     request.extensions_mut().insert(context.operation.clone());
@@ -269,18 +269,17 @@ pub(crate) async fn opening(
         request.extensions_mut().insert(deadline);
     }
     // template:end request-budget:http-request-deadline-projection
+    let stop = |reason| {
+        response_context.operation().cancel();
+        context.stopped_response(reason, version)
+    };
     let response = tokio::select! {
         biased;
-        stopped = async {
-            let reason = context.operation.wait_stopped().await;
-            response_context.operation().cancel();
-            context.stopped_response(reason, version)
-        } => return stopped,
+        reason = context.operation.wait_stopped() => return stop(reason),
         response = next.run(request) => response,
     };
     if let Some(reason) = context.operation.stopped() {
-        response_context.operation().cancel();
-        return context.stopped_response(reason, version);
+        return stop(reason);
     }
     response
 }

@@ -179,7 +179,7 @@ fn invalid_key(rules_link: HeaderValue) -> Response {
     ([(axum::http::header::LINK, rules_link)], problem).into_response()
 }
 
-fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
+pub(super) fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
     tracing::error!(
         operation = operation_id,
         failure,

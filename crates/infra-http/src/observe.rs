@@ -5,7 +5,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use axum::http::{Method, StatusCode, Uri, Version};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, Version};
 use axum::middleware::Next;
 use axum::response::Response;
 use compact_str::{CompactString, format_compact};
@@ -15,7 +15,7 @@ use http_body::Body as _;
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use parking_lot::Mutex;
-use shared_rules::otel_http::{request_method, response_status_code};
+use shared_rules::otel_http::{OTHER_METHOD, request_method, response_status_code};
 use tokio::time::Instant;
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
@@ -113,39 +113,26 @@ pub(crate) async fn observe(
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
-    let trace_parent_accepted =
-        infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
-    let method = request.method();
-    let method_label = request_method(method.as_str());
+    let method = MethodSlot::from_label(request_method(request.method().as_str()));
     let version = request.version();
     let scheme = url_scheme(request.uri(), connection.as_ref());
     let route = matched.as_ref().map(MatchedPath::as_str);
-    let span = make_span(version, method_label, route, request_id_text, scheme);
-    let parent = if trace_parent_accepted {
-        otel_http::extract_context(request.headers())
-    } else {
-        opentelemetry::Context::new()
-    };
-    let fallback = set_parent_or_fallback(&span, parent);
-    let response_context = trace_parent_accepted.then(|| {
-        fallback
-            .clone()
-            .unwrap_or_else(|| find_context_from_tracing(&span))
-    });
     let log_access = !suppresses_access_log(
         log_health_probes,
         &probes,
-        method,
+        request.method(),
         route.unwrap_or(UNMATCHED_ROUTE),
     );
-    let gauge = series.active_gauge(method_label, scheme);
+    let span = make_span(version, method, route, request_id_text, scheme);
+    let mut trace_context = TraceContext::admit(request.headers_mut(), trust_trace_context, &span);
+    let gauge = series.active_gauge(method, scheme);
     gauge.increment(1);
     let mut observation = DropGuard::new(
         RequestObservation {
             log_access,
             series,
             gauge,
-            method_label,
+            method,
             scheme,
             matched,
             request_id,
@@ -158,7 +145,7 @@ pub(crate) async fn observe(
     );
 
     let traced = next.run(request).instrument(observation.span.clone());
-    let mut response = match fallback {
+    let mut response = match trace_context.fallback.take() {
         None => traced.await,
         Some(context) => traced.with_context(context).await,
     };
@@ -181,17 +168,8 @@ pub(crate) async fn observe(
         problem_code: extensions.get::<Problem>().map(Problem::code),
         load_shed: extensions.get::<AdmissionShed>().is_some(),
     });
-    let headers = response.headers_mut();
-    headers.remove("traceparent");
-    headers.remove("tracestate");
-    if let Some(context) = response_context {
-        otel_http::inject_context(&context, headers);
-    }
-    let ends_at_headers = method_label == "HEAD"
-        || method_label == "CONNECT" && status.is_success()
-        || status.is_informational()
-        || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED);
-    if ends_at_headers {
+    trace_context.inject_response(response.headers_mut());
+    if ends_at_headers(method, status) {
         DropGuard::dismiss(observation).record(RequestEnd::Body(BodyEnd::Complete));
         return response;
     }
@@ -201,6 +179,44 @@ pub(crate) async fn observe(
             DropGuard::dismiss(observation).record(RequestEnd::Body(end));
         })
     })
+}
+
+struct TraceContext {
+    fallback: Option<opentelemetry::Context>,
+    response: Option<opentelemetry::Context>,
+}
+
+impl TraceContext {
+    fn admit(headers: &mut HeaderMap, trust_trace_context: bool, span: &tracing::Span) -> Self {
+        let accepted = infra_http_transport::admit_trace_context(headers, trust_trace_context);
+        let parent = if accepted {
+            otel_http::extract_context(headers)
+        } else {
+            opentelemetry::Context::new()
+        };
+        let fallback = set_parent_or_fallback(span, parent);
+        let response = accepted.then(|| {
+            fallback
+                .clone()
+                .unwrap_or_else(|| find_context_from_tracing(span))
+        });
+        Self { fallback, response }
+    }
+
+    fn inject_response(self, headers: &mut HeaderMap) {
+        headers.remove("traceparent");
+        headers.remove("tracestate");
+        if let Some(context) = self.response {
+            otel_http::inject_context(&context, headers);
+        }
+    }
+}
+
+fn ends_at_headers(method: MethodSlot, status: StatusCode) -> bool {
+    matches!(method, MethodSlot::Head)
+        || (matches!(method, MethodSlot::Connect) && status.is_success())
+        || status.is_informational()
+        || matches!(status, StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED)
 }
 
 fn http1_response_length(version: Version, response: &Response) -> Option<u64> {
@@ -235,7 +251,7 @@ struct RequestObservation {
     log_access: bool,
     series: Arc<Series>,
     gauge: Gauge,
-    method_label: &'static str,
+    method: MethodSlot,
     scheme: Scheme,
     matched: Option<MatchedPath>,
     request_id: Option<RequestId>,
@@ -243,6 +259,38 @@ struct RequestObservation {
     started: Instant,
     connection: Option<ConnectionInfo>,
     head: Option<ResponseHead>,
+}
+
+#[derive(Clone, Copy)]
+struct RequestOutcome {
+    status: Option<StatusCode>,
+    error_type: Option<&'static str>,
+    access_status: Option<u16>,
+    termination: Option<&'static str>,
+    problem_code: Option<&'static str>,
+}
+
+fn classify_outcome(end: RequestEnd, head: Option<&ResponseHead>) -> RequestOutcome {
+    let (interruption, fallback_log_status) = match end {
+        RequestEnd::Body(BodyEnd::Complete) => (None, None),
+        RequestEnd::Body(BodyEnd::Error) => (Some("response_body_error"), None),
+        RequestEnd::ClientClosed => (Some("client_closed"), Some(499)),
+        RequestEnd::ServerShutdown => (Some("server_shutdown"), Some(503)),
+    };
+    let status = head.map(|head| head.status);
+    let error_type =
+        interruption.or_else(|| status.filter(StatusCode::is_server_error).map(status_label));
+    let access_status = status.map(StatusCode::as_u16).or(fallback_log_status);
+    let termination =
+        interruption.or_else(|| head.filter(|head| head.load_shed).map(|_| "load_shed"));
+    let problem_code = head.and_then(|head| head.problem_code).map(Code::as_str);
+    RequestOutcome {
+        status,
+        error_type,
+        access_status,
+        termination,
+        problem_code,
+    }
 }
 
 impl RequestObservation {
@@ -261,55 +309,34 @@ impl RequestObservation {
 
     fn record(self, end: RequestEnd) {
         let elapsed = self.started.elapsed();
-        let (interruption, fallback_log_status) = match end {
-            RequestEnd::Body(BodyEnd::Complete) => (None, None),
-            RequestEnd::Body(BodyEnd::Error) => (Some("response_body_error"), None),
-            RequestEnd::ClientClosed => (Some("client_closed"), Some(499)),
-            RequestEnd::ServerShutdown => (Some("server_shutdown"), Some(503)),
-        };
+        let outcome = classify_outcome(end, self.head.as_ref());
         let route = self.matched.as_ref().map(MatchedPath::as_str);
-        let response_status = self.head.as_ref().map(|head| head.status);
-        let error_type = interruption.or_else(|| {
-            response_status
-                .filter(StatusCode::is_server_error)
-                .map(status_label)
-        });
         self.gauge.decrement(1);
         self.series.record_duration(
             route,
             DurationLabels {
-                method: self.method_label,
+                method: self.method,
                 scheme: self.scheme,
-                status: response_status,
-                error_type,
+                status: outcome.status,
+                error_type: outcome.error_type,
             },
             elapsed,
         );
-        if let Some(status) = response_status {
+        if let Some(status) = outcome.status {
             self.span
                 .set_attribute("http.response.status_code", i64::from(status.as_u16()));
         }
-        if let Some(error_type) = error_type {
+        if let Some(error_type) = outcome.error_type {
             self.span.set_attribute("error.type", error_type);
             self.span
                 .set_status(opentelemetry::trace::Status::error(""));
         }
-        if !self.log_access {
-            return;
+        if self.log_access {
+            self.emit_access_log(route, elapsed, outcome);
         }
-        let access_status = response_status
-            .map(|value| value.as_u16())
-            .or(fallback_log_status);
-        let termination = interruption.or_else(|| {
-            self.head
-                .as_ref()
-                .filter(|head| head.load_shed)
-                .map(|_| "load_shed")
-        });
-        let problem_code = self
-            .head
-            .and_then(|head| head.problem_code)
-            .map(Code::as_str);
+    }
+
+    fn emit_access_log(&self, route: Option<&str>, elapsed: Duration, outcome: RequestOutcome) {
         let request_id = self
             .request_id
             .as_ref()
@@ -317,12 +344,12 @@ impl RequestObservation {
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         let log = || {
             tracing::info!(
-                method = self.method_label,
+                method = self.method.as_str(),
                 route = route.unwrap_or(UNMATCHED_ROUTE),
-                status = access_status,
+                status = outcome.access_status,
                 duration_ms,
-                problem_code,
-                termination,
+                problem_code = outcome.problem_code,
+                termination = outcome.termination,
                 request_id,
                 "http_request"
             );
@@ -342,12 +369,12 @@ impl RequestObservation {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     version: Version,
-    method: &'static str,
+    method: MethodSlot,
     route: Option<&str>,
     request_id: Option<&str>,
     scheme: Scheme,
 ) -> tracing::Span {
-    let name_method = if method == "_OTHER" { "HTTP" } else { method };
+    let name_method = method.span_name_prefix();
     let span_name = match route {
         Some(route) => format_compact!("{name_method} {route}"),
         None => CompactString::const_new(name_method),
@@ -358,7 +385,7 @@ fn make_span(
         otel.kind = ?opentelemetry::trace::SpanKind::Server,
         request_id,
     );
-    span.set_attribute("http.request.method", method);
+    span.set_attribute("http.request.method", method.as_str());
     if let Some(route) = route {
         span.set_attribute("http.route", route.to_owned());
     }
@@ -392,7 +419,7 @@ fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> Scheme {
     }
 }
 
-#[derive(Clone, Copy, Debug, Enum)]
+#[derive(Clone, Copy, Debug, Enum, Eq, Hash, PartialEq)]
 enum MethodSlot {
     Connect,
     Delete,
@@ -423,11 +450,34 @@ impl MethodSlot {
             _ => Self::Other,
         }
     }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "CONNECT",
+            Self::Delete => "DELETE",
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+            Self::Patch => "PATCH",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Query => "QUERY",
+            Self::Trace => "TRACE",
+            Self::Other => OTHER_METHOD,
+        }
+    }
+
+    const fn span_name_prefix(self) -> &'static str {
+        match self {
+            Self::Other => "HTTP",
+            _ => self.as_str(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DurationLabels {
-    method: &'static str,
+    method: MethodSlot,
     scheme: Scheme,
     status: Option<StatusCode>,
     error_type: Option<&'static str>,
@@ -435,20 +485,44 @@ struct DurationLabels {
 
 type RouteDurations = HashMap<DurationLabels, Histogram>;
 
+#[derive(Clone, Debug, Default)]
+struct DurationSeries {
+    matched: HashMap<Box<str>, RouteDurations>,
+    unmatched: RouteDurations,
+}
+
+impl DurationSeries {
+    fn get(&self, route: Option<&str>, key: &DurationLabels) -> Option<&Histogram> {
+        let route_durations = match route {
+            Some(route) => self.matched.get(route)?,
+            None => &self.unmatched,
+        };
+        route_durations.get(key)
+    }
+
+    fn insert(&mut self, route: Option<&str>, key: DurationLabels, histogram: Histogram) {
+        let route_durations = match route {
+            Some(route) => self.matched.entry(route.into()).or_default(),
+            None => &mut self.unmatched,
+        };
+        route_durations.insert(key, histogram);
+    }
+}
+
 #[derive(Debug, Default)]
 struct Series {
     active: EnumMap<MethodSlot, EnumMap<Scheme, OnceLock<Gauge>>>,
-    durations: ArcSwap<HashMap<Box<str>, RouteDurations>>,
+    durations: ArcSwap<DurationSeries>,
     durations_write: Mutex<()>,
 }
 
 impl Series {
-    fn active_gauge(&self, method: &'static str, scheme: Scheme) -> Gauge {
-        self.active[MethodSlot::from_label(method)][scheme]
+    fn active_gauge(&self, method: MethodSlot, scheme: Scheme) -> Gauge {
+        self.active[method][scheme]
             .get_or_init(|| {
                 metrics::gauge!(
                     ACTIVE_REQUESTS_METRIC,
-                    "http_request_method" => method,
+                    "http_request_method" => method.as_str(),
                     "url_scheme" => scheme.as_str()
                 )
             })
@@ -457,31 +531,20 @@ impl Series {
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn record_duration(&self, route: Option<&str>, key: DurationLabels, elapsed: Duration) {
-        let route_key = route.unwrap_or_default();
         let seconds = elapsed.as_secs_f64();
-        if let Some(histogram) = self
-            .durations
-            .load()
-            .get(route_key)
-            .and_then(|route_durations| route_durations.get(&key))
-        {
+        if let Some(histogram) = self.durations.load().get(route, &key) {
             histogram.record(seconds);
             return;
         }
         let _guard = self.durations_write.lock();
         let current = self.durations.load_full();
-        if let Some(histogram) = current
-            .get(route_key)
-            .and_then(|route_durations| route_durations.get(&key))
-        {
+        if let Some(histogram) = current.get(route, &key) {
             histogram.record(seconds);
             return;
         }
         let histogram = duration_histogram(route, key);
         let mut next = (*current).clone();
-        next.entry(route_key.into())
-            .or_default()
-            .insert(key, histogram.clone());
+        next.insert(route, key, histogram.clone());
         self.durations.store(Arc::new(next));
         histogram.record(seconds);
     }
@@ -489,7 +552,7 @@ impl Series {
 
 fn duration_histogram(route: Option<&str>, key: DurationLabels) -> Histogram {
     let mut labels = Vec::with_capacity(5);
-    labels.push(Label::new("http_request_method", key.method));
+    labels.push(Label::new("http_request_method", key.method.as_str()));
     labels.push(Label::new("url_scheme", key.scheme.as_str()));
     if let Some(status) = key.status {
         labels.push(Label::new(
@@ -792,8 +855,14 @@ mod tests {
     #[test]
     fn probes_are_skipped_by_route_template_only() {
         let probes = ProbeRoutes::new(vec![
-            ("/health/live".into(), true),
-            ("/api/health/ready".into(), true),
+            crate::probes::ProbeRoute {
+                path: "/health/live".into(),
+                implicit_head: true,
+            },
+            crate::probes::ProbeRoute {
+                path: "/api/health/ready".into(),
+                implicit_head: true,
+            },
         ]);
         assert!(suppresses_access_log(
             false,

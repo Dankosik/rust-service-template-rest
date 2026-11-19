@@ -19,7 +19,7 @@ use utoipa::openapi::{Components, OpenApi, RefOr};
 use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter};
 
 use crate::HardenOptions;
-use crate::probes::ProbeRoutes;
+use crate::probes::{ProbeRoute, ProbeRoutes};
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
@@ -91,15 +91,15 @@ pub enum Authentication {
 pub struct HttpContract<S> {
     routes: OpenApiRouter<S>,
     application: bool,
-    extensions: HashMap<Method, Router<S>>,
+    extension_routers: HashMap<Method, Router<S>>,
     probes: Vec<Box<str>>,
     // template:begin http-idempotency:http-mounted-operations-field
-    idempotency: MountedOperations,
+    idempotency: IdempotentOperations,
     // template:end http-idempotency:http-mounted-operations-field
 }
 
 #[derive(Clone)]
-struct RegisteredRequest(axum::http::Extensions);
+struct DispatchedExtensions(axum::http::Extensions);
 
 async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Response {
     let Some(service) = service else {
@@ -111,9 +111,76 @@ async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Re
     }
     request
         .extensions_mut()
-        .insert(RegisteredRequest(extensions));
+        .insert(DispatchedExtensions(extensions));
     let Ok(response) = service.oneshot(request).await;
     response
+}
+
+fn extension_router<S, H, T>(path: &str, handler: H) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    H: Handler<T, S>,
+    T: 'static,
+{
+    let dispatch = move |State(state): State<S>, mut request: Request| {
+        let handler = handler.clone();
+        async move {
+            let Some(DispatchedExtensions(mut extensions)) = request.extensions_mut().remove()
+            else {
+                return sanitized_internal_error();
+            };
+            if let Some(nested) = request.extensions_mut().remove::<NestedPath>() {
+                extensions.insert(nested);
+            }
+            *request.extensions_mut() = extensions;
+            handler.call(request, state).await
+        }
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the dispatcher selects this handler by its exact registered extension method"
+    )]
+    Router::new().route(path, axum::routing::any(dispatch))
+}
+
+fn mount_extensions<S>(
+    mut routes: Router<S>,
+    extension_routers: HashMap<Method, Router<S>>,
+    paths: &Paths,
+    state: &S,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if extension_routers.is_empty() {
+        return routes;
+    }
+    let extension_routers = Arc::new(
+        extension_routers
+            .into_iter()
+            .map(|(method, router)| (method, router.with_state::<()>(state.clone())))
+            .collect::<HashMap<_, _>>(),
+    );
+    let dispatch = move |request: Request| {
+        dispatch_extension(extension_routers.get(request.method()).cloned(), request)
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "extension methods share a fallback selected by their exact registered method"
+    )]
+    {
+        for (path, item) in &paths.paths {
+            if item.query.is_some()
+                || item
+                    .additional_operations
+                    .keys()
+                    .any(|method| method != "CONNECT")
+            {
+                routes = routes.route(path, axum::routing::any(dispatch.clone()));
+            }
+        }
+    }
+    routes
 }
 
 // template:begin http-idempotency:http-mounted-operations
@@ -129,9 +196,9 @@ pub(crate) fn resolve_schema<'a>(
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct MountedOperations(Vec<(Box<str>, &'static str)>);
+pub(crate) struct IdempotentOperations(Vec<(Box<str>, &'static str)>);
 
-impl MountedOperations {
+impl IdempotentOperations {
     pub(crate) fn contains(&self, path: &str, method: &str) -> bool {
         self.0
             .iter()
@@ -155,10 +222,10 @@ impl<S: Clone + Send + Sync + 'static> Default for HttpContract<S> {
         Self {
             routes: OpenApiRouter::default(),
             application: false,
-            extensions: HashMap::default(),
+            extension_routers: HashMap::default(),
             probes: Vec::new(),
             // template:begin http-idempotency:http-mounted-operations-init
-            idempotency: MountedOperations::default(),
+            idempotency: IdempotentOperations::default(),
             // template:end http-idempotency:http-mounted-operations-init
         }
     }
@@ -307,34 +374,17 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         }
         let mut feature =
             Self::feature_route(OpenApi::default(), (Vec::new(), paths, MethodRouter::new()))?;
-        let dispatch = move |State(state): State<S>, mut request: Request| {
-            let handler = handler.clone();
-            async move {
-                let Some(RegisteredRequest(mut extensions)) = request.extensions_mut().remove()
-                else {
-                    return sanitized_internal_error();
-                };
-                if let Some(nested) = request.extensions_mut().remove::<NestedPath>() {
-                    extensions.insert(nested);
-                }
-                *request.extensions_mut() = extensions;
-                handler.call(request, state).await
-            }
-        };
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the dispatcher selects this handler by its exact registered extension method"
-        )]
-        let router = Router::new().route(path, axum::routing::any(dispatch));
-        feature.extensions.insert(method, router);
+        feature
+            .extension_routers
+            .insert(method, extension_router(path, handler));
         self.merge(feature)
     }
 
     pub fn with_state<S2: Clone + Send + Sync + 'static>(self, state: S) -> HttpContract<S2> {
         HttpContract {
             routes: self.routes.with_state(state.clone()),
-            extensions: self
-                .extensions
+            extension_routers: self
+                .extension_routers
                 .into_iter()
                 .map(|(method, router)| (method, router.with_state(state.clone())))
                 .collect(),
@@ -384,8 +434,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             self = self.with_components(incoming)?;
         }
         self.routes = self.routes.merge(other.routes);
-        for (method, router) in other.extensions {
-            let existing = self.extensions.entry(method).or_default();
+        for (method, router) in other.extension_routers {
+            let existing = self.extension_routers.entry(method).or_default();
             *existing = std::mem::take(existing).merge(router);
         }
         self.probes.extend(other.probes);
@@ -403,7 +453,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         let components = other.routes.get_openapi_mut().components.take();
         other.routes = OpenApiRouter::default().nest(prefix, other.routes);
         other.routes.get_openapi_mut().components = components;
-        for router in other.extensions.values_mut() {
+        for router in other.extension_routers.values_mut() {
             *router = Router::new().nest(prefix, std::mem::take(router));
         }
         for path in &mut other.probes {
@@ -446,7 +496,10 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
                     let implicit_head = paths
                         .get(path.as_ref())
                         .is_some_and(|item| item.head.is_none());
-                    (path.clone(), implicit_head)
+                    ProbeRoute {
+                        path: path.clone(),
+                        implicit_head,
+                    }
                 })
                 .collect(),
         )
@@ -526,34 +579,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     ) -> Result<Application, FinalizeError> {
         let probes = self.probe_routes();
         let policy = self.finalize(&probes)?;
-        let (mut routes, document) = self.routes.split_for_parts();
-        if !self.extensions.is_empty() {
-            let handlers = Arc::new(
-                self.extensions
-                    .into_iter()
-                    .map(|(method, router)| (method, router.with_state::<()>(state.clone())))
-                    .collect::<HashMap<_, _>>(),
-            );
-            let dispatch = move |request: Request| {
-                dispatch_extension(handlers.get(request.method()).cloned(), request)
-            };
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "extension methods share a fallback selected by their exact registered method"
-            )]
-            {
-                for (path, item) in document.paths.paths {
-                    if item.query.is_some()
-                        || item
-                            .additional_operations
-                            .keys()
-                            .any(|method| method != "CONNECT")
-                    {
-                        routes = routes.route(&path, axum::routing::any(dispatch.clone()));
-                    }
-                }
-            }
-        }
+        let (routes, document) = self.routes.split_for_parts();
+        let routes = mount_extensions(routes, self.extension_routers, &document.paths, &state);
         let routes = authentication.finalize(routes, policy)?;
         // template:begin http-idempotency:http-build-bind-store
         let routes = if self.idempotency.0.is_empty() {
@@ -662,7 +689,7 @@ fn compile_operation(
     method: &str,
     operation: &Operation,
     // template:begin http-idempotency:http-compile-operation-mounts
-    mounted: &MountedOperations,
+    idempotent: &IdempotentOperations,
     // template:end http-idempotency:http-compile-operation-mounts
 ) -> Result<Access, FinalizeError> {
     let invalid = |fault| FinalizeError::InvalidPolicy {
@@ -673,11 +700,11 @@ fn compile_operation(
     let access =
         Access::from_operation(document, operation).map_err(|fault| invalid(fault.as_str()))?;
     // template:begin http-idempotency:http-contract-idempotency-policy
-    let is_mounted = mounted.contains(path, method);
-    if is_mounted && matches!(access, Access::Public) {
+    let is_idempotent = idempotent.contains(path, method);
+    if is_idempotent && matches!(access, Access::Public) {
         return Err(invalid("idempotency_requires_authentication"));
     }
-    if !is_mounted && declares_idempotency(document, path, operation) {
+    if !is_idempotent && declares_idempotency(document, path, operation) {
         return Err(invalid("idempotency_requires_registration"));
     }
     // template:end http-idempotency:http-contract-idempotency-policy
@@ -689,36 +716,31 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
     use crate::idempotency::{KEY_HEADER, REPLAYED_HEADER};
     use utoipa::openapi::path::ParameterIn;
     let components = document.components.as_ref();
+    let empty_parameters = BTreeMap::new();
+    let parameters = components.map_or(&empty_parameters, |components| &components.parameters);
+    let empty_responses = BTreeMap::new();
+    let responses = components.map_or(&empty_responses, |components| &components.responses);
     let path_item = document.paths.paths.get(path);
     let key = path_item
         .and_then(|item| item.parameters.as_deref())
         .into_iter()
         .flatten()
         .chain(operation.parameters.iter().flatten())
-        .filter_map(|value| match value {
-            RefOr::T(parameter) => Some(parameter),
-            RefOr::Ref(_) => {
-                outcomes::resolve(value, &components?.parameters, "#/components/parameters/")
-            }
-        })
+        .filter_map(|value| outcomes::resolve(value, parameters, "#/components/parameters/"))
         .any(|parameter| {
             parameter.parameter_in == ParameterIn::Header
                 && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         });
     key || operation.responses.responses.iter().any(|(status, value)| {
         status.starts_with('2')
-            && match value {
-                RefOr::T(response) => Some(response),
-                RefOr::Ref(_) => components.and_then(|components| {
-                    outcomes::resolve(value, &components.responses, "#/components/responses/")
-                }),
-            }
-            .is_some_and(|response| {
-                response
-                    .headers
-                    .keys()
-                    .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER))
-            })
+            && outcomes::resolve(value, responses, "#/components/responses/").is_some_and(
+                |response| {
+                    response
+                        .headers
+                        .keys()
+                        .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER))
+                },
+            )
     })
 }
 // template:end http-idempotency:http-unmounted-reserved-declarations
@@ -726,10 +748,13 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
 #[derive(Clone)]
 pub(crate) struct Policy(Arc<CompiledPolicy>);
 
+struct RoutePolicy {
+    methods: HashMap<Box<str>, Access>,
+    extension_allow: Option<HeaderValue>,
+}
+
 struct CompiledPolicy {
-    routes: HashMap<Box<str>, HashMap<Box<str>, Access>>,
-    extension_allow: HashMap<Box<str>, HeaderValue>,
-    first_protected: Option<(Box<str>, Box<str>)>,
+    routes: HashMap<Box<str>, RoutePolicy>,
 }
 
 macro_rules! fixed_path_operations {
@@ -817,22 +842,24 @@ impl Policy {
     fn compile(
         document: &OpenApi,
         // template:begin http-idempotency:http-compile-mounts-parameter
-        mounted: &MountedOperations,
+        idempotent: &IdempotentOperations,
         // template:end http-idempotency:http-compile-mounts-parameter
     ) -> Result<Self, FinalizeError> {
         let mut routes = HashMap::with_capacity(document.paths.paths.len());
-        let mut extension_allow = HashMap::default();
-        let mut first_protected = None;
         for (path, item) in &document.paths.paths {
             let path = path.as_str();
-            if item.query.is_some() || !item.additional_operations.is_empty() {
+            let extension_allow = if item.query.is_some() || !item.additional_operations.is_empty()
+            {
                 let methods = documented_methods(item)
                     .chain((item.get.is_some() && item.head.is_none()).then_some("HEAD"))
                     .join(",");
-                let allow = HeaderValue::from_str(&methods)
-                    .map_err(|_| FinalizeError::InvalidRegistration)?;
-                extension_allow.insert(path.into(), allow);
-            }
+                Some(
+                    HeaderValue::from_str(&methods)
+                        .map_err(|_| FinalizeError::InvalidRegistration)?,
+                )
+            } else {
+                None
+            };
             let mut methods = HashMap::<Box<str>, Access>::default();
             let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
@@ -844,7 +871,7 @@ impl Policy {
                     compile_operation(
                         document, path, method, operation,
                         // template:begin http-idempotency:http-fixed-operation-mounts
-                        mounted,
+                        idempotent,
                         // template:end http-idempotency:http-fixed-operation-mounts
                     )?,
                 );
@@ -865,38 +892,43 @@ impl Policy {
                     compile_operation(
                         document, path, method, operation,
                         // template:begin http-idempotency:http-additional-operation-mounts
-                        mounted,
+                        idempotent,
                         // template:end http-idempotency:http-additional-operation-mounts
                     )?,
                 );
             }
-            if first_protected.is_none()
-                && let Some(method) = methods
-                    .iter()
-                    .filter(|(_, access)| matches!(access, Access::Protected(..)))
-                    .map(|(method, _)| method)
-                    .min()
-            {
-                first_protected = Some((path.into(), method.clone()));
-            }
-            routes.insert(path.into(), methods);
+            routes.insert(
+                path.into(),
+                RoutePolicy {
+                    methods,
+                    extension_allow,
+                },
+            );
         }
-        Ok(Self(Arc::new(CompiledPolicy {
-            routes,
-            extension_allow,
-            first_protected,
-        })))
+        Ok(Self(Arc::new(CompiledPolicy { routes })))
     }
 
     fn first_protected(&self) -> Option<(&str, &str)> {
         self.0
-            .first_protected
-            .as_ref()
-            .map(|(path, method)| (&**path, &**method))
+            .routes
+            .iter()
+            .flat_map(|(path, route)| {
+                route
+                    .methods
+                    .iter()
+                    .filter(|(_, access)| matches!(access, Access::Protected(..)))
+                    .map(move |(method, _)| (&**path, &**method))
+            })
+            .min()
     }
 
-    pub(crate) async fn unregistered(&self, path: Option<&str>, method: &Method) -> Response {
-        if let Some(allow) = path.and_then(|path| self.0.extension_allow.get(path)) {
+    pub(crate) async fn unregistered_response(
+        &self,
+        path: Option<&str>,
+        method: &Method,
+    ) -> Response {
+        if let Some(allow) = path.and_then(|path| self.0.routes.get(path)?.extension_allow.as_ref())
+        {
             let mut response = crate::harden::method_not_allowed().await;
             response.headers_mut().insert(ALLOW, allow.clone());
             return response;
@@ -906,7 +938,7 @@ impl Policy {
     }
 
     pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
-        let methods = self.0.routes.get(path)?;
+        let methods = &self.0.routes.get(path)?.methods;
         methods.get(method.as_str()).or_else(|| {
             if method == Method::HEAD {
                 methods.get("GET")
@@ -929,7 +961,7 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
     if public {
         next.run(request).await
     } else {
-        policy.unregistered(route, request.method()).await
+        policy.unregistered_response(route, request.method()).await
     }
 }
 

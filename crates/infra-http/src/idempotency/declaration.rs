@@ -139,7 +139,10 @@ pub(super) fn prepare(
     if operation.external_docs.is_none() {
         operation.external_docs = route_docs;
     }
-    let rules_link = super::openapi::key_rules_link(operation.external_docs.as_ref())
+    let rules_link = operation
+        .external_docs
+        .as_ref()
+        .and_then(super::openapi::key_rules_link)
         .ok_or_else(|| at_operation(Rule::RetryDocumentation))?;
     Ok(PreparedOperation {
         id: operation_id,
@@ -300,42 +303,42 @@ fn supplement_success(
 }
 
 fn supplement_content(
-    actual: &mut RefOr<Content>,
+    command: &mut RefOr<Content>,
     annotation: RefOr<Content>,
     schemas: &BTreeMap<String, RefOr<Schema>>,
 ) -> Option<()> {
-    let (actual, mut supplement) = match (actual, annotation) {
-        (RefOr::T(actual), RefOr::T(supplement)) => (actual, supplement),
-        (RefOr::Ref(actual), RefOr::Ref(supplement)) if *actual == supplement => return Some(()),
+    let (command, mut annotation) = match (command, annotation) {
+        (RefOr::T(command), RefOr::T(annotation)) => (command, annotation),
+        (RefOr::Ref(command), RefOr::Ref(annotation)) if *command == annotation => return Some(()),
         _ => return None,
     };
-    if let Some(declared) = &supplement.schema {
-        let typed = actual.schema.as_ref()?;
-        if !same_definition(typed, declared)
+    if let Some(annotation_schema) = &annotation.schema {
+        let command_schema = command.schema.as_ref()?;
+        if !same_definition(command_schema, annotation_schema)
             && !same_definition(
-                crate::contract::resolve_schema(typed, schemas)?,
-                crate::contract::resolve_schema(declared, schemas)?,
+                crate::contract::resolve_schema(command_schema, schemas)?,
+                crate::contract::resolve_schema(annotation_schema, schemas)?,
             )
         {
             return None;
         }
-        actual.schema.clone_from(&supplement.schema);
+        command.schema.clone_from(&annotation.schema);
     } else {
-        supplement.schema.clone_from(&actual.schema);
+        annotation.schema.clone_from(&command.schema);
     }
-    if supplement.example.is_some() || !supplement.examples.is_empty() {
-        actual.example.clone_from(&supplement.example);
-        actual.examples.clone_from(&supplement.examples);
+    if annotation.example.is_some() || !annotation.examples.is_empty() {
+        command.example.clone_from(&annotation.example);
+        command.examples.clone_from(&annotation.examples);
     } else {
-        supplement.example.clone_from(&actual.example);
-        supplement.examples.clone_from(&actual.examples);
+        annotation.example.clone_from(&command.example);
+        annotation.examples.clone_from(&command.examples);
     }
-    if supplement.description.is_some() {
-        actual.description.clone_from(&supplement.description);
+    if annotation.description.is_some() {
+        command.description.clone_from(&annotation.description);
     } else {
-        supplement.description.clone_from(&actual.description);
+        annotation.description.clone_from(&command.description);
     }
-    same_definition(actual, &supplement).then_some(())
+    same_definition(command, &annotation).then_some(())
 }
 
 fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), Rule> {
