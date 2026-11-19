@@ -813,6 +813,9 @@ async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
     for (method, sent, expected) in [
         (http::Method::POST, None, ["content-length: 0"].as_slice()),
         (http::Method::POST, Some("7"), &["content-length: 0"]),
+        (http::Method::PUT, Some("7"), &["content-length: 0"]),
+        (http::Method::PATCH, Some("7"), &["content-length: 0"]),
+        (http::Method::GET, Some("7"), &[]),
         (http::Method::DELETE, Some("7"), &[]),
     ] {
         let material = TlsMaterial::new(FIXTURE_HOST);
@@ -821,6 +824,7 @@ async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
         let mut request = Request::builder()
             .method(method.clone())
             .uri(FIXTURE_URL)
+            .header(header::TRANSFER_ENCODING, "chunked")
             .body(Bytes::new())
             .expect("empty request");
         if let Some(sent) = sent {
@@ -841,6 +845,7 @@ async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
             .filter(|line| line.starts_with("content-length:"))
             .collect::<Vec<_>>();
         assert_eq!(lengths, expected, "{method} sent {sent:?}: {wire}");
+        assert!(!wire.contains("transfer-encoding:"), "{wire}");
         server.await.expect("capture fixture server succeeds");
     }
 }
