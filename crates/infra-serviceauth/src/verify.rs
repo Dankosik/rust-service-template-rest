@@ -204,13 +204,8 @@ impl Verifier {
     }
 
     #[cfg(test)]
-    pub(crate) fn verify(
-        &self,
-        token: &[u8],
-        now: impl FnOnce() -> Result<u64, Reason>,
-    ) -> Result<Caller, Reason> {
-        self.verify_uncached(token, now()?)
-            .map(|(caller, _)| caller)
+    pub(crate) fn verify(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
+        self.verify_uncached(token, now).map(|(caller, _)| caller)
     }
 
     fn verify_uncached(&self, token: &[u8], now: u64) -> Result<(Caller, Window), Reason> {
@@ -578,7 +573,7 @@ mod tests {
 
         fn check(&self, token: &str) -> Result<String, Reason> {
             self.verifier
-                .verify(token.as_bytes(), || Ok(NOW))
+                .verify(token.as_bytes(), NOW)
                 .map(|caller| caller.name().as_str().to_owned())
         }
 
@@ -632,9 +627,7 @@ mod tests {
             Err(Reason::NotYetValid)
         );
         assert_eq!(
-            case.verifier
-                .verify(token.as_bytes(), || Ok(earlier))
-                .map(|_| ()),
+            case.verifier.verify(token.as_bytes(), earlier).map(|_| ()),
             Err(Reason::NotYetValid)
         );
         assert!(case.verifier.verify_at(token.as_bytes(), NOW).is_ok());
@@ -927,11 +920,6 @@ mod tests {
                 case.verifier.authenticate([b"Bearer a.b.c".as_slice()]),
                 Err(Failure::Invalid)
             );
-            assert_eq!(
-                case.verifier
-                    .verify(token.as_bytes(), || Err(Reason::Clock)),
-                Err(Reason::Clock)
-            );
             assert_eq!(Reason::Clock.failure(), Failure::Unavailable);
             token
         });
@@ -994,7 +982,7 @@ mod tests {
         let token = segments.join(".");
         let check = |verifier: &Verifier, at: u64| {
             verifier
-                .verify(token.as_bytes(), || Ok(at))
+                .verify(token.as_bytes(), at)
                 .map(|caller| caller.name().as_str().to_owned())
         };
         let receiver = verifier(&text("receiver"), &text("jwt_type"));
