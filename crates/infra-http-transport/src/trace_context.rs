@@ -1,21 +1,23 @@
-use axum::http::header::Entry;
+use axum::http::header::{Entry, HeaderName};
 use axum::http::{HeaderMap, HeaderValue};
 
 const TRACEPARENT_V0_LEN: usize = 55;
+const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
+const TRACESTATE: HeaderName = HeaderName::from_static("tracestate");
 
 pub fn admit_trace_context(headers: &mut HeaderMap, trusted: bool) -> bool {
     let accepted = trusted && admit_traceparent(headers);
     if accepted {
         normalize_tracestate(headers);
     } else {
-        headers.remove("traceparent");
-        headers.remove("tracestate");
+        headers.remove(&TRACEPARENT);
+        headers.remove(&TRACESTATE);
     }
     accepted
 }
 
 fn admit_traceparent(headers: &mut HeaderMap) -> bool {
-    let Entry::Occupied(mut entry) = headers.entry("traceparent") else {
+    let Entry::Occupied(mut entry) = headers.entry(&TRACEPARENT) else {
         return false;
     };
     if entry.iter().nth(1).is_some() {
@@ -58,17 +60,24 @@ fn validate_traceparent_prefix(wire: &[u8]) -> Option<&[u8]> {
 }
 
 fn normalize_tracestate(headers: &mut HeaderMap) {
-    let Entry::Occupied(mut entry) = headers.entry("tracestate") else {
+    let Entry::Occupied(mut entry) = headers.entry(&TRACESTATE) else {
         return;
     };
     if entry.iter().nth(1).is_none() {
         return;
     }
-    let combined = entry
+    let first = entry.get();
+    let additional_bytes = entry
         .iter()
-        .map(HeaderValue::as_bytes)
-        .collect::<Vec<_>>()
-        .join(&b',');
+        .skip(1)
+        .map(|value| 1 + value.len())
+        .sum::<usize>();
+    let mut combined = Vec::with_capacity(first.len() + additional_bytes);
+    combined.extend_from_slice(first.as_bytes());
+    for value in entry.iter().skip(1) {
+        combined.push(b',');
+        combined.extend_from_slice(value.as_bytes());
+    }
     match HeaderValue::try_from(combined) {
         Ok(value) => {
             entry.insert(value);

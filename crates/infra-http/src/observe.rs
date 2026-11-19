@@ -5,7 +5,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, Version};
+use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, Version};
 use axum::middleware::Next;
 use axum::response::Response;
 use compact_str::{CompactString, format_compact};
@@ -72,13 +72,15 @@ pub(crate) fn describe() {
 }
 
 const UNMATCHED_ROUTE: &str = "<unmatched>";
+const TRACEPARENT: HeaderName = HeaderName::from_static("traceparent");
+const TRACESTATE: HeaderName = HeaderName::from_static("tracestate");
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Observer {
     log_health_probes: bool,
     trust_trace_context: bool,
     probes: ProbeRoutes,
-    series: Arc<Series>,
+    series: Series,
 }
 
 impl Observer {
@@ -86,23 +88,18 @@ impl Observer {
         log_health_probes: bool,
         trust_trace_context: bool,
         probes: ProbeRoutes,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             log_health_probes,
             trust_trace_context,
             probes,
-            series: Arc::default(),
-        }
+            series: Series::default(),
+        })
     }
 }
 
 pub(crate) async fn observe(
-    State(Observer {
-        log_health_probes,
-        trust_trace_context,
-        probes,
-        series,
-    }): State<Observer>,
+    State(observer): State<Arc<Observer>>,
     matched: Option<MatchedPath>,
     mut request: Request,
     next: Next,
@@ -118,20 +115,19 @@ pub(crate) async fn observe(
     let scheme = url_scheme(request.uri(), connection.as_ref());
     let route = matched.as_ref().map(MatchedPath::as_str);
     let log_access = !suppresses_access_log(
-        log_health_probes,
-        &probes,
+        observer.log_health_probes,
+        &observer.probes,
         request.method(),
         route.unwrap_or(UNMATCHED_ROUTE),
     );
     let span = make_span(version, method, route, request_id_text, scheme);
-    let mut trace_context = TraceContext::admit(request.headers_mut(), trust_trace_context, &span);
-    let gauge = series.active_gauge(method, scheme);
-    gauge.increment(1);
+    let mut trace_context =
+        TraceContext::admit(request.headers_mut(), observer.trust_trace_context, &span);
+    observer.series.active_gauge(method, scheme).increment(1);
     let mut observation = DropGuard::new(
         RequestObservation {
             log_access,
-            series,
-            gauge,
+            observer,
             method,
             scheme,
             matched,
@@ -144,7 +140,8 @@ pub(crate) async fn observe(
         RequestObservation::abandon,
     );
 
-    let traced = next.run(request).instrument(observation.span.clone());
+    let traced =
+        crate::context::finish_response(request, next).instrument(observation.span.clone());
     let mut response = match trace_context.fallback.take() {
         None => traced.await,
         Some(context) => traced.with_context(context).await,
@@ -204,8 +201,8 @@ impl TraceContext {
     }
 
     fn inject_response(self, headers: &mut HeaderMap) {
-        headers.remove("traceparent");
-        headers.remove("tracestate");
+        headers.remove(&TRACEPARENT);
+        headers.remove(&TRACESTATE);
         if let Some(context) = self.response {
             otel_http::inject_context(&context, headers);
         }
@@ -249,8 +246,7 @@ enum RequestEnd {
 
 struct RequestObservation {
     log_access: bool,
-    series: Arc<Series>,
-    gauge: Gauge,
+    observer: Arc<Observer>,
     method: MethodSlot,
     scheme: Scheme,
     matched: Option<MatchedPath>,
@@ -311,8 +307,11 @@ impl RequestObservation {
         let elapsed = self.started.elapsed();
         let outcome = classify_outcome(end, self.head.as_ref());
         let route = self.matched.as_ref().map(MatchedPath::as_str);
-        self.gauge.decrement(1);
-        self.series.record_duration(
+        self.observer
+            .series
+            .active_gauge(self.method, self.scheme)
+            .decrement(1);
+        self.observer.series.record_duration(
             route,
             DurationLabels {
                 method: self.method,
@@ -517,16 +516,14 @@ struct Series {
 }
 
 impl Series {
-    fn active_gauge(&self, method: MethodSlot, scheme: Scheme) -> Gauge {
-        self.active[method][scheme]
-            .get_or_init(|| {
-                metrics::gauge!(
-                    ACTIVE_REQUESTS_METRIC,
-                    "http_request_method" => method.as_str(),
-                    "url_scheme" => scheme.as_str()
-                )
-            })
-            .clone()
+    fn active_gauge(&self, method: MethodSlot, scheme: Scheme) -> &Gauge {
+        self.active[method][scheme].get_or_init(|| {
+            metrics::gauge!(
+                ACTIVE_REQUESTS_METRIC,
+                "http_request_method" => method.as_str(),
+                "url_scheme" => scheme.as_str()
+            )
+        })
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
