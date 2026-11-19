@@ -10,7 +10,7 @@ use infra_outbound_http::{Client, Error as HttpError, Limits, Url};
 use operation_context::OperationContext;
 use secrecy::SecretString;
 use serde_json::{Value, json};
-use tokio::{sync::oneshot, time::Instant};
+use tokio::{sync::oneshot, task::JoinSet, time::Instant};
 
 use crate::{Config, Observation, Result, control, measure_with};
 
@@ -18,6 +18,9 @@ const REUSE_MARGIN: Duration = Duration::from_secs(10);
 const FETCH_CUTOFF: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const RESOURCE_TIMEOUT: Duration = Duration::from_secs(8);
+const RESOURCE_PRIME_COUNT: usize = 96;
+const RESOURCE_PRIME_PATH: &str = "/prime-resource";
+const RESOURCE_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 const BODY: &[u8] = &[b'a'; 1024];
 
 pub(super) fn registration(config: &Config) -> Result<Registration> {
@@ -48,7 +51,7 @@ impl Resource {
             .await
     }
 
-    async fn call(&self, context: &OperationContext) -> Observation {
+    fn request(&self) -> Request<Bytes> {
         let mut request = Request::new(Bytes::new());
         *request.uri_mut() = self.uri.clone();
         if self.exchange {
@@ -56,7 +59,34 @@ impl Resource {
                 .extensions_mut()
                 .insert(OnBehalfOf::new(SecretString::from("fixture-subject")));
         }
-        match self.client.execute_with_context(request, context).await {
+        request
+    }
+
+    async fn setup_hit(&self) -> Result<()> {
+        let context = OperationContext::with_timeout(RESOURCE_TIMEOUT);
+        let response = self
+            .client
+            .execute_with_context(self.request(), &context)
+            .await
+            .map_err(|error| error.to_string())?;
+        if response.status().as_u16() != 200 || response.body().as_ref() != BODY {
+            return Err(format!(
+                "expected credential setup HTTP 200 with {} bytes, got {} with {} bytes",
+                BODY.len(),
+                response.status(),
+                response.body().len()
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn call(&self, context: &OperationContext) -> Observation {
+        match self
+            .client
+            .execute_with_context(self.request(), context)
+            .await
+        {
             Ok(response)
                 if response.status().as_u16() == 200 && response.body().as_ref() == BODY =>
             {
@@ -213,17 +243,81 @@ async fn warm(
     if counter(&initial, "token_ttl")? != config.ttl {
         return Err("fixture token TTL differs from caller TTL".into());
     }
-    require_outcome(&resource.hit().await, "successful")?;
+    resource
+        .setup_hit()
+        .await
+        .map_err(|error| format!("initial credential call failed: {error}"))?;
     let issued_before = Instant::now();
+    let primed = if config.concurrency == 64
+        && matches!(
+            config.scenario.as_str(),
+            "service-before" | "service-refresh"
+        ) {
+        prime_resources(config, resource, &initial).await?;
+        RESOURCE_PRIME_COUNT
+    } else {
+        0
+    };
     let count = config.warmup.max(config.concurrency);
     let warm = resource.window(count, config.concurrency).await?;
-    require_successes(&warm, count)?;
+    require_successes(&warm, count)
+        .map_err(|error| format!("credential warm-up failed: {error}"))?;
     let after = stats(config)?;
     check_delta(&initial, &after, grant, 1)?;
-    let warmed = u64::try_from(count)? + 1;
+    let warmed = u64::try_from(count)? + u64::try_from(primed)? + 1;
     check_delta(&initial, &after, bearer, warmed)?;
     check_delta(&initial, &after, "resources", warmed)?;
     Ok((issued_before, after))
+}
+
+async fn prime_resources(config: &Config, resource: &Resource, before: &Value) -> Result<()> {
+    let mut prime = resource.clone();
+    let mut uri = resource.uri.clone().into_parts();
+    uri.path_and_query = Some(RESOURCE_PRIME_PATH.parse()?);
+    prime.uri = Uri::from_parts(uri)?;
+    control(
+        config,
+        "POST",
+        &format!("{RESOURCE_PRIME_PATH}/{RESOURCE_PRIME_COUNT}"),
+    )?;
+    let mut requests = JoinSet::new();
+    for _ in 0..RESOURCE_PRIME_COUNT {
+        let prime = prime.clone();
+        requests.spawn(async move { prime.setup_hit().await });
+    }
+    let mut successful = 0;
+    let mut failure = None;
+    while let Some(request) = requests.join_next().await {
+        match request? {
+            Ok(()) => successful += 1,
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    let after = stats(config)?;
+    if let Some(error) = failure {
+        let arrived = counter(&after, "resource_prime_arrivals")?;
+        return Err(format!(
+            "credential resource priming failed after {arrived} arrivals and {successful}/{RESOURCE_PRIME_COUNT} successful responses: {error}"
+        ).into());
+    }
+    let expected = u64::try_from(RESOURCE_PRIME_COUNT)?;
+    check_delta(before, &after, "resource_prime_arrivals", expected)?;
+    let cutoff = Instant::now() + RESOURCE_SETTLE_TIMEOUT;
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        let idle = counter(&stats(config)?, "http_idle_connections")?;
+        if idle >= expected {
+            return Ok(());
+        }
+        if Instant::now() >= cutoff {
+            return Err(format!(
+                "credential resource priming left {idle}/{expected} HTTP connections idle"
+            )
+            .into());
+        }
+    }
 }
 
 async fn active_refresh(
@@ -487,15 +581,20 @@ fn require_successes(window: &Value, count: usize) -> Result<()> {
     let samples = window["samples"]
         .as_array()
         .ok_or("credential window lacks observations")?;
-    if samples.len() != count
-        || samples
+    let successful = samples
+        .iter()
+        .filter(|sample| sample["outcome"] == "successful")
+        .count();
+    if successful != count || samples.len() != count {
+        let sample = samples
             .iter()
-            .any(|sample| sample["outcome"] != "successful")
-    {
-        return Err(
-            "credential window did not return the expected status and body for every offered call"
-                .into(),
-        );
+            .find(|sample| sample["outcome"] != "successful");
+        let outcome = sample.map_or(&Value::Null, |sample| &sample["outcome"]);
+        let status = sample.map_or(&Value::Null, |sample| &sample["status"]);
+        return Err(format!(
+            "credential window completed {}/{count} calls with {successful} successful; first unsuccessful outcome {outcome}, HTTP status {status}",
+            samples.len()
+        ).into());
     }
     Ok(())
 }

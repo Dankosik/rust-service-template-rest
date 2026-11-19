@@ -158,11 +158,11 @@ def synthesize_identity(openssl, directory, deadline):
             raise RuntimeError(result.stderr.decode(errors="replace").strip())
 
 
-def terminate(process):
+def terminate(process, grace):
     with suppress(ProcessLookupError):
         os.killpg(process.pid, signal.SIGTERM)
     try:
-        process.wait(timeout=3)
+        process.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
@@ -170,7 +170,7 @@ def terminate(process):
 
 
 @contextmanager
-def child(command, directory, stdout_name, stderr_name, env=None):
+def child(command, directory, stdout_name, stderr_name, env=None, *, grace=3):
     with (directory / stdout_name).open("wb") as stdout, (directory / stderr_name).open("wb") as stderr:
         process = subprocess.Popen(command, cwd=directory, stdout=stdout, stderr=stderr, env=env,
                                    stdin=subprocess.DEVNULL, start_new_session=True)
@@ -178,7 +178,7 @@ def child(command, directory, stdout_name, stderr_name, env=None):
             yield process
         finally:
             if process.poll() is None:
-                terminate(process)
+                terminate(process, grace)
 
 
 def ready_notice(process, stdout, deadline):
@@ -281,7 +281,7 @@ def run_cell(args, tools, cell_dir, cell, artifact, identities, deadline):
     ]
     try:
         cell_deadline = min(deadline, time.monotonic() + args.cell_timeout)
-        with child(fixture_command, cell_dir, "fixture.stdout", "fixture.stderr") as fixture:
+        with child(fixture_command, cell_dir, "fixture.stdout", "fixture.stderr", grace=10) as fixture:
             ready = ready_notice(fixture, cell_dir / "fixture.stdout", cell_deadline)
             fixture_port = ready["control_port"]
             invocation["fixture_ready"] = ready
@@ -401,7 +401,9 @@ def validate_peer_connections(cell, receipt):
     if warm_http:
         before = receipt.get("peer_before", receipt.get("before"))
         if before["http_connections"] < 1 or work["http_connections"] != 0:
-            return "warm HTTP window did not reuse established connections throughout"
+            return (f"warm HTTP window began with {before['http_connections']} established and "
+                    f"{before.get('http_idle_connections', 'unknown')} idle connections, and accepted "
+                    f"{work['http_connections']} new connections")
     return None
 
 

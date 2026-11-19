@@ -11,7 +11,7 @@ import signal
 import socket
 from socketserver import BaseRequestHandler, ThreadingTCPServer
 import ssl
-from threading import Event, Lock, Thread
+from threading import Barrier, BrokenBarrierError, Event, Lock, Thread
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -24,6 +24,8 @@ from h2.exceptions import ProtocolError, StreamClosedError
 EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 FIRST_SERVICE_TOKEN = "fixture-service-1"
+RESOURCE_PRIME_PATH = "/prime-resource"
+RESOURCE_PRIME_WAIT = 5
 HTTP_BODIES = {"/one": b"a" * 1024, "/tiny": b"a", "/large": b"a" * 65536, "/empty": b""}
 HTTP_CHUNKS = (b"a" * 512, b"b" * 512)
 GRPC_HEADERS = ((":status", "200"), ("content-type", "application/grpc"))
@@ -48,6 +50,7 @@ COUNTERS = (
     "http_response_bytes",
     "http_response_aborts",
     "http_late_errors",
+    "resource_prime_arrivals",
     "grpc_connections",
     "grpc_requests",
     "grpc_messages",
@@ -67,6 +70,7 @@ class Fixture:
         self.lock = Lock()
         self.gate = Event()
         self.gate.set()
+        self.resource_prime = None
         self.count = Counter(dict.fromkeys(COUNTERS, 0))
         self.tokens = {}
         self.idle_http = set()
@@ -75,6 +79,30 @@ class Fixture:
         self.grpc_methods = Counter()
         self.grpc_status = Counter()
         self.grpc_last_traceparent = None
+
+    def arm_resource_prime(self, count: int) -> bool:
+        with self.lock:
+            if self.resource_prime is not None:
+                return False
+            self.resource_prime = Barrier(count, timeout=RESOURCE_PRIME_WAIT)
+            return True
+
+    def abort_resource_prime(self) -> None:
+        with self.lock:
+            if self.resource_prime is not None:
+                self.resource_prime.abort()
+
+    def await_resource_prime(self) -> bool:
+        with self.lock:
+            gate = self.resource_prime
+            if gate is None or self.count["resource_prime_arrivals"] >= gate.parties:
+                return False
+            self.count["resource_prime_arrivals"] += 1
+        try:
+            gate.wait()
+        except BrokenBarrierError:
+            return False
+        return True
 
     def start_grant(self, kind: str) -> tuple[str, bool]:
         with self.lock:
@@ -263,6 +291,12 @@ class ResourceHandler(HttpHandler):
             if not authorized:
                 status = 401
                 sent = self.send_bytes(status)
+            elif path == RESOURCE_PRIME_PATH:
+                if self.command == "GET" and self.fixture.await_resource_prime():
+                    sent = self.send_bytes(status, HTTP_BODIES["/one"])
+                else:
+                    status = 503
+                    sent = self.send_bytes(status)
             elif path in ("/multi", "/late-error"):
                 sent = self.send_chunks(late_error=path == "/late-error")
             elif path in HTTP_BODIES:
@@ -326,6 +360,13 @@ class ControlHandler(HttpHandler):
             self.send_json(fixture.snapshot())
         elif self.path == "/retry-arm":
             self.send_json(fixture.force_idle_close())
+        elif self.path.startswith(f"{RESOURCE_PRIME_PATH}/"):
+            count = self.path.removeprefix(f"{RESOURCE_PRIME_PATH}/")
+            if count.isdecimal() and len(count) <= 3 and 1 <= int(count) <= 128:
+                armed = fixture.arm_resource_prime(int(count))
+                self.send_json({"armed": armed}, 200 if armed else 409)
+            else:
+                self.send_bytes(400)
         else:
             self.send_bytes(404)
 
@@ -475,6 +516,7 @@ def main() -> None:
             cleanup.callback(thread.join)
             cleanup.callback(server.shutdown)
         cleanup.callback(fixture.gate.set)
+        cleanup.callback(fixture.abort_resource_prime)
         print(json.dumps(ready), flush=True)
         stop.wait()
 
