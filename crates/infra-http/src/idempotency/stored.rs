@@ -222,8 +222,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn created_json_registers_the_payloads_of_boxed_recursive_and_list_responses() {
+    #[tokio::test]
+    async fn created_json_registers_the_payloads_of_boxed_recursive_and_list_responses() {
         #[derive(Serialize, ToSchema)]
         struct Address {
             street: String,
@@ -259,12 +259,43 @@ mod tests {
                 .unwrap(),
             "#/components/schemas/Address"
         );
+        let captured = UpdatedAddress {
+            body: Address {
+                street: "Main".to_owned(),
+            },
+            headers: header_map(&[("etag", "\"addr-1\"")]),
+        }
+        .capture()
+        .unwrap();
+        let response = response_from_record(Record::from(captured.into_success()));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()["etag"], "\"addr-1\"");
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            Bytes::from_static(br#"{"street":"Main"}"#)
+        );
+
         let no_content = document::<NoContent>();
         assert_eq!(no_content["responses"]["204"]["description"], "no content");
         assert!(no_content["responses"]["204"].get("content").is_none());
-        let captured = NoContent::default().capture().unwrap();
+        let captured = NoContent {
+            headers: header_map(&[("etag", "\"deleted-1\"")]),
+        }
+        .capture()
+        .unwrap();
         let response = response_from_record(Record::from(captured.into_success()));
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.headers()["etag"], "\"deleted-1\"");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
 
         let root = "/responses/201/content/application~1json/schema";
         assert_eq!(
