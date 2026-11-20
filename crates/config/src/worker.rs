@@ -2,14 +2,14 @@ use serde::Deserialize;
 
 use crate::validate::admit_with;
 use crate::{
-    AppConfig, HealthConfig, LogConfig, ObservabilityConfig, RuntimeConfig, ShutdownTail,
-    ValidationErrors, WorkerHttpConfig,
+    AppConfig, BuildInfo, HealthConfig, LogConfig, ObservabilityConfig, RuntimeConfig,
+    ShutdownTail, ValidationErrors, WorkerHttpConfig,
 };
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct WorkerInput {
-    pub(crate) app: AppConfig,
+    app: crate::app::AppInput,
     log: LogConfig,
     runtime: RuntimeConfig,
     health: HealthConfig,
@@ -25,7 +25,7 @@ pub(crate) struct WorkerInput {
     messaging: crate::messaging::MessagingInput,
     // template:end messaging:worker-input-messaging-field
     // template:begin webhooks:worker-input-webhooks-field
-    webhooks: crate::WebhooksConfig,
+    webhooks: crate::webhooks::WebhooksInput,
     // template:end webhooks:worker-input-webhooks-field
     // template:begin inbound-webhooks:worker-input-inbound-webhooks-field
     inbound_webhooks: crate::inbound_webhooks::WorkerInboundWebhooksInput,
@@ -35,10 +35,11 @@ pub(crate) struct WorkerInput {
 impl WorkerInput {
     pub(crate) fn admit(
         self,
+        build: BuildInfo,
         shutdown_tail: Option<ShutdownTail>,
     ) -> Result<WorkerConfig, ValidationErrors> {
         admit_with(|v| {
-            self.app.validate(v);
+            let app = self.app.admit(build, v);
             let http = self.http.admit(shutdown_tail, v);
             // template:begin inbound-webhooks:worker-inbound-webhooks-validate
             let inbound_webhook_endpoints = self.inbound_webhooks.admit(self.postgres.enabled, v);
@@ -48,7 +49,7 @@ impl WorkerInput {
             self.runtime.validate(v);
             let observability = self.observability.admit(v);
             // template:begin messaging:worker-messaging-admit
-            let messaging = self.messaging.admit(self.app.is_local_development(), v);
+            let messaging = self.messaging.admit(app.is_local_development(), v);
             // template:end messaging:worker-messaging-admit
             // template:begin jobs:worker-postgres-admit
             let postgres = self.postgres.admit(v);
@@ -57,10 +58,10 @@ impl WorkerInput {
             self.jobs.validate(v);
             // template:end jobs:worker-jobs-validate
             // template:begin webhooks:worker-webhooks-validate
-            self.webhooks.validate(v);
+            let webhooks = self.webhooks.admit(v);
             // template:end webhooks:worker-webhooks-validate
             Ok(WorkerConfig {
-                app: self.app,
+                app,
                 log: self.log,
                 runtime: self.runtime,
                 health: self.health,
@@ -76,7 +77,7 @@ impl WorkerInput {
                 messaging: messaging?,
                 // template:end messaging:worker-messaging-admitted-field
                 // template:begin webhooks:worker-webhooks-admitted-field
-                webhooks: self.webhooks,
+                webhooks,
                 // template:end webhooks:worker-webhooks-admitted-field
                 // template:begin inbound-webhooks:worker-inbound-webhooks-admitted-field
                 inbound_webhook_endpoints,

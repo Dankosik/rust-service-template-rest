@@ -7,12 +7,12 @@ use serde::Deserialize;
 
 use crate::de::{
     BlankAsNone, BlankAsNoneVerbatim, Keep, Mode, ModeMarker, Skip, StrictBool, StrictCount,
-    StrictDuration, StrictEnum, When,
+    StrictDuration, When,
 };
 use crate::load::{Error, MigrationLoadError};
 use crate::observability::{ObservabilityFields, validate_service_name};
-use crate::validate::{Rejected, Violations, duration_range, int_range, required};
-use crate::{AppConfig, LogConfig};
+use crate::validate::{Rejected, Violations, admit_with, duration_range, int_range, required};
+use crate::{AppConfig, BuildInfo, LogConfig};
 
 const DEFAULT_MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::MIN.saturating_add(3);
 
@@ -55,7 +55,7 @@ pub(crate) struct PostgresFields<Session: Mode, Pool: Mode, Migration: Mode> {
     #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     password_file: Option<PathBuf>,
-    #[serde_as(as = "When<Session, StrictEnum>")]
+    #[serde_as(as = "When<Session>")]
     session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
@@ -190,8 +190,7 @@ impl MigrationPostgresInput {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct MigrationInput {
-    #[serde(deserialize_with = "crate::app::deserialize_migration_app")]
-    pub(crate) app: AppConfig,
+    app: crate::app::AppFields<Keep, Skip>,
     log: LogConfig,
     observability: ObservabilityFields<Skip>,
     postgres: MigrationPostgresInput,
@@ -228,20 +227,22 @@ impl MigrationConfig {
 }
 
 impl MigrationInput {
-    pub(crate) fn admit(self) -> Result<MigrationConfig, MigrationLoadError> {
-        let mut violations = Violations::default();
-        let v = &mut violations;
-        self.app.validate(v);
-        self.log.validate(v);
-        let service_name = self.observability.otel.service_name;
-        v.check(validate_service_name(&service_name));
-        let postgres = self.postgres.admit(v);
-        let Some(postgres) = violations.finish(postgres).map_err(Error::from)? else {
-            return Err(MigrationLoadError::PostgresDisabled { log: self.log });
+    pub(crate) fn admit(self, build: BuildInfo) -> Result<MigrationConfig, MigrationLoadError> {
+        let (app, log, service_name, postgres) = admit_with(|v| {
+            let app = self.app.admit(build, v);
+            self.log.validate(v);
+            let service_name = self.observability.otel.service_name;
+            v.check(validate_service_name(&service_name));
+            let postgres = self.postgres.admit(v);
+            Ok((app, self.log, service_name, postgres?))
+        })
+        .map_err(Error::from)?;
+        let Some(postgres) = postgres else {
+            return Err(MigrationLoadError::PostgresDisabled { log });
         };
         Ok(MigrationConfig {
-            app: self.app,
-            log: self.log,
+            app,
+            log,
             service_name,
             postgres,
         })

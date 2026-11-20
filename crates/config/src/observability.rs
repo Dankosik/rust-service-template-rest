@@ -4,8 +4,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{
-    BlankAsNone, BlankAsNoneVerbatim, Keep, ListenAddr, Mode, ModeMarker, StrictEnum, StrictRatio,
-    StrictString, When,
+    BlankAsNone, BlankAsNoneVerbatim, Keep, ListenAddr, Mode, ModeMarker, StrictRatio, When,
 };
 use crate::validate::{ValidationError, Violations, non_blank};
 
@@ -72,10 +71,9 @@ pub enum TracesSampler {
 #[educe(Default(bound = false))]
 #[serde(bound(deserialize = ""), deny_unknown_fields, default)]
 pub(crate) struct OtelFields<Full: Mode = Keep> {
-    #[serde_as(as = "StrictString")]
     #[educe(Default(expression = DEFAULT_SERVICE_NAME.to_owned()))]
     pub(crate) service_name: String,
-    #[serde_as(as = "When<Full, StrictEnum>")]
+    #[serde_as(as = "When<Full>")]
     traces_sampler: TracesSamplerKind,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
     /// (finite and in range) even when the selected sampler ignores it.
@@ -212,10 +210,8 @@ mod tests {
 
     #[test]
     fn sampler_names_follow_opentelemetry_spelling() {
-        #[serde_with::serde_as]
         #[derive(Deserialize)]
         struct Probe {
-            #[serde_as(as = "StrictEnum")]
             sampler: TracesSamplerKind,
         }
         for (text, expected) in [

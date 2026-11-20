@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::load::{Error, JobsOperatorLoadError};
 use crate::postgres::{OperatorPostgresConfig, OperatorPostgresInput};
-use crate::validate::{Violations, int_range};
+use crate::validate::{Violations, admit_with, int_range};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -29,18 +29,17 @@ impl JobsOperatorConfig {
 
 impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
-        let mut violations = Violations::default();
-        let local_development = violations
-            .record(crate::app::validate_local_development(
-                &self.app.env,
-                self.app.allow_insecure_development,
-            ))
-            .unwrap_or(false);
-        let postgres = self.postgres.admit(local_development, &mut violations);
-        let postgres = violations
-            .finish(postgres)
-            .map_err(Error::from)?
-            .ok_or(JobsOperatorLoadError::PostgresDisabled)?;
+        let postgres = admit_with(|v| {
+            let local_development = v
+                .record(crate::app::validate_local_development(
+                    &self.app.env,
+                    self.app.allow_insecure_development,
+                ))
+                .unwrap_or(false);
+            self.postgres.admit(local_development, v)
+        })
+        .map_err(Error::from)?
+        .ok_or(JobsOperatorLoadError::PostgresDisabled)?;
         Ok(JobsOperatorConfig { postgres })
     }
 }

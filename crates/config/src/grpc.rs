@@ -7,7 +7,6 @@ use serde::Deserialize;
 
 use crate::de::{
     BlankAsNone, BlankAsNoneVerbatim, ListenAddr, StrictBool, StrictCount, StrictDuration,
-    StrictEnum,
 };
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
@@ -37,8 +36,6 @@ pub(crate) struct GrpcInput {
     #[serde(default)]
     #[serde_as(as = "BlankAsNone<ListenAddr>")]
     addr: Option<SocketAddr>,
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictEnum>")]
     security: Option<GrpcSecurity>,
     #[serde(default)]
     #[serde_as(as = "BlankAsNone")]

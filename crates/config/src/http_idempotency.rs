@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_with::DeserializeAs;
 
-use crate::de::{BlankAsNone, StrictString, decoded_duration};
+use crate::de::{BlankAsNone, decoded_duration};
 use crate::validate::{ValidationError, Violations, duration_range, required};
 
 #[serde_with::serde_as]
@@ -56,7 +56,7 @@ impl<'de> DeserializeAs<'de, Duration> for RetentionDuration {
     where
         D: serde::Deserializer<'de>,
     {
-        let text: String = StrictString::deserialize_as(deserializer)?;
+        let text = String::deserialize(deserializer)?;
         decoded_duration(&text, "a duration such as 24h")
     }
 }

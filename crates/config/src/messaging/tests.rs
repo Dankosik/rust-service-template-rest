@@ -1,5 +1,4 @@
 use std::assert_matches;
-use std::path::Path;
 
 use secrecy::ExposeSecret as _;
 
@@ -31,9 +30,9 @@ fn fixture_credentials() -> SecretString {
 fn defaults_are_inactive_and_within_the_delivery_budget() {
     let config = admit(MessagingInput::default(), false).unwrap();
     assert_eq!(config.urls, Vec::<String>::new());
-    assert!(!config.tls_first);
-    assert_eq!(config.max_payload_bytes, ByteSize::kib(256));
-    assert_eq!(config.consumer_concurrency, NonZeroU32::MIN);
+    assert_eq!(config.security, MessagingTransportSecurity::Tls);
+    assert_eq!(config.max_payload_bytes, 256 * 1024);
+    assert_eq!(config.consumer_concurrency, NonZeroUsize::MIN);
     assert!(config.credentials.is_none());
 }
 
@@ -42,7 +41,8 @@ fn default_delivery_fits_a_broker_with_the_default_payload_limit() {
     const BROKER_DEFAULT_MAX_PAYLOAD: u64 = 1024 * 1024;
     let config = admit(MessagingInput::default(), false).unwrap();
     assert!(
-        config.max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES <= BROKER_DEFAULT_MAX_PAYLOAD
+        u64::try_from(config.max_payload_bytes).unwrap() + DELIVERY_OVERHEAD_BYTES
+            <= BROKER_DEFAULT_MAX_PAYLOAD
     );
 }
 
@@ -58,7 +58,11 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
         &config.credentials,
         Some(MessagingCredentials::File(path)) if path == Path::new("/run/secrets/nats.creds")
     );
-    config.producer_source_stream().unwrap();
+    let admitted = config.admit_producer().unwrap();
+    assert_matches!(
+        admitted.credentials,
+        MessagingCredentials::File(path) if path == Path::new("/run/secrets/nats.creds")
+    );
 
     let both = MessagingInput {
         credentials: Some(fixture_credentials()),
@@ -76,21 +80,26 @@ fn a_credentials_file_is_the_alternative_to_inline_credentials() {
 fn producer_requires_admitted_connection_credentials_and_source() {
     let mut config = admit(tls_input(), false).unwrap();
     assert_eq!(
-        config.producer_source_stream().unwrap_err().key,
+        config.admit_producer().unwrap_err().key,
         "messaging.credentials"
     );
     config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
     assert_eq!(
-        config.producer_source_stream().unwrap_err().key,
+        config.admit_producer().unwrap_err().key,
         "messaging.source_stream"
     );
     config.source_stream = Some("events".to_owned());
-    assert_eq!(config.producer_source_stream().unwrap(), "events");
+    let admitted = config.admit_producer().unwrap();
+    assert_eq!(admitted.source_stream, "events");
+    assert_eq!(admitted.urls, ["tls://nats.example:4222"]);
+    assert_eq!(admitted.security, MessagingTransportSecurity::Tls);
     assert!(!format!("{config:?}").contains("fixture-credentials"));
+    assert!(!format!("{admitted:?}").contains("fixture-credentials"));
+    assert!(!format!("{admitted:?}").contains("nats.example"));
     assert_eq!(
         admit(MessagingInput::default(), false)
             .unwrap()
-            .producer_source_stream()
+            .admit_producer()
             .unwrap_err()
             .key,
         "messaging.urls"
@@ -109,25 +118,26 @@ fn consumer_requires_its_distinct_operator_owned_names() {
     .unwrap();
     config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
     assert_eq!(
-        config.consumer_keys().unwrap_err().key,
+        config.admit_consumer().unwrap_err().key,
         "messaging.consumer_durable"
     );
     config.consumer_durable = Some("worker".to_owned());
     assert_eq!(
-        config.consumer_keys().unwrap_err().key,
+        config.admit_consumer().unwrap_err().key,
         "messaging.consumer_filter_subject"
     );
     config.consumer_filter_subject = Some("events.created".to_owned());
     assert_eq!(
-        config.consumer_keys().unwrap_err().key,
+        config.admit_consumer().unwrap_err().key,
         "messaging.dlq_subject"
     );
     config.dlq_subject = Some("dead.created".to_owned());
-    let admitted = config.consumer_keys().unwrap();
-    assert_eq!(admitted.source_stream, "events");
+    let admitted = config.admit_consumer().unwrap();
+    assert_eq!(admitted.messaging.source_stream, "events");
     assert_eq!(admitted.durable, "worker");
     assert_eq!(admitted.filter_subject, "events.created");
     assert_eq!(admitted.dlq_subject, "dead.created");
+    assert_eq!(admitted.concurrency, NonZeroUsize::MIN);
 }
 
 #[test]
@@ -201,12 +211,15 @@ fn plaintext_and_unauthenticated_exceptions_require_insecure_development() {
         .concat()),
     )
     .unwrap();
-    assert!(config.messaging().plaintext_admitted);
+    assert_eq!(
+        config.messaging().security,
+        MessagingTransportSecurity::AllowPlaintext
+    );
     assert_matches!(
         config.messaging().credentials,
         Some(MessagingCredentials::Unauthenticated)
     );
-    config.messaging().producer_source_stream().unwrap();
+    config.messaging().admit_producer().unwrap();
 }
 
 #[test]
@@ -219,12 +232,15 @@ fn trusted_network_admits_plaintext_but_keeps_credentials_required() {
     };
     let mut config = admit(input, false).unwrap();
     assert_eq!(
-        config.producer_source_stream().unwrap_err().key,
+        config.admit_producer().unwrap_err().key,
         "messaging.credentials"
     );
     config.credentials = Some(MessagingCredentials::Inline(fixture_credentials()));
-    config.producer_source_stream().unwrap();
-    assert!(config.plaintext_admitted);
+    let admitted = config.admit_producer().unwrap();
+    assert_eq!(
+        admitted.security,
+        MessagingTransportSecurity::AllowPlaintext
+    );
 
     let unauthenticated = MessagingInput {
         urls: vec!["nats://nats.internal:4222".to_owned()],
@@ -332,13 +348,12 @@ fn messaging_environment_decodes_lists_and_redacts_credentials() {
         cfg.messaging().root_ca_path.as_deref(),
         Some(Path::new("/etc/nats/root-ca.pem"))
     );
-    assert_eq!(
-        cfg.messaging().max_payload_bytes,
-        bytesize::ByteSize::mib(2)
-    );
+    assert_eq!(cfg.messaging().max_payload_bytes, 2 * 1024 * 1024);
     assert_eq!(cfg.messaging().consumer_concurrency.get(), 2);
-    assert!(!cfg.messaging().plaintext_admitted);
-    assert!(cfg.messaging().tls_first);
+    assert_eq!(
+        cfg.messaging().security,
+        MessagingTransportSecurity::TlsFirst
+    );
     let rendered = format!("{cfg:?}");
     assert!(!rendered.contains("fixture-credentials"));
     assert!(!rendered.contains("nats-a.example"));
@@ -353,8 +368,11 @@ fn messaging_trusted_network_admits_plaintext_in_production() {
         ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
         ("APP__MESSAGING__SOURCE_STREAM", "events"),
     ]);
-    assert!(cfg.messaging().plaintext_admitted);
-    cfg.messaging().producer_source_stream().unwrap();
+    assert_eq!(
+        cfg.messaging().security,
+        MessagingTransportSecurity::AllowPlaintext
+    );
+    cfg.messaging().admit_producer().unwrap();
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -9,10 +9,9 @@ use crate::app::BuildInfo;
 use crate::secret_policy::first_secret_key;
 use crate::{Config, ConfigInput, LoadOptions, ValidationErrors};
 
-mod rejection;
+mod tree;
 mod variables;
 
-use rejection::describe_rejection;
 use variables::collect_variables;
 pub(crate) use variables::{ADDRESSABLE_KEY_FORM, is_env_addressable, variable_name};
 
@@ -104,8 +103,6 @@ pub(crate) enum ErrorKind {
         crate::validate::join_errors(.0)
     )]
     Inputs(Vec<InputError>),
-    #[error("load configuration: {0}")]
-    Merge(String),
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
     #[error("configuration is invalid: {0}")]
@@ -183,9 +180,8 @@ pub(crate) fn load_with_tail_from(
     shutdown_tail: Option<crate::ShutdownTail>,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Config, Error> {
-    let mut input: ConfigInput = merge(options, environment)?;
-    input.app.apply_build_info(build);
-    Ok(input.admit(shutdown_tail)?)
+    let input: ConfigInput = merge(options, environment)?;
+    Ok(input.admit(build, shutdown_tail)?)
 }
 
 // template:begin worker:load-worker
@@ -212,9 +208,8 @@ pub(crate) fn load_worker_with_tail_from(
     shutdown_tail: Option<crate::ShutdownTail>,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::WorkerConfig, Error> {
-    let mut input: crate::WorkerInput = merge(options, environment)?;
-    input.app.apply_build_info(build);
-    Ok(input.admit(shutdown_tail)?)
+    let input: crate::WorkerInput = merge(options, environment)?;
+    Ok(input.admit(build, shutdown_tail)?)
 }
 // template:end worker:load-worker
 
@@ -239,9 +234,8 @@ pub(crate) fn load_migration_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::MigrationConfig, MigrationLoadError> {
-    let mut input: crate::postgres::MigrationInput = merge(options, environment)?;
-    input.app.apply_build_info(build);
-    input.admit()
+    let input: crate::postgres::MigrationInput = merge(options, environment)?;
+    input.admit(build)
 }
 // template:end postgres:load-migration
 
@@ -305,150 +299,38 @@ fn merge_inputs<T: DeserializeOwned>(
     files: Vec<ScannedFile>,
     variables: variables::Variables,
 ) -> Result<T, Error> {
-    reject_table_overrides(&files, &variables)?;
-    reject_surviving_datetimes(&files, &variables)?;
-    let mut builder = config::Config::builder();
-    for file in files {
-        builder = builder.add_source(file);
-    }
-    let mut variable_sources = Vec::with_capacity(variables.len());
-    for variable in variables.into_values() {
-        let value = config::Value::new(
-            Some(&variable.source.as_str().to_owned()),
-            variable.value.as_str(),
-        );
-        builder = builder
-            .set_override(&variable.key, value)
-            .map_err(|error| ErrorKind::Merge(error.to_string()))?;
-        variable_sources.push((variable.key, variable.source));
-    }
-    let merged = builder
-        .build()
-        .map_err(|error| ErrorKind::Merge(error.to_string()))?;
-
-    let rejection = |error| {
-        Error(ErrorKind::Deserialize(describe_rejection(
-            &error,
-            &variable_sources,
-        )))
-    };
-    if let config::ValueKind::Table(sections) = &merged.cache.kind
-        && let Some(key) = sections
-            .keys()
-            .find(|key| !RETAINED_SECTIONS.contains(&key.as_str()))
-    {
-        return Err(rejection(serde::de::Error::unknown_field(
-            key,
-            RETAINED_SECTIONS,
-        )));
-    }
-    merged.try_deserialize().map_err(rejection)
-}
-
-fn reject_table_overrides(
-    files: &[ScannedFile],
-    variables: &variables::Variables,
-) -> Result<(), InputError> {
-    let mut table_keys = BTreeSet::new();
-    let mut key_segments = Vec::new();
-    for file in files {
-        if let Some(key) =
-            record_tables_and_find_override(&file.table, &mut table_keys, &mut key_segments)
-        {
-            return Err(InputError::TableOverride {
-                key,
-                input: file.path.display().to_string(),
-            });
-        }
-    }
-    if let Some(variable) = variables
-        .values()
-        .find(|variable| table_keys.contains(&variable.key))
-    {
-        return Err(InputError::TableOverride {
-            key: variable.key.clone(),
-            input: variable.original_name.to_ascii_uppercase(),
-        });
-    }
-    Ok(())
-}
-
-fn reject_surviving_datetimes(
-    files: &[ScannedFile],
-    variables: &variables::Variables,
-) -> Result<(), Error> {
-    let mut datetime_keys = BTreeMap::new();
-    let mut key_segments = Vec::new();
-    for file in files {
-        update_datetime_keys(
-            &file.table,
-            &file.path,
-            &mut key_segments,
-            &mut datetime_keys,
-        );
-    }
-    for variable in variables.values() {
-        let mut key = variable.key.as_str();
-        datetime_keys.remove(key);
-        while let Some((parent, _)) = key.rsplit_once('.') {
-            datetime_keys.remove(parent);
-            key = parent;
-        }
-    }
-    if let Some((key, path)) = datetime_keys.into_iter().next() {
+    let root = tree::merge(files, variables)?;
+    if let Some((key, path)) = root.first_datetime() {
         return Err(ErrorKind::Deserialize(format!(
             "key `{key}` in {} must not be an unquoted TOML datetime; quote it as a string",
             path.display()
         ))
         .into());
     }
-    Ok(())
-}
-
-#[derive(Clone, derive_more::Debug)]
-struct ScannedFile {
-    path: PathBuf,
-    #[debug(skip)]
-    table: toml::Table,
-}
-
-impl config::Source for ScannedFile {
-    fn clone_into_box(&self) -> Box<dyn config::Source + Send + Sync> {
-        Box::new(self.clone())
+    if let Some(key) = root.first_unknown_section(RETAINED_SECTIONS) {
+        return Err(Error(ErrorKind::Deserialize(
+            <tree::DecodeError as serde::de::Error>::unknown_field(key, RETAINED_SECTIONS).render(),
+        )));
     }
-
-    fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
-        let uri = self.path.to_string_lossy().into_owned();
-        Ok(from_toml_table(Some(&uri), &self.table))
-    }
+    root.deserialize_into()
+        .map_err(|error| Error(ErrorKind::Deserialize(error.render())))
 }
 
-fn from_toml_table(
-    uri: Option<&String>,
-    table: &toml::Table,
-) -> config::Map<String, config::Value> {
-    table
-        .iter()
-        .map(|(key, value)| (key.clone(), from_toml_value(uri, value)))
-        .collect()
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "only profiles with secret-gated fields deserialize a test node directly"
+)]
+pub(crate) fn deserialize_toml_for_test<T: DeserializeOwned>(body: &str) -> Result<T, String> {
+    let table: toml::Table = toml::from_str(body).expect("fixture must be valid TOML");
+    tree::from_test_toml(table)
+        .deserialize_into()
+        .map_err(|error| error.render())
 }
 
-fn from_toml_value(uri: Option<&String>, value: &toml::Value) -> config::Value {
-    match value {
-        toml::Value::String(value) => config::Value::new(uri, value.clone()),
-        toml::Value::Integer(value) => config::Value::new(uri, *value),
-        toml::Value::Float(value) => config::Value::new(uri, *value),
-        toml::Value::Boolean(value) => config::Value::new(uri, *value),
-        toml::Value::Datetime(value) => config::Value::new(uri, value.to_string()),
-        toml::Value::Array(items) => config::Value::new(
-            uri,
-            items
-                .iter()
-                .map(|item| from_toml_value(uri, item))
-                .collect::<Vec<_>>(),
-        ),
-        toml::Value::Table(nested) => config::Value::new(uri, from_toml_table(uri, nested)),
-    }
+pub(super) struct ScannedFile {
+    pub(super) path: PathBuf,
+    pub(super) table: toml::Table,
 }
 
 #[expect(
@@ -489,57 +371,6 @@ fn scan_file(path: &Path) -> Result<ScannedFile, InputError> {
         path: path.to_owned(),
         table,
     })
-}
-
-fn update_datetime_keys<'a>(
-    table: &'a toml::Table,
-    file_path: &Path,
-    key_segments: &mut Vec<&'a str>,
-    datetime_keys: &mut BTreeMap<String, PathBuf>,
-) {
-    for (key, value) in table {
-        key_segments.push(key);
-        let dotted = key_segments.join(".");
-        if let toml::Value::Table(nested) = value {
-            datetime_keys.remove(&dotted);
-            update_datetime_keys(nested, file_path, key_segments, datetime_keys);
-        } else if contains_datetime(value) {
-            datetime_keys.insert(dotted, file_path.to_owned());
-        } else {
-            datetime_keys.remove(&dotted);
-        }
-        key_segments.pop();
-    }
-}
-
-fn contains_datetime(value: &toml::Value) -> bool {
-    match value {
-        toml::Value::Datetime(_) => true,
-        toml::Value::Array(items) => items.iter().any(contains_datetime),
-        _ => false,
-    }
-}
-
-fn record_tables_and_find_override<'a>(
-    table: &'a toml::Table,
-    table_keys: &mut BTreeSet<String>,
-    key_segments: &mut Vec<&'a str>,
-) -> Option<String> {
-    for (segment, value) in table {
-        key_segments.push(segment);
-        let dotted_key = key_segments.join(".");
-        let found = if let Some(nested) = value.as_table() {
-            table_keys.insert(dotted_key);
-            record_tables_and_find_override(nested, table_keys, key_segments)
-        } else {
-            table_keys.contains(&dotted_key).then_some(dotted_key)
-        };
-        key_segments.pop();
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
 }
 
 fn first_unaddressable_key<'a>(

@@ -101,10 +101,6 @@ pub(crate) enum WorkerError {
     MessagingRegistry(#[from] infra_messaging::RegistryError),
     #[error("messaging startup: {0}")]
     Messaging(#[from] infra_messaging::MessagingError),
-    #[error("messaging.consumer_concurrency cannot fit this platform")]
-    MessagingConcurrency,
-    #[error("messaging.max_payload_bytes cannot fit this platform")]
-    MessagingPayloadBound,
     #[error("the messaging consumer stopped without a stop signal: {0}")]
     ConsumerStopped(#[source] infra_messaging::ConsumerError),
     // template:end messaging:worker-bootstrap-messaging-errors

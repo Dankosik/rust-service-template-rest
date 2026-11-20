@@ -72,14 +72,14 @@ pub(super) fn open(settings: &ObjectStorageConfig) -> Result<ObjectStorage, Conf
         provider,
         bucket: settings.bucket.clone(),
         max_object_bytes: settings.max_object_bytes.as_u64(),
-        max_concurrency: usize::try_from(settings.max_concurrency).unwrap_or(usize::MAX),
+        max_concurrency: settings.max_concurrency.get(),
         operation_timeout: settings.operation_timeout,
     })?;
     tracing::info!(
         object_storage.provider = storage.provider_name(),
         object_storage.credentials = settings.provider.credentials_label(),
         object_storage.max_object_bytes = settings.max_object_bytes.as_u64(),
-        object_storage.max_concurrency = settings.max_concurrency,
+        object_storage.max_concurrency = settings.max_concurrency.get(),
         "object_storage_configured"
     );
     Ok(storage)

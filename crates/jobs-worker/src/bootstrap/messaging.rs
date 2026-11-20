@@ -4,7 +4,9 @@ use infra_messaging::{
     Consumer, ConsumerOptions, Credentials, Messaging, MessagingOptions,
     Registry as MessagingRegistry, TransportSecurity,
 };
-use service_config::{MessagingCredentials, WorkerConfig};
+use service_config::{
+    AdmittedMessaging, MessagingCredentials, MessagingTransportSecurity, WorkerConfig,
+};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +35,7 @@ impl MessagingPlan {
     ) -> Result<Option<Self>, WorkerError> {
         messages
             .registry
-            .check_publication_limit(max_payload_bytes(config)?)?;
+            .check_publication_limit(config.messaging().max_payload_bytes)?;
         let consumes_messages = messages.registry.has_handlers();
         // template:begin outbox:worker-bootstrap-postgres-messages-intent
         let consumes_messages = consumes_messages || messages.postgres_messages.is_some();
@@ -41,26 +43,25 @@ impl MessagingPlan {
         if !consumes_messages {
             return Ok(None);
         }
-        let keys = config.messaging().consumer_keys()?;
+        let admitted = config.messaging().admit_consumer()?;
         let consumer = ConsumerOptions {
-            durable_name: keys.durable.to_owned(),
-            filter_subject: keys.filter_subject.to_owned(),
-            dlq_subject: keys.dlq_subject.to_owned(),
+            durable_name: admitted.durable.to_owned(),
+            filter_subject: admitted.filter_subject.to_owned(),
+            dlq_subject: admitted.dlq_subject.to_owned(),
             dlq_stream: None,
-            concurrency: std::num::NonZeroUsize::try_from(config.messaging().consumer_concurrency)
-                .map_err(|_| WorkerError::MessagingConcurrency)?,
+            concurrency: admitted.concurrency,
         };
         Ok(Some(Self {
-            options: messaging_options(config, keys.source_stream, Some(consumer))?,
+            options: messaging_options(config, admitted.messaging, Some(consumer)),
             retained_messages: Some(messages),
         }))
     }
 
     // template:begin outbox:worker-bootstrap-outbox-messaging
     pub(super) fn for_producer(config: &WorkerConfig) -> Result<Self, WorkerError> {
-        let source_stream = config.messaging().producer_source_stream()?;
+        let admitted = config.messaging().admit_producer()?;
         Ok(Self {
-            options: messaging_options(config, source_stream, None)?,
+            options: messaging_options(config, admitted, None),
             retained_messages: None,
         })
     }
@@ -111,41 +112,31 @@ pub(super) async fn connect_messaging(
     Ok((messaging, consumer))
 }
 
-fn max_payload_bytes(config: &WorkerConfig) -> Result<usize, WorkerError> {
-    usize::try_from(config.messaging().max_payload_bytes.as_u64())
-        .map_err(|_| WorkerError::MessagingPayloadBound)
-}
-
 fn messaging_options(
     config: &WorkerConfig,
-    source_stream: &str,
+    admitted: AdmittedMessaging<'_>,
     consumer: Option<ConsumerOptions>,
-) -> Result<MessagingOptions, WorkerError> {
-    let messaging = config.messaging();
-    let security = if messaging.tls_first {
-        TransportSecurity::TlsFirst
-    } else if messaging.plaintext_admitted {
-        TransportSecurity::AllowPlaintext
-    } else {
-        TransportSecurity::Tls
+) -> MessagingOptions {
+    let security = match admitted.security {
+        MessagingTransportSecurity::Tls => TransportSecurity::Tls,
+        MessagingTransportSecurity::TlsFirst => TransportSecurity::TlsFirst,
+        MessagingTransportSecurity::AllowPlaintext => TransportSecurity::AllowPlaintext,
     };
-    Ok(MessagingOptions {
+    let credentials = match admitted.credentials {
+        MessagingCredentials::Inline(secret) => Some(Credentials::Inline(secret.clone())),
+        MessagingCredentials::File(path) => Some(Credentials::File(path.clone())),
+        MessagingCredentials::Unauthenticated => None,
+    };
+    MessagingOptions {
         connection_name: worker_identity(&config.observability().otel.service_name),
-        servers: messaging.urls.clone(),
-        credentials: messaging
-            .credentials
-            .as_ref()
-            .and_then(|source| match source {
-                MessagingCredentials::Inline(secret) => Some(Credentials::Inline(secret.clone())),
-                MessagingCredentials::File(path) => Some(Credentials::File(path.clone())),
-                MessagingCredentials::Unauthenticated => None,
-            }),
-        root_ca_path: messaging.root_ca_path.clone(),
+        servers: admitted.urls.to_vec(),
+        credentials,
+        root_ca_path: admitted.root_ca_path.map(std::path::Path::to_path_buf),
         security,
-        source_stream: source_stream.to_owned(),
-        max_payload_bytes: max_payload_bytes(config)?,
+        source_stream: admitted.source_stream.to_owned(),
+        max_payload_bytes: admitted.max_payload_bytes,
         consumer,
-    })
+    }
 }
 
 pub(super) fn start_consumer(
