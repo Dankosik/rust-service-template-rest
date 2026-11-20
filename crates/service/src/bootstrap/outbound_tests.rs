@@ -33,7 +33,7 @@ enum Resource {
 async fn resource(Extension(resource): Extension<Resource>, context: RequestContext) -> StatusCode {
     let resource_unavailable = match resource {
         Resource::Http(client) => {
-            let request = Request::get(client.origin().uri("/value").unwrap())
+            let request = Request::get(client.uri("/value").unwrap())
                 .body(infra_outbound_http::Bytes::new())
                 .unwrap();
             matches!(
@@ -42,7 +42,9 @@ async fn resource(Extension(resource): Extension<Resource>, context: RequestCont
                     .execute(request)
                     .await,
                 Err(infra_oauth2_client_credentials::Error::Resource(
-                    infra_outbound_http::Error::Transport { .. }
+                    infra_outbound_http::ExchangeError::BeforeResponse(
+                        infra_outbound_http::Error::Transport { .. }
+                    )
                 ))
             )
         }
