@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -26,26 +25,34 @@ fn app() -> (axum::Router, ::health::Readiness) {
         ::health::RefreshPolicy::try_new(Duration::from_mins(1), OPENING, NonZeroU32::MIN).unwrap(),
     );
     let mut services = Services::new();
-    services.set_listener_layer(tower::util::MapResponseLayer::new(
-        |mut response: axum::response::Response| {
-            response
-                .headers_mut()
-                .insert("x-native", "yes".parse().unwrap());
-            response
-        },
-    ));
-    services.attach_reflection().unwrap();
     services
-        .index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)
-        .unwrap();
-    let methods = Arc::new(services.methods());
-    let routes = services.routes.routes().into_axum_router();
+        .add_listener_layer(tower::util::MapResponseLayer::new(
+            |mut response: axum::response::Response| {
+                response
+                    .headers_mut()
+                    .insert("x-native", "inner".parse().unwrap());
+                response
+            },
+        ))
+        .add_listener_layer(tower::util::MapResponseLayer::new(
+            |mut response: axum::response::Response| {
+                let inner = response
+                    .headers()
+                    .get("x-native")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing");
+                let stacked = format!("{inner},outer").parse().unwrap();
+                response.headers_mut().insert("x-native", stacked);
+                response
+            },
+        ));
+    let (routes, listener_layers, names, methods) = services.into_ingress_parts();
     (
         native_router(
             routes,
-            services.listener_layer,
+            listener_layers,
             readiness.control().reader(),
-            services.names,
+            names,
             methods,
             OPENING,
             false,
@@ -115,7 +122,7 @@ async fn native_protocol_precedes_health_business_and_fallback_dispatch() {
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{media}");
         assert_eq!(response.headers()["grpc-status"], "12", "{media}");
-        assert_eq!(response.headers()["x-native"], "yes", "{media}");
+        assert_eq!(response.headers()["x-native"], "inner,outer", "{media}");
     }
 }
 

@@ -6,7 +6,10 @@ use std::{
 
 use futures_util::future::Either;
 use http::{Request, Response, header::AUTHORIZATION};
-use infra_outbound_grpc::{Client, PreparedCall};
+use infra_outbound_grpc::{
+    Client, WithContext,
+    transport::{PreparedCall, bind_context},
+};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
@@ -61,7 +64,6 @@ impl ExchangeClient {
         AuthenticatedClient {
             tokens: BoundTokens::Exchange(self.tokens.clone(), subject),
             resource: self.resource.clone(),
-            context: None,
         }
     }
 }
@@ -71,7 +73,6 @@ impl ExchangeClient {
 pub struct AuthenticatedClient {
     tokens: BoundTokens,
     resource: Client,
-    context: Option<OperationContext>,
 }
 
 impl ServiceTokens {
@@ -80,7 +81,6 @@ impl ServiceTokens {
         Ok(AuthenticatedClient {
             tokens: BoundTokens::Service(self.clone()),
             resource,
-            context: None,
         })
     }
 }
@@ -110,78 +110,67 @@ fn validate_resource(resource: &Client, origin: &http::Uri) -> Result<(), Config
 
 impl AuthenticatedClient {
     #[must_use]
-    pub fn with_context(&self, context: &OperationContext) -> Self {
-        Self {
-            tokens: self.tokens.clone(),
-            resource: self.resource.clone(),
-            context: Some(context.clone()),
-        }
+    pub fn with_context(&self, context: &OperationContext) -> WithContext<Self> {
+        bind_context(self.clone(), context)
     }
 
-    fn begin_call(&self, mut request: Request<Body>) -> Result<RpcFuture, Status> {
-        if let Some(context) = &self.context {
-            if request.extensions().get::<OperationContext>().is_some() {
-                return Err(self.resource.refuse_call(
-                    &request,
-                    Status::internal("request operation context conflicts with client context"),
-                ));
-            }
-            request.extensions_mut().insert(context.clone());
-        }
-        let has_authorization = request.headers().contains_key(AUTHORIZATION);
+    fn begin_call(&self, request: Request<Body>) -> Result<RpcFuture, Status> {
         let prepared =
-            self.resource
-                .prepare_call(request)
-                .map_err(|status| match status.code() {
+            PreparedCall::prepare(&self.resource, request).map_err(|status| {
+                match status.code() {
                     Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
                     Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
                     _ => status,
-                })?;
-        if let Err(error) = self
-            .tokens
-            .check_active(acquisition_deadline(prepared.opening_context()))
-        {
-            return Err(prepared.refuse(acquisition_status(error)));
-        }
-        if has_authorization {
-            return Err(prepared.refuse(Status::internal(
-                "authorization conflicts with client credentials",
-            )));
-        }
-        Ok(Box::pin(send_admitted(prepared, self.tokens.clone())))
+                }
+            })?;
+        let (prepared, context) = prepared.try_step(|opening, headers| {
+            self.tokens
+                .check_active(acquisition_deadline(opening))
+                .map_err(acquisition_status)?;
+            if headers.contains_key(AUTHORIZATION) {
+                return Err(Status::internal(
+                    "authorization conflicts with client credentials",
+                ));
+            }
+            Ok(opening.clone())
+        })?;
+        Ok(Box::pin(send_admitted(
+            prepared,
+            self.tokens.clone(),
+            context,
+        )))
     }
 }
 
 async fn send_admitted(
-    mut prepared: PreparedCall,
+    prepared: PreparedCall,
     tokens: BoundTokens,
+    context: OperationContext,
 ) -> Result<Response<Body>, Status> {
-    let acquired = tokens
-        .acquire_for_request(acquisition_deadline(prepared.opening_context()))
-        .await;
-    let token = match acquired {
-        Ok(acquired) => acquired,
-        Err(error) => return Err(prepared.refuse(acquisition_status(error))),
-    };
-    prepared
-        .headers_mut()
-        .insert(AUTHORIZATION, token.header.clone());
+    let (prepared, token) = prepared
+        .try_await(async {
+            tokens
+                .acquire_for_request(acquisition_deadline(&context))
+                .await
+                .map_err(acquisition_status)
+        })
+        .await?;
     let used = Arc::downgrade(&token);
     prepared
-        .send_with_dispatch_check(
-            move || {
-                token
-                    .check_expiry(Instant::now())
-                    .map_err(acquisition_status)
-            },
-            move |code| {
-                if code == Code::Unauthenticated
-                    && let Some(token) = used.upgrade()
-                {
-                    token.reject_if_old_enough();
-                }
-            },
-        )
+        .on_status(move |code| {
+            if code == Code::Unauthenticated
+                && let Some(token) = used.upgrade()
+            {
+                token.reject_if_old_enough();
+            }
+        })
+        .send_with_dispatch(move |headers| {
+            token
+                .check_expiry(Instant::now())
+                .map_err(acquisition_status)?;
+            headers.insert(AUTHORIZATION, token.header.clone());
+            Ok(())
+        })
         .await
 }
 

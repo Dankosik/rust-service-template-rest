@@ -40,6 +40,7 @@
     "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
     "crates/infra-cache/Cargo.toml": {"role": "cache"},
     "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
+    "crates/infra-grpc-core/Cargo.toml": {"role": "grpc-core"},
     "crates/infra-http/Cargo.toml": {"role": "http"},
     "crates/infra-http-transport/Cargo.toml": {"role": "http-transport"},
     "crates/infra-idempotency-store/Cargo.toml": {"role": "postgres-provider"},
@@ -73,7 +74,7 @@
     "service-auth": {"rule": "independent-service-token-provider"},
     "outbound-grpc": {
       "rule": "outbound-grpc-provider-dependencies",
-      "allow_roles": ["service-auth"]
+      "allow_roles": ["grpc-core", "service-auth"]
     },
     "outbound-http": {"rule": "independent-outbound-http-provider"},
     "telemetry": {"rule": "independent-telemetry-provider"},
@@ -141,9 +142,10 @@
         }
       }
     },
+    "grpc-core": {"rule": "shared-grpc-transport-primitives"},
     "grpc": {
       "rule": "grpc-transport-dependencies",
-      "allow_roles": ["health", "bearer", "service-auth", "http-transport"],
+      "allow_roles": ["grpc-core", "health", "bearer", "service-auth", "http-transport"],
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "gRPC projects shared failure codes into tonic Status.",

@@ -2051,7 +2051,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "grpc-contracts"
 version = "0.1.0"
 dependencies = [
- "derive-where",
  "prost",
  "prost-types",
  "tonic",
@@ -2634,6 +2633,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infra-bearerauthn",
+ "infra-grpc-core",
  "infra-http",
  "infra-http-transport",
  "infra-outbound-grpc",
@@ -2669,6 +2669,29 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "utoipa",
+]
+
+[[package]]
+name = "infra-grpc-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "metrics",
+ "opentelemetry",
+ "parking_lot",
+ "rustls",
+ "secrecy",
+ "shared-rules",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
 ]
 
 [[package]]
@@ -2959,6 +2982,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper-util",
+ "infra-grpc-core",
  "infra-http-transport",
  "infra-serviceauth",
  "metrics",
