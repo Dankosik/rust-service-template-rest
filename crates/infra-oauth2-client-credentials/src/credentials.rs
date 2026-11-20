@@ -5,7 +5,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::{BuildError, Client, Origin};
+use infra_outbound_http::Client;
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -20,7 +20,7 @@ use crate::{
     assertion::{Signer, SignerConfig},
     options::{ValidatedRegistration, validate_options},
     token::Token,
-    token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
+    token_endpoint::{self, FETCH_TIMEOUT, TokenEndpoint},
 };
 
 mod exchange;
@@ -176,9 +176,7 @@ struct CachedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let validated = validate_options(options)?;
-        let token_http = Origin::parse_https(&validated.token_url.origin().ascii_serialization())
-            .map_err(BuildError::from)
-            .and_then(|origin| Client::try_new(origin, TOKEN_LIMITS))
+        let token_http = token_endpoint::build_https_client(&validated.token_url)
             .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }

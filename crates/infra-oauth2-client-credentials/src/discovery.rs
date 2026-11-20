@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
-use infra_outbound_http::{BuildError, Client, ExchangeError, Origin, prepare_tls};
+use infra_outbound_http::{Client, ExchangeError, prepare_tls};
 use operation_context::OperationContext;
 use serde::Deserialize;
 use url::Url;
@@ -9,7 +9,7 @@ use crate::{
     ConfigurationError, DiscoveryError, DiscoveryTransportError, IssuerUrl, Options, Registration,
     TokenUrl, TransportBuildFailure,
     options::{parse_discovered_token_endpoint, validate_options},
-    token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
+    token_endpoint::{self, FETCH_TIMEOUT},
 };
 
 #[derive(Deserialize)]
@@ -44,8 +44,8 @@ impl Registration {
             .into());
         }
         verify_https_metadata(&issuer, &validated.token_url).await?;
-        let token_http =
-            build_https_client(&validated.token_url).map_err(TransportBuildFailure::token_url)?;
+        let token_http = token_endpoint::build_https_client(&validated.token_url)
+            .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 
@@ -65,9 +65,8 @@ impl Registration {
             audience_url: issuer_url.clone(),
             provider_concurrency: options.provider_concurrency,
         })?;
-        let discovery_http =
-            Client::try_new_for_test_http(&issuer_url.origin().ascii_serialization(), TOKEN_LIMITS)
-                .map_err(TransportBuildFailure::issuer)?;
+        let discovery_http = token_endpoint::build_http_client(&issuer_url)
+            .map_err(TransportBuildFailure::issuer)?;
         verify_metadata(
             &options.issuer,
             &issuer_url,
@@ -75,11 +74,8 @@ impl Registration {
             &discovery_http,
         )
         .await?;
-        let token_http = Client::try_new_for_test_http(
-            &validated.token_url.origin().ascii_serialization(),
-            TOKEN_LIMITS,
-        )
-        .map_err(TransportBuildFailure::token_url)?;
+        let token_http = token_endpoint::build_http_client(&validated.token_url)
+            .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 }
@@ -98,14 +94,10 @@ pub async fn verify_oidc_metadata(
     verify_https_metadata(issuer, token_url.url()).await
 }
 
-fn build_https_client(url: &Url) -> Result<Client, BuildError> {
-    let origin = url.origin().ascii_serialization();
-    Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS)
-}
-
 async fn verify_https_metadata(issuer: &IssuerUrl, endpoint: &Url) -> Result<(), DiscoveryError> {
     prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
-    let discovery_http = build_https_client(issuer.url()).map_err(TransportBuildFailure::issuer)?;
+    let discovery_http =
+        token_endpoint::build_https_client(issuer.url()).map_err(TransportBuildFailure::issuer)?;
     verify_metadata(issuer.as_str(), issuer.url(), endpoint, &discovery_http).await
 }
 

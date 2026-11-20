@@ -1,11 +1,9 @@
 use std::num::NonZeroU32;
 
-use infra_outbound_http::Client;
-
 use crate::{
     ConfigurationError, PrivateKeyJwt, Registration,
     options::{RawRegistration, parse_http_url, validate_registration},
-    token_endpoint::TOKEN_LIMITS,
+    token_endpoint,
 };
 
 #[derive(Clone, derive_more::Debug)]
@@ -30,13 +28,11 @@ pub fn prepare_http(options: HttpOptions) -> Result<Registration, ConfigurationE
         audience_url,
         provider_concurrency: options.provider_concurrency,
     })?;
-    let token_http = Client::try_new_for_test_http(
-        &validated.token_url.origin().ascii_serialization(),
-        TOKEN_LIMITS,
-    )
-    .map_err(|_| ConfigurationError {
-        key: "token_url",
-        reason: "requires an HTTP loopback IP address",
+    let token_http = token_endpoint::build_http_client(&validated.token_url).map_err(|_| {
+        ConfigurationError {
+            key: "token_url",
+            reason: "requires an HTTP loopback IP address",
+        }
     })?;
     Registration::build(validated, token_http)
 }

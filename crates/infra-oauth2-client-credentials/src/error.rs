@@ -266,5 +266,5 @@ pub enum Error {
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
     #[error(transparent)]
-    Resource(#[from] infra_outbound_http::Error),
+    Resource(#[from] infra_outbound_http::ExchangeError),
 }

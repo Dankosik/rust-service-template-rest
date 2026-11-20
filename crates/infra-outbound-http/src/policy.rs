@@ -9,27 +9,16 @@ use crate::Error;
 #[error("outbound HTTP origin is invalid")]
 pub struct InvalidOrigin;
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
-#[debug("{scheme}://{host}:{port}")]
-pub struct Origin {
-    scheme: Scheme,
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct OriginParts {
     host: Arc<str>,
     port: u16,
     host_header: HeaderValue,
     uri: Uri,
 }
 
-impl Origin {
-    pub fn parse_https(raw: &str) -> Result<Self, InvalidOrigin> {
-        let uri = parse_origin_uri(raw)?;
-        Self::from_uri_with_scheme(&uri, Scheme::HTTPS)
-    }
-
-    pub fn from_https_uri(uri: &Uri) -> Result<Self, InvalidOrigin> {
-        Self::from_uri_with_scheme(uri, Scheme::HTTPS)
-    }
-
-    fn from_uri_with_scheme(uri: &Uri, scheme: Scheme) -> Result<Self, InvalidOrigin> {
+impl OriginParts {
+    fn from_uri(uri: &Uri, scheme: Scheme) -> Result<Self, InvalidOrigin> {
         if uri.scheme() != Some(&scheme) {
             return Err(InvalidOrigin);
         }
@@ -47,13 +36,12 @@ impl Origin {
         }
         .map_err(|_| InvalidOrigin)?;
         let canonical_uri = Uri::builder()
-            .scheme(scheme.clone())
+            .scheme(scheme)
             .authority(host_header.as_bytes())
             .path_and_query("/")
             .build()
             .map_err(|_| InvalidOrigin)?;
         Ok(Self {
-            scheme,
             host: Arc::from(host),
             port,
             host_header,
@@ -61,50 +49,64 @@ impl Origin {
         })
     }
 
-    #[must_use]
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    #[must_use]
-    pub const fn port(&self) -> u16 {
-        self.port
-    }
-
-    #[must_use]
-    pub fn is_https(&self) -> bool {
-        self.scheme == Scheme::HTTPS
-    }
-
-    #[must_use]
-    pub const fn as_uri(&self) -> &Uri {
-        &self.uri
-    }
-
-    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+    fn uri_with_scheme(&self, scheme: Scheme, path_and_query: &str) -> Result<Uri, http::Error> {
         Uri::builder()
-            .scheme(self.scheme.clone())
+            .scheme(scheme)
             .authority(self.host_header.as_bytes())
             .path_and_query(path_and_query)
             .build()
     }
 
-    #[must_use]
-    pub fn admits(&self, uri: &Uri) -> bool {
-        uri.scheme() == Some(&self.scheme)
+    fn admits_with_scheme(&self, scheme: &Scheme, uri: &Uri) -> bool {
+        uri.scheme() == Some(scheme)
             && uri.authority().is_some_and(|authority| {
                 let host = authority.host();
                 host.eq_ignore_ascii_case(&self.host)
                     && shared_rules::uri::http_origin_port(
-                        self.scheme.as_str(),
+                        scheme.as_str(),
                         authority.as_str(),
                         host,
                     ) == Some(self.port)
             })
     }
+}
 
-    pub(crate) fn host_arc(&self) -> Arc<str> {
-        Arc::clone(&self.host)
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("https://{}:{}", _0.host, _0.port)]
+pub struct Origin(OriginParts);
+
+impl Origin {
+    pub fn parse_https(raw: &str) -> Result<Self, InvalidOrigin> {
+        let uri = parse_origin_uri(raw)?;
+        Self::from_https_uri(&uri)
+    }
+
+    pub fn from_https_uri(uri: &Uri) -> Result<Self, InvalidOrigin> {
+        OriginParts::from_uri(uri, Scheme::HTTPS).map(Self)
+    }
+
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.0.host
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.0.port
+    }
+
+    #[must_use]
+    pub const fn as_uri(&self) -> &Uri {
+        &self.0.uri
+    }
+
+    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.0.uri_with_scheme(Scheme::HTTPS, path_and_query)
+    }
+
+    #[must_use]
+    pub fn admits(&self, uri: &Uri) -> bool {
+        self.0.admits_with_scheme(&Scheme::HTTPS, uri)
     }
 }
 
@@ -118,7 +120,7 @@ impl FromStr for Origin {
 
 impl From<&Origin> for Uri {
     fn from(origin: &Origin) -> Self {
-        origin.uri.clone()
+        origin.0.uri.clone()
     }
 }
 
@@ -126,9 +128,65 @@ impl fmt::Display for Origin {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}://{}",
-            self.scheme,
-            self.host_header.to_str().unwrap_or(&self.host)
+            "https://{}",
+            self.0.host_header.to_str().unwrap_or(&self.0.host)
+        )
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum TargetOrigin {
+    Https(Origin),
+    #[cfg(feature = "test-support")]
+    TestHttp(OriginParts),
+}
+
+impl TargetOrigin {
+    const fn parts(&self) -> &OriginParts {
+        match self {
+            Self::Https(origin) => &origin.0,
+            #[cfg(feature = "test-support")]
+            Self::TestHttp(parts) => parts,
+        }
+    }
+
+    fn scheme(&self) -> Scheme {
+        match self {
+            Self::Https(_) => Scheme::HTTPS,
+            #[cfg(feature = "test-support")]
+            Self::TestHttp(_) => Scheme::HTTP,
+        }
+    }
+
+    pub(crate) fn host(&self) -> &str {
+        &self.parts().host
+    }
+
+    pub(crate) const fn port(&self) -> u16 {
+        self.parts().port
+    }
+
+    pub(crate) fn host_arc(&self) -> Arc<str> {
+        Arc::clone(&self.parts().host)
+    }
+
+    pub(crate) fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.parts().uri_with_scheme(self.scheme(), path_and_query)
+    }
+
+    pub(crate) fn admits(&self, uri: &Uri) -> bool {
+        self.parts().admits_with_scheme(&self.scheme(), uri)
+    }
+}
+
+impl fmt::Debug for TargetOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}://{}:{}",
+            self.scheme(),
+            self.parts().host,
+            self.parts().port
         )
     }
 }
@@ -151,7 +209,7 @@ fn parse_origin_uri(raw: &str) -> Result<Uri, InvalidOrigin> {
 }
 
 #[cfg(feature = "test-support")]
-pub(crate) fn admit_test_http_origin(raw: &str) -> Result<Origin, InvalidOrigin> {
+pub(crate) fn admit_test_http_origin(raw: &str) -> Result<TargetOrigin, InvalidOrigin> {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     let uri = parse_origin_uri(raw)?;
@@ -170,11 +228,11 @@ pub(crate) fn admit_test_http_origin(raw: &str) -> Result<Origin, InvalidOrigin>
     if !loopback {
         return Err(InvalidOrigin);
     }
-    Origin::from_uri_with_scheme(&uri, Scheme::HTTP)
+    OriginParts::from_uri(&uri, Scheme::HTTP).map(TargetOrigin::TestHttp)
 }
 
 pub(crate) fn admit_request(
-    origin: &Origin,
+    origin: &TargetOrigin,
     mut request: Request<Bytes>,
 ) -> Result<Request<Bytes>, Error> {
     if request.headers().contains_key(header::HOST) || !origin.admits(request.uri()) {
@@ -183,7 +241,7 @@ pub(crate) fn admit_request(
     *request.version_mut() = Version::HTTP_11;
     frame_body(&mut request);
     let headers = request.headers_mut();
-    headers.insert(header::HOST, origin.host_header.clone());
+    headers.insert(header::HOST, origin.parts().host_header.clone());
     headers
         .entry(header::ACCEPT)
         .or_insert(HeaderValue::from_static("*/*"));

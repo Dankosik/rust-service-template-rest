@@ -6,7 +6,7 @@ use http::{
     Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use infra_outbound_http::{Client, ExchangeError, Limits};
+use infra_outbound_http::{BuildError, Client, ExchangeError, Limits, Origin};
 use operation_context::OperationContext;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Deserializer};
@@ -24,6 +24,18 @@ pub(crate) const TOKEN_LIMITS: Limits = Limits {
     response_header_count: 64,
     response_body_bytes: 1024 * 1024,
 };
+
+pub(crate) fn build_https_client(url: &Url) -> Result<Client, BuildError> {
+    let origin = url.origin().ascii_serialization();
+    Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn build_http_client(url: &Url) -> Result<Client, BuildError> {
+    let origin = url.origin().ascii_serialization();
+    Client::try_new_for_test_http(&origin, TOKEN_LIMITS)
+}
+
 const GRANT_CLIENT_CREDENTIALS: &str = "client_credentials";
 const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";

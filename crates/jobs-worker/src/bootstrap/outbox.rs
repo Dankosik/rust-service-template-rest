@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use infra_jobs::Engine;
+use infra_jobs::{Engine, KindError};
 use infra_messaging::MessagingError;
 
 use super::WorkerError;
@@ -19,7 +19,7 @@ pub(super) fn with_publisher(
         Some(mut engine) => {
             engine
                 .add_group(kinds, NonZeroU32::MIN)
-                .map_err(|_| WorkerError::PublisherKindConflict)?;
+                .map_err(|duplicate| KindError::Duplicate(duplicate.kind))?;
             Ok(engine)
         }
         None => Ok(Engine::new(

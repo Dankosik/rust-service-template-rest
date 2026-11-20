@@ -95,10 +95,6 @@ pub(crate) enum WorkerError {
     #[error("jobs startup check: {0}")]
     JobsStartup(#[from] infra_jobs::StartupError),
     // template:end jobs:worker-bootstrap-job-errors
-    // template:begin outbox:worker-bootstrap-outbox-kind-error
-    #[error("ordinary jobs cannot register the reserved outbox publication kind")]
-    PublisherKindConflict,
-    // template:end outbox:worker-bootstrap-outbox-kind-error
     // template:begin messaging:worker-bootstrap-messaging-errors
     #[error("typed message handlers are invalid: {0}")]
     MessagingRegistry(#[from] infra_messaging::RegistryError),
