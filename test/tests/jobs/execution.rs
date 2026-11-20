@@ -9,7 +9,7 @@ use infra_jobs::{
     LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError,
     compare_live_payload, enqueue, enqueue_delayed, enqueue_unique,
 };
-use infra_postgres::{Dsn, Pool, Tx};
+use infra_postgres::{Dsn, Pool, SslPolicy, Tx, TxError, TxOptions};
 use integration_tests::jobs::{self, Probe, ProbeAction};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
@@ -238,8 +238,15 @@ async fn an_expired_checkout_does_not_use_an_idle_connection(pool: PgPool) {
     );
     let deadline = tokio::time::Instant::now() - Duration::from_millis(1);
     std::assert_matches!(
-        jobs.acquire_until("expired checkout", deadline).await,
-        Err(sqlx::Error::PoolTimedOut)
+        jobs.in_tx_with_acquire_deadline(
+            deadline,
+            TxOptions::default(),
+            async |_tx| -> Result<(), TxError> {
+                panic!("an expired checkout must not enter the transaction");
+            },
+        )
+        .await,
+        Err(TxError::Acquire(sqlx::Error::PoolTimedOut))
     );
     super::close_pools(&[&jobs]).await;
 }
@@ -1155,8 +1162,8 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     }
     url.set_username(&role).expect("a user name");
     url.set_password(Some("first")).expect("a password");
-    let dsn =
-        Dsn::admit_for_environment(url.as_str(), None, true).expect("the role's DSN is admitted");
+    let dsn = Dsn::admit_with(url.as_str(), None, SslPolicy::AllowLocalDevelopment)
+        .expect("the role's DSN is admitted");
     let jobs = super::template_pool(&dsn, 3).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let first = until("the engine listens", super::WAIT, async || {

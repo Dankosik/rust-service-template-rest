@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::LazyLock;
 use std::task::{Context, Poll, ready};
@@ -11,7 +12,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
     PgArguments, PgConnection, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
-use sqlx::{Connection, Either, Execute, Executor, Row as _, SqlStr};
+use sqlx::{AssertSqlSafe, Connection, Either, Execute, Executor, Row as _, SqlStr};
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -50,7 +51,7 @@ pub struct Tx<'c, Mode = ()> {
     proven_alive: bool,
     mode: Mode,
     notifications: SmallVec<[Notification; 1]>,
-    has_command_savepoint: bool,
+    next_savepoint: u32,
 }
 
 pub type BudgetedTx<'c> = Tx<'c, OperationDeadline>;
@@ -65,6 +66,22 @@ pub struct OperationDeadline {
 #[derive(Debug, thiserror::Error)]
 #[error("postgres operation deadline elapsed before commit")]
 pub struct OperationDeadlineElapsed;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SavepointEnd<T> {
+    Keep(T),
+    Rollback(T),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SavepointError<E> {
+    #[error("postgres savepoint: begin: {0}")]
+    Begin(#[source] sqlx::Error),
+    #[error(transparent)]
+    Work(E),
+    #[error("postgres savepoint: rollback: {0}")]
+    Rollback(#[source] sqlx::Error),
+}
 
 mod sealed {
     #[derive(Debug)]
@@ -274,14 +291,7 @@ impl Tx<'_> {
     }
 }
 
-#[derive(Debug)]
-#[must_use = "the savepoint remains active until rolled back or the transaction commits"]
-pub struct CommandSavepoint<'tx, 'c, M> {
-    tx: &'tx mut Tx<'c, M>,
-    notification_count: usize,
-}
-
-impl<'c, M: TxMode> Tx<'c, M> {
+impl<M: TxMode> Tx<'_, M> {
     fn run_unproven<'a, T: Send + 'a>(
         &'a mut self,
         call: impl FnOnce(&'a mut PgConnection) -> DriverFuture<'a, T> + Send + 'a,
@@ -298,33 +308,40 @@ impl<'c, M: TxMode> Tx<'c, M> {
         })
     }
 
-    pub async fn begin_command_savepoint(
-        &mut self,
-    ) -> Result<CommandSavepoint<'_, 'c, M>, sqlx::Error> {
-        if self.has_command_savepoint {
-            return Err(sqlx::Error::InvalidArgument(
-                "the transaction already owns a command savepoint".into(),
-            ));
+    pub async fn with_savepoint<T, E, F>(&mut self, f: F) -> Result<T, SavepointError<E>>
+    where
+        F: AsyncFnOnce(&mut Tx<'_, M>) -> Result<SavepointEnd<T>, E>,
+    {
+        let id = self.next_savepoint;
+        self.next_savepoint = id.checked_add(1).ok_or_else(|| {
+            SavepointError::Begin(sqlx::Error::InvalidArgument(
+                "transaction savepoint limit reached".into(),
+            ))
+        })?;
+        let saved_notifications = self.notifications.len();
+        self.execute(savepoint_sql(id, false))
+            .await
+            .map_err(SavepointError::Begin)?;
+        match f(self).await {
+            Ok(SavepointEnd::Keep(value)) => Ok(value),
+            Ok(SavepointEnd::Rollback(value)) => {
+                self.rollback_savepoint(id, saved_notifications)
+                    .await
+                    .map_err(SavepointError::Rollback)?;
+                Ok(value)
+            }
+            Err(error) => Err(SavepointError::Work(error)),
         }
-        let notification_count = self.notifications.len();
-        self.has_command_savepoint = true;
-        (&mut *self).execute("SAVEPOINT command_work").await?;
-        Ok(CommandSavepoint {
-            tx: self,
-            notification_count,
-        })
-    }
-}
-
-impl<'c, M: TxMode> CommandSavepoint<'_, 'c, M> {
-    pub fn tx(&mut self) -> &mut Tx<'c, M> {
-        self.tx
     }
 
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.tx.proven_alive = false;
-        let rollback = self.tx.conn.execute("ROLLBACK TO SAVEPOINT command_work");
-        if let Some(budget) = self.tx.mode.operation_deadline(sealed::Private) {
+    async fn rollback_savepoint(
+        &mut self,
+        id: u32,
+        saved_notifications: usize,
+    ) -> Result<(), sqlx::Error> {
+        self.proven_alive = false;
+        let rollback = self.conn.execute(savepoint_sql(id, true));
+        if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
             budget
                 .remaining_ms_or_expire()
                 .await
@@ -339,10 +356,19 @@ impl<'c, M: TxMode> CommandSavepoint<'_, 'c, M> {
         } else {
             rollback.await?;
         }
-        self.tx.proven_alive = true;
-        self.tx.notifications.truncate(self.notification_count);
+        self.proven_alive = true;
+        self.notifications.truncate(saved_notifications);
         Ok(())
     }
+}
+
+fn savepoint_sql(id: u32, rollback: bool) -> AssertSqlSafe<Cow<'static, str>> {
+    AssertSqlSafe(match (id, rollback) {
+        (0, false) => Cow::Borrowed("SAVEPOINT _tx_sp_0"),
+        (0, true) => Cow::Borrowed("ROLLBACK TO SAVEPOINT _tx_sp_0"),
+        (id, false) => Cow::Owned(format!("SAVEPOINT _tx_sp_{id}")),
+        (id, true) => Cow::Owned(format!("ROLLBACK TO SAVEPOINT _tx_sp_{id}")),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -686,7 +712,7 @@ where
             proven_alive: true,
             mode,
             notifications: SmallVec::new(),
-            has_command_savepoint: false,
+            next_savepoint: 0,
         };
         let result = f(&mut handle).await;
         handle.mode.check_expiry(&mut observation)?;

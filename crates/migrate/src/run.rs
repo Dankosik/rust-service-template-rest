@@ -229,15 +229,15 @@ async fn apply_outside_transaction(
 }
 
 async fn invalid_indexes(conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
-    observed!(
+    let indexes = observed!(
         "SELECT pg_index",
         sqlx::query_scalar!(
             r#"SELECT c.oid::regclass::text AS "name!" FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relkind = 'i' ORDER BY 1"#
         )
         .fetch_all(conn),
     )
-    .await
-    .map_err(MigrateError::Execute)
+    .await?;
+    Ok(indexes)
 }
 
 async fn set_session_timeouts(
@@ -254,8 +254,7 @@ async fn set_session_timeouts(
         )
         .fetch_one(conn),
     )
-    .await
-    .map_err(MigrateError::Execute)?;
+    .await?;
     Ok(())
 }
 

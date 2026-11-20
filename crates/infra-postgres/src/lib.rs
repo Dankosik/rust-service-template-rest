@@ -11,7 +11,7 @@ mod test_metrics;
 mod transaction;
 
 pub use credentials::PASSWORD_REFRESH_INTERVAL;
-pub use dsn::{Dsn, DsnError};
+pub use dsn::{Dsn, DsnError, SslPolicy};
 pub use error::{failure_cause, is_transient, sqlstate};
 pub use observe::HISTOGRAMS;
 pub use pool::{
@@ -21,8 +21,8 @@ pub use pool::{
 pub use probe::{PostgresProbe, SessionProperties, session_properties};
 pub use sqlx::Error as SqlError;
 pub use transaction::{
-    BudgetedTx, CommandSavepoint, Isolation, OperationDeadline, OperationDeadlineElapsed, Tx,
-    TxError, TxMode, TxOptions,
+    BudgetedTx, Isolation, OperationDeadline, OperationDeadlineElapsed, SavepointEnd,
+    SavepointError, Tx, TxError, TxMode, TxOptions,
 };
 
 #[doc(hidden)]

@@ -35,7 +35,7 @@ use infra_idempotency_store::{
     CallerKind, CleanupError, Record, RequestFingerprint, ScopeKey, StartupError, Store,
     SuccessRecord, TerminalRefusal, WriteOutcome,
 };
-use infra_postgres::{Dsn, Isolation, Pool, Tx};
+use infra_postgres::{Dsn, Isolation, Pool, SavepointEnd, Tx};
 use integration_tests::{close_pools, dsn_for, poll_until};
 use sqlx::{Executor as _, PgPool};
 use tokio::sync::watch;
@@ -440,9 +440,14 @@ async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
                 .execute(&mut *tx)
                 .await
                 .unwrap();
-            if let Ok(savepoint) = tx.begin_command_savepoint().await {
-                savepoint.rollback().await.unwrap();
-            }
+            tx.with_savepoint(async |tx| -> Result<SavepointEnd<()>, sqlx::Error> {
+                sqlx::query("INSERT INTO effects DEFAULT VALUES")
+                    .execute(&mut *tx)
+                    .await?;
+                Ok(SavepointEnd::Rollback(()))
+            })
+            .await
+            .unwrap();
             Ok::<_, Refusal>(WriteOutcome::TerminalRefusal(refusal.clone()))
         })
         .await;

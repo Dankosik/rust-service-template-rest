@@ -1,7 +1,7 @@
 use std::{num::NonZeroU32, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
-use infra_postgres::{Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource};
+use infra_postgres::{Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource, SslPolicy};
 use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{self, Error, Operation, PreparedRequest};
 use serde_json::{Value, json};
@@ -52,7 +52,11 @@ fn operation(raw: &str) -> Result<Operation, FixtureError> {
 }
 
 async fn open_pool() -> Result<Pool, FixtureError> {
-    let dsn = Dsn::admit_for_environment(&std::env::var("DATABASE_URL")?, None, true)?;
+    let dsn = Dsn::admit_with(
+        &std::env::var("DATABASE_URL")?,
+        None,
+        SslPolicy::AllowLocalDevelopment,
+    )?;
     Ok(Pool::connect(
         &dsn,
         &PoolOptions {

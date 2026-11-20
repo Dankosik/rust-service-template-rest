@@ -199,10 +199,10 @@ impl CleanupPass {
         pool: &Pool,
         cancel: Option<&CancellationToken>,
         options: &CleanupBatchOptions,
-        delete: F,
+        mut delete: F,
     ) -> Result<CleanupPassResult, CleanupError>
     where
-        F: Copy + AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -211,7 +211,7 @@ impl CleanupPass {
                     end: PassEnd::Cancelled,
                 });
             }
-            let rows = self.run_batch(pool, options, delete).await?;
+            let rows = self.run_batch(pool, options, &mut delete).await?;
             metrics::counter!(options.removed_metric).increment(rows);
             if rows < u64::from(options.limit) {
                 let removed_rows = self.complete();
@@ -227,17 +227,21 @@ impl CleanupPass {
         &mut self,
         pool: &Pool,
         options: &CleanupBatchOptions,
-        delete: F,
+        delete: &mut F,
     ) -> Result<u64, CleanupError>
     where
-        F: AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
+        let limit = options.limit;
         self.await_batch(
             options.failure_message,
-            pool.in_tx_with(options.transaction, async |tx| -> Result<u64, BatchError> {
-                tx.set_statement_timeout(CLEANUP_STATEMENT_TIMEOUT).await?;
-                delete(tx, options.limit).await.map_err(BatchError::from)
-            }),
+            pool.in_tx_with(
+                options.transaction,
+                async move |tx| -> Result<u64, BatchError> {
+                    tx.set_statement_timeout(CLEANUP_STATEMENT_TIMEOUT).await?;
+                    delete(tx, limit).await.map_err(BatchError::from)
+                },
+            ),
         )
         .await
     }

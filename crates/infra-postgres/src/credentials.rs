@@ -155,7 +155,8 @@ mod tests {
         assert_eq!(
             Dsn::admit_with(
                 "postgres://app@127.0.0.1:1/app?sslmode=require",
-                Some(&file)
+                Some(&file),
+                crate::SslPolicy::VerifyFull,
             )
             .unwrap_err(),
             DsnError::ServerVerification,
@@ -163,6 +164,7 @@ mod tests {
         let dsn = Dsn::admit_with(
             "postgres://app@127.0.0.1:1/app?sslmode=verify-full",
             Some(&file),
+            crate::SslPolicy::VerifyFull,
         )
         .unwrap();
         let pool =

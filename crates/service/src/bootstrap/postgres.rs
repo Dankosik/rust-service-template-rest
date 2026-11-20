@@ -1,5 +1,5 @@
 use super::background::Background;
-use infra_postgres::{Dsn, Pool, PoolOptions, SessionSettingsSource};
+use infra_postgres::{Dsn, Pool, PoolOptions, SessionSettingsSource, SslPolicy};
 use secrecy::ExposeSecret;
 use service_config::{Config, PostgresConfig};
 
@@ -13,13 +13,13 @@ pub(super) async fn open<'a>(
 ) -> Result<&'a Pool, BootstrapError> {
     let raw = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
-    let local_development = config.app().is_local_development();
+    let ssl_policy = if config.app().is_local_development() {
+        SslPolicy::AllowLocalDevelopment
+    } else {
+        SslPolicy::VerifyFull
+    };
     let dsn = super::blocking_startup("postgres", move || {
-        Dsn::admit_for_environment(
-            raw.expose_secret(),
-            password_file.as_deref(),
-            local_development,
-        )
+        Dsn::admit_with(raw.expose_secret(), password_file.as_deref(), ssl_policy)
     })
     .await?;
     let options = PoolOptions {
@@ -34,7 +34,7 @@ pub(super) async fn open<'a>(
         notifications: postgres.notifications,
     };
     let pool = retained.insert(Pool::prepare(&dsn, &options));
-    pool.admit(&options).await?;
+    pool.admit().await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),

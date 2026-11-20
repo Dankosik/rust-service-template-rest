@@ -18,7 +18,9 @@ pub mod reading_counter;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_postgres::{CloseOutcome, Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource};
+use infra_postgres::{
+    CloseOutcome, Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource, SslPolicy,
+};
 use sqlx::PgPool;
 use url::Url;
 
@@ -37,15 +39,19 @@ pub fn fixture_dir(name: &str) -> std::path::PathBuf {
 }
 
 pub async fn dsn_for(pool: &PgPool) -> Dsn {
-    Dsn::admit_for_environment(url_for(pool, DATABASE_URL).await.as_str(), None, true)
-        .expect("DATABASE_URL must be an admitted DSN")
+    Dsn::admit_with(
+        url_for(pool, DATABASE_URL).await.as_str(),
+        None,
+        SslPolicy::AllowLocalDevelopment,
+    )
+    .expect("DATABASE_URL must be an admitted DSN")
 }
 
 pub async fn pooler_dsn_for(pool: &PgPool) -> Dsn {
-    Dsn::admit_for_environment(
+    Dsn::admit_with(
         url_for(pool, PGBOUNCER_DATABASE_URL).await.as_str(),
         None,
-        true,
+        SslPolicy::AllowLocalDevelopment,
     )
     .expect("PGBOUNCER_DATABASE_URL must be an admitted DSN")
 }

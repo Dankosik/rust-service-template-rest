@@ -8,7 +8,7 @@ use infra_jobs::operator::{
     OperatorError, PageInspection, PageQuery, RecoveryTarget,
 };
 use infra_jobs::{JobId, StartupError};
-use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, Pool, TxOptions};
+use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, Pool, SslPolicy, TxOptions};
 use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -453,10 +453,14 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
             return request.failed_before_start(Cause::Signals).into();
         }
     };
-    let Ok(dsn) = Dsn::admit_for_environment(
+    let Ok(dsn) = Dsn::admit_with(
         config.dsn.expose_secret(),
         config.password_file.as_deref(),
-        config.local_development,
+        if config.local_development {
+            SslPolicy::AllowLocalDevelopment
+        } else {
+            SslPolicy::VerifyFull
+        },
     ) else {
         return request.failed_before_start(Cause::Dsn).into();
     };

@@ -25,7 +25,7 @@ use commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, Pool, PoolOptions,
-    PostgresProbe, SessionSettingsSource, TxError, TxOptions, sqlstate,
+    PostgresProbe, SessionSettingsSource, SslPolicy, TxError, TxOptions, sqlstate,
 };
 use integration_tests::{
     DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, propagate_join_panic, url_for,
@@ -156,7 +156,7 @@ async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
     url.set_host(Some("[::1]")).unwrap();
     url.set_port(Some(listener.local_addr().unwrap().port()))
         .unwrap();
-    let dsn = Dsn::admit_for_environment(url.as_str(), None, true).unwrap();
+    let dsn = Dsn::admit_with(url.as_str(), None, SslPolicy::AllowLocalDevelopment).unwrap();
     let work = async {
         let connected = template_pool(&dsn, 1).await;
         let result = sqlx::query_scalar::<_, String>("SELECT current_database()")
@@ -245,7 +245,8 @@ async fn dsn_at(pool: &PgPool, address: SocketAddr) -> Dsn {
         .expect("the relay address is a host");
     url.set_port(Some(address.port()))
         .expect("the relay URL accepts a port");
-    Dsn::admit_for_environment(url.as_str(), None, true).expect("the relayed DSN is admitted")
+    Dsn::admit_with(url.as_str(), None, SslPolicy::AllowLocalDevelopment)
+        .expect("the relayed DSN is admitted")
 }
 
 async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, Pool) {
@@ -384,7 +385,7 @@ async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(po
             Boundary::Autocommit("pg_settings"),
         );
         let started = Instant::now();
-        let mut admission = Box::pin(ours.admit(&options));
+        let mut admission = Box::pin(ours.admit());
         tokio::select! {
             result = &mut admission => panic!("session admission completed before its held reply: {result:?}"),
             () = proxy.silenced() => {}
@@ -862,7 +863,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     let mut url = url_for(&pool, DATABASE_URL).await;
     url.set_username(&role).unwrap();
     url.set_password(None).unwrap();
-    let rotating = Dsn::admit_for_environment(url.as_str(), Some(&file), true)
+    let rotating = Dsn::admit_with(url.as_str(), Some(&file), SslPolicy::AllowLocalDevelopment)
         .expect("the file is the password");
     let ours = template_pool(&rotating, 1).await;
     let cancel = CancellationToken::new();
