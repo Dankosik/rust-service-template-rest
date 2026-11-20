@@ -27,7 +27,7 @@ fn app() -> (axum::Router, ::health::Readiness) {
     let mut services = Services::new();
     services
         .add_listener_layer(tower::util::MapResponseLayer::new(
-            |mut response: axum::response::Response| {
+            |mut response: http::Response<tonic::body::Body>| {
                 response
                     .headers_mut()
                     .insert("x-native", "inner".parse().unwrap());
@@ -35,7 +35,7 @@ fn app() -> (axum::Router, ::health::Readiness) {
             },
         ))
         .add_listener_layer(tower::util::MapResponseLayer::new(
-            |mut response: axum::response::Response| {
+            |mut response: http::Response<tonic::body::Body>| {
                 let inner = response
                     .headers()
                     .get("x-native")

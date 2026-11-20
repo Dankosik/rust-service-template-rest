@@ -1002,7 +1002,7 @@ mod tests {
                     Client::builder(&origin, ClientSecurity::Plaintext, Duration::from_secs(5))
                         .build()?;
                 services.add_listener_layer(tower::util::MapResponseLayer::new(
-                    |mut response: axum::response::Response| {
+                    |mut response: axum::http::Response<tonic::body::Body>| {
                         response
                             .headers_mut()
                             .insert("x-listener", "grpc".parse().unwrap());

@@ -25,8 +25,8 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{
-    Authentication, Caller, Error, Limits, PolicyKind, RequestExt as _, ServerOptions,
-    ServiceRegistration, Services, TlsRequiredError, server_options,
+    Authentication, Caller, Limits, RequestExt as _, ServerOptions, ServiceRegistration, Services,
+    TlsRequiredError, server_options,
 };
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial, transport::PreparedCall};
@@ -524,7 +524,10 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     };
     let refused =
         echo_services(&Echo::default()).build(readiness().reader(), Authentication::None, options);
-    std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "gRPC caller rules require service token authentication"
+    );
     // template:begin oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     let verifier = infra_bearerauthn::test_support::JwtFixture::shared().verifier();
     let refused = echo_services(&Echo::default()).build(
@@ -532,13 +535,19 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         Authentication::Bearer(verifier),
         options,
     );
-    std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "gRPC caller rules require service token authentication"
+    );
     // template:end oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     // template:begin authn:grpc-service-auth-test-without-verifier-bearer
     let readiness = readiness();
     let refused =
         described_echo(&Echo::default()).build(readiness.reader(), Authentication::None, options);
-    std::assert_matches!(refused, Err(Error::UnauthenticatedBusinessCalls));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        infra_grpc::Error::unauthenticated_business_calls().to_string()
+    );
     // template:end authn:grpc-service-auth-test-without-verifier-bearer
     if bearer_retained() {
         return;
@@ -614,7 +623,10 @@ async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
                 trust_trace_context: false,
             },
         );
-        std::assert_matches!(refused, Err(Error::ScopesWithServiceTokens));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "gRPC required scopes or bearer delegation cannot be enforced when service tokens replace bearer authentication"
+        );
     }
 }
 // template:end authn:grpc-service-auth-test-scopes-refused
@@ -641,12 +653,11 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     services
         .add(EchoServiceServer::new(Echo::default()))
         .unwrap();
-    std::assert_matches!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingPolicy {
-            policy: PolicyKind::CallerRule,
-            path,
-        }) if path == format!("{ECHO}/BidiStream"),
+    assert_eq!(
+        build(services, Authentication::ServiceTokens(keys.verifier()))
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC method {ECHO}/BidiStream has no caller rule"),
         "a verifier without any rule"
     );
     let mut services = Services::new();
@@ -658,23 +669,21 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
         .unwrap()
         .allow_callers("BidiStream", &["orders"])
         .unwrap();
-    std::assert_matches!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingPolicy {
-            policy: PolicyKind::CallerRule,
-            path,
-        }) if path == format!("{ECHO}/ClientStream"),
+    assert_eq!(
+        build(services, Authentication::ServiceTokens(keys.verifier()))
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC method {ECHO}/ClientStream has no caller rule"),
         "every method requires an explicit rule"
     );
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.add_reflection().unwrap();
-    std::assert_matches!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingPolicy {
-            policy: PolicyKind::CallerRule,
-            path,
-        }) if path == "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
+    assert_eq!(
+        build(services, Authentication::ServiceTokens(keys.verifier()))
+            .unwrap_err()
+            .to_string(),
+        "gRPC method /grpc.reflection.v1.ServerReflection/ServerReflectionInfo has no caller rule"
     );
     let mut services = echo_services(&echo);
     services
@@ -701,39 +710,48 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         "/example.v1.EchoService/Unary",
     ] {
         let expected_path = format!("{ECHO}/{method}");
-        std::assert_matches!(
-            registration.allow_callers(method, &["orders"]),
-            Err(Error::UnregisteredMethod {
-                policy: PolicyKind::CallerRule,
-                path,
-            }) if path == expected_path,
+        assert_eq!(
+            registration
+                .allow_callers(method, &["orders"])
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "gRPC caller rule for {expected_path} must name a described method of a registered service"
+            ),
             "{method}"
         );
     }
     let unary = format!("{ECHO}/Unary");
     for callers in [&["Orders"], &["a b"]] {
-        std::assert_matches!(
-            registration.allow_callers("Unary", callers),
-            Err(Error::InvalidCallerRule {
-                path,
-                source: infra_serviceauth::InvalidServiceName,
-            }) if path == unary,
+        let error = registration.allow_callers("Unary", callers).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("gRPC caller rule for {unary} is invalid"),
+            "{callers:?}"
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<infra_serviceauth::InvalidServiceName>(),
             "{callers:?}"
         );
     }
-    std::assert_matches!(
-        registration.allow_callers("Unary", &["orders", "orders"]),
-        Err(Error::DuplicateCallerName(path)) if path == unary
+    assert_eq!(
+        registration
+            .allow_callers("Unary", &["orders", "orders"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC caller rule for {unary} names the same caller twice")
     );
     registration
         .allow_callers("Unary", &["orders", "billing"])
         .unwrap();
-    std::assert_matches!(
-        registration.allow_callers("Unary", &["orders"]),
-        Err(Error::DuplicatePolicy {
-            policy: PolicyKind::CallerRule,
-            path,
-        }) if path == unary
+    assert_eq!(
+        registration
+            .allow_callers("Unary", &["orders"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC caller rule is declared twice for {unary}")
     );
 }
 

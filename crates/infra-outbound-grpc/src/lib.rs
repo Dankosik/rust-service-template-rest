@@ -9,7 +9,7 @@ mod service_auth;
 mod tls;
 
 pub mod transport {
-    pub use crate::client::{PreparedCall, bind_context};
+    pub use crate::client::PreparedCall;
 }
 
 pub use client::{Client, ClientBuilder, ClientSecurity, ClientTimeout, WithContext};

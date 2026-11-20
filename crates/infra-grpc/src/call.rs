@@ -1,15 +1,13 @@
-use std::task::Poll;
-
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body::Body;
-use infra_grpc_core::watched::{FramePoll, PanicOutcome, StreamHooks, WatchedBody};
+use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
+use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody};
 use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::observe::Call;
-use crate::protocol::{STATUS_HEADERS, header_status_code};
 use crate::status::FixedFailure;
 
 #[derive(Default)]
@@ -149,23 +147,17 @@ impl<E> StreamHooks<E> for ServerHooks {
         PanicOutcome::Stop(LocalStatus::failure(FixedFailure::Internal))
     }
 
-    fn write_stop(&mut self, stop: LocalStatus, trailers: &mut HeaderMap) -> ServerOutcome {
+    fn write_stop(&self, stop: LocalStatus, trailers: &mut HeaderMap) -> ServerOutcome {
         stop.write_headers(trailers)
     }
 
-    fn terminal_outcome(&self, polled: &FramePoll<E>) -> Option<ServerOutcome> {
-        match polled {
-            Poll::Ready(Some(Ok(frame))) => {
-                let trailers = frame.trailers_ref()?;
-                Some(ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown))
+    fn end_outcome(&self, end: StreamEnd<'_, E>) -> ServerOutcome {
+        match end {
+            StreamEnd::Trailers(trailers) => {
+                ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown)
             }
-            Poll::Ready(Some(Err(_)) | None) => Some(ServerOutcome::unknown()),
-            Poll::Pending => None,
+            StreamEnd::Error(_) | StreamEnd::Empty => ServerOutcome::unknown(),
         }
-    }
-
-    fn empty_outcome(&self) -> ServerOutcome {
-        ServerOutcome::unknown()
     }
 
     fn watcher_lost() -> LocalStatus {
@@ -268,7 +260,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::{Context, Waker};
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     use http_body::Frame;
@@ -363,6 +355,7 @@ mod tests {
             path.into(),
             crate::services::CallType::BidiStream,
             false,
+            crate::services::MethodPolicy::None,
         )]);
         Call::start(methods.resolve(path), path)
     }

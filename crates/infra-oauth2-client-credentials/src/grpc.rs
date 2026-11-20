@@ -6,10 +6,7 @@ use std::{
 
 use futures_util::future::Either;
 use http::{Request, Response, header::AUTHORIZATION};
-use infra_outbound_grpc::{
-    Client, WithContext,
-    transport::{PreparedCall, bind_context},
-};
+use infra_outbound_grpc::{Client, WithContext, transport::PreparedCall};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
@@ -111,7 +108,7 @@ fn validate_resource(resource: &Client, origin: &http::Uri) -> Result<(), Config
 impl AuthenticatedClient {
     #[must_use]
     pub fn with_context(&self, context: &OperationContext) -> WithContext<Self> {
-        bind_context(self.clone(), context)
+        WithContext::new(self.clone(), context)
     }
 
     fn begin_call(&self, request: Request<Body>) -> Result<RpcFuture, Status> {
