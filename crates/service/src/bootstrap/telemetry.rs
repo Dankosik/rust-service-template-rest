@@ -46,7 +46,7 @@ pub(super) fn tracing_options(config: &Config) -> TracingOptions<'_> {
         service_version: &config.app().version,
         vcs_revision: &config.app().commit,
         instance_id: config.app().instance_id.as_deref(),
-        deployment_environment: &config.app().env,
+        deployment_environment: config.app().env(),
         sampler,
         otlp_endpoint: otel.exporter.otlp_endpoint.as_deref(),
         otlp_headers: otel.exporter.otlp_headers.as_ref(),
@@ -56,7 +56,7 @@ pub(super) fn tracing_options(config: &Config) -> TracingOptions<'_> {
 pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
     exporter.log();
     tracing::info!(
-        app.env = %config.app().env,
+        app.env = %config.app().env(),
         app.version = %config.app().version,
         app.commit = %config.app().commit,
         runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),

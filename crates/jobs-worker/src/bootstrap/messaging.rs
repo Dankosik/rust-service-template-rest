@@ -35,7 +35,7 @@ impl MessagingPlan {
     ) -> Result<Option<Self>, WorkerError> {
         messages
             .registry
-            .check_publication_limit(config.messaging().max_payload_bytes)?;
+            .check_publication_limit(config.messaging().max_payload_bytes())?;
         let consumes_messages = messages.registry.has_handlers();
         // template:begin outbox:worker-bootstrap-postgres-messages-intent
         let consumes_messages = consumes_messages || messages.postgres_messages.is_some();

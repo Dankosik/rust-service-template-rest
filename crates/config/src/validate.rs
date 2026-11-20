@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
@@ -56,10 +57,6 @@ impl Violations {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "removing every profile with conditional input leaves the method without a caller"
-    )]
     pub(crate) fn record<T>(&mut self, result: Result<T, ValidationError>) -> Result<T, Rejected> {
         result.map_err(|error| self.reject(error))
     }
@@ -151,6 +148,34 @@ pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "removing every profile with bounded nonzero counts leaves the rule without a caller"
+)]
+pub(crate) fn nonzero_usize_range<T>(
+    key: &str,
+    value: T,
+    range: RangeInclusive<usize>,
+) -> Result<NonZeroUsize, ValidationError>
+where
+    T: Copy + TryInto<usize> + std::fmt::Display,
+{
+    if let Ok(narrow) = value.try_into()
+        && let Some(nonzero) = NonZeroUsize::new(narrow)
+        && range.contains(&narrow)
+    {
+        return Ok(nonzero);
+    }
+    Err(ValidationError::new(
+        key,
+        format!(
+            "must be between {} and {}, got {value}",
+            range.start(),
+            range.end()
+        ),
+    ))
+}
+
 pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
     if value.trim().is_empty() {
         return Err(ValidationError::new(key, "cannot be empty"));
@@ -239,6 +264,28 @@ mod tests {
     #[case::above_maximum(11, false)]
     fn int_range_is_inclusive(#[case] value: u64, #[case] valid: bool) {
         assert_eq!(int_range("limit", value, 1..=10).is_ok(), valid);
+    }
+
+    #[rstest::rstest]
+    #[case::zero(0_u64, false)]
+    #[case::minimum(1_u64, true)]
+    #[case::maximum(10_u64, true)]
+    #[case::above_maximum(11_u64, false)]
+    #[case::above_usize(u64::MAX, false)]
+    fn nonzero_usize_range_parses_inclusive_bounds(#[case] value: u64, #[case] valid: bool) {
+        match nonzero_usize_range("limit", value, 1..=10) {
+            Ok(parsed) => {
+                assert!(valid);
+                assert_eq!(parsed.get(), usize::try_from(value).unwrap());
+            }
+            Err(error) => {
+                assert!(!valid);
+                assert_eq!(
+                    error.to_string(),
+                    format!("limit: must be between 1 and 10, got {value}")
+                );
+            }
+        }
     }
 
     #[rstest::rstest]

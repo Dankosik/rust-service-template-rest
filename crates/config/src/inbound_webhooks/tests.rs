@@ -135,13 +135,7 @@ fn worker_requires_only_endpoint_ids_and_ignores_service_signing_fields() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        cfg.inbound_webhook_endpoints()
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["orders", "partner"]
-    );
+    assert_eq!(cfg.inbound_webhook_endpoints(), ["orders", "partner"]);
     let err = load_worker_from(
         &LoadOptions::default(),
         BUILD,

@@ -48,7 +48,7 @@ enum NodeKind {
     Integer(i64),
     Float(f64),
     Boolean(bool),
-    Datetime(Arc<Path>),
+    Datetime,
     Array(Vec<Node>),
     Table(BTreeMap<String, Node>),
 }
@@ -60,7 +60,7 @@ impl NodeKind {
             Self::Integer(value) => Unexpected::Signed(*value),
             Self::Float(value) => Unexpected::Float(*value),
             Self::Boolean(value) => Unexpected::Bool(*value),
-            Self::Datetime(_) => Unexpected::Other("TOML datetime"),
+            Self::Datetime => Unexpected::Other("TOML datetime"),
             Self::Array(_) => Unexpected::Seq,
             Self::Table(_) => Unexpected::Map,
         }
@@ -148,7 +148,7 @@ fn from_toml_value(value: toml::Value, path: &Arc<Path>) -> Node {
         toml::Value::Integer(number) => NodeKind::Integer(number),
         toml::Value::Float(number) => NodeKind::Float(number),
         toml::Value::Boolean(flag) => NodeKind::Boolean(flag),
-        toml::Value::Datetime(_) => NodeKind::Datetime(Arc::clone(path)),
+        toml::Value::Datetime(_) => NodeKind::Datetime,
         toml::Value::Array(items) => NodeKind::Array(
             items
                 .into_iter()
@@ -287,9 +287,9 @@ fn find_datetime<'a>(
 }
 
 fn datetime_path(node: &Node) -> Option<&Path> {
-    match &node.kind {
-        NodeKind::Datetime(path) => Some(path.as_ref()),
-        NodeKind::Array(items) => items.iter().find_map(datetime_path),
+    match (&node.kind, &node.origin) {
+        (NodeKind::Datetime, Origin::File(path)) => Some(path.as_ref()),
+        (NodeKind::Array(items), _) => items.iter().find_map(datetime_path),
         _ => None,
     }
 }
@@ -483,7 +483,7 @@ impl<'de> Deserializer<'de> for Node {
             NodeKind::Integer(value) => visitor.visit_i64(value),
             NodeKind::Float(value) => visitor.visit_f64(value),
             NodeKind::Boolean(value) => visitor.visit_bool(value),
-            NodeKind::Datetime(_) => Err(DecodeError::invalid_type(
+            NodeKind::Datetime => Err(DecodeError::invalid_type(
                 Unexpected::Other("TOML datetime"),
                 &visitor,
             )),

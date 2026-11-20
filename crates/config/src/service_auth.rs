@@ -28,12 +28,10 @@ pub(crate) struct ServiceAuthInput {
     trust: Option<String>,
     /// The `kid` receivers hold this service's public key under.
     /// Required together with `private_key`.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     key_id: Option<String>,
     /// Environment-only PKCS#8 PEM of this service's EC P-256 signing
     /// key. Without it the service verifies callers but calls no one.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     private_key: Option<SecretString>,
 }

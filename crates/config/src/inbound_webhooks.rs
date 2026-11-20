@@ -19,7 +19,6 @@ use crate::validate::{Violations, missing, validate_endpoint_id};
 )]
 pub(crate) struct InboundWebhooksFields<Endpoint, Secrets: Mode = Keep> {
     endpoints: BTreeMap<String, Endpoint>,
-    #[serde(default)]
     #[serde_as(as = "When<Secrets>")]
     secrets: BTreeMap<String, SecretString>,
     #[serde(skip)]
@@ -129,11 +128,7 @@ pub(crate) struct WorkerEndpointInput {
 }
 
 impl WorkerInboundWebhooksInput {
-    pub(crate) fn admit(
-        self,
-        postgres_enabled: bool,
-        violations: &mut Violations,
-    ) -> std::collections::BTreeSet<String> {
+    pub(crate) fn admit(self, postgres_enabled: bool, violations: &mut Violations) -> Vec<String> {
         validate_endpoints(&self.endpoints, postgres_enabled, violations);
         self.endpoints.into_keys().collect()
     }

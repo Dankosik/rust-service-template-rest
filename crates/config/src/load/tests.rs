@@ -24,7 +24,7 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 #[test]
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_env(&[]);
-    assert_eq!(cfg.app().env, "unspecified");
+    assert_eq!(cfg.app().env(), "unspecified");
     assert!(!cfg.app().is_local_development());
     assert_eq!(cfg.http().listener().addr, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(cfg.app().version, "1.2.3");
@@ -1199,10 +1199,10 @@ fn unquoted_toml_datetime_is_rejected_unless_overridden() {
         ..LoadOptions::default()
     };
     let cfg = load_from(&with_overlay, BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.app().env, "2026-11-13");
+    assert_eq!(cfg.app().env(), "2026-11-13");
 
     let cfg = load_from(&base_only, BUILD, env(&[("APP__APP__ENV", "production")])).unwrap();
-    assert_eq!(cfg.app().env, "production");
+    assert_eq!(cfg.app().env(), "production");
 
     let scalar_section = LoadOptions {
         config: Some(write(&dir, "scalar.toml", "app = 2026-11-13\n")),
@@ -1214,7 +1214,7 @@ fn unquoted_toml_datetime_is_rejected_unless_overridden() {
         env(&[("APP__APP__ENV", "production")]),
     )
     .unwrap();
-    assert_eq!(cfg.app().env, "production");
+    assert_eq!(cfg.app().env(), "production");
 }
 
 #[test]

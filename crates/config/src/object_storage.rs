@@ -8,7 +8,8 @@ use serde::Deserialize;
 use crate::app::local_development_only;
 use crate::de::{BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
-    Rejected, ValidationError, Violations, duration_range, int_range, non_blank, required,
+    Rejected, ValidationError, Violations, duration_range, int_range, non_blank,
+    nonzero_usize_range, required,
 };
 
 const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
@@ -51,25 +52,20 @@ pub(crate) struct ObjectStorageInput {
     bucket: String,
     /// Signing region. Required for `amazon_s3`; `auto` or empty for
     /// `cloudflare_r2`; optional for `railway`, `s3_compatible`, and `local`.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     region: Option<String>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     #[debug(skip)]
     endpoint: Option<String>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     expected_bucket_owner: Option<String>,
     #[serde_as(as = "StrictBool")]
     path_style: bool,
     credentials: CredentialsKind,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     access_key_id: Option<String>,
     /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
     /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     secret_access_key: Option<SecretString>,
     #[educe(Default(expression = ByteSize::mib(8)))]
@@ -400,16 +396,11 @@ impl ObjectStorageInput {
             max_object_bytes.as_u64(),
             1..=MAX_OBJECT_BYTES_CEILING,
         ));
-        let max_concurrency = v.record(
-            int_range("object_storage.max_concurrency", max_concurrency, 1..=512).and_then(|()| {
-                usize::try_from(max_concurrency)
-                    .ok()
-                    .and_then(NonZeroUsize::new)
-                    .ok_or_else(|| {
-                        ValidationError::new("object_storage.max_concurrency", "must be at least 1")
-                    })
-            }),
-        );
+        let max_concurrency = v.record(nonzero_usize_range(
+            "object_storage.max_concurrency",
+            max_concurrency,
+            1..=512,
+        ));
         v.check(duration_range(
             "object_storage.operation_timeout",
             operation_timeout,

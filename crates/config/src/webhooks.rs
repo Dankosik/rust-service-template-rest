@@ -17,7 +17,6 @@ use crate::validate::{Violations, non_blank, validate_endpoint_id};
 )]
 pub(crate) struct WebhooksFields<Endpoint, MaxConcurrent: Mode = Keep> {
     endpoints: BTreeMap<String, Endpoint>,
-    #[serde(default)]
     #[serde_as(as = "When<MaxConcurrent, Option<StrictCount>>")]
     max_concurrent_deliveries: Option<NonZeroU32>,
     #[serde(skip)]

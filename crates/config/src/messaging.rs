@@ -33,19 +33,16 @@ pub(crate) struct MessagingInput {
     #[serde_as(as = "UrlList")]
     #[debug("{} servers", urls.len())]
     urls: Vec<String>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     credentials: Option<SecretString>,
     /// Path to a NATS credentials file, the alternative to `credentials` for
     /// a platform that rotates it: the client reads the file again for every
     /// connection. Its target must be a regular file of at most 1 MiB.
     /// Missing, empty, or whitespace-only is unset (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     credentials_file: Option<PathBuf>,
     /// Optional PEM root CA path for the operator-selected broker. Missing,
     /// empty, or whitespace-only is unset (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     root_ca_path: Option<PathBuf>,
     /// Permit `nats://` with `app.allow_insecure_development`.
@@ -63,18 +60,14 @@ pub(crate) struct MessagingInput {
     /// Permit a connection without credentials with `app.allow_insecure_development`.
     #[serde_as(as = "StrictBool")]
     allow_unauthenticated: bool,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     source_stream: Option<String>,
     #[educe(Default(expression = DEFAULT_MAX_PAYLOAD))]
     max_payload_bytes: ByteSize,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     consumer_durable: Option<String>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     consumer_filter_subject: Option<String>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     dlq_subject: Option<String>,
     #[serde_as(as = "StrictCount")]
@@ -92,16 +85,16 @@ pub enum MessagingTransportSecurity {
 #[derive(Clone, derive_more::Debug)]
 pub struct MessagingConfig {
     #[debug("{} servers", urls.len())]
-    pub urls: Vec<String>,
-    pub credentials: Option<MessagingCredentials>,
-    pub root_ca_path: Option<PathBuf>,
-    pub security: MessagingTransportSecurity,
-    pub source_stream: Option<String>,
-    pub max_payload_bytes: usize,
-    pub consumer_durable: Option<String>,
-    pub consumer_filter_subject: Option<String>,
-    pub dlq_subject: Option<String>,
-    pub consumer_concurrency: NonZeroUsize,
+    urls: Vec<String>,
+    credentials: Option<MessagingCredentials>,
+    root_ca_path: Option<PathBuf>,
+    security: MessagingTransportSecurity,
+    source_stream: Option<String>,
+    max_payload_bytes: usize,
+    consumer_durable: Option<String>,
+    consumer_filter_subject: Option<String>,
+    dlq_subject: Option<String>,
+    consumer_concurrency: NonZeroUsize,
 }
 
 impl MessagingInput {
@@ -183,6 +176,11 @@ impl MessagingInput {
 }
 
 impl MessagingConfig {
+    #[must_use]
+    pub const fn max_payload_bytes(&self) -> usize {
+        self.max_payload_bytes
+    }
+
     pub fn admit_producer(&self) -> Result<AdmittedMessaging<'_>, ValidationError> {
         if self.urls.is_empty() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));

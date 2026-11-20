@@ -40,11 +40,9 @@ pub(crate) struct PostgresFields<Session: Mode, Pool: Mode, Migration: Mode> {
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
     /// Set `APP__POSTGRES__DSN` in the environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     dsn: Option<SecretString>,
     /// Optional direct connection URL, including credentials, for the migrator.
-    #[serde(default)]
     #[serde_as(as = "When<Migration, BlankAsNoneVerbatim>")]
     migration_dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
@@ -52,7 +50,6 @@ pub(crate) struct PostgresFields<Session: Mode, Pool: Mode, Migration: Mode> {
     /// password. The DSN then carries no password, and the running service
     /// follows the file. Its target must be a regular file of at most 16 KiB.
     /// Missing, empty, or whitespace-only is unset (`None`), the default.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     password_file: Option<PathBuf>,
     #[serde_as(as = "When<Session>")]
@@ -60,7 +57,6 @@ pub(crate) struct PostgresFields<Session: Mode, Pool: Mode, Migration: Mode> {
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
-    #[serde(default)]
     #[serde_as(as = "When<Pool, Option<StrictCount>>")]
     max_connections: Option<NonZeroU32>,
     /// Enables PostgreSQL LISTEN/NOTIFY for job wakeups. Set to false on producers
