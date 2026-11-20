@@ -348,7 +348,7 @@ fn messaging_environment_decodes_lists_and_redacts_credentials() {
         cfg.messaging().root_ca_path.as_deref(),
         Some(Path::new("/etc/nats/root-ca.pem"))
     );
-    assert_eq!(cfg.messaging().max_payload_bytes, 2 * 1024 * 1024);
+    assert_eq!(cfg.messaging().max_payload_bytes(), 2 * 1024 * 1024);
     assert_eq!(cfg.messaging().consumer_concurrency.get(), 2);
     assert_eq!(
         cfg.messaging().security,

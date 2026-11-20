@@ -59,6 +59,20 @@ pub enum OperationError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum MutationFailure {
+    #[error("cache key exceeds the configured size limit")]
+    KeyTooLarge,
+    #[error("cache value exceeds the configured size limit")]
+    ValueTooLarge,
+    #[error("cache ttl is outside the supported expiration range")]
+    InvalidTtl,
+    #[error("cache operation stopped by caller ({0:?})")]
+    Stopped(Stopped),
+    #[error("cache unavailable")]
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum UnknownOutcome {
     #[error("cache unavailable")]
     Unavailable,
@@ -69,17 +83,9 @@ pub enum UnknownOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MutationError {
     #[error("cache mutation was not applied: {0}")]
-    NotApplied(#[source] OperationError),
+    NotApplied(#[source] MutationFailure),
     #[error("cache mutation outcome is unknown: {0}")]
     OutcomeUnknown(#[source] UnknownOutcome),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SetError {
-    #[error("cache ttl is outside the supported expiration range")]
-    InvalidTtl,
-    #[error(transparent)]
-    Mutation(#[from] MutationError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
@@ -106,6 +112,13 @@ impl UnknownCause {
         }
     }
 
+    fn mutation_failure(self) -> MutationFailure {
+        match self {
+            Self::Stopped(stopped) => MutationFailure::Stopped(stopped),
+            Self::Failed(_) => MutationFailure::Unavailable,
+        }
+    }
+
     fn unknown_outcome(self) -> UnknownOutcome {
         match self {
             Self::Stopped(stopped) => UnknownOutcome::Stopped(stopped),
@@ -116,8 +129,7 @@ impl UnknownCause {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Refusal {
-    Stopped(Stopped),
-    Failed(ErrorType),
+    Cause(UnknownCause),
     PermissionDenied,
     InvalidTtl,
     ValueTooLarge,
@@ -126,21 +138,25 @@ pub(crate) enum Refusal {
 impl Refusal {
     fn operation_error(self) -> OperationError {
         match self {
-            Self::Stopped(stopped) => OperationError::Stopped(stopped),
+            Self::Cause(cause) => cause.operation_error(),
             Self::ValueTooLarge => OperationError::ValueTooLarge,
-            Self::Failed(_) | Self::PermissionDenied | Self::InvalidTtl => {
-                OperationError::Unavailable
-            }
+            Self::PermissionDenied | Self::InvalidTtl => OperationError::Unavailable,
+        }
+    }
+
+    fn mutation_failure(self) -> MutationFailure {
+        match self {
+            Self::Cause(cause) => cause.mutation_failure(),
+            Self::InvalidTtl => MutationFailure::InvalidTtl,
+            Self::ValueTooLarge => MutationFailure::ValueTooLarge,
+            Self::PermissionDenied => MutationFailure::Unavailable,
         }
     }
 }
 
 impl From<UnknownCause> for Refusal {
     fn from(cause: UnknownCause) -> Self {
-        match cause {
-            UnknownCause::Stopped(stopped) => Self::Stopped(stopped),
-            UnknownCause::Failed(error) => Self::Failed(error),
-        }
+        Self::Cause(cause)
     }
 }
 
@@ -191,24 +207,15 @@ impl From<CommandError> for OperationError {
 impl From<CommandError> for MutationError {
     fn from(error: CommandError) -> Self {
         match error {
-            CommandError::NotApplied(refusal) => Self::NotApplied(refusal.operation_error()),
+            CommandError::NotApplied(refusal) => Self::NotApplied(refusal.mutation_failure()),
             CommandError::OutcomeUnknown(cause) => Self::OutcomeUnknown(cause.unknown_outcome()),
-        }
-    }
-}
-
-impl From<CommandError> for SetError {
-    fn from(error: CommandError) -> Self {
-        match error {
-            CommandError::NotApplied(Refusal::InvalidTtl) => Self::InvalidTtl,
-            _ => Self::Mutation(error.into()),
         }
     }
 }
 
 impl From<ErrorType> for CommandError {
     fn from(error: ErrorType) -> Self {
-        Self::NotApplied(Refusal::Failed(error))
+        Self::NotApplied(Refusal::Cause(UnknownCause::Failed(error)))
     }
 }
 

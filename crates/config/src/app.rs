@@ -63,7 +63,6 @@ pub(crate) struct AppFields<Meta: Mode = Keep, Instance: Mode = Keep> {
     version: String,
     #[serde_as(as = "When<Meta>")]
     commit: String,
-    #[serde(default)]
     #[serde_as(as = "When<Instance, BlankAsNone>")]
     instance_id: Option<String>,
     #[serde(skip)]
@@ -74,9 +73,8 @@ pub(crate) type AppInput = AppFields;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppConfig {
-    pub env: String,
-    /// Permit development-only settings when `env` is `local` or `development`.
-    pub allow_insecure_development: bool,
+    env: String,
+    local_development: bool,
     /// Service version published as `service.version`. Empty on input uses the
     /// build's own version.
     pub version: String,
@@ -97,12 +95,17 @@ impl<Instance: Mode> AppFields<Keep, Instance> {
             build.commit.clone_into(&mut self.commit);
         }
         v.check(non_blank("app.env", &self.env));
-        v.check(validate_local_development(&self.env, self.allow_insecure_development).map(|_| ()));
+        let local_development = v
+            .record(validate_local_development(
+                &self.env,
+                self.allow_insecure_development,
+            ))
+            .unwrap_or(false);
         v.check(non_blank("app.version", &self.version));
         v.check(non_blank("app.commit", &self.commit));
         AppConfig {
             env: self.env,
-            allow_insecure_development: self.allow_insecure_development,
+            local_development,
             version: self.version,
             commit: self.commit,
             instance_id: self.instance_id,
@@ -112,7 +115,12 @@ impl<Instance: Mode> AppFields<Keep, Instance> {
 
 impl AppConfig {
     #[must_use]
-    pub fn is_local_development(&self) -> bool {
-        validate_local_development(&self.env, self.allow_insecure_development).unwrap_or(false)
+    pub const fn env(&self) -> &str {
+        self.env.as_str()
+    }
+
+    #[must_use]
+    pub const fn is_local_development(&self) -> bool {
+        self.local_development
     }
 }

@@ -6,7 +6,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use operation_context::Stopped;
 
 use super::*;
-use crate::{CacheLookup, MutationError, OperationError, SetError, UnknownOutcome};
+use crate::{CacheLookup, MutationError, MutationFailure, OperationError, UnknownOutcome};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -244,7 +244,7 @@ async fn acl_denial_is_distinct_in_traces_and_keeps_the_response_series_and_conn
 #[tokio::test]
 async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
     let caller = OperationContext::unbounded();
-    let refused = MutationError::NotApplied(OperationError::Unavailable);
+    let refused = MutationError::NotApplied(MutationFailure::Unavailable);
     let unknown = MutationError::OutcomeUnknown(UnknownOutcome::Unavailable);
     for (set, reply, expected) in [
         (true, &b"-NOPERM access denied\r\n"[..], Err(refused)),
@@ -268,7 +268,7 @@ async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
                 namespace
                     .set(&caller, "key", b"value", Duration::from_secs(1))
                     .await,
-                expected.map_err(SetError::Mutation),
+                expected,
                 "{reply:?}"
             );
         } else {
@@ -397,10 +397,10 @@ async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     assert_eq!(namespace.get(&caller, "é").await, Ok(None));
     namespace.set(&caller, "é", b"ok", ttl).await.unwrap();
     namespace.delete(&caller, "é").await.unwrap();
-    let key_too_large = MutationError::NotApplied(OperationError::KeyTooLarge);
+    let key_too_large = MutationError::NotApplied(MutationFailure::KeyTooLarge);
     assert_eq!(
         namespace.set(&caller, "éx", b"", ttl).await,
-        Err(SetError::Mutation(key_too_large))
+        Err(key_too_large)
     );
     assert_eq!(namespace.delete(&caller, "éx").await, Err(key_too_large));
     assert_eq!(
@@ -409,9 +409,7 @@ async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     );
     assert_eq!(
         namespace.set(&caller, "é", b"abc", ttl).await,
-        Err(SetError::Mutation(MutationError::NotApplied(
-            OperationError::ValueTooLarge
-        )))
+        Err(MutationError::NotApplied(MutationFailure::ValueTooLarge))
     );
     for command in ["EXISTS", "GETRANGE", "SET", "DEL"] {
         assert_eq!(server.command_count(command, Some("n:é")), 1);
@@ -566,8 +564,8 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
     context.cancel();
     assert_eq!(
         tokio::time::timeout(limit, write).await,
-        Ok(Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            UnknownOutcome::Stopped(Stopped::Cancelled)
+        Ok(Err(MutationError::OutcomeUnknown(UnknownOutcome::Stopped(
+            Stopped::Cancelled
         ))))
     );
     assert_eq!(server.connections(), 1);
@@ -702,7 +700,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     assert!(matches!(
         write.await,
         Err(crate::error::CommandError::NotApplied(
-            crate::error::Refusal::Stopped(Stopped::Cancelled)
+            crate::error::Refusal::Cause(crate::error::UnknownCause::Stopped(Stopped::Cancelled))
         ))
     ));
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
@@ -878,9 +876,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary_without_waiting_for_a_ca
     server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set(&caller, "key", b"value", ttl).await,
-        Err(SetError::Mutation(MutationError::NotApplied(
-            OperationError::Unavailable
-        )))
+        Err(MutationError::NotApplied(MutationFailure::Unavailable))
     );
 
     server
@@ -940,7 +936,7 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    use crate::error::{CommandError, ErrorType, Refusal};
+    use crate::error::{CommandError, ErrorType, Refusal, UnknownCause};
 
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
@@ -984,8 +980,8 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(CommandError::NotApplied(Refusal::Failed(
-            ErrorType::Other
+        Poll::Ready(Err(CommandError::NotApplied(Refusal::Cause(
+            UnknownCause::Failed(ErrorType::Other)
         ))))
     ));
     assert_work_metrics(&metrics, 2, 2, 0);
@@ -1037,13 +1033,13 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
     let mut excess = Box::pin(sibling.delete(&caller, "refused"));
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
-        Poll::Ready(Err(MutationError::NotApplied(OperationError::Unavailable)))
+        Poll::Ready(Err(MutationError::NotApplied(MutationFailure::Unavailable)))
     );
     drop(pending);
     let deadline = OperationContext::with_timeout(Duration::from_millis(100));
     assert_eq!(
         sibling.delete(&deadline, "waiting-for-replies").await,
-        Err(MutationError::NotApplied(OperationError::Stopped(
+        Err(MutationError::NotApplied(MutationFailure::Stopped(
             Stopped::Deadline
         )))
     );
@@ -1105,9 +1101,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
                     Duration::from_secs(1)
                 )
                 .await,
-            Err(SetError::Mutation(MutationError::OutcomeUnknown(
-                UnknownOutcome::Unavailable
-            )))
+            Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
@@ -1341,9 +1335,7 @@ async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned()
     assert_eq!(cache.close(deadline).await, CloseOutcome::Complete);
     assert_eq!(
         pending.await,
-        Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            UnknownOutcome::Unavailable
-        )))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     server
         .wait_for(
@@ -1380,18 +1372,18 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
             }
             Stopped::Deadline => OperationContext::with_timeout(Duration::ZERO),
         };
-        let cause = OperationError::Stopped(reason);
-        assert_eq!(namespace.get(&context, "stopped").await, Err(cause));
+        assert_eq!(
+            namespace.get(&context, "stopped").await,
+            Err(OperationError::Stopped(reason))
+        );
+        let refused = MutationError::NotApplied(MutationFailure::Stopped(reason));
         assert_eq!(
             namespace
                 .set(&context, "stopped", b"value", Duration::from_secs(1))
                 .await,
-            Err(SetError::Mutation(MutationError::NotApplied(cause)))
+            Err(refused)
         );
-        assert_eq!(
-            namespace.delete(&context, "stopped").await,
-            Err(MutationError::NotApplied(cause))
-        );
+        assert_eq!(namespace.delete(&context, "stopped").await, Err(refused));
     }
     assert_eq!(namespace.get(&caller, "live").await, Ok(None));
     assert_eq!(
@@ -1614,8 +1606,8 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         tokio::time::timeout(Duration::from_millis(200), write)
             .await
             .expect("cancellation must end waiting before the local ceiling"),
-        Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            UnknownOutcome::Stopped(Stopped::Cancelled)
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Stopped(
+            Stopped::Cancelled
         )))
     );
     assert_work_metrics(&metrics, 0, 0, 0);

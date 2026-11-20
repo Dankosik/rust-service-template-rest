@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::app::local_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
-    Rejected, ValidationError, Violations, duration_range, int_range, optional_pair,
+    Rejected, Violations, duration_range, int_range, nonzero_usize_range, optional_pair,
 };
 
 #[serde_with::serde_as]
@@ -21,7 +21,6 @@ pub(crate) struct CacheInput {
     /// unless `password_file` is set.
     /// Set `APP__CACHE__DSN` in the environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
@@ -29,23 +28,19 @@ pub(crate) struct CacheInput {
     /// password. The DSN then carries no password, and the running service
     /// follows the file. Missing, empty, or whitespace-only is unset (`None`),
     /// the default.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     password_file: Option<PathBuf>,
     /// PEM root CA path for a private certificate. Missing, empty, or
     /// whitespace-only is unset (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     root_ca_path: Option<PathBuf>,
     /// PEM certificate chain this client presents to a server that requires
     /// one (mutual TLS). Set together with `client_key_path`. Missing, empty,
     /// or whitespace-only is unset (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     client_cert_path: Option<PathBuf>,
     /// PEM private key of that certificate. The key is a path, so a file may
     /// set it; the key itself stays in the file it names.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     client_key_path: Option<PathBuf>,
     /// Permit a plaintext DSN with `app.allow_insecure_development`.
@@ -118,18 +113,11 @@ impl CacheInput {
             self.command_timeout,
             Duration::from_millis(1)..=Duration::from_secs(10),
         ));
-        let max_concurrency = v.record(
-            int_range(
-                "cache.max_concurrency",
-                self.max_concurrency,
-                1..=usize::MAX,
-            )
-            .and_then(|()| {
-                NonZeroUsize::new(self.max_concurrency).ok_or_else(|| {
-                    ValidationError::new("cache.max_concurrency", "must be at least 1")
-                })
-            }),
-        );
+        let max_concurrency = v.record(nonzero_usize_range(
+            "cache.max_concurrency",
+            self.max_concurrency,
+            1..=usize::MAX,
+        ));
         for (key, size) in [
             ("cache.max_key_bytes", self.max_key_bytes),
             ("cache.max_value_bytes", self.max_value_bytes),

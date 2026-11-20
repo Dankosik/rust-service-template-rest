@@ -10,11 +10,10 @@ pub struct ContentType(String);
 pub struct InvalidContentType;
 
 impl ContentType {
-    pub fn try_new(value: impl Into<String>) -> Result<Self, InvalidContentType> {
-        let value = value.into();
-        let valid = value.len() <= MAX_CONTENT_TYPE_BYTES && media_type(value.as_bytes()).is_some();
-        if valid {
-            Ok(Self(value))
+    pub fn try_new(value: impl AsRef<str> + Into<String>) -> Result<Self, InvalidContentType> {
+        let bytes = value.as_ref().as_bytes();
+        if bytes.len() <= MAX_CONTENT_TYPE_BYTES && media_type(bytes).is_some() {
+            Ok(Self(value.into()))
         } else {
             Err(InvalidContentType)
         }

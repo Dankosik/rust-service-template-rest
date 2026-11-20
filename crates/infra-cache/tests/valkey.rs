@@ -365,7 +365,9 @@ async fn a_ttl_that_overflows_server_time_is_invalid_and_preserves_the_value() {
                 Duration::from_millis(i64::MAX.cast_unsigned())
             )
             .await,
-        Err(infra_cache::SetError::InvalidTtl)
+        Err(infra_cache::MutationError::NotApplied(
+            infra_cache::MutationFailure::InvalidTtl
+        ))
     );
     assert_eq!(
         namespace.get(&caller, &key).await.unwrap().as_deref(),

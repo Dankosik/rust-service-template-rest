@@ -198,7 +198,7 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
     tracing::event!(
         target: RECORD_TARGET,
         tracing::Level::INFO,
-        app.env = %config.app().env,
+        app.env = %config.app().env(),
         app.version = %config.app().version,
         app.commit = %config.app().commit,
         postgres.host = dsn.host(),
