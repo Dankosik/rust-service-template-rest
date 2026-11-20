@@ -160,13 +160,9 @@ impl fmt::Debug for ListenerPool {
 }
 
 impl ListenerPool {
-    fn sync_connect_options(&self) {
+    pub async fn connect(&self) -> Result<PgListener, sqlx::Error> {
         self.inner
             .set_connect_options((*self.source.inner.connect_options()).clone());
-    }
-
-    pub async fn connect(&self) -> Result<PgListener, sqlx::Error> {
-        self.sync_connect_options();
         PgListener::connect_with(&self.inner).await
     }
 
@@ -755,17 +751,17 @@ mod tests {
             listener.inner.connect_options().to_url_lossy().password(),
             Some("pw")
         );
+        assert_eq!(
+            listener.close(ACQUIRE_TIMEOUT).await,
+            CloseOutcome::Complete
+        );
         pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
-        listener.sync_connect_options();
+        std::assert_matches!(listener.connect().await, Err(sqlx::Error::PoolClosed));
         assert_eq!(
             listener.inner.connect_options().to_url_lossy().password(),
             Some("rotated")
         );
         assert!(!format!("{listener:?}").contains("rotated"));
-        assert_eq!(
-            listener.close(ACQUIRE_TIMEOUT).await,
-            CloseOutcome::Complete
-        );
         assert_eq!(pool.close(ACQUIRE_TIMEOUT).await, CloseOutcome::Complete);
     }
 }

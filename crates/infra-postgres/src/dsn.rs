@@ -463,6 +463,20 @@ mod tests {
         for (raw, expected) in cases {
             assert_eq!(parse(raw).err(), Some(DsnError(expected)), "{raw}");
         }
+        for (raw, label) in [
+            ("postgres:///app?sslmode=require", "host"),
+            ("postgres://app:pw@h/app?sslmode=require", "port"),
+            ("postgres://:pw@h:5432/app?sslmode=require", "user"),
+            ("postgres://app@h:5432/app?sslmode=require", "password"),
+            ("postgres://app:pw@h:5432?sslmode=require", "database"),
+            ("postgres://app:pw@h:5432/app", "sslmode"),
+        ] {
+            assert_eq!(
+                parse(raw).unwrap_err().to_string(),
+                format!("postgres dsn requires an explicit {label}"),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
@@ -537,9 +551,11 @@ mod tests {
             ("sslmode", QueryParameter::SslMode),
             ("sslrootcert", QueryParameter::SslRootCert),
         ] {
+            let err = parse(&format!("{base}&{key}=x")).unwrap_err();
+            assert_eq!(err, DsnError(DsnErrorKind::Repeated(param)), "{key}");
             assert_eq!(
-                parse(&format!("{base}&{key}=x")).err(),
-                Some(DsnError(DsnErrorKind::Repeated(param))),
+                err.to_string(),
+                format!("postgres dsn parameter {key} must appear only once"),
                 "{key}"
             );
         }
@@ -572,12 +588,21 @@ mod tests {
 
     #[test]
     fn only_a_variable_the_url_cannot_override_refuses_the_dsn() {
-        for var in AmbientVar::ALL {
-            let result = Dsn::admit_with_environment(VALID, |candidate| candidate == var.as_str());
+        for (name, var) in [
+            ("PGSSLROOTCERT", AmbientVar::PgSslRootCert),
+            ("PGSSLCERT", AmbientVar::PgSslCert),
+            ("PGSSLKEY", AmbientVar::PgSslKey),
+            ("PGOPTIONS", AmbientVar::PgOptions),
+        ] {
+            let err =
+                Dsn::admit_with_environment(VALID, |candidate| candidate == name).unwrap_err();
+            assert_eq!(err, DsnError(DsnErrorKind::Ambient(var)), "{name}");
             assert_eq!(
-                result.err(),
-                Some(DsnError(DsnErrorKind::Ambient(var))),
-                "{var}"
+                err.to_string(),
+                format!(
+                    "postgres dsn must be the only connection source; unset {name} in the environment"
+                ),
+                "{name}"
             );
         }
         for name in ["PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGSSLMODE"] {
