@@ -30,5 +30,5 @@ pub use router::{Application, Authentication, Limits, ServerOptions, server_opti
 pub use infra_serviceauth::Caller;
 // template:end service-auth:grpc-service-auth-exports
 pub use services::{ListenerService, ReflectionRegistration, ServiceRegistration, Services};
-pub use status::{ERROR_DOMAIN, Failure};
+pub use status::{Code, ERROR_DOMAIN, Failure};
 pub use tls::{ServerTlsMaterial, server_tls_config};

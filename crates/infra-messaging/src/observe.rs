@@ -2,49 +2,22 @@ use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
 
-pub(crate) trait OutcomeLabel: Enum {
-    fn label(self) -> &'static str;
-}
-
-macro_rules! outcome_label {
-    ($(#[$meta:meta])* $vis:vis enum $name:ident {
-        $($variant:ident => $label:literal),+ $(,)?
-    }) => {
-        $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, ::enum_map::Enum)]
-        $vis enum $name {
-            $($variant),+
-        }
-
-        impl $crate::observe::OutcomeLabel for $name {
-            fn label(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $label),+
-                }
-            }
-        }
-    };
-}
-pub(crate) use outcome_label;
-
 #[derive(derive_more::Debug)]
 #[debug("Outcomes")]
-pub(crate) struct Outcomes<O: OutcomeLabel> {
+pub(crate) struct Outcomes<O: Enum> {
     handles: EnumMap<O, (metrics::Counter, metrics::Histogram)>,
 }
 
-impl<O: OutcomeLabel> Outcomes<O> {
+impl<O: Enum> Outcomes<O> {
     pub(crate) fn register(
         total: &'static str,
         duration: &'static str,
         label_key: &'static str,
         event_type: Option<&'static str>,
+        label: fn(O) -> &'static str,
     ) -> Self {
         let handles = EnumMap::from_fn(|outcome: O| {
-            let mut labels = vec![metrics::Label::from_static_parts(
-                label_key,
-                outcome.label(),
-            )];
+            let mut labels = vec![metrics::Label::from_static_parts(label_key, label(outcome))];
             if let Some(event_type) = event_type {
                 labels.push(metrics::Label::from_static_parts("event_type", event_type));
             }

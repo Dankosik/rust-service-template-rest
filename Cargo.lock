@@ -5302,7 +5302,6 @@ dependencies = [
  "serde",
  "serde_json",
  "service-config",
- "service-failure",
  "similar 3.2.1",
  "sqlx",
  "tempfile",
