@@ -1,4 +1,4 @@
-use time::UtcDateTime;
+pub use time::UtcDateTime;
 
 pub trait EventPayload {
     const EVENT_TYPE: &'static str;

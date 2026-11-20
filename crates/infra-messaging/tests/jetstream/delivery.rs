@@ -16,8 +16,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -40,7 +39,7 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -84,8 +83,7 @@ async fn handler_runs_in_the_trace_of_the_publication() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -108,7 +106,7 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -188,8 +186,7 @@ async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed
             Some(consumer_options(&fixture)),
             1024,
         ),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("consumer connects through the settlement relay");
@@ -198,7 +195,7 @@ async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed
         .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -255,8 +252,7 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -289,7 +285,7 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -385,8 +381,7 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -406,7 +401,7 @@ async fn handler_panic_is_retried_like_a_retryable_failure() {
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -437,8 +432,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -458,7 +452,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -491,8 +485,7 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
     let startup_cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        startup_deadline,
-        startup_cancel.clone(),
+        &context(startup_deadline, &startup_cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -504,7 +497,7 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
         registry
     };
     let mut handle = messaging
-        .consumer(handled(), deadline(), &cancel)
+        .consumer(handled(), &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -526,15 +519,19 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     std::assert_matches!(
-        messaging.consumer(handled(), deadline(), &cancelled).await,
+        messaging
+            .consumer(handled(), &context(deadline(), &cancelled))
+            .await,
         Err(infra_messaging::MessagingError::Cancelled)
     );
     std::assert_matches!(
-        messaging.consumer(handled(), Instant::now(), &cancel).await,
+        messaging
+            .consumer(handled(), &context(Instant::now(), &cancel))
+            .await,
         Err(infra_messaging::MessagingError::TimedOut { .. })
     );
     let mut replacement = messaging
-        .consumer(handled(), deadline(), &cancel)
+        .consumer(handled(), &context(deadline(), &cancel))
         .await
         .expect("a new consumer is admitted after the owner aborted one")
         .start(&cancel);
@@ -561,8 +558,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
     };
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options), 1024),
-        Instant::now() + Duration::from_secs(30),
-        cancel.clone(),
+        &context(Instant::now() + Duration::from_secs(30), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -605,7 +601,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
             .expect("fixture event publication is acknowledged");
     }
     let mut first = messaging
-        .consumer(blocking, deadline(), &cancel)
+        .consumer(blocking, &context(deadline(), &cancel))
         .await
         .expect("adapter creates its named durable consumer")
         .start(&cancel);
@@ -657,7 +653,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         )
         .expect("fixture handler is registered");
     let mut second = messaging
-        .consumer(recording, deadline(), &cancel)
+        .consumer(recording, &context(deadline(), &cancel))
         .await
         .expect("the durable consumer is admitted again")
         .start(&cancel);

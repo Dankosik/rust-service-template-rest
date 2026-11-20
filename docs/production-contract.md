@@ -493,8 +493,10 @@ direct publishers that supply their own globally unique IDs. Check historical
 IDs for overlap before activating the new namespace.
 
 Route resubmissions of pre-upgrade operations by their recorded identity.
-Use the original unbound route, event contents, time and order to reconcile
-an existing receipt. An unknown unbound event fails with `PublisherRequired`.
+Use the original unbound route, event contents, time and order with
+`PreparedEvent::reconcile_legacy_outbox` (or `reconcile_legacy_outbox_ordered`)
+to reconcile an existing receipt; an unknown unbound event returns
+`ReconcileOutcome::Missing` and cannot be enqueued without a bound `OutboxRoute`.
 New operations use the bound route, including when their local ID also
 appears in another publisher's history. Workers retry already committed
 intents with their stored headers. DLQ restoration preserves the logical

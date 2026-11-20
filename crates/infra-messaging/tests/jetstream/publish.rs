@@ -1,13 +1,14 @@
 use super::*;
-use infra_messaging::{EnvelopeError, PublishRejection};
+use infra_messaging::{PublishEnvelopeError, PublishRejection};
 
 #[tokio::test]
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
     let fixture = Fixture::create_with_source_limit(Topology::StreamsOnly, 1).await;
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(options(&fixture, None, 1024), deadline(), cancel.clone())
-        .await
-        .expect("fixture source stream is admitted");
+    let messaging =
+        Messaging::connect(options(&fixture, None, 1024), &context(deadline(), &cancel))
+            .await
+            .expect("fixture source stream is admitted");
     let original = event("event-publication");
     let prepared = fixture
         .publication
@@ -68,8 +69,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     let receiving_limit = prepared.payload().len() - 1;
     let messaging = Messaging::connect(
         options(&fixture, None, receiving_limit),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("smaller receiving resource is admitted");
@@ -80,7 +80,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
             .publish(&context(deadline(), &cancel), &prepared)
             .await,
         Err(PublishError::Rejected(PublishRejection::InvalidEnvelope(
-            EnvelopeError::PayloadTooLarge
+            PublishEnvelopeError::PayloadTooLarge
         )))
     );
     assert!(logged.lock().unwrap().iter().any(|fields| {
@@ -96,8 +96,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
 
     let messaging = Messaging::connect(
         options(&fixture, None, receiving_limit + 1),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
@@ -137,8 +136,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, max_payload_bytes),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
@@ -196,8 +194,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted through the transparent relay");
@@ -238,7 +235,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     close(messaging).await;
     relay.join().await;
 
-    let retry = Messaging::connect(options(&fixture, None, 1024), deadline(), cancel.clone())
+    let retry = Messaging::connect(options(&fixture, None, 1024), &context(deadline(), &cancel))
         .await
         .expect("direct retry producer is admitted after relay shutdown");
     let acknowledgment = retry

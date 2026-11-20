@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MessagingError {
     #[error("messaging configuration is invalid: {0}")]
     Configuration(&'static str),
@@ -24,39 +24,33 @@ pub enum MessagingError {
     Bounds,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum EnvelopeError {
-    #[error("subject is invalid")]
-    Subject,
-    #[error("dead-letter original subject is invalid")]
-    DeadLetterSubject,
-    #[error("event identity is invalid")]
-    Identity,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PrepareError {
     #[error("event payload cannot be serialized")]
     Serialization,
     #[error("payload exceeds configured maximum")]
     PayloadTooLarge,
     #[error("event payload structure is invalid")]
     PayloadStructure,
-    #[error("encoded headers exceed {} KiB", crate::wire::HEADER_LIMIT_BYTES / 1024)]
-    HeadersTooLarge,
-    #[error("required header {0} is missing")]
-    MissingHeader(&'static str),
-    #[error("event schema is invalid")]
-    Schema,
-    #[error("creation time is invalid")]
-    CreatedAtInvalid,
+    #[error("event identity is invalid")]
+    Identity,
     #[error("creation time is required")]
     CreatedAtRequired,
     #[error("creation time is out of range")]
     CreatedAtOutOfRange,
-    #[error("dead-letter creation time is required")]
-    DeadLetterCreatedAtRequired,
-    #[error("dead-letter record has no verifiable original message ID")]
-    DeadLetterMessageIdMissing,
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PublishEnvelopeError {
+    #[error("payload exceeds configured maximum")]
+    PayloadTooLarge,
+    #[error("encoded headers exceed {} KiB", crate::wire::HEADER_LIMIT_BYTES / 1024)]
+    HeadersTooLarge,
+    #[error("creation time is out of range")]
+    CreatedAtOutOfRange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PublishError {
     #[error("messaging publication was rejected: {0}")]
     Rejected(#[from] PublishRejection),
@@ -64,10 +58,10 @@ pub enum PublishError {
     Ambiguous,
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PublishRejection {
     #[error("invalid publication envelope: {0}")]
-    InvalidEnvelope(#[from] EnvelopeError),
+    InvalidEnvelope(#[from] PublishEnvelopeError),
     #[error("messaging resource is draining or its consumer failed")]
     Unavailable,
     #[error("publication context stopped before dispatch")]

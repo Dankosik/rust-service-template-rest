@@ -2,9 +2,8 @@ use std::fmt;
 
 use domain_events::{Event, EventPayload};
 use infra_jobs::{JobKind, KindName};
-use infra_messaging::{
-    PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
-};
+use infra_messaging::outbox::OutboxEvent;
+use infra_messaging::{PublicationPolicy, PublicationRoute, Registry, RegistryError, Route};
 use infra_postgres::{Pool, Tx, TxError, TxMode};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use serde::{Deserialize, Serialize};
@@ -116,7 +115,7 @@ pub struct Accepted {
 #[derive(Clone, Debug)]
 pub struct PreparedRequest {
     operation: Operation,
-    event: PreparedEvent,
+    event: OutboxEvent,
     event_time: String,
 }
 impl PreparedRequest {

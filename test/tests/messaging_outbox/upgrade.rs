@@ -1,15 +1,14 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_jobs::operator::{self, OperatorError, RecoveryTarget};
 use infra_messaging::Messaging;
-use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, kinds};
+use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, ReconcileOutcome, kinds};
 use infra_postgres::Pool;
 use integration_tests::{dsn_for, poll_until};
 use migrate::{MIGRATOR, RunError, RunOptions};
+use operation_context::OperationContext;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::migrate::MigrateError;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     APP, Fixture, OUTBOX_KIND, POLL, Step, WAIT, close, event, event_key, finish,
@@ -193,9 +192,12 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
         .prepare(&event(LOGICAL_ID, "changed"))
         .unwrap();
     jobs.in_tx(async |tx| -> Result<(), Step> {
-        assert_eq!(replay.enqueue(tx).await?, OutboxEnqueued::Duplicate);
+        assert_eq!(
+            replay.reconcile_legacy_outbox(tx).await?,
+            ReconcileOutcome::Matched
+        );
         std::assert_matches!(
-            changed.enqueue(tx).await,
+            changed.reconcile_legacy_outbox(tx).await,
             Err(OutboxEnqueueError::EventIdConflict)
         );
         Ok(())
@@ -214,8 +216,7 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
 
     let messaging = Messaging::connect(
         messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
+        &OperationContext::with_timeout(WAIT),
     )
     .await
     .unwrap();
@@ -246,7 +247,10 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
     let independent = prepared(&fixture, LOGICAL_ID, "legacy\nbytes");
     jobs.in_tx(async |tx| -> Result<(), Step> {
         assert_eq!(independent.enqueue(tx).await?, OutboxEnqueued::Created);
-        assert_eq!(replay.enqueue(tx).await?, OutboxEnqueued::Duplicate);
+        assert_eq!(
+            replay.reconcile_legacy_outbox(tx).await?,
+            ReconcileOutcome::Matched
+        );
         Ok(())
     })
     .await

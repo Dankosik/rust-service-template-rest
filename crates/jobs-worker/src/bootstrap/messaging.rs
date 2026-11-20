@@ -1,13 +1,12 @@
 use std::time::Duration;
 
 use infra_messaging::{
-    Consumer, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
-    Registry as MessagingRegistry, TransportSecurity,
+    Consumer, ConsumerOptions, Credentials, Deadline, Messaging, MessagingOptions, MessagingProbe,
+    MessagingStartup, OperationContext, Registry as MessagingRegistry, TransportSecurity,
 };
 use service_config::{
     AdmittedMessaging, MessagingCredentials, MessagingTransportSecurity, WorkerConfig,
 };
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::{WorkerError, worker_identity};
@@ -15,6 +14,13 @@ use crate::background::Background;
 use crate::resources::Resources;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(super) struct ConnectedMessaging {
+    pub(super) consumer: Option<Consumer>,
+    // template:begin outbox:worker-bootstrap-connected-outbox
+    pub(super) outbox: infra_messaging::OutboxProducer,
+    // template:end outbox:worker-bootstrap-connected-outbox
+}
 
 pub(super) struct RetainedMessages {
     pub(super) registry: MessagingRegistry,
@@ -75,7 +81,7 @@ pub(super) async fn connect_messaging(
     // template:end outbox:worker-bootstrap-connect-messaging-pool
     cancel: &CancellationToken,
     retained: &mut Option<MessagingStartup>,
-) -> Result<(Messaging, Option<Consumer>), WorkerError> {
+) -> Result<(MessagingProbe, ConnectedMessaging), WorkerError> {
     let MessagingPlan {
         options,
         retained_messages,
@@ -89,22 +95,29 @@ pub(super) async fn connect_messaging(
             .check_publication_limit(options.max_payload_bytes)?;
     }
     // template:end outbox:worker-bootstrap-activate-postgres-messages
-    let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup = retained.insert(Messaging::prepare(options, deadline, cancel.child_token())?);
+    let context = OperationContext::new(
+        Some(Deadline::after(MESSAGING_STARTUP_TIMEOUT)),
+        cancel.child_token(),
+    );
+    let startup = retained.insert(Messaging::prepare(options, &context)?);
     let messaging = startup.admit().await?;
     // template:begin outbox:worker-bootstrap-admit-outbox-source
-    messaging.outbox_producer()?;
+    let outbox = messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
     let consumer = if let Some(messages) = retained_messages {
-        Some(
-            messaging
-                .consumer(messages.registry, deadline, cancel)
-                .await?,
-        )
+        Some(messaging.consumer(messages.registry, &context).await?)
     } else {
         None
     };
-    Ok((messaging, consumer))
+    Ok((
+        messaging.probe(),
+        ConnectedMessaging {
+            consumer,
+            // template:begin outbox:worker-bootstrap-connected-outbox-value
+            outbox,
+            // template:end outbox:worker-bootstrap-connected-outbox-value
+        },
+    ))
 }
 
 fn messaging_options(

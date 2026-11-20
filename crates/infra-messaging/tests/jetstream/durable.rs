@@ -12,8 +12,7 @@ fn handle<T: EventPayload + serde::de::DeserializeOwned + 'static>(
     registry: &mut Registry,
     route: &Route<T>,
 ) {
-    registry.declare(route).unwrap();
-    registry.register(route, accept).unwrap();
+    registry.declare(route).unwrap().handle(accept);
 }
 
 fn assert_durable_refusal(logged: &Logged, operation: &str, error_type: &str) {
@@ -46,8 +45,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -55,15 +53,17 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
     let mut current = Registry::default();
     handle(&mut current, &fixture.route);
     let old = current.clone();
-    let publication = current.declare_publication(&v2, 1024).unwrap();
-    current.register(&v2, accept).unwrap();
+    let mut entry = current.declare(&v2).unwrap();
+    let publication = entry.publish(1024);
+    entry.handle(accept);
     let mut reordered = Registry::default();
     handle(&mut reordered, &v2);
     handle(&mut reordered, &fixture.route);
 
+    let admit_context = context(deadline(), &cancel);
     let (first, second) = tokio::join!(
-        messaging.consumer(current, deadline(), &cancel),
-        messaging.consumer(reordered, deadline(), &cancel),
+        messaging.consumer(current, &admit_context),
+        messaging.consumer(reordered, &admit_context),
     );
     let admitted = first.expect("the first replica admits the durable");
     second.expect("the second replica admits the same durable");
@@ -80,7 +80,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
         .await
         .unwrap();
     std::assert_matches!(
-        messaging.consumer(old, deadline(), &cancel).await,
+        messaging.consumer(old, &context(deadline(), &cancel)).await,
         Err(infra_messaging::MessagingError::Topology)
     );
     let actual = durable(&fixture).await.cached_info().clone();
@@ -120,16 +120,15 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
     fixture.jetstream.update_stream(config).await.unwrap();
     let mut other_options = consumer_options(&fixture);
     other_options.filter_subject.clone_from(&other_subject);
+    let connect_context = context(deadline(), &cancel);
     let (first, second) = tokio::try_join!(
         Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
-            deadline(),
-            cancel.clone(),
+            &connect_context,
         ),
         Messaging::connect(
             options(&fixture, Some(other_options), 1024),
-            deadline(),
-            cancel.clone(),
+            &connect_context,
         ),
     )
     .unwrap();
@@ -137,11 +136,11 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
     registered.register(&fixture.route, accept).unwrap();
     let mut other_registry = Registry::default();
     let route = Route::<ExampleEvent>::new(other_subject.clone());
-    other_registry.declare(&route).unwrap();
-    other_registry.register(&route, accept).unwrap();
+    other_registry.declare(&route).unwrap().handle(accept);
+    let admit_context = context(deadline(), &cancel);
     let (left, right) = tokio::join!(
-        first.consumer(registered, deadline(), &cancel),
-        second.consumer(other_registry, deadline(), &cancel),
+        first.consumer(registered, &admit_context),
+        second.consumer(other_registry, &admit_context),
     );
     let filter = match (left, right) {
         (Ok(_), Err(infra_messaging::MessagingError::Topology)) => fixture.subject.as_str(),
@@ -192,14 +191,15 @@ async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage
         let cancel = CancellationToken::new();
         let messaging = Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
-            deadline(),
-            cancel.clone(),
+            &context(deadline(), &cancel),
         )
         .await
         .unwrap();
         let (_guard, logged) = capture_logs();
         std::assert_matches!(
-            messaging.consumer(registered, deadline(), &cancel).await,
+            messaging
+                .consumer(registered, &context(deadline(), &cancel))
+                .await,
             Err(infra_messaging::MessagingError::Topology)
         );
         assert_durable_refusal(&logged, "bind_consumer", error_type);
@@ -236,8 +236,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
         let cancel = CancellationToken::new();
         let messaging = Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
-            deadline(),
-            cancel.clone(),
+            &context(deadline(), &cancel),
         )
         .await
         .unwrap();
@@ -245,7 +244,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
         registered.register(&fixture.route, accept).unwrap();
         let before = durable(&fixture).await.cached_info().clone();
         let admitted = messaging
-            .consumer(registered.clone(), deadline(), &cancel)
+            .consumer(registered.clone(), &context(deadline(), &cancel))
             .await
             .unwrap();
         let after = durable(&fixture).await.cached_info().clone();
@@ -269,7 +268,9 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
         let changed = stream.update_consumer(config).await.unwrap();
         let (_guard, logged) = capture_logs();
         std::assert_matches!(
-            messaging.consumer(registered, deadline(), &cancel).await,
+            messaging
+                .consumer(registered, &context(deadline(), &cancel))
+                .await,
             Err(infra_messaging::MessagingError::Topology)
         );
         let actual = durable(&fixture).await.cached_info().clone();
@@ -309,8 +310,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -325,7 +325,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
         .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     messaging
-        .consumer(publishes_elsewhere, deadline(), &cancel)
+        .consumer(publishes_elsewhere, &context(deadline(), &cancel))
         .await
         .expect("a publish-only route outside the filter does not refuse the consumer");
 
@@ -334,7 +334,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
         .register(&elsewhere, accept)
         .expect("fixture handler is registered");
     let refused = messaging
-        .consumer(handles_elsewhere, deadline(), &cancel)
+        .consumer(handles_elsewhere, &context(deadline(), &cancel))
         .await
         .expect_err("a handler the filter can never reach refuses the consumer");
     std::assert_matches!(
@@ -353,8 +353,7 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -363,7 +362,7 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
         .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     let consumer = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("adapter creates its named durable consumer");
     fixture
@@ -389,15 +388,14 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("source stream is admitted");
     let mut registered = fixture.registry.clone();
     registered.register(&fixture.route, accept).unwrap();
     let mut handle = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap()
         .start(&cancel);
@@ -442,8 +440,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
             Some(consumer_options(&fixture)),
             1024,
         ),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
@@ -467,7 +464,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
         })
         .unwrap();
     let mut handle = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap()
         .start(&cancel);
@@ -541,8 +538,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
             Some(consumer_options(&fixture)),
             1024,
         ),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
@@ -558,7 +554,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         )
         .unwrap();
     let consumer = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap();
     let prepared = fixture
@@ -632,8 +628,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
                 }),
                 1024,
             ),
-            deadline(),
-            cancel.clone(),
+            &context(deadline(), &cancel),
         )
         .await
         .unwrap();
@@ -656,7 +651,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
             })
             .unwrap();
         let consumer = messaging
-            .consumer(registered, deadline(), &cancel)
+            .consumer(registered, &context(deadline(), &cancel))
             .await
             .unwrap();
         let events = ["drain-with-info-withheld", "drain-release-slot"];

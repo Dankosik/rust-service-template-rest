@@ -13,9 +13,11 @@ use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::RawMessage;
 use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use infra_messaging::wire::{DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, restore_dead_letter};
+use infra_messaging::wire::{
+    DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, RestoreError as WireRestoreError, restore_dead_letter,
+};
 use infra_messaging::{
-    BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, EnvelopeError, Messaging, MessagingOptions,
+    BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
     MessagingStartup, PreparedEvent, PublishError, TransportSecurity,
 };
 use operation_context::{Deadline, OperationContext};
@@ -25,7 +27,6 @@ use sha2::{Digest as _, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::watch;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, &'static str>;
 const FILE_LIMIT: u64 = 4 * 1024 * 1024;
@@ -59,7 +60,7 @@ struct Record {
 #[derive(Debug)]
 enum RestoreError {
     Record(&'static str),
-    Envelope(EnvelopeError),
+    Envelope(WireRestoreError),
 }
 
 impl RestoreError {
@@ -264,9 +265,9 @@ impl Resources {
     }
 
     async fn close(self, deadline: Instant) -> bool {
-        let cancel = CancellationToken::new();
+        let context = OperationContext::from_deadline(Deadline::at(deadline));
         let publisher_close = match self.publisher {
-            Some(startup) => startup.close(deadline, &cancel).await,
+            Some(startup) => startup.close(&context).await,
             None => CloseOutcome::Complete,
         };
         let mut complete = publisher_close == CloseOutcome::Complete;
@@ -536,6 +537,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
     }
     if state.publication != Publication::Confirmed {
         let publication_after_rejection = state.publication.after_rejection();
+        let context = OperationContext::from_deadline(Deadline::at(deadline));
         let startup = Messaging::prepare(
             MessagingOptions {
                 connection_name: "dlq-recovery-redrive".into(),
@@ -547,8 +549,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                 max_payload_bytes: config.max_payload_bytes,
                 consumer: None,
             },
-            deadline,
-            CancellationToken::new(),
+            &context,
         )
         .map_err(|_| "publisher_configuration")?;
         let startup = resources.publisher.insert(startup);
@@ -561,13 +562,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         state.publication = Publication::Ambiguous;
         state.ack = None;
         save(&state_path, &state, Persist::Replace)?;
-        match producer
-            .publish(
-                &OperationContext::from_deadline(Deadline::at(deadline)),
-                &prepared,
-            )
-            .await
-        {
+        match producer.publish(&context, &prepared).await {
             Ok(ack) if ack.stream == config.source_stream && ack.sequence > 0 => {
                 state.publication = Publication::Confirmed;
                 state.ack = Some(Ack {

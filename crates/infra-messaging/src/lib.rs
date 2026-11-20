@@ -20,7 +20,10 @@ pub mod wire;
 pub use budget::BROKER_OPERATION_BUDGET;
 pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
 pub use contract::ContractError;
-pub use error::{EnvelopeError, HandlerError, MessagingError, PublishError, PublishRejection};
+pub use error::{
+    HandlerError, MessagingError, PrepareError, PublishEnvelopeError, PublishError,
+    PublishRejection,
+};
 // template:begin outbox:messaging-outbox-producer-export
 pub use messaging::OutboxProducer;
 // template:end outbox:messaging-outbox-producer-export
@@ -28,9 +31,10 @@ pub use messaging::{
     CloseOutcome, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
     TransportSecurity,
 };
+pub use operation_context::{Deadline, OperationContext};
 pub use prepared::PreparedEvent;
 pub use probe::MessagingProbe;
 pub use producer::{Producer, PublishAck};
 pub use registry::{
-    EventHandler, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
+    EventHandler, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route, RouteEntry,
 };

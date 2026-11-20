@@ -157,7 +157,9 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     .await;
 
     let closed = if let Some(messaging) = messaging {
-        messaging.close(deadline(), &CancellationToken::new()).await
+        messaging
+            .close(&OperationContext::from_deadline(Deadline::at(deadline())))
+            .await
     } else {
         CloseOutcome::Complete
     };
@@ -204,8 +206,7 @@ async fn rotation_scenario(
                 max_payload_bytes: 1024,
                 consumer: None,
             },
-            deadline(),
-            cancel.clone(),
+            &context(&cancel),
         )
         .await
         .unwrap(),

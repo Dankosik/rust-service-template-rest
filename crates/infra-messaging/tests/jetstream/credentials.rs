@@ -113,7 +113,7 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
     let cancel = CancellationToken::new();
     let mut options = options_with_servers(&fixture, vec![relay.url.clone()], None, 1024);
     options.credentials = Some(Credentials::File(active_credentials.clone()));
-    let messaging = Messaging::connect(options, deadline(), cancel.clone())
+    let messaging = Messaging::connect(options, &context(deadline(), &cancel))
         .await
         .expect("tuple A authenticates through the relay");
     relay.wait_for_latest_public_user(AUTH_USER_A).await;
@@ -221,7 +221,7 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
 
     let mut missing = options(&fixture, None, 1024);
     missing.credentials = Some(Credentials::File(dir.path().join("absent.creds")));
-    let refused = Messaging::connect(missing, deadline(), cancel.clone())
+    let refused = Messaging::connect(missing, &context(deadline(), &cancel))
         .await
         .expect_err("a missing credentials file refuses the connection");
     std::assert_matches!(
@@ -234,7 +234,7 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
     std::fs::write(&malformed_path, "not credentials").expect("fixture file is written");
     let mut malformed = options(&fixture, None, 1024);
     malformed.credentials = Some(Credentials::File(malformed_path));
-    let refused = Messaging::connect(malformed, deadline(), cancel.clone())
+    let refused = Messaging::connect(malformed, &context(deadline(), &cancel))
         .await
         .expect_err("a malformed credentials file refuses the connection");
     std::assert_matches!(
