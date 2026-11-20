@@ -105,14 +105,7 @@ pub(crate) async fn run_sampling(
     gauges: SampleGauges,
     cancel: CancellationToken,
 ) {
-    let reset = std::mem::DropGuard::new(gauges, |gauges| {
-        gauges.reset();
-        // template:begin outbox:jobs-maintenance-outbox-reset
-        if outbox::is_registered(kinds) {
-            outbox::reset_metrics();
-        }
-        // template:end outbox:jobs-maintenance-outbox-reset
-    });
+    let reset = std::mem::DropGuard::new(gauges, |gauges| gauges.reset());
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
             run_kind_sampling(primary_group, kinds, &reset),
@@ -132,8 +125,8 @@ async fn run_kind_sampling(
     loop {
         ticker.tick().await;
         // template:begin outbox:jobs-maintenance-outbox-sampler
-        if outbox::is_registered(kinds) {
-            outbox::sample(primary_group).await;
+        if let Some(outbox) = &gauges.outbox {
+            outbox.sample(primary_group).await;
         }
         // template:end outbox:jobs-maintenance-outbox-sampler
         match sample_once(primary_group, kinds).await {
@@ -241,11 +234,6 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) -> SampleGauges {
     );
     let gauges = SampleGauges::new(kinds);
     gauges.reset();
-    // template:begin outbox:jobs-maintenance-outbox-init
-    if outbox::is_registered(kinds) {
-        outbox::init_metrics();
-    }
-    // template:end outbox:jobs-maintenance-outbox-init
     gauges
 }
 
@@ -439,6 +427,9 @@ impl KindGauges {
 pub(crate) struct SampleGauges {
     by_kind: foldhash::HashMap<&'static str, KindGauges>,
     observation_timestamp: metrics::Gauge,
+    // template:begin outbox:jobs-maintenance-outbox-gauges-field
+    outbox: Option<outbox::OutboxGauges>,
+    // template:end outbox:jobs-maintenance-outbox-gauges-field
 }
 
 impl SampleGauges {
@@ -449,6 +440,9 @@ impl SampleGauges {
                 .map(|&kind| (kind, KindGauges::new(kind)))
                 .collect(),
             observation_timestamp: metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC),
+            // template:begin outbox:jobs-maintenance-outbox-gauges-init
+            outbox: outbox::OutboxGauges::init_if_registered(kinds),
+            // template:end outbox:jobs-maintenance-outbox-gauges-init
         }
     }
 
@@ -466,6 +460,11 @@ impl SampleGauges {
             gauges.reset();
         }
         self.observation_timestamp.set(0.0);
+        // template:begin outbox:jobs-maintenance-outbox-gauges-reset
+        if let Some(outbox) = &self.outbox {
+            outbox.reset();
+        }
+        // template:end outbox:jobs-maintenance-outbox-gauges-reset
     }
 }
 

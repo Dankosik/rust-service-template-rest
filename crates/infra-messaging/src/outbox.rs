@@ -5,8 +5,8 @@ use arrayvec::ArrayString;
 use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
-use infra_jobs::outbox::{self as job_outbox, KIND as OUTBOX_KIND};
-use infra_jobs::{Handler, Job, JobError, JobKind, KindName, Kinds, Policy, RetrySchedule};
+use infra_jobs::outbox::{self as job_outbox, Order, ReconcileOutcome};
+use infra_jobs::{Handler, Job, JobError, Kinds, Policy, RetrySchedule};
 use infra_postgres::{Tx, TxMode};
 use operation_context::Deadline;
 use serde::{Deserialize, Serialize};
@@ -63,18 +63,6 @@ impl From<job_outbox::OutboxEnqueueError> for OutboxEnqueueError {
             job_outbox::OutboxEnqueueError::OrderConflict => Self::OrderConflict,
             job_outbox::OutboxEnqueueError::InvalidOrder => Self::InvalidOrder,
             job_outbox::OutboxEnqueueError::Enqueue(error) => Self::Jobs(error),
-        }
-    }
-}
-
-impl From<job_outbox::OutboxReconcileError> for OutboxEnqueueError {
-    fn from(error: job_outbox::OutboxReconcileError) -> Self {
-        match error {
-            job_outbox::OutboxReconcileError::PayloadContainsNul => Self::PayloadContainsNul,
-            job_outbox::OutboxReconcileError::EventIdConflict => Self::EventIdConflict,
-            job_outbox::OutboxReconcileError::InvalidOrder => Self::InvalidOrder,
-            job_outbox::OutboxReconcileError::MissingReceipt => Self::PublisherRequired,
-            job_outbox::OutboxReconcileError::Enqueue(error) => Self::Jobs(error),
         }
     }
 }
@@ -146,21 +134,29 @@ impl PreparedEvent {
         aggregate_key: &str,
         version: i64,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
-        self.enqueue_with_order(tx, Some((aggregate_key, version)))
-            .await
+        self.enqueue_with_order(
+            tx,
+            Some(Order {
+                aggregate_key,
+                version,
+            }),
+        )
+        .await
     }
 
     async fn enqueue_with_order(
         &self,
         tx: &mut Tx<'_, impl TxMode>,
-        order: Option<(&str, i64)>,
+        order: Option<Order<'_>>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
         if self.has_bound_publication() {
             Ok(job_outbox::enqueue(tx, &intent, order).await?)
         } else {
-            job_outbox::reconcile(tx, &intent, order).await?;
-            Ok(OutboxEnqueued::Duplicate)
+            match job_outbox::reconcile(tx, &intent, order).await? {
+                ReconcileOutcome::Matched => Ok(OutboxEnqueued::Duplicate),
+                ReconcileOutcome::Missing => Err(OutboxEnqueueError::PublisherRequired),
+            }
         }
     }
 
@@ -330,10 +326,6 @@ struct PublishDomainEvent {
     occurred_at_nanosecond: u32,
     #[serde(rename = "payload_base64", with = "base64_payload")]
     payload: Result<Bytes, InvalidBase64>,
-}
-
-impl JobKind for PublishDomainEvent {
-    const NAME: KindName = OUTBOX_KIND;
 }
 
 impl From<&PreparedEvent> for PublishDomainEvent {

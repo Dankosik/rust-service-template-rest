@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,6 +58,10 @@ impl KindName {
     #[must_use]
     pub const fn new(name: &'static str) -> Self {
         assert!(is_valid_kind_name(name), "invalid job kind name");
+        assert!(
+            !is_reserved_kind_name(name),
+            "job kind name is reserved for the outbox publisher"
+        );
         Self(name)
     }
 
@@ -90,6 +95,7 @@ impl JobId {
 
 pub(crate) struct Attempt {
     pub(crate) fence: crate::attempt::ClaimFence,
+    pub(crate) kind: &'static str,
     pub(crate) number: u16,
     #[expect(
         clippy::struct_field_names,
@@ -149,12 +155,12 @@ impl<K> Job<K> {
     }
 }
 
-impl<K: JobKind, P> fmt::Debug for Job<K, P> {
+impl<K, P> fmt::Debug for Job<K, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Job")
             .field("id", &self.attempt.fence.job_id)
-            .field("kind", &K::NAME.as_str())
+            .field("kind", &self.attempt.kind)
             .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
     }
@@ -276,13 +282,12 @@ impl From<infra_postgres::TxError> for TransactionFailure {
     }
 }
 
-pub trait Handler<K: JobKind>: Send + Sync + 'static {
+pub trait Handler<K>: Send + Sync + 'static {
     fn run(&self, job: Job<K>) -> impl Future<Output = Result<(), JobError>> + Send;
 }
 
 impl<K, F, Fut> Handler<K> for F
 where
-    K: JobKind,
     F: Fn(Job<K>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), JobError>> + Send + 'static,
 {
@@ -345,11 +350,16 @@ impl KindsBuilder {
     }
 
     pub fn register<K: JobKind>(&mut self, policy: Policy, handler: impl Handler<K>) -> &mut Self {
-        let handler = Arc::new(handler);
-        self.register_dispatch::<K>(policy, move |job| {
-            let handler = Arc::clone(&handler);
-            Box::pin(async move { handler.run(job).await.map(|()| Completion::Pending) })
-        })
+        self.entries.push(Registered::new(
+            K::NAME.as_str(),
+            policy,
+            false,
+            Box::new(OrdinaryHandler {
+                handler,
+                payload: PhantomData,
+            }),
+        ));
+        self
     }
 
     pub fn register_transactional<K: JobKind>(
@@ -357,57 +367,19 @@ impl KindsBuilder {
         policy: Policy,
         handler: impl TransactionalHandler<K>,
     ) -> &mut Self {
-        let handler = Arc::new(handler);
-        self.register_dispatch::<K>(policy, move |job| {
-            Box::pin(run_transactional(Arc::clone(&handler), job))
-        })
-    }
-
-    fn register_dispatch<K: JobKind>(
-        &mut self,
-        policy: Policy,
-        run: impl Fn(Job<K>) -> HandlerFuture + Send + Sync + 'static,
-    ) -> &mut Self {
-        let name = K::NAME.as_str();
-        self.entries.push(Registered {
-            name,
+        self.entries.push(Registered::new(
+            K::NAME.as_str(),
             policy,
-            is_outbox: crate::RESERVED_OUTBOX_KIND == Some(name),
-            running_slots: policy
-                .max_running
-                .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
-            dispatch: Box::new(move |attempt, pool, payload| {
-                let payload = serde_json::from_slice::<K>(payload)?;
-                Ok(run(Job {
-                    attempt,
-                    payload,
-                    pool,
-                }))
+            false,
+            Box::new(TransactionalHandlerEntry {
+                handler,
+                payload: PhantomData,
             }),
-            metrics: std::sync::OnceLock::new(),
-        });
+        ));
         self
     }
 
     pub fn validate(self) -> Result<Kinds, KindError> {
-        // template:begin outbox:jobs-outbox-registry-guard
-        if self.entries.iter().any(|entry| entry.is_outbox) {
-            return Err(KindError::OutboxKind);
-        }
-        // template:end outbox:jobs-outbox-registry-guard
-        self.validate_kinds()
-    }
-
-    // template:begin outbox:jobs-outbox-registry
-    pub(crate) fn validate_outbox(self) -> Result<Kinds, KindError> {
-        match self.entries.as_slice() {
-            [entry] if entry.is_outbox => self.validate_kinds(),
-            _ => Err(KindError::OutboxKind),
-        }
-    }
-    // template:end outbox:jobs-outbox-registry
-
-    fn validate_kinds(self) -> Result<Kinds, KindError> {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
         }
@@ -416,17 +388,7 @@ impl KindsBuilder {
             if !seen.insert(entry.name) {
                 return Err(KindError::Duplicate(entry.name));
             }
-            if !(1..=MAX_ATTEMPTS).contains(&entry.policy.max_attempts) {
-                return Err(KindError::InvalidMaxAttempts { kind: entry.name });
-            }
-            if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&entry.policy.timeout) {
-                return Err(KindError::InvalidTimeout { kind: entry.name });
-            }
-            if let RetrySchedule::Exponential { max_base } = entry.policy.retry
-                && !(MIN_TIMEOUT..=MAX_DELAY).contains(&max_base)
-            {
-                return Err(KindError::InvalidRetryMaxBase { kind: entry.name });
-            }
+            validate_policy(entry.name, entry.policy)?;
         }
         Ok(Kinds {
             entries: self.entries.into_iter().map(Arc::new).collect(),
@@ -434,9 +396,24 @@ impl KindsBuilder {
     }
 }
 
+fn validate_policy(kind: &'static str, policy: Policy) -> Result<(), KindError> {
+    if !(1..=MAX_ATTEMPTS).contains(&policy.max_attempts) {
+        return Err(KindError::InvalidMaxAttempts { kind });
+    }
+    if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&policy.timeout) {
+        return Err(KindError::InvalidTimeout { kind });
+    }
+    if let RetrySchedule::Exponential { max_base } = policy.retry
+        && !(MIN_TIMEOUT..=MAX_DELAY).contains(&max_base)
+    {
+        return Err(KindError::InvalidRetryMaxBase { kind });
+    }
+    Ok(())
+}
+
 #[warn(clippy::map_err_ignore)]
 async fn run_transactional<K: JobKind>(
-    handler: Arc<impl TransactionalHandler<K>>,
+    handler: &impl TransactionalHandler<K>,
     job: Job<K>,
 ) -> Result<Completion, JobError> {
     let Job {
@@ -491,6 +468,26 @@ pub struct Kinds {
 }
 
 impl Kinds {
+    // template:begin outbox:jobs-outbox-registry
+    pub(crate) fn outbox<T>(policy: Policy, handler: impl Handler<T>) -> Result<Self, KindError>
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+    {
+        validate_policy(crate::outbox::KIND, policy)?;
+        Ok(Self {
+            entries: vec![Arc::new(Registered::new(
+                crate::outbox::KIND,
+                policy,
+                true,
+                Box::new(OrdinaryHandler {
+                    handler,
+                    payload: PhantomData,
+                }),
+            ))],
+        })
+    }
+    // template:end outbox:jobs-outbox-registry
+
     pub fn names(&self) -> impl Iterator<Item = &'static str> {
         self.entries.iter().map(|entry| entry.name)
     }
@@ -518,13 +515,6 @@ impl fmt::Debug for Kinds {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KindError {
-    // template:begin outbox:jobs-outbox-registry-error
-    #[error(
-        "{} requires a dedicated single-kind outbox publisher registry",
-        crate::outbox::KIND
-    )]
-    OutboxKind,
-    // template:end outbox:jobs-outbox-registry-error
     #[error("no job kind is registered")]
     NoKinds,
     #[error("job kind {0:?} is registered twice")]
@@ -560,16 +550,53 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     true
 }
 
+const fn is_reserved_kind_name(name: &str) -> bool {
+    let Some(reserved) = crate::RESERVED_OUTBOX_KIND else {
+        return false;
+    };
+    let name = name.as_bytes();
+    let reserved = reserved.as_bytes();
+    if name.len() != reserved.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < name.len() {
+        if name[index] != reserved[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
     pub(crate) is_outbox: bool,
     pub(crate) running_slots: Option<Arc<Semaphore>>,
-    pub(crate) dispatch: Box<Dispatch>,
+    pub(crate) handler: Box<dyn ErasedHandler>,
     metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
 }
 
 impl Registered {
+    fn new(
+        name: &'static str,
+        policy: Policy,
+        is_outbox: bool,
+        handler: Box<dyn ErasedHandler>,
+    ) -> Self {
+        Self {
+            name,
+            policy,
+            is_outbox,
+            running_slots: policy
+                .max_running
+                .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
+            handler,
+            metrics: std::sync::OnceLock::new(),
+        }
+    }
+
     pub(crate) fn metrics(&self) -> &crate::attempt::KindMetrics {
         self.metrics
             .get_or_init(|| crate::attempt::KindMetrics::new(self.name))
@@ -590,10 +617,70 @@ pub(crate) enum Completion {
     Committed,
 }
 
-pub(crate) type HandlerFuture = BoxFuture<'static, Result<Completion, JobError>>;
+pub(crate) type HandlerFuture<'a> = BoxFuture<'a, Result<Completion, JobError>>;
 
-pub(crate) type Dispatch =
-    dyn Fn(Attempt, PgPool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
+pub(crate) trait ErasedHandler: Send + Sync + 'static {
+    fn prepare(
+        &self,
+        attempt: Attempt,
+        pool: PgPool,
+        payload: &[u8],
+    ) -> Result<HandlerFuture<'_>, serde_json::Error>;
+}
+
+struct OrdinaryHandler<K, H> {
+    handler: H,
+    payload: PhantomData<fn(K)>,
+}
+
+impl<K, H> ErasedHandler for OrdinaryHandler<K, H>
+where
+    K: DeserializeOwned + Send + Sync + 'static,
+    H: Handler<K>,
+{
+    fn prepare(
+        &self,
+        attempt: Attempt,
+        pool: PgPool,
+        payload: &[u8],
+    ) -> Result<HandlerFuture<'_>, serde_json::Error> {
+        let payload = serde_json::from_slice::<K>(payload)?;
+        let job = Job {
+            attempt,
+            payload,
+            pool,
+        };
+        Ok(Box::pin(async move {
+            self.handler.run(job).await.map(|()| Completion::Pending)
+        }))
+    }
+}
+
+struct TransactionalHandlerEntry<K, H> {
+    handler: H,
+    payload: PhantomData<fn(K)>,
+}
+
+impl<K, H> ErasedHandler for TransactionalHandlerEntry<K, H>
+where
+    K: JobKind,
+    H: TransactionalHandler<K>,
+{
+    fn prepare(
+        &self,
+        attempt: Attempt,
+        pool: PgPool,
+        payload: &[u8],
+    ) -> Result<HandlerFuture<'_>, serde_json::Error> {
+        let payload = serde_json::from_slice::<K>(payload)?;
+        let job = Job {
+            attempt,
+            payload,
+            pool,
+        };
+        Ok(Box::pin(run_transactional(&self.handler, job)))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -667,6 +754,11 @@ mod tests {
         assert!(!is_valid_kind_name("a b"));
         assert!(!is_valid_kind_name("a/b"));
         assert!(!is_valid_kind_name("é"));
+        assert_eq!(
+            is_reserved_kind_name("publish_domain_event"),
+            crate::RESERVED_OUTBOX_KIND.is_some()
+        );
+        assert!(!is_reserved_kind_name("sample"));
     }
 
     #[test]
@@ -794,7 +886,7 @@ mod tests {
                 .expect("first registered kind");
             assert!(after_alpha.contains("\"beta\""), "{output}");
             assert!(!output.contains("policy"), "{output}");
-            assert!(!output.contains("dispatch"), "{output}");
+            assert!(!output.contains("handler"), "{output}");
         }
     }
 
@@ -848,32 +940,36 @@ mod tests {
         let registry = kinds.validate().unwrap();
         let registered = registry.get(Sample::NAME.as_str()).unwrap();
         let token = CancellationToken::new();
-        let future = (registered.dispatch)(
-            Attempt {
-                fence: crate::attempt::ClaimFence {
-                    job_id: id,
-                    generation: 99,
-                    token: uuid::Uuid::nil(),
+        let future = registered
+            .handler
+            .prepare(
+                Attempt {
+                    fence: crate::attempt::ClaimFence {
+                        job_id: id,
+                        generation: 99,
+                        token: uuid::Uuid::nil(),
+                    },
+                    kind: Sample::NAME.as_str(),
+                    number: 3,
+                    attempt_deadline: deadline,
+                    cancellation: token,
                 },
-                number: 3,
-                attempt_deadline: deadline,
-                cancellation: token,
-            },
-            lazy_pool(),
-            br#"{"n":7,"secret":"payload-secret"}"#,
-        )
-        .unwrap();
+                lazy_pool(),
+                br#"{"n":7,"secret":"payload-secret"}"#,
+            )
+            .unwrap();
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
         future.await.unwrap();
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 
-        let err = (registered.dispatch)(
+        let err = registered.handler.prepare(
             Attempt {
                 fence: crate::attempt::ClaimFence {
                     job_id: id,
                     generation: 99,
                     token: uuid::Uuid::nil(),
                 },
+                kind: Sample::NAME.as_str(),
                 number: 1,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
@@ -893,6 +989,7 @@ mod tests {
                     generation: 99,
                     token: uuid::Uuid::nil(),
                 },
+                kind: Sample::NAME.as_str(),
                 number: 4,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
