@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use health::BoxedProbe;
 use infra_messaging::{
-    Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
+    Consumer, ConsumerOptions, Credentials, Messaging, MessagingOptions,
     Registry as MessagingRegistry, TransportSecurity,
 };
 use service_config::{MessagingCredentials, WorkerConfig};
@@ -70,9 +69,12 @@ impl MessagingPlan {
 
 pub(super) async fn connect_messaging(
     plan: MessagingPlan,
+    // template:begin outbox:worker-bootstrap-connect-messaging-pool
+    pool: Option<&infra_postgres::PgPool>,
+    // template:end outbox:worker-bootstrap-connect-messaging-pool
     cancel: &CancellationToken,
-    resources: &mut Resources,
-) -> Result<Option<Consumer>, WorkerError> {
+    retained: &mut Option<BrokerResource>,
+) -> Result<(Messaging, Option<Consumer>), WorkerError> {
     let MessagingPlan {
         options,
         retained_messages,
@@ -80,7 +82,7 @@ pub(super) async fn connect_messaging(
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
     let mut retained_messages = retained_messages;
     if let Some(messages) = &mut retained_messages {
-        messages.register_postgres_messages(resources)?;
+        messages.register_postgres_messages(pool)?;
         messages
             .registry
             .check_publication_limit(options.max_payload_bytes)?;
@@ -88,27 +90,25 @@ pub(super) async fn connect_messaging(
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
     let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
-    let BrokerResource::Starting(startup) = resources
-        .dependencies
-        .broker
-        .insert(BrokerResource::Starting(Box::new(startup)))
-    else {
-        return Err(MessagingError::Connection.into());
-    };
-    let messaging = startup.admit().await?;
-    resources.dependencies.broker = Some(BrokerResource::Admitted(messaging.clone()));
+    let mut startup = std::mem::DropGuard::new((Box::new(startup), retained), |(startup, slot)| {
+        *slot = Some(BrokerResource::Starting(startup));
+    });
+    let messaging = startup.0.admit().await?;
+    let (_, slot) = std::mem::DropGuard::dismiss(startup);
+    *slot = Some(BrokerResource::Admitted(messaging.clone()));
     // template:begin outbox:worker-bootstrap-admit-outbox-source
     messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
-    if let Some(messages) = retained_messages {
-        Ok(Some(
+    let consumer = if let Some(messages) = retained_messages {
+        Some(
             messaging
                 .consumer(messages.registry, deadline, cancel)
                 .await?,
-        ))
+        )
     } else {
-        Ok(None)
-    }
+        None
+    };
+    Ok((messaging, consumer))
 }
 
 fn max_payload_bytes(config: &WorkerConfig) -> Result<usize, WorkerError> {
@@ -148,17 +148,12 @@ fn messaging_options(
     })
 }
 
-pub(super) fn probe(resources: &Resources) -> Option<BoxedProbe> {
-    let messaging = resources.admitted_messaging()?;
-    Some(BoxedProbe::new(messaging.probe()))
-}
-
 pub(super) fn start_consumer(
     consumer: Consumer,
     resources: &mut Resources,
     background: &Background,
 ) {
-    resources.work.consumer = Some(consumer.start(&background.cancel));
+    resources.work.consumer = Some(consumer.start(background.cancel()));
     tracing::info!("messaging_consuming_started");
 }
 

@@ -3447,7 +3447,6 @@ dependencies = [
  "infra-webhooks",
  "itertools 0.15.0",
  "migrate",
- "parking_lot",
  "rlimit",
  "secrecy",
  "serde",

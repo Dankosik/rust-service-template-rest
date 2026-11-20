@@ -30,7 +30,7 @@ pub(crate) struct Work {
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin jobs:worker-shutdown-resources-pool
-    pub(crate) pool: Option<PoolResource>,
+    pub(crate) pool: Option<PgPool>,
     // template:end jobs:worker-shutdown-resources-pool
     // template:begin messaging:worker-shutdown-resources-messaging-broker
     pub(crate) broker: Option<BrokerResource>,
@@ -57,25 +57,9 @@ pub(crate) struct Resources {
     pub(crate) readiness: Option<ReadinessControl>,
 }
 
-// template:begin jobs:worker-resources-postgres-pool
-pub(crate) enum PoolResource {
-    Starting(PgPool),
-    Admitted(PgPool),
-}
-// template:end jobs:worker-resources-postgres-pool
-
 // template:begin messaging:worker-resources-broker
 pub(crate) enum BrokerResource {
     Starting(Box<MessagingStartup>),
     Admitted(Messaging),
-}
-
-impl Resources {
-    pub(crate) fn admitted_messaging(&self) -> Option<&Messaging> {
-        match self.dependencies.broker.as_ref() {
-            Some(BrokerResource::Admitted(messaging)) => Some(messaging),
-            Some(BrokerResource::Starting(_)) | None => None,
-        }
-    }
 }
 // template:end messaging:worker-resources-broker

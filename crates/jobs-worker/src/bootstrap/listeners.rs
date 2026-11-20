@@ -1,4 +1,4 @@
-use health::{BoxedProbe, ReadinessReader, RefreshPolicy};
+use health::{ReadinessReader, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions, HttpContract};
 use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options, Server};
 use infra_telemetry::{Metrics, diagnostics_router};
@@ -8,23 +8,11 @@ use super::WorkerError;
 use crate::background::Background;
 use crate::resources::{Listeners, Resources};
 
-pub(super) fn readiness_probes(resources: &Resources) -> Vec<BoxedProbe> {
-    #[allow(unused_mut, reason = "retained profiles add their probes")]
-    let mut probes: Vec<BoxedProbe> = Vec::new();
-    // template:begin jobs:worker-bootstrap-listener-jobs-probe
-    probes.extend(super::postgres::probe(resources));
-    // template:end jobs:worker-bootstrap-listener-jobs-probe
-    // template:begin messaging:worker-bootstrap-listener-messaging-probe
-    probes.extend(super::messaging::probe(resources));
-    // template:end messaging:worker-bootstrap-listener-messaging-probe
-    probes
-}
-
 pub(super) fn bind_listeners(
     config: &WorkerConfig,
     metrics: &Metrics,
     readiness: ReadinessReader,
-    background: &Background,
+    background: &mut Background,
     resources: &mut Resources,
 ) -> Result<(), WorkerError> {
     let http = config.http().listener();
@@ -53,7 +41,7 @@ pub(super) fn bind_listeners(
     Ok(())
 }
 
-fn watch_listener(name: &'static str, server: &Server, background: &Background) {
+fn watch_listener(name: &'static str, server: &Server, background: &mut Background) {
     let failure = server.accept_failure();
     background.spawn(name, |cancel| async move {
         tokio::select! {

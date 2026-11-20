@@ -54,18 +54,21 @@ pub(super) fn validate_pool_capacity(
 pub(super) async fn build_engine(
     config: &WorkerConfig,
     kinds: Option<Kinds>,
-    resources: &Resources,
+    pool: Option<&infra_postgres::PgPool>,
+    // template:begin outbox:worker-bootstrap-build-engine-messaging
+    messaging: Option<&infra_messaging::Messaging>,
+    // template:end outbox:worker-bootstrap-build-engine-messaging
 ) -> Result<Option<Engine>, WorkerError> {
     let engine = match kinds {
         Some(kinds) => Some(Engine::new(
-            super::postgres::admitted_pool(resources)?,
+            pool.cloned().ok_or(WorkerError::PostgresDisabled)?,
             kinds,
             config.jobs().max_workers,
         )),
         None => None,
     };
     // template:begin outbox:worker-bootstrap-outbox-engine
-    let engine = Some(super::outbox::with_publisher(resources, engine)?);
+    let engine = Some(super::outbox::with_publisher(pool, messaging, engine)?);
     // template:end outbox:worker-bootstrap-outbox-engine
     if let Some(engine) = &engine {
         engine.check_startup().await?;
@@ -74,7 +77,7 @@ pub(super) async fn build_engine(
 }
 
 pub(super) fn start_engine(engine: Engine, resources: &mut Resources, background: &Background) {
-    resources.work.started_engine = Some(engine.start(&background.tracker, &background.cancel));
+    resources.work.started_engine = Some(background.start_engine(engine));
     tracing::info!("jobs_claiming_started");
 }
 

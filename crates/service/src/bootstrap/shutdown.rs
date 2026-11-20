@@ -39,19 +39,10 @@ pub(crate) const TAIL: ShutdownTail = ShutdownTail::new(
     "teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)",
 );
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Outcome {
     Graceful,
     Degraded,
-}
-
-impl Outcome {
-    fn combine(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Graceful, Self::Graceful) => Self::Graceful,
-            (Self::Degraded, _) | (_, Self::Degraded) => Self::Degraded,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -177,19 +168,58 @@ impl Dependencies {
             Outcome::Graceful
         };
         let (cache_outcome, postgres_outcome) = tokio::join!(cache_close, postgres_close);
-        cache_outcome.combine(postgres_outcome)
+        cache_outcome.max(postgres_outcome)
     }
 }
 
 #[derive(Default)]
-pub(crate) struct Serving {
-    pub(crate) readiness: Option<ReadinessControl>,
-    pub(crate) http_server: Option<Server>,
-    pub(crate) diagnostics_server: Option<Server>,
+pub(crate) struct Telemetry {
+    pub(crate) tracer_provider: Option<TracerProviderHandle>,
+    pub(crate) logger: Option<LoggerGuard>,
+}
+
+#[derive(Default)]
+pub(crate) enum ReadinessState {
+    #[default]
+    Uninstalled,
+    Prepared(ReadinessControl),
+    Admitted(ReadinessControl),
+}
+
+impl ReadinessState {
+    pub(crate) fn control(&self) -> Option<&ReadinessControl> {
+        match self {
+            Self::Uninstalled => None,
+            Self::Prepared(control) | Self::Admitted(control) => Some(control),
+        }
+    }
+
+    pub(crate) fn mark_admitted(&mut self) {
+        *self = match std::mem::take(self) {
+            Self::Prepared(control) | Self::Admitted(control) => Self::Admitted(control),
+            Self::Uninstalled => Self::Uninstalled,
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_admitted(&self) -> bool {
+        matches!(self, Self::Admitted(_))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TrafficListeners {
+    pub(crate) http: Option<Server>,
     // template:begin grpc:shutdown-serving-grpc-field
-    pub(crate) grpc_server: Option<Server>,
+    pub(crate) grpc: Option<Server>,
     // template:end grpc:shutdown-serving-grpc-field
-    pub(crate) admitted: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct Serving {
+    pub(crate) readiness: ReadinessState,
+    pub(crate) traffic: TrafficListeners,
+    pub(crate) diagnostics: Option<Server>,
 }
 
 pub(crate) struct Plan<'a> {
@@ -199,8 +229,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) serving: Serving,
     pub(crate) background: Background,
     pub(crate) dependencies: Dependencies,
-    pub(crate) tracer_provider: Option<TracerProviderHandle>,
-    pub(crate) logger: Option<LoggerGuard>,
+    pub(crate) telemetry: Telemetry,
 }
 
 async fn stage(name: &'static str, future: impl Future<Output = Outcome>) -> Outcome {
@@ -221,38 +250,40 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         http_config,
         signals,
         deadline,
-        mut serving,
+        serving:
+            Serving {
+                readiness,
+                traffic,
+                diagnostics,
+            },
         mut background,
         dependencies,
-        tracer_provider,
-        logger,
+        telemetry,
     } = plan;
     let budget = Budget::until(deadline);
     let mut outcome = stage("listeners", async {
         tracing::info!(grace = ?http_config.grace_period, "shutdown_started");
-        stop_serving(&mut serving, http_config, signals, &budget).await
+        stop_serving(&readiness, traffic, http_config, signals, &budget).await
     })
     .await;
-    if let Some(diagnostics) = serving.diagnostics_server.take() {
-        let diagnostics_outcome =
-            stage("diagnostics", stop_diagnostics(diagnostics, &budget)).await;
-        outcome = outcome.combine(diagnostics_outcome);
+    if let Some(diagnostics) = diagnostics {
+        outcome = outcome.max(stage("diagnostics", stop_diagnostics(diagnostics, &budget)).await);
     }
-    drop(serving);
+    drop(readiness);
 
     background.cancel();
-    let background_outcome = stage("background", join_background(&mut background, &budget)).await;
-    outcome = outcome.combine(background_outcome);
+    outcome = outcome.max(stage("background", join_background(&mut background, &budget)).await);
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
-    let forced_background_outcome = stage(
-        "background_forced",
-        confirm_background_abort(&mut background, dependency_deadline),
-    )
-    .await;
-    outcome = outcome.combine(forced_background_outcome);
-    let dependencies_outcome = stage("dependencies", dependencies.close(dependency_deadline)).await;
-    outcome = outcome.combine(dependencies_outcome);
-    finish_telemetry(tracer_provider, logger, signals, &budget, outcome).await
+    outcome = outcome.max(
+        stage(
+            "background_forced",
+            confirm_background_abort(&mut background, dependency_deadline),
+        )
+        .await,
+    );
+    drop(background);
+    outcome = outcome.max(stage("dependencies", dependencies.close(dependency_deadline)).await);
+    finish_telemetry(telemetry, signals, &budget, outcome).await
 }
 
 async fn join_background(background: &mut Background, budget: &Budget) -> Outcome {
@@ -292,12 +323,15 @@ async fn confirm_background_abort(
 }
 
 async fn finish_telemetry(
-    tracer_provider: Option<TracerProviderHandle>,
-    logger: Option<LoggerGuard>,
+    telemetry: Telemetry,
     signals: &mut Signals,
     budget: &Budget,
     mut outcome: Outcome,
 ) -> Outcome {
+    let Telemetry {
+        tracer_provider,
+        logger,
+    } = telemetry;
     let telemetry_deadline =
         budget.stage_deadline(TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK));
     let log_reserve = if let Some(logger) = &logger {
@@ -308,16 +342,14 @@ async fn finish_telemetry(
     };
     let trace_deadline = telemetry_deadline - log_reserve;
     if let Some(provider) = tracer_provider {
-        let trace_outcome = stage("telemetry", shutdown_tracer(provider, trace_deadline)).await;
-        outcome = outcome.combine(trace_outcome);
+        outcome = outcome.max(stage("telemetry", shutdown_tracer(provider, trace_deadline)).await);
     }
     if let Err(error) = signals.take_pending() {
-        outcome = outcome.combine(signal_owner_failed(error));
+        outcome = outcome.max(signal_owner_failed(error));
     }
     tracing::info!(?outcome, logger_pending = true, "shutdown_finishing");
     if let Some(logger) = logger {
-        let logger_outcome = stage("logger", shutdown_logger(logger, telemetry_deadline)).await;
-        outcome = outcome.combine(logger_outcome);
+        outcome = outcome.max(stage("logger", shutdown_logger(logger, telemetry_deadline)).await);
     }
     outcome
 }
@@ -387,41 +419,41 @@ async fn wait_readiness_propagation(delay: Duration, signals: &mut Signals) -> O
 }
 
 async fn stop_serving(
-    serving: &mut Serving,
+    readiness: &ReadinessState,
+    traffic: TrafficListeners,
     http_config: &HttpConfig,
     signals: &mut Signals,
     budget: &Budget,
 ) -> Outcome {
-    if let Some(readiness) = &serving.readiness {
-        readiness.start_drain();
+    if let Some(control) = readiness.control() {
+        control.start_drain();
         tracing::info!("readiness_disabled");
     }
     let overall_drain_deadline = budget.stage_deadline(http_config.drain_timeout);
-    let (propagation_outcome, requested_drain) = if serving.admitted {
-        (
+    let (propagation_outcome, requested_drain) = match readiness {
+        ReadinessState::Admitted(_) => (
             wait_readiness_propagation(
                 budget.stage_budget(http_config.readiness_propagation_delay),
                 signals,
             )
             .await,
             http_config.effective_drain_budget(),
-        )
-    } else {
-        (Outcome::Graceful, http_config.drain_timeout)
+        ),
+        ReadinessState::Uninstalled | ReadinessState::Prepared(_) => {
+            (Outcome::Graceful, http_config.drain_timeout)
+        }
     };
     let deadlines = budget.drain_deadlines(requested_drain, overall_drain_deadline);
     tracing::info!(budget = ?deadlines.remaining(), "drain_started");
-    let drain = drain_server(serving.http_server.take(), deadlines, &DrainEvents::HTTP);
+    let drain = drain_server(traffic.http, deadlines, &DrainEvents::HTTP);
     // template:begin grpc:shutdown-concurrent-grpc-drain
+    let grpc_drain = drain_server(traffic.grpc, deadlines, &DrainEvents::GRPC);
     let drain = async {
-        let (http_outcome, grpc_outcome) = tokio::join!(
-            drain,
-            drain_server(serving.grpc_server.take(), deadlines, &DrainEvents::GRPC)
-        );
-        http_outcome.combine(grpc_outcome)
+        let (http_outcome, grpc_outcome) = tokio::join!(drain, grpc_drain);
+        http_outcome.max(grpc_outcome)
     };
     // template:end grpc:shutdown-concurrent-grpc-drain
-    propagation_outcome.combine(drain.await)
+    propagation_outcome.max(drain.await)
 }
 
 struct DrainEvents {
@@ -553,8 +585,7 @@ mod tests {
             serving: Serving::default(),
             background,
             dependencies: Dependencies::default(),
-            tracer_provider: None,
-            logger: None,
+            telemetry: Telemetry::default(),
         })
         .await;
         assert_eq!(outcome, Outcome::Degraded);
@@ -580,8 +611,7 @@ mod tests {
                 serving: Serving::default(),
                 background,
                 dependencies: Dependencies::default(),
-                tracer_provider: None,
-                logger: None,
+                telemetry: Telemetry::default(),
             })
             .await,
             Outcome::Degraded
@@ -671,18 +701,16 @@ mod tests {
         let mut http_config = super::super::test_config(&[]).http().clone();
         http_config.drain_timeout = Duration::from_millis(30);
         let mut signals = Signals::install().unwrap();
+        let mut serving = Serving::default();
+        serving.traffic.http = Some(server);
         let shutdown = run(Plan {
             http_config: &http_config,
             signals: &mut signals,
             deadline: Instant::now() + http_config.grace_period,
-            serving: Serving {
-                http_server: Some(server),
-                ..Serving::default()
-            },
+            serving,
             background: Background::new(CancellationToken::new()),
             dependencies,
-            tracer_provider: None,
-            logger: None,
+            telemetry: Telemetry::default(),
         });
         let check_order = async {
             tokio::time::timeout(Duration::from_secs(2), dropping.cancelled())
