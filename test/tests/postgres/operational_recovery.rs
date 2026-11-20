@@ -4,8 +4,9 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
 use health::{BoxedProbe, Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
 use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
-use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
+use infra_postgres::{CloseOutcome, Pool, PostgresProbe};
 use integration_tests::{poll_until, propagate_join_panic};
+use sqlx::PgPool;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -36,22 +37,22 @@ const POLICY: RefreshPolicy = match RefreshPolicy::try_new(
     Err(_) => panic!("valid refresh policy"),
 };
 
-async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {
-    let mut connection = infra_postgres::acquire(pool, "recovery consumer").await?;
+async fn value(pool: &Pool) -> Result<String, sqlx::Error> {
+    let mut connection = pool.acquire("recovery consumer").await?;
     sqlx::query_scalar("SELECT value FROM recovery_value")
         .fetch_one(&mut *connection)
         .await
 }
 
 #[utoipa::path(get, path = "/useful", responses((status = 200), (status = 503)))]
-async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
+async fn http_value(State(pool): State<Pool>) -> axum::response::Response {
     match value(&pool).await {
         Ok(value) => value.into_response(),
         Err(_) => infra_http::Problem::new(infra_http::Code::ServiceUnavailable).into_response(),
     }
 }
 
-fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Application {
+fn http_router(pool: Pool, readiness: &ReadinessControl) -> infra_http::Application {
     infra_http::http_route!(http_value)
         .unwrap()
         .with_state(pool)
@@ -74,7 +75,7 @@ fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Applic
 }
 
 struct Instance {
-    pool: PgPool,
+    pool: Pool,
     readiness: ReadinessControl,
     cancel: CancellationToken,
     refresh: JoinHandle<()>,
@@ -88,7 +89,7 @@ struct Instance {
 }
 
 impl Instance {
-    async fn start(pool: PgPool) -> Self {
+    async fn start(pool: Pool) -> Self {
         let probes = Readiness::new(
             vec![BoxedProbe::new(PostgresProbe::new(pool.clone()))],
             POLICY,
@@ -278,11 +279,8 @@ impl Instance {
                 .unwrap(),
             Drained::Complete
         );
-        assert_eq!(self.pool.options().get_max_connections(), 1);
-        assert_eq!(
-            infra_postgres::close(&self.pool, CALL).await,
-            CloseOutcome::Complete
-        );
+        assert_eq!(self.pool.as_sqlx().options().get_max_connections(), 1);
+        assert_eq!(self.pool.close(CALL).await, CloseOutcome::Complete);
     }
 }
 
@@ -371,9 +369,8 @@ async fn publish(pool: &PgPool, expected: &str) {
 }
 
 #[expect(
-    clippy::disallowed_methods,
     clippy::print_stdout,
-    reason = "hold raw pool capacity and print observed recovery timing with --no-capture"
+    reason = "print observed recovery timing with --no-capture"
 )]
 #[sqlx::test(migrations = false)]
 async fn consumers_recover_from_local_pressure_shared_interruption_and_admission(pool: PgPool) {
@@ -395,7 +392,7 @@ async fn consumers_recover_from_local_pressure_shared_interruption_and_admission
     a.useful("initial").await;
     b.useful("initial").await;
 
-    let mut held = a.pool.acquire().await.unwrap();
+    let mut held = a.pool.as_sqlx().acquire().await.unwrap();
     let started = Instant::now();
     a.state(false).await;
     assert_eq!(
@@ -471,7 +468,7 @@ mod grpc {
         health_client::HealthClient,
     };
 
-    struct DatabaseEcho(PgPool);
+    struct DatabaseEcho(Pool);
     type Output<T> = Pin<Box<dyn futures_util::Stream<Item = Result<T, Status>> + Send>>;
 
     #[tonic::async_trait]
@@ -544,7 +541,7 @@ mod grpc {
     }
 
     impl Consumer {
-        pub(super) async fn start(pool: PgPool, reader: health::ReadinessReader) -> Self {
+        pub(super) async fn start(pool: Pool, reader: health::ReadinessReader) -> Self {
             #[allow(unused_variables, reason = "the bearer profile replaces the test mode")]
             let authentication = infra_grpc::Authentication::None;
             // template:end postgres-grpc-consumers:recovery-grpc-module-3

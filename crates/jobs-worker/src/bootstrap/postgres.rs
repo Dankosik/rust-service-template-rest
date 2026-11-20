@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_postgres::{Dsn, DsnError, PgPool, PoolOptions, SessionSettingsSource};
+use infra_postgres::{Dsn, DsnError, Pool, PoolOptions, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
@@ -36,8 +36,8 @@ pub(super) async fn admit_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
     background: &mut Background,
-    retained: &mut Option<PgPool>,
-) -> Result<PgPool, WorkerError> {
+    retained: &mut Option<Pool>,
+) -> Result<Pool, WorkerError> {
     let dsn = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
     let local_development = config.app().is_local_development();
@@ -57,24 +57,19 @@ async fn open_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
     background: &mut Background,
-    retained: &mut Option<PgPool>,
+    retained: &mut Option<Pool>,
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
-) -> Result<PgPool, WorkerError> {
+) -> Result<Pool, WorkerError> {
     let dsn = prepare_dsn(prepare).await?;
     let application_name = application_name(&config.observability().otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
         postgres.max_connections,
         &application_name,
+        postgres.notifications,
     );
-    let pool = retained
-        .insert(infra_postgres::prepare_pool_with_notifications(
-            &dsn,
-            &options,
-            postgres.notifications,
-        ))
-        .clone();
-    infra_postgres::admit_pool(&pool, &options).await?;
+    let pool = retained.insert(Pool::prepare(&dsn, &options)).clone();
+    pool.admit(&options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
@@ -100,19 +95,16 @@ async fn prepare_dsn(
     }
 }
 
-fn spawn_pool_tasks(pool: &PgPool, dsn: &Dsn, background: &mut Background) {
+fn spawn_pool_tasks(pool: &Pool, dsn: &Dsn, background: &mut Background) {
     background.spawn("postgres_pool_metrics", |cancel| {
-        infra_postgres::record_metrics_periodically(
-            pool.clone(),
-            "postgres",
-            METRICS_MAINTENANCE_INTERVAL,
-            cancel,
-        )
+        pool.clone()
+            .record_metrics_periodically("postgres", METRICS_MAINTENANCE_INTERVAL, cancel)
     });
     if let Some(password_file) = dsn.password_file() {
         let password_file = password_file.to_owned();
         background.spawn("postgres_password_refresh", |cancel| {
-            infra_postgres::refresh_password_periodically(pool.clone(), password_file, cancel)
+            pool.clone()
+                .refresh_password_periodically(password_file, cancel)
         });
     }
 }
@@ -121,6 +113,7 @@ pub(crate) fn pool_options(
     session_budgets: PostgresSessionBudgets,
     max_connections: NonZeroU32,
     application_name: &str,
+    notifications: bool,
 ) -> PoolOptions<'_> {
     PoolOptions {
         max_connections,
@@ -131,6 +124,7 @@ pub(crate) fn pool_options(
             PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
         wait_order: infra_postgres::WaitOrder::Arrival,
+        notifications,
     }
 }
 

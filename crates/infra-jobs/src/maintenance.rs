@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
-use infra_postgres::{
-    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, in_observation_tx, in_tx,
-    observed, set_statement_timeout,
+use infra_postgres::maintenance::{
+    CleanupName, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationName,
+    PopulationSample, in_observation_tx,
 };
+use infra_postgres::{Tx, observed};
 use metrics::Unit;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -18,6 +19,8 @@ use crate::engine::{
 mod outbox;
 // template:end outbox:jobs-maintenance-outbox-module
 
+const JOBS_CLEANUP: CleanupName = CleanupName::new("jobs");
+const FAILED_JOBS_POPULATION: PopulationName = PopulationName::new("failed_jobs");
 const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
 pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
 const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
@@ -31,24 +34,25 @@ const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) async fn remove_expired(primary_group: &WorkerGroup) -> Result<u64, OperationError> {
-    let mut pass = CleanupPass::start(Cleanup::Jobs);
-    let mut removed = 0u64;
+    let mut pass = CleanupPass::start(JOBS_CLEANUP);
     loop {
-        let batch = Box::pin(delete_batch(primary_group))
-            .await
-            .inspect_err(|_| pass.failed())?;
+        let batch = match Box::pin(delete_batch(primary_group)).await {
+            Ok(batch) => batch,
+            Err(error) => {
+                pass.fail();
+                return Err(error);
+            }
+        };
         pass.committed(batch);
-        removed = removed.saturating_add(batch);
         if batch < u64::from(RETENTION_BATCH_ROWS) {
-            pass.completed();
-            return Ok(removed);
+            return Ok(pass.complete());
         }
     }
 }
 
 pub(crate) async fn run_retention(primary_group: &WorkerGroup, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
+        let mut schedule = CleanupSchedule::new(JOBS_CLEANUP);
         loop {
             schedule.next().await;
             match remove_expired(primary_group).await {
@@ -70,11 +74,13 @@ where
 {
     let _turn = primary_group.statement_turn.lock().await;
     backstop(async {
-        in_tx(&primary_group.pool, async |tx| {
-            set_statement_timeout(tx, timeout).await?;
-            work(tx).await
-        })
-        .await
+        primary_group
+            .pool
+            .in_tx(async |tx| {
+                tx.set_statement_timeout(timeout).await?;
+                work(tx).await
+            })
+            .await
     })
     .await
 }
@@ -92,7 +98,7 @@ async fn delete_batch(primary_group: &WorkerGroup) -> Result<u64, OperationError
             RETAIN_COMPLETED_FOR as _,
             i64::from(RETENTION_BATCH_ROWS),
         );
-        Ok(observed("delete finished jobs", delete.execute(&mut *tx))
+        Ok(observed!("delete finished jobs", delete.execute(&mut *tx))
             .await?
             .rows_affected())
     })
@@ -167,8 +173,8 @@ enum Population {
 impl Population {
     const fn maintenance_population(self) -> MaintenancePopulation {
         match self {
-            Self::ExpiredCompleted => MaintenancePopulation::Cleanup(Cleanup::Jobs),
-            Self::Failed => MaintenancePopulation::FailedJobs,
+            Self::ExpiredCompleted => MaintenancePopulation::Cleanup(JOBS_CLEANUP),
+            Self::Failed => MaintenancePopulation::Retained(FAILED_JOBS_POPULATION),
         }
     }
 }
@@ -182,7 +188,7 @@ async fn read_population(
         .map_err(|_| MaintenanceFailure::Permit)?;
     in_observation_tx(&primary_group.pool, async |tx| {
         Ok(match population {
-            Population::Failed => observed(
+            Population::Failed => observed!(
                 "observe failed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
@@ -193,7 +199,7 @@ async fn read_population(
                 .fetch_one(&mut *tx),
             )
             .await?,
-            Population::ExpiredCompleted => observed(
+            Population::ExpiredCompleted => observed!(
                 "observe completed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
@@ -242,7 +248,7 @@ async fn sample_once(
     kinds: &[&str],
 ) -> Result<Sample, OperationError> {
     in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
-        let rows = observed(
+        let rows = observed!(
             "sample jobs",
             sqlx::query_as!(
                 SampleRow,

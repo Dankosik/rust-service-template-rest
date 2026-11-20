@@ -69,6 +69,9 @@ utoipa-axum = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
+# template:begin http-idempotency:http-idempotency-test-dependencies
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end http-idempotency:http-idempotency-test-dependencies
 # template:begin grpc:http-tls-test-dependencies
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

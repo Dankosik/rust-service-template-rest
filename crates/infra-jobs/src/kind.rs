@@ -8,11 +8,10 @@ use std::time::Duration;
 
 use compact_str::{CompactString, format_compact};
 use futures_util::future::BoxFuture;
-use infra_postgres::{Tx, observed};
+use infra_postgres::{Pool, Tx, observed};
 use operation_context::{Deadline, OperationContext};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::postgres::PgPool;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -105,7 +104,7 @@ pub(crate) struct Attempt {
     pub(crate) cancellation: CancellationToken,
 }
 
-pub struct Job<K, P = PgPool> {
+pub struct Job<K, P = Pool> {
     attempt: Attempt,
     payload: K,
     pool: P,
@@ -150,7 +149,7 @@ impl<K, P> Job<K, P> {
 
 impl<K> Job<K> {
     #[must_use]
-    pub const fn pool(&self) -> &PgPool {
+    pub const fn pool(&self) -> &Pool {
         &self.pool
     }
 }
@@ -427,8 +426,7 @@ async fn run_transactional<K: JobKind>(
         pool: (),
     };
     let fence = job.attempt.fence;
-    infra_postgres::in_tx_with_acquire_deadline(
-        &pool,
+    pool.in_tx_with_acquire_deadline(
         job.deadline(),
         infra_postgres::TxOptions::default(),
         async move |tx| {
@@ -623,7 +621,7 @@ pub(crate) trait ErasedHandler: Send + Sync + 'static {
     fn prepare(
         &self,
         attempt: Attempt,
-        pool: PgPool,
+        pool: Pool,
         payload: &[u8],
     ) -> Result<HandlerFuture<'_>, serde_json::Error>;
 }
@@ -641,7 +639,7 @@ where
     fn prepare(
         &self,
         attempt: Attempt,
-        pool: PgPool,
+        pool: Pool,
         payload: &[u8],
     ) -> Result<HandlerFuture<'_>, serde_json::Error> {
         let payload = serde_json::from_slice::<K>(payload)?;
@@ -669,7 +667,7 @@ where
     fn prepare(
         &self,
         attempt: Attempt,
-        pool: PgPool,
+        pool: Pool,
         payload: &[u8],
     ) -> Result<HandlerFuture<'_>, serde_json::Error> {
         let payload = serde_json::from_slice::<K>(payload)?;
@@ -686,7 +684,6 @@ where
 mod tests {
 
     use serde::{Deserialize, Serialize};
-    use sqlx::postgres::PgPoolOptions;
 
     use super::*;
 
@@ -722,10 +719,8 @@ mod tests {
         JobId(uuid::Uuid::try_parse(text).unwrap())
     }
 
-    fn lazy_pool() -> PgPool {
-        PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap()
+    fn lazy_pool() -> Pool {
+        Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap()
     }
 
     proptest::proptest! {

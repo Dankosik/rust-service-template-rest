@@ -664,7 +664,7 @@ async fn http_application(
     auth: Authentication,
     config: &Config,
     // template:begin http-idempotency:bootstrap-http-idempotency-inputs
-    pool: Option<&infra_postgres::PgPool>,
+    pool: Option<&infra_postgres::Pool>,
     background: &mut Background,
     // template:end http-idempotency:bootstrap-http-idempotency-inputs
 ) -> Result<infra_http::Application, BootstrapError> {

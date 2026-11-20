@@ -1,11 +1,10 @@
 use std::{num::NonZeroU32, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Parser, Subcommand};
-use infra_postgres::{Dsn, Isolation, PoolOptions, SessionSettingsSource};
+use infra_postgres::{Dsn, Isolation, Pool, PoolOptions, SessionSettingsSource};
 use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{self, Error, Operation, PreparedRequest};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use tokio::io::AsyncReadExt;
 
 const ENDPOINT: &str = "reading-counter";
@@ -52,9 +51,9 @@ fn operation(raw: &str) -> Result<Operation, FixtureError> {
     Ok(value)
 }
 
-async fn open_pool() -> Result<PgPool, FixtureError> {
+async fn open_pool() -> Result<Pool, FixtureError> {
     let dsn = Dsn::admit_for_environment(&std::env::var("DATABASE_URL")?, None, true)?;
-    Ok(infra_postgres::connect(
+    Ok(Pool::connect(
         &dsn,
         &PoolOptions {
             max_connections: const { NonZeroU32::new(2).expect("2 is nonzero") },
@@ -62,6 +61,7 @@ async fn open_pool() -> Result<PgPool, FixtureError> {
             default_isolation: Isolation::ServerDefault,
             session_settings_source: SessionSettingsSource::Startup,
             wait_order: infra_postgres::WaitOrder::Arrival,
+            notifications: true,
         },
     )
     .await?)
@@ -81,7 +81,7 @@ fn error_receipt(error: &Error) -> Value {
 }
 
 async fn accept_one(
-    pool: &PgPool,
+    pool: &Pool,
     operation: Operation,
     publication: &infra_messaging::PublicationRoute<Operation>,
     endpoint: &str,
@@ -111,7 +111,7 @@ async fn accept_one(
     }
 }
 
-async fn accept(pool: &PgPool, args: AcceptArgs) -> Result<bool, FixtureError> {
+async fn accept(pool: &Pool, args: AcceptArgs) -> Result<bool, FixtureError> {
     let operations = if let Some(path) = args.operations_file {
         const MAX_BATCH_BYTES: usize = 128 * 1024 + 256;
         let file = tokio::fs::File::open(path).await?;
@@ -157,7 +157,7 @@ async fn command(Command::Accept(args): Command) -> Result<bool, FixtureError> {
         return Ok(false);
     };
     let result = accept(&pool, args).await;
-    let closed = infra_postgres::close(&pool, Duration::from_secs(5)).await;
+    let closed = pool.close(Duration::from_secs(5)).await;
     if closed == infra_postgres::CloseOutcome::TimedOut {
         return Err("fixture pool close timed out".into());
     }

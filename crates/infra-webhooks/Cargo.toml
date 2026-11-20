@@ -57,6 +57,7 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 [dev-dependencies]
 metrics-util = { workspace = true, features = ["debugging"] }
 # template:begin inbound-webhooks:webhooks-inbound-test-dependencies
+infra-postgres = { workspace = true, features = ["test-support"] }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:webhooks-inbound-test-dependencies
 proptest = { workspace = true, features = ["std"] }

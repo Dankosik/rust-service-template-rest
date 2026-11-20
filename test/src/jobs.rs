@@ -58,12 +58,19 @@ pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigser
 
 pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     let id = job.id().to_string();
-    sqlx::query("INSERT INTO probe_attempts (job_id, attempt) VALUES ($1::uuid, $2)")
-        .bind(id)
-        .bind(i32::from(job.attempt()))
-        .execute(job.pool())
-        .await
-        .map_err(|_| JobError::retryable("probe write failed"))?;
+    {
+        let mut conn = job
+            .pool()
+            .acquire("record probe attempt")
+            .await
+            .map_err(|_| JobError::retryable("probe write failed"))?;
+        sqlx::query("INSERT INTO probe_attempts (job_id, attempt) VALUES ($1::uuid, $2)")
+            .bind(id)
+            .bind(i32::from(job.attempt()))
+            .execute(&mut *conn)
+            .await
+            .map_err(|_| JobError::retryable("probe write failed"))?;
+    }
     match job.payload().action {
         ProbeAction::Succeed => Ok(()),
         ProbeAction::FailRetryable => Err(JobError::retryable("probe failed retryably")),
@@ -74,10 +81,15 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
         )
         .expect("probe delay is valid")),
         ProbeAction::SnoozeOnce { millis } => {
+            let mut conn = job
+                .pool()
+                .acquire("read probe attempts")
+                .await
+                .map_err(|_| JobError::retryable("probe lookup failed"))?;
             let deliveries: i64 =
                 sqlx::query_scalar("SELECT count(*) FROM probe_attempts WHERE job_id = $1::uuid")
                     .bind(job.id().to_string())
-                    .fetch_one(job.pool())
+                    .fetch_one(&mut *conn)
                     .await
                     .map_err(|_| JobError::retryable("probe lookup failed"))?;
             if deliveries == 1 {

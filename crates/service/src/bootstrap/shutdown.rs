@@ -10,7 +10,7 @@ use infra_cache::Cache;
 use infra_object_storage::ObjectStorage;
 // template:end object-storage:service-shutdown-object-storage-imports
 // template:begin postgres:shutdown-imports
-use infra_postgres::{CloseOutcome, PgPool};
+use infra_postgres::{CloseOutcome, Pool};
 // template:end postgres:shutdown-imports
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
@@ -98,7 +98,7 @@ impl Budget {
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin postgres:shutdown-dependencies-postgres-field
-    pub(crate) postgres: Option<PgPool>,
+    pub(crate) postgres: Option<Pool>,
     // template:end postgres:shutdown-dependencies-postgres-field
     // template:begin cache:service-shutdown-dependencies-cache-field
     pub(crate) cache: Option<Cache>,
@@ -148,11 +148,9 @@ impl Dependencies {
         let postgres_close = async {
             // template:begin postgres:shutdown-dependencies-postgres-close
             if let Some(pool) = postgres {
-                return match infra_postgres::close(
-                    &pool,
-                    deadline.saturating_duration_since(Instant::now()),
-                )
-                .await
+                return match pool
+                    .close(deadline.saturating_duration_since(Instant::now()))
+                    .await
                 {
                     CloseOutcome::Complete => {
                         tracing::info!("postgres_pool_closed");
@@ -623,7 +621,7 @@ mod tests {
         entered: CancellationToken,
         dropping: CancellationToken,
         held: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
-        pool: PgPool,
+        pool: Pool,
         released_before_close: CancellationToken,
     ) -> &'static str {
         let _guard = std::mem::DropGuard::new(held, move |held| {
@@ -654,7 +652,7 @@ mod tests {
         let mut dependencies = Dependencies::default();
         let pool = dependencies
             .postgres
-            .insert(PgPool::connect_lazy("postgres://localhost/unused").unwrap())
+            .insert(Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap())
             .clone();
         let handler = {
             let entered = entered.clone();
@@ -717,7 +715,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                tokio::time::timeout(Duration::from_millis(30), pool.close_event())
+                tokio::time::timeout(Duration::from_millis(30), pool.as_sqlx().close_event())
                     .await
                     .is_err()
             );

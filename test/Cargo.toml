@@ -23,7 +23,7 @@ integration = []
 [dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal", "fs"] }
 url = { workspace = true }
-infra-postgres = { workspace = true }
+infra-postgres = { workspace = true, features = ["test-support"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
 # template:end postgres:test-postgres-dependencies
 # template:begin jobs:test-jobs-dependencies

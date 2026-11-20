@@ -4,6 +4,8 @@ use super::*;
 use crate::maintenance::{MaintenanceFailure, run_scheduled_cleanup};
 use crate::observe::tests::Events;
 
+const TEST_CLEANUP: CleanupName = CleanupName::new("jobs");
+
 #[test]
 fn cleanup_buckets_separate_a_seventeen_second_pass_from_upper_tail_overflow() {
     let recorder = PrometheusBuilder::new()
@@ -14,15 +16,13 @@ fn cleanup_buckets_separate_a_seventeen_second_pass_from_upper_tail_overflow() {
         .unwrap()
         .build_recorder();
     metrics::with_local_recorder(&recorder, || {
-        let mut failed = CleanupPass::start(Cleanup::Jobs);
+        let mut failed = CleanupPass::start(TEST_CLEANUP);
         failed.started -= Duration::from_secs(17);
         failed.committed(500);
-        failed.failed();
-        drop(failed);
-        let mut long = CleanupPass::start(Cleanup::Jobs);
+        failed.fail();
+        let mut long = CleanupPass::start(TEST_CLEANUP);
         long.started -= Duration::from_secs(3601);
-        long.completed();
-        drop(long);
+        let _ = long.complete();
     });
     let scrape = recorder.handle().render();
     for (outcome, bound, count) in [
@@ -52,9 +52,9 @@ fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() 
     metrics::with_local_recorder(&recorder, || {
         tracing::subscriber::with_default(events.clone(), || {
             let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            let mut completed = CleanupPass::start(Cleanup::Jobs);
-            let mut failed = CleanupPass::start(Cleanup::Jobs);
-            let mut cancelled = CleanupPass::start(Cleanup::Jobs);
+            let mut completed = CleanupPass::start(TEST_CLEANUP);
+            let mut failed = CleanupPass::start(TEST_CLEANUP);
+            let mut cancelled = CleanupPass::start(TEST_CLEANUP);
             completed.committed(500);
             completed.committed(0);
             failed.committed(500);
@@ -69,16 +69,14 @@ fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() 
             }
             assert!(!scrape.contains("postgres_cleanup_passes_total{"));
             assert!(events.records.lock().unwrap().is_empty());
-            completed.completed();
-            drop(completed);
+            assert_eq!(completed.complete(), 500);
             assert!(
                 recorder
                     .handle()
                     .render()
                     .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 2")
             );
-            failed.failed();
-            drop(failed);
+            failed.fail();
             assert!(
                 recorder
                     .handle()
@@ -120,7 +118,7 @@ fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() 
 #[test]
 fn cleanup_releases_the_original_active_gauge_after_moving_threads() {
     let recorder = PrometheusBuilder::new().build_recorder();
-    let pass = metrics::with_local_recorder(&recorder, || CleanupPass::start(Cleanup::Jobs));
+    let pass = metrics::with_local_recorder(&recorder, || CleanupPass::start(TEST_CLEANUP));
     std::thread::spawn(move || drop(pass)).join().unwrap();
     assert!(
         recorder
@@ -140,7 +138,7 @@ async fn scheduled_cleanup_counts_a_timed_out_batch_and_runs_the_next_pass() {
     let mut passes = 0;
 
     let cleanup = run_scheduled_cleanup(
-        Cleanup::Jobs,
+        TEST_CLEANUP,
         RUNS_METRIC,
         &cancel,
         || {
@@ -150,16 +148,16 @@ async fn scheduled_cleanup_counts_a_timed_out_batch_and_runs_the_next_pass() {
             async move {
                 match pass_number {
                     1 => {
-                        let mut pass = CleanupPass::start(Cleanup::Jobs);
+                        let mut pass = CleanupPass::start(TEST_CLEANUP);
                         pass.await_batch("test_cleanup_failed", std::future::pending())
                             .await?;
                         Ok::<_, CleanupError>(PassEnd::Completed)
                     }
                     2 => {
-                        let mut pass = CleanupPass::start(Cleanup::Jobs);
+                        let mut pass = CleanupPass::start(TEST_CLEANUP);
                         pass.await_batch("test_cleanup_failed", std::future::ready(Ok(7)))
                             .await?;
-                        pass.completed();
+                        let _ = pass.complete();
                         Ok(PassEnd::Completed)
                     }
                     _ => {

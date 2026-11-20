@@ -71,7 +71,7 @@ impl MessagingPlan {
 pub(super) async fn connect_messaging(
     plan: MessagingPlan,
     // template:begin outbox:worker-bootstrap-connect-messaging-pool
-    pool: Option<&infra_postgres::PgPool>,
+    pool: Option<&infra_postgres::Pool>,
     // template:end outbox:worker-bootstrap-connect-messaging-pool
     cancel: &CancellationToken,
     retained: &mut Option<MessagingStartup>,

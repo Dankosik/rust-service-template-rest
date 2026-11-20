@@ -4,7 +4,7 @@ use metrics_util::debugging::DebuggingRecorder;
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
-use crate::{Dsn, acquire_until, in_tx};
+use crate::Dsn;
 
 pub(crate) type EventFields = std::collections::BTreeMap<String, String>;
 
@@ -132,12 +132,14 @@ async fn separate_pools_report_their_own_limits() {
     let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let pool = |max_connections| {
-        PgPoolOptions::new()
-            .max_connections(max_connections)
-            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new())
+        Pool::from_test_pool(
+            PgPoolOptions::new()
+                .max_connections(max_connections)
+                .connect_lazy_with(sqlx::postgres::PgConnectOptions::new()),
+        )
     };
-    super::record_metrics(&pool(5), "write");
-    super::record_metrics(&pool(20), "read");
+    pool(5).record_metrics("write");
+    pool(20).record_metrics("read");
     let snapshot = snapshotter.snapshot().into_hashmap();
     for (pool_name, expected) in [("write", 5.0), ("read", 20.0)] {
         let target = Key::from_parts(
@@ -165,20 +167,22 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
             false
         })
         .expect("the dsn is admitted");
-    let pool = PgPoolOptions::new()
-        .acquire_timeout(Duration::from_millis(50))
-        .connect_lazy_with(dsn.connect_options());
-    let result: Result<(), TxError> = in_tx(&pool, async |_tx| Ok(())).await;
+    let pool = Pool::from_test_pool(
+        PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy_with(dsn.connect_options()),
+    );
+    let result: Result<(), TxError> = pool.in_tx(async |_tx| Ok(())).await;
     std::assert_matches!(result, Err(TxError::Acquire(_)), "{result:?}");
-    let expired: Result<(), Box<dyn std::error::Error>> = crate::in_tx_with_deadline(
-        &pool,
-        tokio::time::Instant::now(),
-        crate::TxOptions::default(),
-        async |_tx| Ok(()),
-    )
-    .await;
+    let expired: Result<(), Box<dyn std::error::Error>> = pool
+        .in_tx_with_deadline(
+            tokio::time::Instant::now(),
+            crate::TxOptions::default(),
+            async |_tx| Ok(()),
+        )
+        .await;
     assert!(expired.unwrap_err().is::<crate::OperationDeadlineElapsed>());
-    drop(TransactionObservation::start(Span::none(), None));
+    drop(TransactionObservation::start(Span::none(), pool.metrics()));
     let scrape = recorder.handle().render();
     for line in [
         "db_client_connection_wait_time_seconds_count{db_client_connection_pool_name=\"postgres\"} 2",
@@ -269,7 +273,7 @@ async fn a_prepared_pool_records_wait_and_outcome_through_cached_metrics() {
             false
         })
         .expect("the dsn is admitted");
-    let pool = crate::prepare_pool(
+    let pool = Pool::prepare(
         &dsn,
         &crate::PoolOptions {
             max_connections: std::num::NonZeroU32::MIN,
@@ -277,17 +281,17 @@ async fn a_prepared_pool_records_wait_and_outcome_through_cached_metrics() {
             default_isolation: crate::Isolation::ServerDefault,
             session_settings_source: crate::SessionSettingsSource::Startup,
             wait_order: crate::WaitOrder::Arrival,
+            notifications: true,
         },
     );
-    assert!(crate::pool::pool_metrics(&pool).is_some());
     for _ in 0..2 {
-        let expired: Result<(), Box<dyn std::error::Error>> = crate::in_tx_with_deadline(
-            &pool,
-            tokio::time::Instant::now(),
-            crate::TxOptions::default(),
-            async |_tx| Ok(()),
-        )
-        .await;
+        let expired: Result<(), Box<dyn std::error::Error>> = pool
+            .in_tx_with_deadline(
+                tokio::time::Instant::now(),
+                crate::TxOptions::default(),
+                async |_tx| Ok(()),
+            )
+            .await;
         assert!(expired.unwrap_err().is::<crate::OperationDeadlineElapsed>());
     }
     assert_eq!(recorder.wait_registrations.load(Ordering::Relaxed), 1);
@@ -320,12 +324,16 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
             false
         })
         .expect("the dsn is admitted");
-    let pool = PgPoolOptions::new()
-        .acquire_timeout(Duration::from_millis(50))
-        .connect_lazy_with(dsn.connect_options());
+    let pool = Pool::from_test_pool(
+        PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(50))
+            .connect_lazy_with(dsn.connect_options()),
+    );
 
     let started = tokio::time::Instant::now();
-    let waited = acquire_until(&pool, "test", started + Duration::from_millis(400)).await;
+    let waited = pool
+        .acquire_until("test", started + Duration::from_millis(400))
+        .await;
     std::assert_matches!(waited, Err(sqlx::Error::PoolTimedOut));
     assert!(
         started.elapsed() >= Duration::from_millis(400),
@@ -334,11 +342,15 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
         started.elapsed()
     );
 
-    let patient = PgPoolOptions::new()
-        .acquire_timeout(Duration::from_secs(30))
-        .connect_lazy_with(dsn.connect_options());
+    let patient = Pool::from_test_pool(
+        PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(30))
+            .connect_lazy_with(dsn.connect_options()),
+    );
     let started = tokio::time::Instant::now();
-    let cut = acquire_until(&patient, "test", started + Duration::from_millis(100)).await;
+    let cut = patient
+        .acquire_until("test", started + Duration::from_millis(100))
+        .await;
     std::assert_matches!(cut, Err(sqlx::Error::PoolTimedOut));
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -346,13 +358,13 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
         started.elapsed()
     );
 
-    let result: Result<(), TxError> = crate::in_tx_with_acquire_deadline(
-        &pool,
-        tokio::time::Instant::now() + Duration::from_millis(100),
-        crate::TxOptions::default(),
-        async |_tx| Ok(()),
-    )
-    .await;
+    let result: Result<(), TxError> = pool
+        .in_tx_with_acquire_deadline(
+            tokio::time::Instant::now() + Duration::from_millis(100),
+            crate::TxOptions::default(),
+            async |_tx| Ok(()),
+        )
+        .await;
     std::assert_matches!(
         result,
         Err(TxError::Acquire(sqlx::Error::PoolTimedOut)),
@@ -362,6 +374,8 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
 
 #[tokio::test]
 async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
+    const WRITE_WIDGET: &str = "write widget";
+
     async fn read_widget() -> Result<i32, sqlx::Error> {
         crate::observed!("read widget", async { Ok(7) }).await
     }
@@ -370,13 +384,18 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     assert_eq!(read_widget().await.unwrap(), 7);
-    assert_eq!(observed("read widget", async { Ok(8) }).await.unwrap(), 8);
+    assert_eq!(
+        crate::observed!("read widget", async { Ok(8) })
+            .await
+            .unwrap(),
+        8
+    );
     let rejected = crate::observed!("write widget", async {
         Err::<(), _>(crate::error::tests::database("23505"))
     })
     .await;
     assert_eq!(sqlstate(&rejected.unwrap_err()).as_deref(), Some("23505"));
-    let lost = observed("write widget", async {
+    let lost = crate::observed!(WRITE_WIDGET, async {
         Err::<(), _>(sqlx::Error::Io(std::io::Error::other(
             "reset by db.internal",
         )))

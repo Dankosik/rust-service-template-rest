@@ -1,6 +1,6 @@
 use super::background::Background;
 use infra_idempotency_store::Store;
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 
 use super::BootstrapError;
@@ -15,7 +15,7 @@ pub(super) struct PreparedStore {
 pub(super) fn prepare(
     operation_count: usize,
     config: &Config,
-    postgres_pool: Option<&PgPool>,
+    postgres_pool: Option<&Pool>,
 ) -> Result<Option<PreparedStore>, BootstrapError> {
     let Some(operations) = std::num::NonZeroUsize::new(operation_count) else {
         return Ok(None);

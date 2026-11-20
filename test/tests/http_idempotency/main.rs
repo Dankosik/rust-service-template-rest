@@ -35,9 +35,9 @@ use infra_idempotency_store::{
     CallerKind, CleanupError, Record, RequestFingerprint, ScopeKey, StartupError, Store,
     SuccessRecord, TerminalRefusal, WriteOutcome,
 };
-use infra_postgres::{Dsn, Isolation, PgPool, Tx};
+use infra_postgres::{Dsn, Isolation, Pool, Tx};
 use integration_tests::{close_pools, dsn_for, poll_until};
-use sqlx::Executor as _;
+use sqlx::{Executor as _, PgPool};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -84,11 +84,11 @@ const INSERT_LIVE: &str = "INSERT INTO http_idempotency_records \
     VALUES ($1, $2, 201, ARRAY[]::http_idempotency_header_pair[], '{}', \
     'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour')";
 
-async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
+async fn template_pool(dsn: &Dsn, max_connections: u32) -> Pool {
     integration_tests::template_pool(dsn, APP, max_connections, Isolation::ServerDefault).await
 }
 
-async fn replica(dsn: &Dsn) -> (PgPool, Store) {
+async fn replica(dsn: &Dsn) -> (Pool, Store) {
     let pool = template_pool(dsn, 3).await;
     let store = Store::new(pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     (pool, store)
@@ -426,7 +426,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(pool.clone(), RETENTION).unwrap();
+    let store = Store::new(Pool::from_test_pool(pool.clone()), RETENTION).unwrap();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refusal = TerminalRefusal::capture(
         StatusCode::CONFLICT,
@@ -440,8 +440,8 @@ async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
                 .execute(&mut *tx)
                 .await
                 .unwrap();
-            if tx.begin_command_savepoint().await.is_ok() {
-                tx.rollback_command_savepoint().await.unwrap();
+            if let Ok(savepoint) = tx.begin_command_savepoint().await {
+                savepoint.rollback().await.unwrap();
             }
             Ok::<_, Refusal>(WriteOutcome::TerminalRefusal(refusal.clone()))
         })
@@ -495,7 +495,7 @@ async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn disabling_terminal_writes_still_replays_live_refusals(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(pool.clone(), RETENTION).unwrap();
+    let store = Store::new(Pool::from_test_pool(pool.clone()), RETENTION).unwrap();
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refusal = TerminalRefusal::capture(
@@ -807,10 +807,6 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
             .expect("seed the old record");
         expire(&pool, &scope).await;
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the competing transaction owns the row lock until released"
-        )]
         let mut holder = pool.begin().await.expect("a row-lock holder");
         let holder_pid: i32 = sqlx::query_scalar(
             "SELECT pg_backend_pid() FROM http_idempotency_records WHERE scope_key = $1 FOR UPDATE",
@@ -964,10 +960,6 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     expire(&pool, &scope).await;
     seed(&pool, SEED_EXPIRED, BACKLOG).await;
     seed(&pool, SEED_LIVE, LIVE).await;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test holds a raw transaction open to keep a lock"
-    )]
     let mut holder = pool.begin().await.expect("a row-lock holder");
     sqlx::query(LOCK_SEEDED_ROW)
         .execute(&mut *holder)
@@ -1052,9 +1044,7 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     ] {
         assert!(scrape.contains(line), "{line} missing from {scrape}");
     }
-    let held = infra_postgres::acquire(&store_pool, "hold cleanup admission")
-        .await
-        .unwrap();
+    let held = store_pool.acquire("hold cleanup admission").await.unwrap();
     let never_polled = store.remove_expired();
     drop(never_polled);
     let mut first = Box::pin(store.remove_expired());
@@ -1149,10 +1139,6 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
         .fetch_one(&pool)
         .await
         .expect("the independent population timestamp");
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the test holds a raw transaction open to keep a row lock"
-        )]
         let mut holder = pool.begin().await.expect("a row-lock holder");
         sqlx::query(LOCK_SEEDED_ROW)
             .execute(&mut *holder)
@@ -1182,7 +1168,8 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
                 })
                 .collect()
         };
-        let admission = infra_postgres::acquire(&store_pool, "hold sampler admission")
+        let admission = store_pool
+            .acquire("hold sampler admission")
             .await
             .expect("the sole slot");
         let cancel = CancellationToken::new();

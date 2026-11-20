@@ -5,10 +5,11 @@ use infra_jobs::operator::{
     RecoveryTarget,
 };
 use infra_jobs::{Enqueued, JobId, JobKind, KindName, enqueue_unique};
-use infra_postgres::{Isolation, PgPool, TxOptions, in_tx, in_tx_with};
+use infra_postgres::{Isolation, Pool, TxOptions};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -30,7 +31,7 @@ impl JobKind for Note {
     const NAME: KindName = KindName::new(KIND);
 }
 
-async fn open(pool: &PgPool) -> PgPool {
+async fn open(pool: &PgPool) -> Pool {
     super::template_pool(&dsn_for(pool).await, 3).await
 }
 
@@ -65,16 +66,14 @@ async fn stored(pool: &PgPool, target: &RecoveryTarget) -> Value {
         .expect("the durable job")
 }
 
-async fn inspect_one(pool: &PgPool, id: JobId) -> OneInspection {
-    in_tx_with(pool, READ_ONLY, async |tx| {
-        operator::inspect_one(tx, id).await
-    })
-    .await
-    .expect("read-only inspection commits")
+async fn inspect_one(pool: &Pool, id: JobId) -> OneInspection {
+    pool.in_tx_with(READ_ONLY, async |tx| operator::inspect_one(tx, id).await)
+        .await
+        .expect("read-only inspection commits")
 }
 
-async fn inspect_failed(pool: &PgPool, page: PageQuery) -> PageInspection {
-    in_tx_with(pool, READ_ONLY, async |tx| {
+async fn inspect_failed(pool: &Pool, page: PageQuery) -> PageInspection {
+    pool.in_tx_with(READ_ONLY, async |tx| {
         operator::inspect_failed(tx, page).await
     })
     .await
@@ -82,11 +81,11 @@ async fn inspect_failed(pool: &PgPool, page: PageQuery) -> PageInspection {
 }
 
 async fn inspect_unhandled(
-    pool: &PgPool,
+    pool: &Pool,
     handled_kinds: &HandledKinds,
     page: PageQuery,
 ) -> PageInspection {
-    in_tx_with(pool, READ_ONLY, async |tx| {
+    pool.in_tx_with(READ_ONLY, async |tx| {
         operator::inspect_unhandled(tx, handled_kinds, page).await
     })
     .await
@@ -101,10 +100,12 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     let wrong_kind =
         RecoveryTarget::try_from_parts(target.id(), "test.other", target.version()).unwrap();
     std::assert_matches!(
-        in_tx(&jobs, async |tx| operator::discard(tx, &wrong_kind).await).await,
+        jobs.in_tx(async |tx| operator::discard(tx, &wrong_kind).await)
+            .await,
         Err(OperatorError::Stale)
     );
-    let receipt = in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
+    let receipt = jobs
+        .in_tx(async |tx| operator::redrive(tx, &target).await)
         .await
         .expect("redrive commits");
     assert_ne!(receipt.new_version, target.version());
@@ -159,19 +160,20 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     .await
     .unwrap();
     for discard in [false, true] {
-        let error = in_tx(&jobs, async |tx| {
-            if discard {
-                operator::discard(tx, &target).await
-            } else {
-                operator::redrive(tx, &target).await.map(|_| ())
-            }
-        })
-        .await
-        .unwrap_err();
+        let error = jobs
+            .in_tx(async |tx| {
+                if discard {
+                    operator::discard(tx, &target).await
+                } else {
+                    operator::redrive(tx, &target).await.map(|_| ())
+                }
+            })
+            .await
+            .unwrap_err();
         std::assert_matches!(error, OperatorError::Stale);
     }
     let next = RecoveryTarget::try_from_parts(target.id(), KIND, receipt.new_version).unwrap();
-    in_tx(&jobs, async |tx| operator::redrive(tx, &next).await)
+    jobs.in_tx(async |tx| operator::redrive(tx, &next).await)
         .await
         .unwrap();
     let final_row = stored(&pool, &target).await;
@@ -219,7 +221,7 @@ mod outbox {
                 .unwrap(),
             );
         let prepared = publication.prepare(&event).unwrap();
-        in_tx(&jobs, async |tx| {
+        jobs.in_tx(async |tx| {
             assert_eq!(prepared.enqueue(tx).await.unwrap(), OutboxEnqueued::Created);
             Ok::<_, OperatorError>(())
         })
@@ -237,14 +239,13 @@ mod outbox {
         let target =
             RecoveryTarget::try_new(&id, "publish_domain_event", &version.to_string()).unwrap();
         let before = stored(&pool, &target).await;
-        let discard = in_tx(&jobs, async |tx| {
-            Ok::<_, OperatorError>(operator::discard(tx, &target).await)
-        })
-        .await
-        .unwrap();
+        let discard = jobs
+            .in_tx(async |tx| Ok::<_, OperatorError>(operator::discard(tx, &target).await))
+            .await
+            .unwrap();
         std::assert_matches!(discard, Err(OperatorError::Conflict));
         assert_eq!(stored(&pool, &target).await, before);
-        in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
+        jobs.in_tx(async |tx| operator::redrive(tx, &target).await)
             .await
             .unwrap();
         let after = stored(&pool, &target).await;
@@ -456,10 +457,6 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
     for discard in [false, true] {
         let target = failed(&pool, Uuid::new_v4(), "blocked-recovery").await;
         let before = stored(&pool, &target).await;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a raw independent transaction holds the row lock while the adapter is exercised"
-        )]
         let mut holder = pool.begin().await.unwrap();
         sqlx::query("SELECT id FROM background_jobs WHERE id::text = $1 FOR UPDATE")
             .bind(target.id().to_string())
@@ -468,7 +465,7 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
             .unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            in_tx(&jobs, async |tx| {
+            jobs.in_tx(async |tx| {
                 if discard {
                     operator::discard(tx, &target).await
                 } else {
@@ -484,7 +481,7 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
         assert_eq!(error.sqlstate().as_deref(), Some("57014"));
         assert_eq!(stored(&pool, &target).await, before);
         let budget: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(&jobs)
+            .fetch_one(jobs.as_sqlx())
             .await
             .unwrap();
         assert_eq!(
@@ -506,7 +503,7 @@ async fn concurrent_recovery_has_one_winner_after_the_row_lock(pool: PgPool) {
             let jobs = jobs.clone();
             let target = target.clone();
             async move {
-                in_tx(&jobs, async |tx| {
+                jobs.in_tx(async |tx| {
                     let receipt = operator::redrive(tx, &target).await?;
                     ready.send(()).unwrap();
                     super::bounded("release the winning transaction", released)
@@ -524,7 +521,7 @@ async fn concurrent_recovery_has_one_winner_after_the_row_lock(pool: PgPool) {
             let jobs = jobs.clone();
             let target = target.clone();
             async move {
-                in_tx(&jobs, async |tx| {
+                jobs.in_tx(async |tx| {
                     if discard {
                         operator::discard(tx, &target).await
                     } else {
@@ -570,7 +567,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
     let enqueue_task = tokio::spawn({
         let jobs = jobs.clone();
         async move {
-            in_tx(&jobs, async |tx| {
+            jobs.in_tx(async |tx| {
                 let result = enqueue_unique(
                     tx,
                     &Note {
@@ -593,7 +590,10 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
     let redrive = tokio::spawn({
         let jobs = jobs.clone();
         let target = target.clone();
-        async move { in_tx(&jobs, async |tx| operator::redrive(tx, &target).await).await }
+        async move {
+            jobs.in_tx(async |tx| operator::redrive(tx, &target).await)
+                .await
+        }
     });
     let error = super::join_after_lock_wait(
         &pool,
@@ -615,7 +615,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
     super::close_pools(&[&jobs]).await;
 }
 
-async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
+async fn proxied_pool(pool: &PgPool) -> (CommitProxy, Pool) {
     let (proxy, dsn) = CommitProxy::start_for(pool).await;
     let jobs = super::template_pool(&dsn, 1).await;
     (proxy, jobs)
@@ -626,13 +626,14 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
     let jobs = super::template_pool(&dsn_for(&pool).await, 1).await;
     let target = failed(&pool, Uuid::new_v4(), "rollback").await;
     let before = stored(&pool, &target).await;
-    let result = in_tx(&jobs, async |tx| {
-        operator::redrive(tx, &target).await?;
-        Err::<(), _>(OperatorError::Stale)
-    })
-    .await;
+    let result = jobs
+        .in_tx(async |tx| {
+            operator::redrive(tx, &target).await?;
+            Err::<(), _>(OperatorError::Stale)
+        })
+        .await;
     std::assert_matches!(result, Err(OperatorError::Stale));
-    assert_eq!(stored(&jobs, &target).await, before);
+    assert_eq!(stored(jobs.as_sqlx(), &target).await, before);
     for fault in [Fault::DropBeforeForward, Fault::ForwardThenDrop] {
         let target = failed(&pool, Uuid::new_v4(), "uncertain").await;
         let before = stored(&pool, &target).await;
@@ -640,7 +641,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
         proxy.arm(fault, Boundary::Commit(None));
         let error = super::bounded(
             "the uncertain redrive",
-            in_tx(&proxied, async |tx| operator::redrive(tx, &target).await),
+            proxied.in_tx(async |tx| operator::redrive(tx, &target).await),
         )
         .await
         .unwrap_err();
@@ -728,16 +729,17 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         assert!(third_page.items.is_empty() && third_page.next_cursor.is_none());
     }
     let id = operator::parse_job_id(&Uuid::from_u128(3).to_string()).unwrap();
-    let result = in_tx_with(&jobs, READ_ONLY, async |tx| {
-        let result = operator::inspect_one(tx, id).await?;
-        let budget: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(&mut *tx)
-            .await?;
-        assert_eq!(budget, "2s");
-        Ok::<_, OperatorError>(result)
-    })
-    .await
-    .unwrap();
+    let result = jobs
+        .in_tx_with(READ_ONLY, async |tx| {
+            let result = operator::inspect_one(tx, id).await?;
+            let budget: String = sqlx::query_scalar("SHOW statement_timeout")
+                .fetch_one(&mut *tx)
+                .await?;
+            assert_eq!(budget, "2s");
+            Ok::<_, OperatorError>(result)
+        })
+        .await
+        .unwrap();
     assert!(!format!("{result:?}").contains(SECRET));
     let item = result.item.expect("one job");
     assert_eq!(item.state, JobState::Failed);
