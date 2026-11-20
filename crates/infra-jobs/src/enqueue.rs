@@ -31,10 +31,6 @@ pub enum LivePayloadComparison {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
-    // template:begin outbox:jobs-outbox-enqueue-error
-    #[error("{} requires the dedicated outbox enqueue operation", outbox::KIND)]
-    OutboxKind,
-    // template:end outbox:jobs-outbox-enqueue-error
     #[error(
         "unique key must be 1 to {MAX_UNIQUE_KEY_BYTES} bytes of UTF-8 without control characters"
     )]
@@ -116,11 +112,6 @@ async fn enqueue_inner<K: JobKind>(
     delay: Duration,
     unique_key: Option<&str>,
 ) -> Result<Enqueued, EnqueueError> {
-    // template:begin outbox:jobs-outbox-enqueue-guard
-    if K::NAME == outbox::KIND {
-        return Err(EnqueueError::OutboxKind);
-    }
-    // template:end outbox:jobs-outbox-enqueue-guard
     let prepared = prepare(payload, delay, unique_key)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();

@@ -56,6 +56,19 @@ impl RecoveryTarget {
             return Err(InputError::Version);
         }
         let version = version.parse().map_err(|_| InputError::Version)?;
+        Self::try_from_parts(id, kind, version)
+    }
+
+    pub fn try_from_parts(id: JobId, kind: &str, version: i64) -> Result<Self, InputError> {
+        if id.0.is_nil() {
+            return Err(InputError::Id);
+        }
+        if !is_valid_kind_name(kind) {
+            return Err(InputError::Kind);
+        }
+        if version < 0 {
+            return Err(InputError::Version);
+        }
         Ok(Self {
             id,
             kind: kind.to_owned(),
@@ -581,6 +594,23 @@ mod tests {
         );
         assert_eq!(RecoveryTarget::try_new(ID, "a", "0").unwrap().version(), 0);
         assert!(RecoveryTarget::try_new(&ID.to_ascii_uppercase(), "a", "0").is_ok());
+        let parsed = parse_job_id(ID).unwrap();
+        assert_eq!(
+            RecoveryTarget::try_from_parts(JobId(uuid::Uuid::nil()), "a", 0),
+            Err(InputError::Id)
+        );
+        assert_eq!(
+            RecoveryTarget::try_from_parts(parsed, "bad kind", 0),
+            Err(InputError::Kind)
+        );
+        assert_eq!(
+            RecoveryTarget::try_from_parts(parsed, "a", -1),
+            Err(InputError::Version)
+        );
+        assert_eq!(
+            RecoveryTarget::try_from_parts(parsed, "a", i64::MAX).unwrap(),
+            RecoveryTarget::try_new(ID, "a", "9223372036854775807").unwrap()
+        );
     }
 
     #[test]
