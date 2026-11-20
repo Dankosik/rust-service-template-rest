@@ -631,7 +631,7 @@ async fn dropping_registration_stops_a_bound_grpc_call_during_token_acquisition(
 async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let registration = prepare_registration(crate::Options {
+    let registration = prepare_registration(crate::test_support::HttpOptions {
         provider_concurrency: nonzero(1),
         ..tokens.options()
     });

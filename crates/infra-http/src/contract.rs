@@ -90,7 +90,7 @@ pub enum FinalizeError {
 pub enum Authentication {
     Public,
     // template:begin authn:http-assembly-verifier
-    Bearer(Box<infra_bearerauthn::Verifier>),
+    Bearer(infra_bearerauthn::Verifier),
     // template:end authn:http-assembly-verifier
 }
 
@@ -632,7 +632,7 @@ impl Authentication {
                 }))
             }
             // template:begin authn:http-assembly-finalize
-            Self::Bearer(auth) => Ok(crate::authn::finalize(routes, policy, *auth)),
+            Self::Bearer(auth) => Ok(crate::authn::finalize(routes, policy, auth)),
             // template:end authn:http-assembly-finalize
         }
     }

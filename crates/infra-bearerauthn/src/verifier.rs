@@ -48,39 +48,40 @@ fn record_verification(
     Err(error.failure)
 }
 
-pub(crate) struct VerificationCounters {
+struct VerificationCounters {
     mode: &'static str,
     verified: metrics::Counter,
     refused: EnumMap<VerificationReason, OnceLock<metrics::Counter>>,
-    pub(crate) transport: TransportCounters,
+    transport: TransportCounters,
 }
 
 impl VerificationCounters {
-    fn new(mode: &'static str) -> Arc<Self> {
+    fn new(mode: &'static str) -> Self {
         metrics::describe_counter!(
             TOKEN_VERIFICATIONS_METRIC,
             "Token verification decisions by engine and closed reason"
         );
-        Arc::new(Self {
+        Self {
             mode,
             verified: metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "success", "reason" => "verified"),
             refused: EnumMap::default(),
             transport: TransportCounters::new(),
-        })
+        }
     }
 }
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Verifier([REDACTED])")]
-pub struct Verifier {
+pub struct Verifier(Arc<Inner>);
+
+struct Inner {
     engine: Engine,
-    pub(crate) counters: Arc<VerificationCounters>,
+    counters: VerificationCounters,
 }
 
-#[derive(Clone)]
 enum Engine {
     // template:begin oidc-jwt:authn-jwt-engine
-    Jwt(Arc<crate::jwt::JwtVerifier>),
+    Jwt(crate::jwt::JwtVerifier),
     // template:end oidc-jwt:authn-jwt-engine
     // template:begin oidc-introspection:authn-introspection-engine
     Introspection(Arc<crate::introspection::IntrospectionVerifier>),
@@ -97,15 +98,15 @@ impl Verifier {
             Engine::Introspection(_) => "introspection",
             // template:end oidc-introspection:authn-introspection-engine-mode
         };
-        Self {
+        Self(Arc::new(Inner {
             engine,
             counters: VerificationCounters::new(mode),
-        }
+        }))
     }
 
     // template:begin oidc-jwt:authn-jwt-verifier
     pub(crate) fn jwt(engine: crate::jwt::JwtVerifier) -> Self {
-        Self::new(Engine::Jwt(Arc::new(engine)))
+        Self::new(Engine::Jwt(engine))
     }
     // template:end oidc-jwt:authn-jwt-verifier
 
@@ -114,6 +115,10 @@ impl Verifier {
         Self::new(Engine::Introspection(engine))
     }
     // template:end oidc-introspection:authn-introspection-verifier
+
+    pub(crate) fn transport_counters(&self) -> &TransportCounters {
+        &self.0.counters.transport
+    }
 
     #[cfg(feature = "test-support")]
     pub async fn verify_fixture_authorization(
@@ -140,7 +145,7 @@ impl Verifier {
     ) -> Result<Principal, Failure> {
         context.check().map_err(|_| Failure::Unavailable)?;
         let verification = async {
-            match &self.engine {
+            match &self.0.engine {
                 // template:begin oidc-jwt:authn-jwt-verify
                 Engine::Jwt(engine) => engine.verify(token).await,
                 // template:end oidc-jwt:authn-jwt-verify
@@ -155,6 +160,6 @@ impl Verifier {
             _ = context.wait_stopped() => return Err(Failure::Unavailable),
         };
         context.check().map_err(|_| Failure::Unavailable)?;
-        record_verification(&self.counters, result)
+        record_verification(&self.0.counters, result)
     }
 }

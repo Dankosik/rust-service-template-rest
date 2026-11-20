@@ -42,6 +42,30 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VerifiedDelegation(pub DelegationCredential);
+
+impl<S> FromRequestParts<S> for VerifiedDelegation
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(
+            parts
+                .extensions
+                .get::<DelegationCredential>()
+                .cloned()
+                .map(Self)
+                .ok_or_else(crate::context::missing_extension::<Self>),
+        )
+    }
+}
+
 pub(crate) fn finalize<S>(contract: Router<S>, policy: Policy, verifier: Verifier) -> Router<S>
 where
     S: Send + Sync + Clone + 'static,
@@ -267,5 +291,22 @@ mod tests {
             let problem = body_json(failure_response(failure)).await;
             assert_eq!(problem["detail"], failure.to_string());
         }
+    }
+
+    #[tokio::test]
+    async fn missing_delegation_credential_is_a_sanitized_internal_failure() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+
+        let handler = |_: VerifiedDelegation| async { "unreachable" };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = Router::new().route("/", get(handler));
+        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
     }
 }

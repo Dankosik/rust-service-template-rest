@@ -141,15 +141,13 @@ impl TokenEndpoint {
     fn token_request(&self, grant: Grant<'_>) -> Result<Request<Bytes>, AcquisitionError> {
         let body = {
             let assertion = self.signer.sign()?;
-            let signer_fields = self.signer.form_fields(&assertion);
-            let capacity = signer_fields
-                .iter()
-                .fold(grant.max_encoded_len(), |total, &(key, value)| {
-                    total.saturating_add(max_form_pair_len(key, value))
-                });
-            let mut form = Serializer::new(String::with_capacity(capacity));
-            grant.append_fields(&mut form);
-            form.extend_pairs(signer_fields).finish()
+            let fields = grant.fields().chain(self.signer.form_fields(&assertion));
+            let capacity = fields.clone().fold(0_usize, |total, (key, value)| {
+                total.saturating_add(max_form_pair_len(key, value))
+            });
+            Serializer::new(String::with_capacity(capacity))
+                .extend_pairs(fields)
+                .finish()
         };
         Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -204,62 +202,31 @@ enum Grant<'a> {
     },
 }
 
-impl Grant<'_> {
-    fn max_encoded_len(self) -> usize {
+impl<'a> Grant<'a> {
+    fn fields(self) -> impl Iterator<Item = (&'static str, &'a str)> + Clone {
         match self {
-            Self::ClientCredentials(target) => {
-                max_form_pair_len("grant_type", GRANT_CLIENT_CREDENTIALS).saturating_add(
-                    target
-                        .scope
-                        .as_deref()
-                        .map_or(0, |scope| max_form_pair_len("scope", scope)),
-                )
-            }
-            Self::TokenExchange { subject, target } => {
-                max_form_pair_len("grant_type", GRANT_TOKEN_EXCHANGE)
-                    .saturating_add(max_form_pair_len("subject_token", subject.expose_secret()))
-                    .saturating_add(max_form_pair_len(
-                        "subject_token_type",
-                        TOKEN_TYPE_ACCESS_TOKEN,
-                    ))
-                    .saturating_add(max_form_pair_len(
-                        "requested_token_type",
-                        TOKEN_TYPE_ACCESS_TOKEN,
-                    ))
-                    .saturating_add(
-                        target
-                            .scope
-                            .as_deref()
-                            .map_or(0, |scope| max_form_pair_len("scope", scope)),
-                    )
-                    .saturating_add(
-                        target
-                            .audience
-                            .as_deref()
-                            .map_or(0, |audience| max_form_pair_len("audience", audience)),
-                    )
-            }
+            Self::ClientCredentials(target) => [
+                Some(("grant_type", GRANT_CLIENT_CREDENTIALS)),
+                target.scope.as_deref().map(|scope| ("scope", scope)),
+                None,
+                None,
+                None,
+                None,
+            ],
+            Self::TokenExchange { subject, target } => [
+                Some(("grant_type", GRANT_TOKEN_EXCHANGE)),
+                Some(("subject_token", subject.expose_secret())),
+                Some(("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN)),
+                Some(("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN)),
+                target.scope.as_deref().map(|scope| ("scope", scope)),
+                target
+                    .audience
+                    .as_deref()
+                    .map(|audience| ("audience", audience)),
+            ],
         }
-    }
-
-    fn append_fields(self, form: &mut Serializer<'_, String>) {
-        match self {
-            Self::ClientCredentials(target) => form
-                .append_pair("grant_type", GRANT_CLIENT_CREDENTIALS)
-                .extend_pairs(target.scope.as_deref().map(|scope| ("scope", scope))),
-            Self::TokenExchange { subject, target } => form
-                .append_pair("grant_type", GRANT_TOKEN_EXCHANGE)
-                .append_pair("subject_token", subject.expose_secret())
-                .append_pair("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN)
-                .append_pair("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN)
-                .extend_pairs(target.scope.as_deref().map(|scope| ("scope", scope)))
-                .extend_pairs(
-                    target
-                        .audience
-                        .as_deref()
-                        .map(|audience| ("audience", audience)),
-                ),
-        };
+        .into_iter()
+        .flatten()
     }
 
     const fn kind(self) -> GrantKind {

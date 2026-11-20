@@ -341,7 +341,24 @@ enum ExchangeMode<'a> {
     Introspection { caller_stop: CallerStop<'a> },
 }
 
-pub(crate) type CallerStop<'a> = &'a (dyn Fn() -> Option<Stopped> + Sync);
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the JWT-only profile removes introspection callers"
+)]
+pub(crate) enum CallerStop<'a> {
+    Context(&'a operation_context::OperationContext),
+    Latch(&'a OnceLock<Stopped>),
+}
+
+impl CallerStop<'_> {
+    fn stopped(self) -> Option<Stopped> {
+        match self {
+            Self::Context(context) => context.stopped(),
+            Self::Latch(latch) => latch.get().copied(),
+        }
+    }
+}
 
 struct Exchange<'a> {
     histograms: &'a OperationHistograms,
@@ -388,7 +405,7 @@ impl<'a> Exchange<'a> {
         };
         let guard = std::mem::DropGuard::new(self, |exchange| {
             let outcome = caller_stop
-                .and_then(|stopped| stopped())
+                .and_then(CallerStop::stopped)
                 .map_or(Outcome::Cancelled, stopped_outcome);
             exchange.record(outcome);
         });
@@ -998,13 +1015,14 @@ mod tests {
 
         let response = http_ok("application/json", r#"{"active":false}"#);
         let (address, root, server) = tls_server(response, false).await;
+        let unbounded = operation_context::OperationContext::unbounded();
         let body = fixture_client(address, &root)
             .post_introspection_form_json(
                 &fixture_url(address),
                 "a:b",
                 "c d",
                 &[("token", "opaque")],
-                &|| None,
+                CallerStop::Context(&unbounded),
             )
             .await
             .unwrap();
@@ -1027,7 +1045,7 @@ mod tests {
                         "fixture",
                         "secret",
                         &[("token", "opaque")],
-                        &|| None,
+                        CallerStop::Context(&unbounded),
                     )
                     .with_subscriber(dispatch.clone())
                     .await,

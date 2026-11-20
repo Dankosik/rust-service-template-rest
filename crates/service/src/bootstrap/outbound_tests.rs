@@ -6,7 +6,8 @@ use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
 use infra_oauth2_client_credentials::{
-    Algorithm, IssuerUrl, Options, PrivateKeyJwt, Registration, ServiceTokenTarget, TokenUrl,
+    Algorithm, IssuerUrl, PrivateKeyJwt, ServiceTokenTarget,
+    test_support::{HttpOptions, prepare_http},
 };
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -146,9 +147,9 @@ async fn assert_resource_unavailable(address: SocketAddr) {
     assert!(status.starts_with("HTTP/1.1 502 "), "{status}");
 }
 
-fn token_options(peer_addr: SocketAddr) -> Options {
-    Options {
-        token_url: TokenUrl::parse_for_test_http(&format!("http://{peer_addr}/token")).unwrap(),
+fn token_options(peer_addr: SocketAddr) -> HttpOptions {
+    HttpOptions {
+        token_url: format!("http://{peer_addr}/token"),
         client_id: "service".to_owned(),
         auth: PrivateKeyJwt {
             private_key: tls_test_support::new_issuer().key().serialize_pem().into(),
@@ -175,9 +176,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let peer = tokio::spawn(serve_token_peer(token_peer, requests, stop_peer.clone()));
         let (installed, lifetime) = oneshot::channel();
         let registration = crate::ServiceRegistration::for_http_resource(move |_, background| {
-            let registration = Arc::new(Registration::prepare_for_test_http(token_options(
-                peer_addr,
-            ))?);
+            let registration = Arc::new(prepare_http(token_options(peer_addr))?);
             let lifetime = Arc::downgrade(&registration);
             let tokens = background.service_tokens(
                 registration,

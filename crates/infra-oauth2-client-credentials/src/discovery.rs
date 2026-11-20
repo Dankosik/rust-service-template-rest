@@ -8,7 +8,7 @@ use url::Url;
 use crate::{
     ConfigurationError, DiscoveryError, DiscoveryTransportError, IssuerUrl, Options, Registration,
     TokenUrl, TransportBuildFailure,
-    options::{Scheme, check_url_scheme, parse_discovered_token_endpoint, validate_options},
+    options::{parse_discovered_token_endpoint, validate_options},
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
 
@@ -18,39 +18,68 @@ struct Metadata {
     token_endpoint: String,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct HttpDiscoveryOptions {
+    pub(crate) issuer: String,
+    pub(crate) token_url: String,
+    pub(crate) client_id: String,
+    pub(crate) private_key: secrecy::SecretString,
+    pub(crate) key_id: String,
+    pub(crate) algorithm: crate::Algorithm,
+    pub(crate) provider_concurrency: std::num::NonZeroU32,
+}
+
 impl Registration {
     pub async fn prepare_with_oidc_discovery(
         issuer: IssuerUrl,
         options: Options,
     ) -> Result<Self, DiscoveryError> {
-        Self::prepare_with_oidc_discovery_scheme(issuer, options, Scheme::Https).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn prepare_with_oidc_discovery_for_test_http(
-        issuer: IssuerUrl,
-        options: Options,
-    ) -> Result<Self, DiscoveryError> {
-        Self::prepare_with_oidc_discovery_scheme(issuer, options, Scheme::Http).await
-    }
-
-    async fn prepare_with_oidc_discovery_scheme(
-        issuer: IssuerUrl,
-        options: Options,
-        scheme: Scheme,
-    ) -> Result<Self, DiscoveryError> {
-        check_url_scheme(issuer.url(), "issuer", scheme)?;
-        let validated = validate_options(options, scheme, scheme)?;
-        if issuer.url() == validated.endpoint() {
+        let validated = validate_options(options)?;
+        if issuer.url() == &validated.token_url {
             return Err(ConfigurationError {
                 key: "issuer",
                 reason: "must differ from the token endpoint",
             }
             .into());
         }
-        verify_metadata(&issuer, validated.endpoint(), scheme).await?;
+        verify_https_metadata(&issuer, &validated.token_url).await?;
         let token_http =
-            build_client(scheme, validated.endpoint()).map_err(TransportBuildFailure::token_url)?;
+            build_https_client(&validated.token_url).map_err(TransportBuildFailure::token_url)?;
+        Self::build(validated, token_http).map_err(DiscoveryError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepare_with_oidc_discovery_for_test_http(
+        options: HttpDiscoveryOptions,
+    ) -> Result<Self, DiscoveryError> {
+        let issuer_url = crate::options::parse_http_url(&options.issuer, "issuer", false)?;
+        let token_url = crate::options::parse_http_url(&options.token_url, "token_url", true)?;
+        let validated = crate::options::validate_registration(crate::options::RawRegistration {
+            token_url,
+            client_id: options.client_id,
+            private_key: options.private_key,
+            key_id: options.key_id,
+            algorithm: options.algorithm,
+            audience_exact: options.issuer.clone(),
+            audience_url: issuer_url.clone(),
+            provider_concurrency: options.provider_concurrency,
+        })?;
+        let discovery_http =
+            Client::try_new_for_test_http(&issuer_url.origin().ascii_serialization(), TOKEN_LIMITS)
+                .map_err(TransportBuildFailure::issuer)?;
+        verify_metadata(
+            &options.issuer,
+            &issuer_url,
+            &validated.token_url,
+            &discovery_http,
+        )
+        .await?;
+        let token_http = Client::try_new_for_test_http(
+            &validated.token_url.origin().ascii_serialization(),
+            TOKEN_LIMITS,
+        )
+        .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 }
@@ -59,8 +88,6 @@ pub async fn verify_oidc_metadata(
     issuer: &IssuerUrl,
     token_url: &TokenUrl,
 ) -> Result<(), DiscoveryError> {
-    check_url_scheme(issuer.url(), "issuer", Scheme::Https)?;
-    check_url_scheme(token_url.url(), "token_url", Scheme::Https)?;
     if issuer.url() == token_url.url() {
         return Err(ConfigurationError {
             key: "issuer",
@@ -68,30 +95,28 @@ pub async fn verify_oidc_metadata(
         }
         .into());
     }
-    verify_metadata(issuer, token_url.url(), Scheme::Https).await
+    verify_https_metadata(issuer, token_url.url()).await
 }
 
-fn build_client(scheme: Scheme, url: &Url) -> Result<Client, BuildError> {
+fn build_https_client(url: &Url) -> Result<Client, BuildError> {
     let origin = url.origin().ascii_serialization();
-    match scheme {
-        Scheme::Https => Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS),
-        #[cfg(any(test, feature = "test-support"))]
-        Scheme::Http => Client::try_new_for_test_http(&origin, TOKEN_LIMITS),
-    }
+    Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS)
+}
+
+async fn verify_https_metadata(issuer: &IssuerUrl, endpoint: &Url) -> Result<(), DiscoveryError> {
+    prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
+    let discovery_http = build_https_client(issuer.url()).map_err(TransportBuildFailure::issuer)?;
+    verify_metadata(issuer.as_str(), issuer.url(), endpoint, &discovery_http).await
 }
 
 async fn verify_metadata(
-    issuer: &IssuerUrl,
+    issuer_exact: &str,
+    issuer_url: &Url,
     endpoint: &Url,
-    scheme: Scheme,
+    discovery_http: &Client,
 ) -> Result<(), DiscoveryError> {
-    if scheme == Scheme::Https {
-        prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
-    }
-    let discovery_http =
-        build_client(scheme, issuer.url()).map_err(TransportBuildFailure::issuer)?;
-    let metadata = fetch_metadata(issuer.url(), &discovery_http).await?;
-    if metadata.issuer != issuer.as_str() {
+    let metadata = fetch_metadata(issuer_url, discovery_http).await?;
+    if metadata.issuer != issuer_exact {
         return Err(DiscoveryError::Metadata(
             "issuer differs from configured issuer",
         ));
