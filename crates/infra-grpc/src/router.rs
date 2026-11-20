@@ -448,13 +448,19 @@ async fn acquire_permit(
         return Ok((None, request));
     };
     let wait = admission_wait(*remaining_wait, opening_context);
-    let Ok((permit, waited)) =
-        infra_http_transport::acquire_within(permits, wait, observe::admission_waiting).await
-    else {
-        check_open(opening_context)?;
-        return Err(reject_shed(opening_context, request).await);
-    };
-    *remaining_wait = remaining_wait.saturating_sub(waited.unwrap_or_default());
+    let permit =
+        match infra_http_transport::acquire_within(permits, wait, observe::admission_waiting).await
+        {
+            infra_http_transport::Admission::Immediate(permit) => permit,
+            infra_http_transport::Admission::Waited { permit, waited } => {
+                *remaining_wait = remaining_wait.saturating_sub(waited);
+                permit
+            }
+            infra_http_transport::Admission::Shed { waited: _ } => {
+                check_open(opening_context)?;
+                return Err(reject_shed(opening_context, request).await);
+            }
+        };
     Ok((Some(permit), request))
 }
 

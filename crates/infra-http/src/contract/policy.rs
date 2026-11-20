@@ -157,14 +157,10 @@ impl Policy {
     }
     // template:end authn:http-policy-is-protected
 
-    pub(crate) async fn unregistered_response(
-        &self,
-        path: Option<&str>,
-        method: &Method,
-    ) -> Response {
+    pub(crate) fn unregistered_response(&self, path: Option<&str>, method: &Method) -> Response {
         if let Some(allow) = path.and_then(|path| self.0.routes.get(path)?.extension_allow.as_ref())
         {
-            let mut response = crate::harden::method_not_allowed().await;
+            let mut response = crate::harden::method_not_allowed_response();
             response.headers_mut().insert(ALLOW, allow.clone());
             return response;
         }
@@ -200,7 +196,7 @@ pub(super) async fn enforce_public(
     if public {
         next.run(request).await
     } else {
-        policy.unregistered_response(route, request.method()).await
+        policy.unregistered_response(route, request.method())
     }
 }
 

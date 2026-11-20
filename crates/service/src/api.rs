@@ -120,10 +120,7 @@ mod idempotency_tests {
             self,
             _: &mut Tx<'_>,
         ) -> impl Future<Output = Result<Self::Success, Rollback<Self::Terminal>>> + Send {
-            std::future::ready(Ok(CreatedText {
-                body: "created".into(),
-                headers: axum::http::HeaderMap::new(),
-            }))
+            std::future::ready(Ok(CreatedText::new("created")))
         }
     }
 

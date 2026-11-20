@@ -195,19 +195,21 @@ async fn admit(
         return next.run(request).await;
     }
     let arrived = tokio::time::Instant::now();
-    let acquired =
-        infra_http_transport::acquire_borrowed_within(&admission.permits, admission.max_wait).await;
-    let waited = match &acquired {
-        Ok((_, waited)) => *waited,
-        Err(waited) => Some(*waited),
-    };
-    if let Some(waited) = waited {
-        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
-    }
-    let Ok((_permit, _)) = acquired else {
-        metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
-        return shed_response(&request);
-    };
+    let _permit =
+        match infra_http_transport::acquire_borrowed_within(&admission.permits, admission.max_wait)
+            .await
+        {
+            infra_http_transport::Admission::Immediate(permit) => permit,
+            infra_http_transport::Admission::Waited { permit, waited } => {
+                metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
+                permit
+            }
+            infra_http_transport::Admission::Shed { waited } => {
+                metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
+                metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
+                return shed_response(&request);
+            }
+        };
     request
         .extensions_mut()
         .insert(crate::context::Arrival(arrived));
@@ -246,10 +248,14 @@ async fn not_found() -> Response {
         .into_response()
 }
 
-pub(crate) async fn method_not_allowed() -> Response {
+pub(crate) fn method_not_allowed_response() -> Response {
     Problem::new(Code::MethodNotAllowed)
         .detail_static("method is not allowed for this resource")
         .into_response()
+}
+
+async fn method_not_allowed() -> Response {
+    method_not_allowed_response()
 }
 
 #[cfg(test)]

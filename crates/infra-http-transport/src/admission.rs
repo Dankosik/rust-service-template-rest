@@ -4,13 +4,21 @@ use std::time::Duration;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
+#[must_use]
+#[derive(Debug)]
+pub enum Admission<P> {
+    Immediate(P),
+    Waited { permit: P, waited: Duration },
+    Shed { waited: Duration },
+}
+
 pub async fn acquire_within<G>(
     permits: &Arc<Semaphore>,
     patience: Duration,
     on_wait: impl FnOnce() -> G,
-) -> Result<(OwnedSemaphorePermit, Option<Duration>), Duration> {
+) -> Admission<OwnedSemaphorePermit> {
     if let Ok(permit) = Arc::clone(permits).try_acquire_owned() {
-        return Ok((permit, None));
+        return Admission::Immediate(permit);
     }
     wait_within(patience, on_wait, || Arc::clone(permits).acquire_owned()).await
 }
@@ -18,9 +26,9 @@ pub async fn acquire_within<G>(
 pub async fn acquire_borrowed_within(
     permits: &Semaphore,
     patience: Duration,
-) -> Result<(SemaphorePermit<'_>, Option<Duration>), Duration> {
+) -> Admission<SemaphorePermit<'_>> {
     if let Ok(permit) = permits.try_acquire() {
-        return Ok((permit, None));
+        return Admission::Immediate(permit);
     }
     wait_within(patience, || (), || permits.acquire()).await
 }
@@ -29,9 +37,11 @@ async fn wait_within<P, G, F: Future<Output = Result<P, AcquireError>>>(
     patience: Duration,
     on_wait: impl FnOnce() -> G,
     acquire: impl FnOnce() -> F,
-) -> Result<(P, Option<Duration>), Duration> {
+) -> Admission<P> {
     if patience.is_zero() {
-        return Err(Duration::ZERO);
+        return Admission::Shed {
+            waited: Duration::ZERO,
+        };
     }
     let waiting = on_wait();
     let started = Instant::now();
@@ -39,8 +49,8 @@ async fn wait_within<P, G, F: Future<Output = Result<P, AcquireError>>>(
     let waited = started.elapsed();
     drop(waiting);
     match acquire_result {
-        Ok(Ok(permit)) if waited < patience => Ok((permit, Some(waited))),
-        _ => Err(waited),
+        Ok(Ok(permit)) if waited < patience => Admission::Waited { permit, waited },
+        _ => Admission::Shed { waited },
     }
 }
 
@@ -62,7 +72,7 @@ mod tests {
         tokio::time::advance(patience + Duration::from_millis(1)).await;
         drop(holder);
 
-        assert!(waiting.await.is_err());
+        std::assert_matches!(waiting.await, Admission::Shed { .. });
         assert_eq!(permits.available_permits(), 1);
     }
 
@@ -70,14 +80,40 @@ mod tests {
     async fn a_free_permit_is_taken_without_waiting_and_zero_patience_refuses_at_once() {
         let permits = Arc::new(Semaphore::new(1));
         let mut waits = 0;
-        let (permit, waited) = acquire_within(&permits, Duration::ZERO, || waits += 1)
-            .await
-            .unwrap();
-        assert_eq!(waited, None);
+        let Admission::Immediate(permit) =
+            acquire_within(&permits, Duration::ZERO, || waits += 1).await
+        else {
+            panic!("free permit should be granted immediately");
+        };
 
-        let refused = acquire_within(&permits, Duration::ZERO, || waits += 1).await;
-        assert_eq!(refused.err(), Some(Duration::ZERO));
+        std::assert_matches!(
+            acquire_within(&permits, Duration::ZERO, || waits += 1).await,
+            Admission::Shed {
+                waited: Duration::ZERO,
+            }
+        );
         assert_eq!(waits, 0);
         drop(permit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_permit_freed_before_patience_expires_reports_its_wait() {
+        let permits = Arc::new(Semaphore::new(1));
+        let holder = permits.try_acquire().unwrap();
+        let patience = Duration::from_secs(1);
+        let wait = Duration::from_millis(250);
+        let mut waiting = std::pin::pin!(acquire_borrowed_within(&permits, patience));
+        let cx = &mut Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(cx).is_pending());
+
+        tokio::time::advance(wait).await;
+        drop(holder);
+
+        let Admission::Waited { permit, waited } = waiting.await else {
+            panic!("permit freed within patience should be admitted after waiting");
+        };
+        assert_eq!(waited, wait);
+        drop(permit);
+        assert_eq!(permits.available_permits(), 1);
     }
 }

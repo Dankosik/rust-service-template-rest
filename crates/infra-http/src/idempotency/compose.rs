@@ -25,7 +25,10 @@ use crate::problem::{
     Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
     sanitized_internal_error,
 };
-use crate::{DelegationCredential, FinalizeError, HttpContract, Principal, VerifiedPrincipal};
+use crate::{
+    DelegationCredential, FinalizeError, HttpContract, Principal, VerifiedDelegation,
+    VerifiedPrincipal,
+};
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const INVALID_KEY_PARAM_NAME: &str = const_format::formatcp!("header.{KEY_HEADER}");
@@ -53,7 +56,7 @@ mod sealed {
 
     #[diagnostic::on_unimplemented(
         message = "`{Self}` cannot be extracted as an idempotent command part",
-        note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+        note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `VerifiedDelegation`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
     )]
     pub trait FromCommandPart<S>: Sized {
         fn extract_part(
@@ -64,7 +67,7 @@ mod sealed {
 
     #[diagnostic::on_unimplemented(
         message = "`{Self}` cannot be extracted by an idempotent command handler",
-        note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+        note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `VerifiedDelegation`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
     )]
     pub trait FromCommand<S, M>: Sized {
         fn extract(
@@ -87,7 +90,7 @@ mod sealed {
 
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be extracted as an idempotent command part",
-    note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+    note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `VerifiedDelegation`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
 )]
 pub trait FromCommandPart<S>: sealed::FromCommandPart<S> {}
 
@@ -95,7 +98,7 @@ impl<S, T: sealed::FromCommandPart<S>> FromCommandPart<S> for T {}
 
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be extracted by an idempotent command handler",
-    note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+    note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `VerifiedDelegation`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
 )]
 pub trait FromCommand<S, M = sealed::ViaCommand>: sealed::FromCommand<S, M> {}
 
@@ -134,6 +137,20 @@ impl<S: Send + Sync> sealed::FromCommandPart<S> for VerifiedPrincipal {
         cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
         std::future::ready(Ok(Self(cx.principal.clone())))
+    }
+}
+
+impl<S: Send + Sync> sealed::FromCommandPart<S> for VerifiedDelegation {
+    fn extract_part(
+        _input: &mut CommandInput,
+        cx: &sealed::ExtractContext<'_, S>,
+    ) -> impl Future<Output = Result<Self, Problem>> + Send {
+        std::future::ready(
+            cx.delegation
+                .cloned()
+                .map(Self)
+                .ok_or_else(crate::context::missing_extension_problem::<Self>),
+        )
     }
 }
 
@@ -334,15 +351,15 @@ async fn capture_attempt(
         .remove::<Store>()
         .ok_or_else(|| wiring_failure(&route.operation_id, "store_missing"))?;
     let request = request.with_limited_body();
-    let (parts, body) = request.into_parts();
-    let context = parts.extensions.get::<RequestContext>();
-    let deadline = context
+    let (mut parts, body) = request.into_parts();
+    let deadline = parts
+        .extensions
+        .get::<RequestContext>()
         .and_then(RequestContext::deadline)
         .ok_or_else(|| wiring_failure(&route.operation_id, "deadline_missing"))?;
     let principal = parts
         .extensions
-        .get::<Principal>()
-        .cloned()
+        .remove::<Principal>()
         .ok_or_else(|| wiring_failure(&route.operation_id, "principal_missing"))?;
     let caller = identity::caller_identity(principal.issuer(), principal.identity());
     let Some(scope) = identity::decode_key(
@@ -356,7 +373,7 @@ async fn capture_attempt(
         route.record(Outcome::InvalidKey);
         return Err(invalid_key(route.rules_link.clone()));
     };
-    let collected = buffer_body(context, body)
+    let collected = buffer_body(parts.extensions.get::<RequestContext>(), body)
         .await
         .inspect_err(|_| route.record(Outcome::NotStored))?;
     let (input, fingerprint) = CommandInput::capture(parts, &route.fingerprint_headers, collected);
@@ -507,6 +524,12 @@ mod tests {
             let _ = principal;
             Ok(DummyCommand)
         }
+        async fn verified_delegation_last(
+            VerifiedDelegation(delegation): VerifiedDelegation,
+        ) -> Result<DummyCommand, Problem> {
+            let _ = delegation;
+            Ok(DummyCommand)
+        }
         async fn delegation_last(
             delegation: Option<DelegationCredential>,
         ) -> Result<DummyCommand, Problem> {
@@ -531,6 +554,7 @@ mod tests {
         let _: HttpContract<AppState> = route(post_document(), state_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), principal_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), verified_principal_last).unwrap();
+        let _: HttpContract<AppState> = route(post_document(), verified_delegation_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), delegation_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), path_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), query_last).unwrap();
