@@ -367,7 +367,7 @@ fn migration_ignores_only_the_replica_identity_within_app() {
         ..LoadOptions::default()
     };
     let migration = load_migration_from(&options, BUILD, env(&enabled)).unwrap();
-    assert_eq!(migration.app().env, "local");
+    assert_eq!(migration.app().env(), "local");
     assert!(migration.app().is_local_development());
     assert!(migration.app().instance_id.is_none());
     let service = load_from(&options, BUILD, env(&enabled)).unwrap_err();

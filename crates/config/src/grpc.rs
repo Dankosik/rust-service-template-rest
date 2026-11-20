@@ -33,17 +33,13 @@ pub(crate) struct GrpcInput {
     trust_trace_context: bool,
     /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
     /// Hostnames are refused; load does not look them up. Blank is absent.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone<ListenAddr>")]
     addr: Option<SocketAddr>,
     security: Option<GrpcSecurity>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     certificate: Option<String>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     private_key: Option<SecretString>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     client_ca: Option<String>,
     #[serde_as(as = "StrictDuration")]

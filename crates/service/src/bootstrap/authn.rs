@@ -64,13 +64,6 @@ pub(super) async fn prepare(
             let issuer = issuer_url(mode, issuer)?;
             let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint)
                 .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))?;
-            let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
-                .map_err(|_| {
-                    service_config::ValidationError::new(
-                        "authn.provider_concurrency",
-                        "does not fit this platform",
-                    )
-                })?;
             let cache = cache
                 .map(|cache| {
                     infra_bearerauthn::IntrospectionCacheOptions::try_new(
@@ -89,7 +82,7 @@ pub(super) async fn prepare(
                 endpoint,
                 client_id: introspection_client_id.clone(),
                 client_secret: introspection_client_secret.clone(),
-                provider_concurrency,
+                provider_concurrency: *provider_concurrency,
                 cache,
             })
             .map(Some)

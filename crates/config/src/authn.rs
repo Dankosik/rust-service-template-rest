@@ -154,7 +154,6 @@ pub(crate) struct AuthnInput {
     mode: AuthnMode,
     issuer: Option<String>,
     audience: Option<Audiences>,
-    #[serde(default)]
     #[serde_as(as = "Option<AudienceList>")]
     audiences: Option<Audiences>,
     // template:begin oidc-jwt:authn-config-jwt-variant
@@ -162,14 +161,12 @@ pub(crate) struct AuthnInput {
     token_profile: Option<TokenProfile>,
     /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
     /// Missing uses `[RS256]`.
-    #[serde(default)]
     #[serde_as(as = "Option<AlgorithmList>")]
     algorithms: Option<Vec<JwtAlgorithm>>,
     /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
     /// metadata.
     jwks_uri: Option<String>,
     /// Maximum age since the verifier last acquired usable keys.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictDuration>")]
     jwks_max_age: Option<std::time::Duration>,
     // template:end oidc-jwt:authn-config-jwt-variant
@@ -179,23 +176,18 @@ pub(crate) struct AuthnInput {
     /// Environment-only client secret. Missing or blank is rejected.
     /// Whitespace determines absence only; a present credential retains
     /// its exact bytes for the provider, including surrounding whitespace.
-    #[serde(default)]
     #[serde_as(as = "crate::de::BlankAsNoneVerbatim")]
     introspection_client_secret: Option<SecretString>,
     /// Immediate provider-exchange capacity. Missing uses 32.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictCount>")]
     provider_concurrency: Option<NonZeroU32>,
     /// Reuse verified positive results until their fixed expiry. Default off.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictBool>")]
     cache_enabled: Option<bool>,
     /// Maximum retained results, from 1 through 1024. Missing uses 256.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictCount>")]
     cache_capacity: Option<usize>,
     /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictDuration>")]
     cache_ttl: Option<Duration>,
     // template:end oidc-introspection:authn-config-introspection-variant
@@ -230,7 +222,7 @@ pub enum AuthnConfig {
         introspection_endpoint: String,
         introspection_client_id: String,
         introspection_client_secret: SecretString,
-        provider_concurrency: NonZeroU32,
+        provider_concurrency: NonZeroUsize,
         cache: Option<IntrospectionCacheConfig>,
     },
     // template:end oidc-introspection:authn-admitted-introspection-variant
@@ -307,10 +299,7 @@ impl<'de> DeserializeAs<'de, Vec<JwtAlgorithm>> for AlgorithmList {
 // template:end oidc-jwt:authn-default-algorithms
 
 // template:begin oidc-introspection:authn-default-provider-concurrency
-fn default_provider_concurrency() -> NonZeroU32 {
-    const { NonZeroU32::new(32).expect("32 is nonzero") }
-}
-
+const DEFAULT_PROVIDER_CONCURRENCY: NonZeroU32 = NonZeroU32::MIN.saturating_add(31);
 const DEFAULT_CACHE_CAPACITY: usize = 256;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
 // template:end oidc-introspection:authn-default-provider-concurrency
@@ -463,25 +452,29 @@ impl AuthnInput {
             self.introspection_client_secret,
             condition,
         ));
-        let provider_concurrency = self
-            .provider_concurrency
-            .unwrap_or_else(default_provider_concurrency);
+        let provider_concurrency = v.record(
+            NonZeroUsize::try_from(
+                self.provider_concurrency
+                    .unwrap_or(DEFAULT_PROVIDER_CONCURRENCY),
+            )
+            .map_err(|_| {
+                ValidationError::new("authn.provider_concurrency", "cannot fit this platform")
+            }),
+        );
         let cache_enabled = self.cache_enabled.unwrap_or(false);
         let cache_capacity = self.cache_capacity.unwrap_or(DEFAULT_CACHE_CAPACITY);
         let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
-        let cache_capacity = v.record(
-            crate::validate::int_range("authn.cache_capacity", cache_capacity, CACHE_CAPACITY)
-                .and_then(|()| {
-                    NonZeroUsize::new(cache_capacity).ok_or_else(|| {
-                        ValidationError::new("authn.cache_capacity", "must be at least 1")
-                    })
-                }),
-        );
+        let cache_capacity = v.record(crate::validate::nonzero_usize_range(
+            "authn.cache_capacity",
+            cache_capacity,
+            CACHE_CAPACITY,
+        ));
         v.check(crate::validate::duration_range(
             "authn.cache_ttl",
             cache_ttl,
             CACHE_TTL,
         ));
+        let provider_concurrency = provider_concurrency?;
         let cache_capacity = cache_capacity?;
         Ok(AuthnConfig::OidcIntrospection {
             issuer: issuer?,

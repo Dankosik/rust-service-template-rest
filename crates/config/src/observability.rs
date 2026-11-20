@@ -111,7 +111,6 @@ pub struct OtelExporterConfig {
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
     /// the exporter stays disabled when no credential is configured. Userinfo,
     /// query strings and fragments are rejected.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     #[debug(skip)]
     pub otlp_endpoint: Option<String>,
@@ -120,7 +119,6 @@ pub struct OtelExporterConfig {
     /// environment or via `--secrets-dir`.
     /// Requires an HTTPS endpoint in `otlp_endpoint`. Missing, empty, or
     /// whitespace-only is absent (`None`).
-    #[serde(default)]
     #[serde_as(as = "BlankAsNoneVerbatim")]
     pub otlp_headers: Option<SecretString>,
 }

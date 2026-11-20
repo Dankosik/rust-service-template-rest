@@ -16,7 +16,6 @@ pub struct HttpIdempotencyConfig {
     /// whitespace-only is vacant (`None`). A set value must be between 1
     /// minute and 30 days inclusive; that range is checked whether or not
     /// the pack is active.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone<RetentionDuration>")]
     pub retention: Option<Duration>,
 }

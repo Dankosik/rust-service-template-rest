@@ -34,7 +34,7 @@ pub struct Registration<'a> {
     outbound_webhooks: &'a service_config::WebhooksConfig,
     // template:end webhooks:worker-registration-outbound-webhooks
     // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints
-    inbound_webhook_endpoints: &'a std::collections::BTreeSet<String>,
+    inbound_webhook_endpoints: &'a [String],
     // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints
     background: &'a mut background::Background,
 }

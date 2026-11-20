@@ -108,7 +108,7 @@ pub struct WorkerConfig {
     webhooks: crate::WebhooksConfig,
     // template:end webhooks:worker-config-webhooks-field
     // template:begin inbound-webhooks:worker-config-inbound-webhooks-field
-    inbound_webhook_endpoints: std::collections::BTreeSet<String>,
+    inbound_webhook_endpoints: Vec<String>,
     // template:end inbound-webhooks:worker-config-inbound-webhooks-field
 }
 
@@ -173,7 +173,7 @@ impl WorkerConfig {
 
     // template:begin inbound-webhooks:worker-config-inbound-webhooks-accessor
     #[must_use]
-    pub const fn inbound_webhook_endpoints(&self) -> &std::collections::BTreeSet<String> {
+    pub fn inbound_webhook_endpoints(&self) -> &[String] {
         &self.inbound_webhook_endpoints
     }
     // template:end inbound-webhooks:worker-config-inbound-webhooks-accessor
