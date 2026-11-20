@@ -11,11 +11,15 @@ use foldhash::HashMap;
 use infra_http::extract::Path;
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
 use infra_http::{Code, Problem, RequestContext};
+use infra_postgres::PgPool;
 use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use utoipa::{OpenApi, ToResponse};
 
-use super::{PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveError, Receiver, Verifier};
+use super::{
+    EndpointReceiveError, PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveBody, Receiver, Rejection,
+    RejectionKind, Verifier, receive_for_endpoint,
+};
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
 const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
@@ -56,7 +60,7 @@ struct ReceiverState {
 }
 
 struct ActiveReceiver {
-    receiver: Receiver,
+    pool: PgPool,
     endpoints: HashMap<Arc<str>, ConfiguredEndpoint>,
 }
 
@@ -74,8 +78,8 @@ impl ReceiverState {
     }
 
     fn active(receiver: Receiver) -> Self {
-        let endpoints = receiver
-            .endpoints
+        let Receiver { pool, endpoints } = receiver;
+        let endpoints = endpoints
             .iter()
             .map(|(endpoint_id, verifier)| {
                 let id: Arc<str> = Arc::from(endpoint_id.as_str());
@@ -88,18 +92,15 @@ impl ReceiverState {
             })
             .collect();
         Self {
-            active: Some(ActiveReceiver {
-                receiver,
-                endpoints,
-            }),
+            active: Some(ActiveReceiver { pool, endpoints }),
             unknown_endpoint: OnceLock::new(),
         }
     }
 
-    fn endpoint(&self, endpoint_id: &str) -> Option<(&Receiver, &ConfiguredEndpoint)> {
+    fn endpoint(&self, endpoint_id: &str) -> Option<(&PgPool, &ConfiguredEndpoint)> {
         let active = self.active.as_ref()?;
         let endpoint = active.endpoints.get(endpoint_id)?;
-        Some((&active.receiver, endpoint))
+        Some((&active.pool, endpoint))
     }
 
     fn reject_unknown_endpoint(&self) -> Response {
@@ -189,7 +190,7 @@ async fn receive(
     request: Request,
 ) -> Response {
     let state = state.state.as_ref();
-    let Some((receiver, ConfiguredEndpoint { verifier, metrics })) = state.endpoint(&endpoint_id)
+    let Some((pool, ConfiguredEndpoint { verifier, metrics })) = state.endpoint(&endpoint_id)
     else {
         return state.reject_unknown_endpoint();
     };
@@ -213,18 +214,19 @@ async fn receive(
             return body_too_large().into_response();
         }
         Err(_) => {
-            metrics.record(OutcomeSlot::BodyUnreadable);
+            metrics.record_body_unreadable();
             return Problem::new(Code::WebhookRejected).into_response();
         }
     };
     let Some(attempt_end) = deadline.attempt_end() else {
         return receipt_deadline_exceeded(metrics);
     };
-    let receipt = receiver.receive_configured_bytes(
+    let receipt = receive_for_endpoint(
+        pool,
         &endpoint_id,
         verifier.as_ref(),
         &parts.headers,
-        body,
+        ReceiveBody::Owned(body),
         SystemTime::now(),
         attempt_end,
     );
@@ -240,15 +242,14 @@ async fn receive(
             metrics.record(slot);
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(ReceiveError::UnknownEndpoint) => state.reject_unknown_endpoint(),
-        Err(ReceiveError::Rejected(rejection)) => {
-            metrics.record_rejection(rejection.reason());
+        Err(EndpointReceiveError::Rejected(rejection)) => {
+            metrics.record_rejection(rejection);
             Problem::new(Code::WebhookRejected).into_response()
         }
-        Err(ReceiveError::Unavailable) if tokio::time::Instant::now() >= attempt_end => {
+        Err(EndpointReceiveError::Unavailable) if tokio::time::Instant::now() >= attempt_end => {
             receipt_deadline_exceeded(metrics)
         }
-        Err(ReceiveError::Unavailable) => {
+        Err(EndpointReceiveError::Unavailable) => {
             metrics.record(OutcomeSlot::Unavailable);
             Problem::new(Code::ServiceUnavailable).into_response()
         }
@@ -268,24 +269,15 @@ enum OutcomeSlot {
     Duplicate,
     Unavailable,
     DeadlineExceeded,
-    BodyUnreadable,
-    PayloadTooLarge,
-}
-
-enum OutcomeLabel {
-    Outcome(&'static str),
-    Rejected(&'static str),
 }
 
 impl OutcomeSlot {
-    const fn label(self) -> OutcomeLabel {
+    const fn as_str(self) -> &'static str {
         match self {
-            Self::Accepted => OutcomeLabel::Outcome("accepted"),
-            Self::Duplicate => OutcomeLabel::Outcome("duplicate"),
-            Self::Unavailable => OutcomeLabel::Outcome("unavailable"),
-            Self::DeadlineExceeded => OutcomeLabel::Outcome("deadline_exceeded"),
-            Self::BodyUnreadable => OutcomeLabel::Rejected("body_unreadable"),
-            Self::PayloadTooLarge => OutcomeLabel::Rejected(PAYLOAD_TOO_LARGE.reason()),
+            Self::Accepted => "accepted",
+            Self::Duplicate => "duplicate",
+            Self::Unavailable => "unavailable",
+            Self::DeadlineExceeded => "deadline_exceeded",
         }
     }
 }
@@ -294,6 +286,8 @@ struct EndpointMetrics {
     endpoint: SharedString,
     outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
     protocol_rejections: EnumMap<ProtocolError, OnceLock<Counter>>,
+    body_unreadable: OnceLock<Counter>,
+    payload_too_large: OnceLock<Counter>,
     custom_rejections: ArcSwap<HashMap<&'static str, Counter>>,
     custom_rejections_lock: Mutex<()>,
 }
@@ -304,6 +298,8 @@ impl EndpointMetrics {
             endpoint,
             outcomes: EnumMap::default(),
             protocol_rejections: EnumMap::default(),
+            body_unreadable: OnceLock::new(),
+            payload_too_large: OnceLock::new(),
             custom_rejections: ArcSwap::default(),
             custom_rejections_lock: Mutex::new(()),
         }
@@ -311,13 +307,12 @@ impl EndpointMetrics {
 
     fn record(&self, slot: OutcomeSlot) {
         self.outcomes[slot]
-            .get_or_init(|| match slot.label() {
-                OutcomeLabel::Outcome(outcome) => metrics::counter!(
+            .get_or_init(|| {
+                metrics::counter!(
                     WEBHOOK_INGRESS_OUTCOMES_METRIC,
                     "endpoint" => self.endpoint.clone(),
-                    "outcome" => outcome
-                ),
-                OutcomeLabel::Rejected(reason) => self.rejection_counter(reason),
+                    "outcome" => slot.as_str()
+                )
             })
             .increment(1);
     }
@@ -328,24 +323,23 @@ impl EndpointMetrics {
             .increment(1);
     }
 
-    fn record_rejection(&self, reason: &'static str) {
-        if let Some((error, _)) = self
-            .protocol_rejections
-            .iter()
-            .find(|(error, _)| error.reason() == reason)
-        {
-            self.record_protocol_rejection(error);
-            return;
+    fn record_body_unreadable(&self) {
+        self.record_fixed_rejection(&self.body_unreadable, "body_unreadable");
+    }
+
+    fn record_rejection(&self, rejection: Rejection) {
+        match rejection.kind() {
+            RejectionKind::Protocol(error) => self.record_protocol_rejection(error),
+            RejectionKind::PayloadTooLarge => {
+                self.record_fixed_rejection(&self.payload_too_large, PAYLOAD_TOO_LARGE.reason());
+            }
+            RejectionKind::Custom(reason) => self.record_custom_rejection(reason),
         }
-        if let Some((slot, _)) = self
-            .outcomes
-            .iter()
-            .find(|(slot, _)| matches!(slot.label(), OutcomeLabel::Rejected(r) if r == reason))
-        {
-            self.record(slot);
-            return;
-        }
-        self.record_custom_rejection(reason);
+    }
+
+    fn record_fixed_rejection(&self, slot: &OnceLock<Counter>, reason: &'static str) {
+        slot.get_or_init(|| self.rejection_counter(reason))
+            .increment(1);
     }
 
     fn record_custom_rejection(&self, reason: &'static str) {
@@ -443,9 +437,15 @@ mod tests {
             partner.metrics.record(OutcomeSlot::Accepted);
             let (_, cloned_partner) = cloned.state.endpoint("partner").expect("partner endpoint");
             cloned_partner.metrics.record(OutcomeSlot::Accepted);
-            partner.metrics.record_rejection("invalid_signature");
-            partner.metrics.record_rejection("invalid_token");
-            partner.metrics.record_rejection("invalid_token");
+            partner
+                .metrics
+                .record_rejection(Rejection::from(ProtocolError::InvalidSignature));
+            partner
+                .metrics
+                .record_rejection(Rejection::new("invalid_token"));
+            partner
+                .metrics
+                .record_rejection(Rejection::new("invalid_token"));
             let _ = state.state.reject_unknown_endpoint();
             let _ = cloned.state.reject_unknown_endpoint();
         });

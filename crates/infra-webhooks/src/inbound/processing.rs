@@ -66,18 +66,18 @@ impl Consumers {
         }
     }
 
-    pub fn require<'a>(
-        &self,
-        endpoint_ids: impl IntoIterator<Item = &'a str>,
-    ) -> Result<(), MissingConsumer> {
-        for endpoint_id in endpoint_ids {
+    pub fn into_processor<'a>(
+        self,
+        required_endpoints: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Processor, MissingConsumer> {
+        for endpoint_id in required_endpoints {
             if !self.bindings.contains_key(endpoint_id) {
                 return Err(MissingConsumer {
                     endpoint_id: endpoint_id.to_owned(),
                 });
             }
         }
-        Ok(())
+        Ok(Processor { consumers: self })
     }
 
     fn get(&self, endpoint_id: &str) -> Option<&dyn ErasedConsumer> {
@@ -85,13 +85,13 @@ impl Consumers {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("inbound webhook endpoint {endpoint_id} already has a consumer binding")]
 pub struct EndpointAlreadyBound {
     pub endpoint_id: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("inbound webhook endpoint {endpoint_id} has no consumer binding")]
 pub struct MissingConsumer {
     pub endpoint_id: String,
@@ -112,11 +112,6 @@ pub struct Processor {
 }
 
 impl Processor {
-    #[must_use]
-    pub fn new(consumers: Consumers) -> Self {
-        Self { consumers }
-    }
-
     pub fn register(self, kinds: &mut KindsBuilder) -> &mut KindsBuilder {
         kinds.register_transactional(Policy::default(), self)
     }
@@ -173,16 +168,23 @@ mod tests {
             .expect_err("second binding");
         assert_eq!(duplicate.endpoint_id, "partner");
 
-        assert!(consumers.require(["partner"]).is_ok());
         let missing = consumers
-            .require(["partner", "other"])
+            .into_processor(["partner", "other"])
             .expect_err("unbound endpoint");
         assert_eq!(missing.endpoint_id, "other");
+
+        let mut bound = Consumers::new();
+        bound
+            .bind("partner", Arc::new(Ignore))
+            .expect("arc binding");
+        assert!(bound.into_processor(["partner"]).is_ok());
     }
 
     #[test]
     fn processor_debug_shows_binding_count_only() {
-        let processor = Processor::new(Consumers::new());
+        let processor = Consumers::new()
+            .into_processor([])
+            .expect("empty processor");
         assert_eq!(
             format!("{processor:?}"),
             "Processor { consumers: Consumers { binding_count: 0 } }"

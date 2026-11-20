@@ -251,7 +251,7 @@ async fn enqueue_intents(
         .enqueue(
             tx,
             endpoint,
-            prepared.event.payload().to_vec(),
+            prepared.event.payload().clone(),
             JSON_CONTENT_TYPE,
         )
         .await?

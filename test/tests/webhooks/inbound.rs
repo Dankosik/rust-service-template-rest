@@ -6,8 +6,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, KindsBuilder};
 use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
-    Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
-    Verifier,
+    Consumer, Consumers, Incoming, ReceiptOutcome, ReceiveError, Receiver, Rejection, Verifier,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{dsn_for, poll_until};
@@ -107,26 +106,10 @@ fn mounted_receiver_with_limit(
 }
 
 fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> HeaderMap {
-    let message_id = message_id.as_ref();
     let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "webhook-id",
-        HeaderValue::from_bytes(message_id).expect("message id"),
-    );
-    headers.insert(
-        "webhook-timestamp",
-        HeaderValue::from_str(&timestamp.to_string()).expect("timestamp"),
-    );
-    headers.insert(
-        "webhook-signature",
-        HeaderValue::from_str(
-            &keys
-                .signatures(message_id, timestamp, body)
-                .expect("signature"),
-        )
-        .expect("signature header"),
-    );
+    keys.write_headers(&mut headers, message_id.as_ref(), timestamp, body)
+        .expect("signed webhook headers");
     headers.insert(
         "content-type",
         HeaderValue::from_bytes(b"application/webhook\xff").expect("opaque content type"),
@@ -551,7 +534,10 @@ struct RunningProcessor {
 impl RunningProcessor {
     fn start(pool: &PgPool, consumers: Consumers) -> Self {
         let mut kinds = KindsBuilder::new();
-        Processor::new(consumers).register(&mut kinds);
+        consumers
+            .into_processor([])
+            .expect("webhook processor")
+            .register(&mut kinds);
         let engine = Engine::new(
             pool.clone(),
             kinds.validate().expect("webhook processor registry"),
@@ -618,7 +604,7 @@ async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(po
         .execute(&pool)
         .await
         .expect("two attempts remain");
-    let running = RunningProcessor::with_consumer(&pool, Arc::new(EffectConsumer::default()));
+    let running = RunningProcessor::with_consumer(&pool, EffectConsumer::default());
     let summary = poll_until(
         "the deadlock schedules a retry",
         super::WAIT,
