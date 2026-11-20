@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     num::NonZeroU32,
     sync::{Arc, Mutex},
     time::Duration,
@@ -54,24 +54,20 @@ fn limits() -> infra_outbound_http::Limits {
 
 fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Dispatcher {
     let limits = limits();
-    Dispatcher::new(
-        endpoints
-            .iter()
-            .map(|(id, path)| {
-                let destination = url::Url::parse(&format!("http://{address}{path}"))
-                    .expect("fixture destination");
-                let client =
-                    infra_outbound_http::Client::try_new_for_test_http(&destination, limits)
-                        .expect("fixture client");
-                let keys =
-                    KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY)).expect("fixture keys");
-                (
-                    (*id).to_owned(),
-                    Endpoint::with_client(destination, client, keys).expect("fixture endpoint"),
-                )
-            })
-            .collect(),
-    )
+    Dispatcher::new(endpoints.iter().map(|(id, path)| {
+        let destination =
+            url::Url::parse(&format!("http://{address}{path}")).expect("fixture destination");
+        let client = infra_outbound_http::Client::try_new_for_test_http(
+            &destination.origin().ascii_serialization(),
+            limits,
+        )
+        .expect("fixture client");
+        let keys = KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY)).expect("fixture keys");
+        (
+            (*id).to_owned(),
+            Endpoint::with_client(destination, client, keys).expect("fixture endpoint"),
+        )
+    }))
 }
 
 async fn enqueue(pool: &Pool, outbound: &Producer, endpoint: &str, body: &[u8]) -> String {
@@ -235,7 +231,7 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
             .enqueue(
                 tx,
                 "partner",
-                b"{\"event\":\"rolled-back\"}".to_vec(),
+                b"{\"event\":\"rolled-back\"}".as_slice(),
                 JSON_CONTENT_TYPE,
             )
             .await
@@ -566,7 +562,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
         .await
         .expect("historical retry position");
 
-    let running = RunningDispatcher::start(&app_pool, Dispatcher::new(BTreeMap::new()), 1);
+    let running = RunningDispatcher::start(&app_pool, Dispatcher::new([]), 1);
     job_is(&pool, &id, "failed", 20).await;
     let row = sqlx::query(
         "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",

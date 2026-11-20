@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use infra_webhooks::outbound::{Dispatcher, Endpoint};
 use infra_webhooks::protocol::{EndpointKeyOwners, KeyRing};
 use secrecy::ExposeSecret;
@@ -24,7 +22,7 @@ pub(super) fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {
     let webhooks = registration.outbound_webhooks();
-    let mut endpoints = BTreeMap::new();
+    let mut endpoints = Vec::with_capacity(webhooks.endpoints.len());
     let mut owners = EndpointKeyOwners::default();
     for (endpoint_id, endpoint) in &webhooks.endpoints {
         let keys = KeyRing::from_encoded(
@@ -45,7 +43,7 @@ pub(super) fn register(
                 source,
             }
         })?;
-        endpoints.insert(endpoint_id.clone(), built);
+        endpoints.push((endpoint_id.clone(), built));
     }
     let max_concurrent = webhooks.max_concurrent_deliveries;
     Dispatcher::new(endpoints).register(&mut registration.jobs, max_concurrent);

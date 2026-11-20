@@ -33,7 +33,7 @@ enum Resource {
 async fn resource(Extension(resource): Extension<Resource>, context: RequestContext) -> StatusCode {
     let resource_unavailable = match resource {
         Resource::Http(client) => {
-            let request = Request::get("https://127.0.0.1:0/value")
+            let request = Request::get(client.origin().uri("/value").unwrap())
                 .body(infra_outbound_http::Bytes::new())
                 .unwrap();
             matches!(
@@ -64,8 +64,9 @@ pub(crate) fn route() -> Result<HttpContract<crate::AppState>, infra_http::Final
 type Build = fn(&infra_oauth2_client_credentials::ServiceTokens) -> Resource;
 
 fn http(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
+    let origin = infra_outbound_http::Origin::parse_https("https://127.0.0.1:0").unwrap();
     let transport = infra_outbound_http::Client::try_new(
-        &"https://127.0.0.1:0".parse().unwrap(),
+        origin,
         infra_outbound_http::Limits {
             operation_timeout: Duration::from_secs(5),
             response_header_count: 16,
@@ -92,13 +93,14 @@ async fn grpc_unavailable(
 }
 
 fn grpc(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
-    use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial};
+    use infra_outbound_grpc::{Client, ClientSecurity};
 
-    let transport = Client::try_new(
+    let transport = Client::builder(
         "https://127.0.0.1:0",
-        ClientSecurity::Tls(ClientTlsMaterial::default()),
+        ClientSecurity::tls(),
         Duration::from_secs(5),
     )
+    .build()
     .unwrap();
     Resource::Grpc(Arc::new(tokens.grpc(transport).unwrap()))
 }

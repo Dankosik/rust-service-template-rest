@@ -1,4 +1,3 @@
-mod context;
 mod observe;
 mod policy;
 mod transport;
@@ -8,19 +7,20 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-use std::time::Duration;
+use std::{convert::Infallible, time::Duration};
 
 use http_body_util::{BodyExt as _, Full, Limited};
-use operation_context::{Deadline, OperationContext, Stopped};
-use tokio::time::Instant;
+use operation_context::{Deadline, Stopped};
 use tracing::Instrument as _;
 
 pub use bytes::Bytes;
-pub use context::RequestContext;
-pub use http::{HeaderMap, Method, Request, Response, StatusCode, Version, header};
-pub use observe::{HISTOGRAMS, REQUEST_DURATION_METRIC, UrlTemplate};
+pub use http::{
+    HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, header, response::Parts,
+};
+pub use observe::{HISTOGRAMS, UrlTemplate};
+pub use operation_context::OperationContext;
+pub use policy::{InvalidOrigin, Origin};
 pub use transport::prepare_tls;
-pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -46,6 +46,14 @@ impl Limits {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportErrorKind {
+    Tls,
+    Connect,
+    Protocol,
+    Other,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("outbound HTTP origin is invalid")]
@@ -59,6 +67,12 @@ pub enum BuildError {
     },
 }
 
+impl From<InvalidOrigin> for BuildError {
+    fn from(_: InvalidOrigin) -> Self {
+        Self::InvalidOrigin
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("outbound HTTP target is invalid")]
@@ -67,8 +81,6 @@ pub enum Error {
     Timeout,
     #[error("outbound HTTP operation was cancelled")]
     Cancelled,
-    #[error("outbound HTTP dispatch was refused")]
-    DispatchRefused,
     #[error("outbound HTTP response body is too large")]
     ResponseBodyTooLarge,
     #[error("outbound HTTP transport failed")]
@@ -99,9 +111,23 @@ impl ExchangeError {
     }
 }
 
+impl From<ExchangeError> for Error {
+    fn from(error: ExchangeError) -> Self {
+        error.into_error()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DispatchError<E> {
+    #[error("outbound HTTP dispatch was refused")]
+    Refused(#[source] E),
+    #[error(transparent)]
+    Exchange(#[from] ExchangeError),
+}
+
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
-    origin: policy::Origin,
+    origin: Origin,
     #[debug(skip)]
     server: observe::Server,
     limits: Limits,
@@ -112,22 +138,27 @@ pub struct Client {
 
 impl Client {
     #[must_use]
-    pub fn matches_origin(&self, origin: &http::Uri) -> bool {
+    pub const fn origin(&self) -> &Origin {
+        &self.origin
+    }
+
+    #[must_use]
+    pub fn matches_origin(&self, origin: &Uri) -> bool {
         origin
             .path_and_query()
             .is_none_or(|pq| pq.query().is_none() && matches!(pq.path(), "" | "/"))
             && self.origin.admits(origin)
     }
 
-    pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
+    pub fn try_new(origin: Origin, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
-        Self::try_with_default_transport(policy::admit_origin(origin)?, limits)
+        if !origin.is_https() {
+            return Err(BuildError::InvalidOrigin);
+        }
+        Self::try_with_default_transport(origin, limits)
     }
 
-    fn try_with_default_transport(
-        origin: policy::Origin,
-        limits: Limits,
-    ) -> Result<Self, BuildError> {
+    fn try_with_default_transport(origin: Origin, limits: Limits) -> Result<Self, BuildError> {
         Ok(Self::with_transport(
             origin,
             limits,
@@ -137,7 +168,7 @@ impl Client {
     }
 
     fn with_transport(
-        origin: policy::Origin,
+        origin: Origin,
         limits: Limits,
         tls: rustls::ClientConfig,
         resolver: transport::Resolver,
@@ -158,87 +189,64 @@ impl Client {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
+    pub fn try_new_for_test_http(origin: &str, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
         Self::try_with_default_transport(policy::admit_test_http_origin(origin)?, limits)
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn try_new_for_test_https(
+        origin: Origin,
+        limits: Limits,
+        root_der: &[u8],
+        address: std::net::SocketAddr,
+    ) -> Result<Self, BuildError> {
+        limits.validate()?;
+        if !origin.is_https() || !address.ip().is_loopback() {
+            return Err(BuildError::InvalidOrigin);
+        }
+        let tls = transport::tls_config_with_root(root_der)?;
+        Ok(Self::with_transport(
+            origin,
+            limits,
+            tls,
+            transport::Resolver::Fixture(transport::FixtureResolver::with_addresses(vec![address])),
+        ))
+    }
+
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
-        deadline: Instant,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        request: Request<Bytes>,
         context: &OperationContext,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_buffered(request, context)
-            .await
-            .map_err(ExchangeError::into_error)
-    }
-
-    pub async fn execute_buffered(
-        &self,
         request: Request<Bytes>,
-        context: impl Into<RequestContext>,
     ) -> Result<Response<Bytes>, ExchangeError> {
-        self.prepare_scoped(request, context.into())
+        self.prepare(context, request)
             .map_err(ExchangeError::BeforeResponse)?
-            .send_with_response(|| true, |_| {}, buffer_response)
+            .send_with_response(|| Ok::<(), Infallible>(()), |_| {}, buffer_response)
             .await
-    }
-
-    pub async fn execute_with_response_status(
-        &self,
-        request: Request<Bytes>,
-        context: &OperationContext,
-        on_status: impl FnOnce(StatusCode) + Send,
-    ) -> Result<Response<Bytes>, Error> {
-        self.prepare(request, context)?
-            .send(|| true, on_status)
-            .await
+            .map_err(into_exchange_error)
     }
 
     pub async fn execute_for_headers(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
-    ) -> Result<http::response::Parts, Error> {
-        self.prepare(request, context)?
+        request: Request<Bytes>,
+    ) -> Result<Parts, Error> {
+        self.prepare(context, request)?
             .send_with_response(
-                || true,
+                || Ok::<(), Infallible>(()),
                 |_| {},
                 async |response, _, _| Ok(response.into_parts().0),
             )
             .await
-            .map_err(ExchangeError::into_error)
+            .map_err(|error| into_exchange_error(error).into_error())
     }
 
     pub fn prepare(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<PreparedRequest<'_>, Error> {
-        self.prepare_scoped(request, context.into())
-    }
-
-    fn prepare_scoped(
-        &self,
-        mut request: Request<Bytes>,
-        context: RequestContext,
-    ) -> Result<PreparedRequest<'_>, Error> {
-        let context = context.for_request(
-            Deadline::after(self.limits.operation_timeout),
-            request.extensions_mut().remove::<OperationContext>(),
-        );
+        let context = context.child_until(Deadline::after(self.limits.operation_timeout));
         context.check()?;
         let request = policy::admit_request(&self.origin, request)?;
         Ok(PreparedRequest {
@@ -254,53 +262,45 @@ impl Client {
 pub struct PreparedRequest<'a> {
     client: &'a Client,
     request: Request<Bytes>,
-    context: RequestContext,
+    context: OperationContext,
 }
 
 impl PreparedRequest<'_> {
-    delegate::delegate! {
-        to self.context {
-            #[must_use]
-            pub const fn deadline(&self) -> Option<Deadline>;
-
-            #[must_use]
-            pub fn stopped(&self) -> Option<Stopped>;
-
-            pub async fn wait_stopped(&self) -> Stopped;
-        }
-    }
-
     #[must_use]
-    pub const fn context(&self) -> &RequestContext {
+    pub const fn context(&self) -> &OperationContext {
         &self.context
     }
 
-    pub fn set_authorization(&mut self, value: http::HeaderValue) {
+    pub fn set_authorization(&mut self, value: HeaderValue) {
         self.request
             .headers_mut()
             .insert(header::AUTHORIZATION, value);
     }
 
-    pub async fn send(
+    pub async fn send_checked<E>(
         self,
-        admit_dispatch: impl FnOnce() -> bool + Send,
+        admit_dispatch: impl FnOnce() -> Result<(), E> + Send,
         on_status: impl FnOnce(StatusCode) + Send,
-    ) -> Result<Response<Bytes>, Error> {
+    ) -> Result<Response<Bytes>, DispatchError<E>> {
         self.send_with_response(admit_dispatch, on_status, buffer_response)
             .await
-            .map_err(ExchangeError::into_error)
     }
 
-    async fn send_with_response<T>(
+    async fn send_with_response<T, E>(
         self,
-        admit_dispatch: impl FnOnce() -> bool + Send,
+        admit_dispatch: impl FnOnce() -> Result<(), E> + Send,
         on_status: impl FnOnce(StatusCode) + Send,
         consume: impl AsyncFnOnce(
             Response<hyper::body::Incoming>,
             usize,
-            &RequestContext,
+            &OperationContext,
         ) -> Result<T, Error>,
-    ) -> Result<T, ExchangeError> {
+    ) -> Result<T, DispatchError<E>> {
+        enum SendError<E> {
+            Refused(E),
+            Error(Error),
+        }
+
         let Self {
             client,
             mut request,
@@ -318,45 +318,71 @@ impl PreparedRequest<'_> {
         }
         let span = attempt.span();
         let exchange = async {
-            context.check()?;
+            context.check().map_err(|s| SendError::Error(s.into()))?;
             let admitted = admit_dispatch();
-            context.check()?;
-            if !admitted {
-                return Err(Error::DispatchRefused);
+            context.check().map_err(|s| SendError::Error(s.into()))?;
+            if let Err(refused) = admitted {
+                return Err(SendError::Refused(refused));
             }
             let response = client
                 .transport
                 .request(request.map(Full::new))
                 .await
-                .map_err(|source| Error::Transport {
-                    source: Box::new(source),
+                .map_err(|source| {
+                    SendError::Error(Error::Transport {
+                        source: Box::new(source),
+                    })
                 })?;
             attempt.record_status(response.status());
             on_status(response.status());
-            context.check()?;
-            consume(response, client.limits.response_body_bytes, &context).await
+            context.check().map_err(|s| SendError::Error(s.into()))?;
+            consume(response, client.limits.response_body_bytes, &context)
+                .await
+                .map_err(SendError::Error)
         };
         let result = tokio::select! {
             biased;
-            reason = context.wait_stopped() => Err(Error::from(reason)),
+            reason = context.wait_stopped() => Err(SendError::Error(Error::from(reason))),
             result = exchange.instrument(span) => result,
         }
         .and_then(|response| {
-            context.check()?;
+            context.check().map_err(|s| SendError::Error(s.into()))?;
             Ok(response)
         });
-        let status = attempt.finish(result.as_ref().err());
-        result.map_err(|source| match status {
-            Some(status) => ExchangeError::AfterResponse { status, source },
-            None => ExchangeError::BeforeResponse(source),
-        })
+        match result {
+            Ok(value) => {
+                attempt.finish(None);
+                Ok(value)
+            }
+            Err(SendError::Refused(refused)) => {
+                attempt.finish_dispatch_refused();
+                Err(DispatchError::Refused(refused))
+            }
+            Err(SendError::Error(error)) => {
+                let status = attempt.finish(Some(&error));
+                Err(DispatchError::Exchange(match status {
+                    Some(status) => ExchangeError::AfterResponse {
+                        status,
+                        source: error,
+                    },
+                    None => ExchangeError::BeforeResponse(error),
+                }))
+            }
+        }
+    }
+}
+
+fn into_exchange_error(error: DispatchError<Infallible>) -> ExchangeError {
+    match error {
+        DispatchError::Refused(never) => match never {},
+        DispatchError::Exchange(exchange) => exchange,
     }
 }
 
 async fn buffer_response(
     response: Response<hyper::body::Incoming>,
     limit: usize,
-    context: &RequestContext,
+    context: &OperationContext,
 ) -> Result<Response<Bytes>, Error> {
     if hyper::body::Body::size_hint(response.body())
         .exact()
@@ -373,7 +399,7 @@ async fn buffer_response(
 async fn collect_bounded_body<B>(
     body: B,
     limit: usize,
-    context: &RequestContext,
+    context: &OperationContext,
 ) -> Result<Bytes, Error>
 where
     B: hyper::body::Body<Data = Bytes> + Unpin,

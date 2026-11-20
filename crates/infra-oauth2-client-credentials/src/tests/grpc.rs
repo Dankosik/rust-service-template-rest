@@ -174,15 +174,16 @@ impl Resource {
     }
 
     fn channel_with_limit(&self, timeout: ClientTimeout, limit: Option<NonZeroUsize>) -> Client {
-        Client::with_opening_limit(
+        Client::builder(
             &format!("https://{}", self.address),
             ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(self.root_pem.clone()),
+                ca_certificate_pem: Some(&self.root_pem),
                 identity: None,
             }),
             timeout,
-            limit,
         )
+        .opening_limit(limit)
+        .build()
         .unwrap()
     }
 
@@ -289,7 +290,7 @@ impl hyper::body::Body for GatedTrailers {
 async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Body> {
     if request.uri().path() == "/budget-stream" {
         peer.record(header_string(request.headers(), "authorization"));
-        if let Some(timeout) = infra_outbound_grpc::grpc_timeout(request.headers()) {
+        if let Some(timeout) = grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         let status = request
@@ -326,7 +327,7 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         return response.body(Body::empty()).unwrap();
     }
     if request.uri().path() == "/example.v1.EchoService/Unary" {
-        if let Some(timeout) = infra_outbound_grpc::grpc_timeout(request.headers()) {
+        if let Some(timeout) = grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         return tonic::server::Grpc::new(
@@ -339,6 +340,12 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         .into_http::<()>()
         .into_parts();
     HyperResponse::from_parts(parts, Body::empty())
+}
+
+fn grpc_timeout(headers: &http::HeaderMap) -> Option<Duration> {
+    headers
+        .get(shared_rules::grpc::TIMEOUT_HEADER)
+        .and_then(|value| shared_rules::grpc::parse_timeout(value.as_bytes()))
 }
 
 fn header_string(headers: &http::HeaderMap, name: &str) -> Option<String> {
@@ -359,11 +366,12 @@ async fn plaintext_cannot_be_bound_to_oauth_credentials() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let credentials = resource.credentials(&tokens);
-    let channel = Client::try_new(
+    let channel = Client::builder(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),
     )
+    .build()
     .unwrap();
     assert_eq!(
         credentials.grpc(channel.clone()).unwrap_err().key,
@@ -641,11 +649,8 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
         .unwrap();
     let gate = tokens.block_tokens();
     let active_subject = subject("active");
-    let mut exchange = Box::pin(http.execute(
-        tokens.request(),
-        &active_subject,
-        Instant::now() + Duration::from_secs(10),
-    ));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut exchange = Box::pin(http.execute(&context, tokens.request(), &active_subject));
     tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     let error = resource
         .client(&credentials)

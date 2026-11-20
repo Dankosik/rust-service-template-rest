@@ -1,17 +1,20 @@
+// template:begin postgres:test-lib-allows
 #![allow(
     clippy::expect_used,
     clippy::panic,
     reason = "a helper that cannot do its job fails the calling test; a `Result` would move the same panic into every test body"
 )]
 
+// template:end postgres:test-lib-allows
 // template:begin jobs:test-lib-jobs-module
 pub mod jobs;
-// template:end jobs:test-lib-jobs-module
 
+// template:end jobs:test-lib-jobs-module
 // template:begin jobs-reference:test-lib-reading-counter
 pub mod reading_counter;
-// template:end jobs-reference:test-lib-reading-counter
 
+// template:end jobs-reference:test-lib-reading-counter
+// template:begin postgres:test-lib-postgres-helpers
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -120,3 +123,4 @@ pub async fn poll_until<T>(
     .await
     .unwrap_or_else(|elapsed| panic!("{what} did not happen within {bound:?}: {elapsed}"))
 }
+// template:end postgres:test-lib-postgres-helpers

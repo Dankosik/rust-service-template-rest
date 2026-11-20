@@ -10,11 +10,11 @@ fn register(
     _state: &service::AppState,
     _background: &mut service::BackgroundRegistration<'_>,
 ) -> Result<(), service::RegistrationError> {
-    echo::register(services, |services, path| {
+    echo::register(services, |echo, method| {
         // template:begin service-auth:grpc-example-caller-rules
-        services.allow_callers(path, &["example-caller"])?;
+        echo.allow_callers(method, &["example-caller"])?;
         // template:end service-auth:grpc-example-caller-rules
-        let _ = (services, path);
+        let _ = (echo, method);
         Ok(())
     })
     .map_err(Into::into)

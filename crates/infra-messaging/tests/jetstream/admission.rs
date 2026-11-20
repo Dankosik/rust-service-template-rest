@@ -171,7 +171,7 @@ async fn outbox_refuses_route_changing_subject_transforms() {
             .unwrap();
         let ack = messaging
             .producer()
-            .publish(&event, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &event)
             .await
             .unwrap();
         let stored = source.get_raw_message(ack.sequence).await.unwrap();
@@ -302,12 +302,12 @@ async fn verify_full_stream(fixture: &Fixture) {
         .prepare(&event_with_value("second", &"b".repeat(750)))
         .unwrap();
     let ack = producer
-        .publish(&first, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &first)
         .await
         .expect("the first event fits into an empty stream");
     assert_eq!(
         producer
-            .publish(&second, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &second)
             .await,
         Err(PublishError::Rejected(
             infra_messaging::PublishRejection::BrokerRefused
@@ -344,7 +344,7 @@ async fn verify_full_stream(fixture: &Fixture) {
     )
     .await;
     let stored = producer
-        .publish(&second, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &second)
         .await
         .expect("the same rejected event fits after old bytes are acknowledged");
     assert!(!stored.duplicate);
@@ -414,11 +414,11 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
     messaging
         .producer()
         .publish(
+            &context(deadline(), &CancellationToken::new()),
             &fixture
                 .publication
                 .prepare(&event("publisher-no-dlq"))
                 .unwrap(),
-            &context(deadline(), &CancellationToken::new()),
         )
         .await
         .unwrap();

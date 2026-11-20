@@ -1,10 +1,6 @@
-use std::time::Duration;
+use http::HeaderMap;
 
-use http::{HeaderMap, HeaderName};
-
-pub(crate) const GRPC_TIMEOUT: HeaderName =
-    HeaderName::from_static(shared_rules::grpc::TIMEOUT_HEADER);
-
+pub(crate) use infra_grpc_core::protocol::{STATUS_HEADERS, grpc_timeout, header_status_code};
 pub(crate) use shared_rules::grpc::split_method_path;
 
 pub(crate) fn method_path(service: &str, method: &str) -> String {
@@ -115,32 +111,9 @@ fn is_qdtext(byte: u8) -> bool {
     is_quoted_pair_char(byte) && byte != b'"' && byte != b'\\'
 }
 
-#[must_use]
-pub(crate) fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
-    headers
-        .get(GRPC_TIMEOUT)
-        .and_then(|value| shared_rules::grpc::parse_timeout(value.as_bytes()))
-}
-
-pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
-    headers
-        .get(tonic::Status::GRPC_STATUS)
-        .map(|value| tonic::Code::from_bytes(value.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn grpc_timeout_extracts_valid_header_and_ignores_missing_or_malformed() {
-        let mut headers = HeaderMap::new();
-        assert_eq!(grpc_timeout(&headers), None);
-        headers.insert(GRPC_TIMEOUT, http::HeaderValue::from_static("250m"));
-        assert_eq!(grpc_timeout(&headers), Some(Duration::from_millis(250)));
-        headers.insert(GRPC_TIMEOUT, http::HeaderValue::from_static("+5S"));
-        assert_eq!(grpc_timeout(&headers), None);
-    }
 
     #[test]
     fn native_content_type_accepts_valid_rfc9110_grpc_media_types() {

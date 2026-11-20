@@ -624,7 +624,7 @@ mod tests {
             });
             assert_eq!(
                 verifier
-                    .authenticate_with_context(authorization, crate::Transport::Http, &context)
+                    .authenticate(&context, authorization, crate::Transport::Http)
                     .await
                     .err(),
                 Some(Failure::Unavailable)
@@ -945,10 +945,10 @@ mod tests {
             let _gate = fixture.block_responses();
             let budget = Duration::from_secs(2);
             let context = OperationContext::with_timeout(budget);
-            let mut authentication = Box::pin(verifier.authenticate_with_context(
+            let mut authentication = Box::pin(verifier.authenticate(
+                &context,
                 [b"Bearer slow".as_slice()],
                 crate::Transport::Http,
-                &context,
             ));
             tokio::select! {
                 () = fixture.received() => {},

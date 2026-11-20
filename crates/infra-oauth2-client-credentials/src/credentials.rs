@@ -5,7 +5,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::{Client, RequestContext};
+use infra_outbound_http::{BuildError, Client, Origin};
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -176,7 +176,9 @@ struct CachedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let validated = validate_options(options, Scheme::Https, Scheme::Https)?;
-        let token_http = Client::try_new(validated.endpoint(), TOKEN_LIMITS)
+        let token_http = Origin::parse_https(&validated.endpoint().origin().ascii_serialization())
+            .map_err(BuildError::from)
+            .and_then(|origin| Client::try_new(origin, TOKEN_LIMITS))
             .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }
@@ -184,11 +186,14 @@ impl Registration {
     #[cfg(any(test, feature = "test-support"))]
     pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
         let validated = validate_options(options, Scheme::Http, Scheme::Https)?;
-        let token_http = Client::try_new_for_test_http(validated.endpoint(), TOKEN_LIMITS)
-            .map_err(|_| ConfigurationError {
-                key: "token_url",
-                reason: "requires an HTTP loopback IP address",
-            })?;
+        let token_http = Client::try_new_for_test_http(
+            &validated.endpoint().origin().ascii_serialization(),
+            TOKEN_LIMITS,
+        )
+        .map_err(|_| ConfigurationError {
+            key: "token_url",
+            reason: "requires an HTTP loopback IP address",
+        })?;
         Self::build(validated, token_http)
     }
 
@@ -453,7 +458,7 @@ impl ServiceState {
             return;
         }
         let endpoint = &self.registration.endpoint;
-        let context = OperationContext::from_deadline(Deadline::at(request.deadline)).into();
+        let context = OperationContext::from_deadline(Deadline::at(request.deadline));
         match endpoint.fetch_service_token(&self.target, &context).await {
             Ok(token) => {
                 let now = Instant::now();
@@ -492,7 +497,7 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     source: CutoffSource,
-    context: &'a RequestContext,
+    context: &'a OperationContext,
 }
 
 #[derive(Clone, Copy)]
@@ -502,7 +507,7 @@ enum CutoffSource {
 }
 
 impl AcquisitionDeadline<'_> {
-    fn fetch_context(self, now: Instant) -> RequestContext {
+    fn fetch_context(self, now: Instant) -> OperationContext {
         let ceiling = Deadline::at(self.cutoff.min(now + FETCH_TIMEOUT));
         self.context.child_until(ceiling)
     }
@@ -522,7 +527,7 @@ impl AcquisitionDeadline<'_> {
     }
 }
 
-pub(crate) fn acquisition_deadline(context: &RequestContext) -> AcquisitionDeadline<'_> {
+pub(crate) fn acquisition_deadline(context: &OperationContext) -> AcquisitionDeadline<'_> {
     let (cutoff, source) = match context.deadline().and_then(Deadline::instant) {
         Some(cutoff) => (cutoff, CutoffSource::Request),
         None => (Instant::now() + FETCH_TIMEOUT, CutoffSource::Synthetic),

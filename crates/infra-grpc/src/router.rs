@@ -14,7 +14,7 @@ use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
 use infra_http_transport::{ConnectionLimits, Http2Options};
 use opentelemetry::context::FutureExt as _;
-use operation_context::{Deadline, OperationContext, Stopped};
+use operation_context::{Deadline, OperationContext};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tonic::server::NamedService as _;
@@ -25,15 +25,23 @@ use crate::call::{ServerCustody, check_open, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
-use crate::services::{CallType, ListenerLayer, Methods, REFLECTION_PATHS};
+use crate::services::{
+    BuiltServices, CallType, ListenerLayer, ListenerService, Methods, REFLECTION_PATHS,
+};
 use crate::status::{FixedFailure, internal_status};
-use crate::{Error, Services};
+use crate::{Error, ResponseContext, Services, TlsRequiredError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub request_timeout: Duration,
     pub max_in_flight: Option<NonZeroU32>,
     pub max_admission_wait: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerOptions {
+    pub limits: Limits,
+    pub trust_trace_context: bool,
 }
 
 #[derive(Debug)]
@@ -47,27 +55,7 @@ pub enum Authentication {
     // template:end service-auth:grpc-authentication-service-tokens
 }
 
-pub fn request_operation<T>(
-    request: &tonic::Request<T>,
-) -> Result<&OperationContext, tonic::Status> {
-    request.extensions().get().ok_or_else(internal_status)
-}
-
-#[derive(Clone, Debug)]
-pub struct ResponseContext(OperationContext);
-
-impl ResponseContext {
-    pub fn require_from_request<T>(request: &tonic::Request<T>) -> Result<&Self, tonic::Status> {
-        request.extensions().get().ok_or_else(internal_status)
-    }
-
-    #[must_use]
-    pub const fn operation(&self) -> &OperationContext {
-        &self.0
-    }
-}
-
-enum BusinessAuth {
+pub(crate) enum BusinessAuth {
     None,
     // template:begin authn:grpc-router-bearer-field
     Bearer {
@@ -111,10 +99,10 @@ impl Application {
         listener: infra_http_transport::BoundListener,
         options: infra_http_transport::Http2Options,
         tls: Option<infra_http_transport::TlsOptions>,
-    ) -> Result<infra_http_transport::Server, Error> {
+    ) -> Result<infra_http_transport::Server, TlsRequiredError> {
         // template:begin service-auth:grpc-app-tls-check
         if self.requires_tls && tls.is_none() {
-            return Err(Error::ServiceTokensRequireTls);
+            return Err(TlsRequiredError);
         }
         // template:end service-auth:grpc-app-tls-check
         Ok(listener.serve_h2(self.router, options, tls))
@@ -138,23 +126,25 @@ where
     }
 }
 
-pub fn router(
-    mut services: Services,
+pub(crate) fn build(
+    services: Services,
     readiness: ::health::ReadinessReader,
     authentication: Authentication,
-    limits: Limits,
-    trust_trace_context: bool,
+    options: ServerOptions,
 ) -> Result<Application, Error> {
-    if services.reflection {
-        services.attach_reflection()?;
-    }
-    services.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
-    let authentication = prepare_business_auth(authentication, &mut services)?;
+    let BuiltServices {
+        routes,
+        listener_layers,
+        names,
+        methods,
+        reflection,
+        authentication,
+    } = services.into_built(authentication)?;
+    let limits = options.limits;
     if limits.max_in_flight.is_some() {
         observe::register_shed();
     }
     observe::describe();
-    let methods = Arc::new(services.methods());
     let admission = limits.max_in_flight.map(|count| {
         let count = count.get() as usize;
         AdmissionPermits {
@@ -172,70 +162,22 @@ pub fn router(
                 authentication,
                 methods: Arc::clone(&methods),
                 request_timeout: limits.request_timeout,
-                reflection_enabled: services.reflection,
+                reflection_enabled: reflection,
                 admission,
             });
-            let business = services
-                .routes
-                .routes()
+            let business = routes
                 .into_axum_router()
                 .layer(axum::middleware::from_fn_with_state(state, business_call));
             native_router(
                 business,
-                services.listener_layer,
+                listener_layers,
                 readiness,
-                services.names,
+                names,
                 methods,
                 limits.request_timeout,
-                trust_trace_context,
+                options.trust_trace_context,
             )
         },
-    })
-}
-
-fn prepare_business_auth(
-    authentication: Authentication,
-    #[allow(
-        unused_variables,
-        reason = "optional auth template regions consume services"
-    )]
-    services: &mut Services,
-) -> Result<BusinessAuth, Error> {
-    // template:begin service-auth:grpc-router-caller-rules
-    if matches!(authentication, Authentication::ServiceTokens(_)) {
-        services.validate_caller_rules()?;
-    } else if !services.caller_rules.is_empty() {
-        return Err(Error::CallerRulesRequireServiceTokens);
-    }
-    // template:end service-auth:grpc-router-caller-rules
-    // template:begin authn:grpc-router-authenticate
-    if matches!(authentication, Authentication::None) {
-        return Err(Error::UnauthenticatedBusinessCalls);
-    }
-    if matches!(authentication, Authentication::Bearer(_)) {
-        services.prepare_scope_requirements()?;
-    } else if services
-        .scopes
-        .values()
-        .any(|rule| rule.delegate || !rule.scopes.is_empty())
-    {
-        return Err(Error::ScopesWithServiceTokens);
-    }
-    // template:end authn:grpc-router-authenticate
-    Ok(match authentication {
-        Authentication::None => BusinessAuth::None,
-        // template:begin authn:grpc-router-bearer-init
-        Authentication::Bearer(verifier) => BusinessAuth::Bearer {
-            verifier,
-            scopes: std::mem::take(&mut services.scopes),
-        },
-        // template:end authn:grpc-router-bearer-init
-        // template:begin service-auth:grpc-router-caller-init
-        Authentication::ServiceTokens(verifier) => BusinessAuth::ServiceTokens {
-            verifier,
-            caller_rules: std::mem::take(&mut services.caller_rules),
-        },
-        // template:end service-auth:grpc-router-caller-init
     })
 }
 
@@ -250,7 +192,7 @@ pub fn server_options(connections: ConnectionLimits) -> Http2Options {
 
 fn native_router(
     router: axum::Router,
-    listener_layer: Option<ListenerLayer>,
+    listener_layers: Vec<ListenerLayer>,
     readiness: ::health::ReadinessReader,
     names: BTreeSet<&'static str>,
     methods: Arc<Methods>,
@@ -268,13 +210,19 @@ fn native_router(
         (methods, request_timeout),
         health_call,
     )));
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the native gRPC listener delegates every route and its tonic fallback through this layer"
-    )]
-    let router = match listener_layer {
-        Some(layer) => axum::Router::new().fallback_service(layer.layer(router)),
-        None => router,
+    let router = if listener_layers.is_empty() {
+        router
+    } else {
+        let layered = listener_layers
+            .into_iter()
+            .fold(ListenerService::new(router), |service, layer| {
+                layer.layer(service)
+            });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the native gRPC listener delegates every route and its tonic fallback through the stacked listener layers"
+        )]
+        axum::Router::new().fallback_service(layered)
     };
     router.layer(axum::middleware::from_fn_with_state(
         trust_trace_context,
@@ -412,22 +360,18 @@ async fn business_call(
     )]
     let outcome = run_in_span(
         async {
-            let outcome = tokio::select! {
-                biased;
-                reason = lifecycle.opening_context.wait_stopped() => match reason {
-                    Stopped::Deadline => return Err(FixedFailure::Deadline.status().into_http()),
-                    Stopped::Cancelled => Err(stopped_status(reason).into_http()),
-                },
-                outcome = open_business(
+            lifecycle
+                .opening_context
+                .run(open_business(
                     &state,
                     &lifecycle.opening_context,
                     started.call_type,
                     request,
                     next,
-                ) => outcome,
-            };
-            check_open(&lifecycle.opening_context)?;
-            outcome
+                ))
+                .await
+                .map_err(|reason| stopped_status(reason).into_http())
+                .and_then(std::convert::identity)
         },
         started.call.span(),
         started.fallback.as_ref(),
@@ -699,21 +643,6 @@ mod ingress_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn missing_request_operation_returns_a_sanitized_internal_status() {
-        let mut request = tonic::Request::new(());
-        request
-            .extensions_mut()
-            .insert(ResponseContext(OperationContext::unbounded()));
-        let status = request_operation(&request).unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Internal);
-        assert_eq!(status.message(), service_failure::SANITIZED_DETAIL);
-        assert_eq!(
-            crate::status::catalog_code(&status),
-            Some(service_failure::Code::InternalServerError)
-        );
-    }
 
     #[tokio::test]
     async fn rejected_call_stops_reading_when_frames_reach_64_kib() {

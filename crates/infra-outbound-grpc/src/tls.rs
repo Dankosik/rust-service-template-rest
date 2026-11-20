@@ -1,18 +1,19 @@
 use std::sync::{Arc, OnceLock};
 
+use infra_grpc_core::tls::{
+    CertParseError, crypto_provider, parse_ca_roots, parse_cert_chain, parse_private_key,
+    tls13_client_builder,
+};
 use parking_lot::Mutex;
-use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
-use rustls::server::ParsedCertificate;
-use rustls::{ClientConfig, ConfigBuilder, InconsistentKeys, RootCertStore, WantsVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{ClientConfig, InconsistentKeys, RootCertStore};
 use rustls_platform_verifier::Verifier;
-use secrecy::ExposeSecret as _;
 
-use crate::{ClientError, ClientIdentity, ClientTlsMaterial, TlsMaterialError};
+use crate::{ClientIdentity, ClientTlsError, ClientTlsMaterial};
 
 pub(crate) fn client_tls_config(
-    material: &ClientTlsMaterial,
-) -> Result<Arc<ClientConfig>, ClientError> {
+    material: &ClientTlsMaterial<'_>,
+) -> Result<Arc<ClientConfig>, ClientTlsError> {
     if material.ca_certificate_pem.is_none() && material.identity.is_none() {
         return default_tls_config();
     }
@@ -45,18 +46,19 @@ impl<T> FallibleOnce<T> {
     }
 }
 
-fn default_tls_config() -> Result<Arc<ClientConfig>, ClientError> {
+fn default_tls_config() -> Result<Arc<ClientConfig>, ClientTlsError> {
     static DEFAULT_CONFIG: FallibleOnce<Arc<ClientConfig>> = FallibleOnce::new();
     DEFAULT_CONFIG
         .get_or_try_init(|| build_client_tls_config(&ClientTlsMaterial::default()).map(Arc::new))
         .map(Arc::clone)
 }
 
-fn build_client_tls_config(material: &ClientTlsMaterial) -> Result<ClientConfig, ClientError> {
+fn build_client_tls_config(
+    material: &ClientTlsMaterial<'_>,
+) -> Result<ClientConfig, ClientTlsError> {
     let roots = material
         .ca_certificate_pem
-        .as_deref()
-        .map(parse_ca_roots)
+        .map(client_ca_roots)
         .transpose()?;
     let identity = material
         .identity
@@ -64,8 +66,8 @@ fn build_client_tls_config(material: &ClientTlsMaterial) -> Result<ClientConfig,
         .map(parse_client_identity)
         .transpose()?;
     let builder = match roots {
-        Some(roots) => tls13_builder()?.with_root_certificates(roots),
-        None => tls13_builder()?
+        Some(roots) => tls13_client_builder().with_root_certificates(roots),
+        None => tls13_client_builder()
             .dangerous()
             .with_custom_certificate_verifier(platform_verifier()?),
     };
@@ -79,65 +81,42 @@ fn build_client_tls_config(material: &ClientTlsMaterial) -> Result<ClientConfig,
     Ok(config)
 }
 
-fn platform_verifier() -> Result<Arc<Verifier>, ClientError> {
+fn platform_verifier() -> Result<Arc<Verifier>, ClientTlsError> {
     static PLATFORM_VERIFIER: FallibleOnce<Arc<Verifier>> = FallibleOnce::new();
     PLATFORM_VERIFIER
         .get_or_try_init(|| {
             Verifier::new(crypto_provider())
                 .map(Arc::new)
-                .map_err(|_| ClientError::ClientVerifierSetup)
+                .map_err(|_| ClientTlsError::VerifierSetup)
         })
         .map(Arc::clone)
 }
 
-fn crypto_provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-}
-
-fn tls13_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, ClientError> {
-    ClientConfig::builder_with_provider(crypto_provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(ClientError::ClientProtocolSetup)
-}
-
-fn identity_setup_error(error: rustls::Error) -> ClientError {
+fn identity_setup_error(error: rustls::Error) -> ClientTlsError {
     match error {
         rustls::Error::InconsistentKeys(InconsistentKeys::KeyMismatch) => {
-            ClientError::ClientIdentityMismatch(error)
+            ClientTlsError::IdentityMismatch(error)
         }
-        _ => ClientError::ClientIdentitySetup(error),
+        _ => ClientTlsError::IdentitySetup(error),
     }
 }
 
-fn parse_ca_roots(ca_pem: &str) -> Result<RootCertStore, TlsMaterialError> {
-    let mut roots = RootCertStore::empty();
-    for item in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
-        let cert = item.map_err(|_| TlsMaterialError::InvalidCaCertificate(None))?;
-        roots
-            .add(cert)
-            .map_err(|error| TlsMaterialError::InvalidCaCertificate(Some(error)))?;
-    }
-    if roots.is_empty() {
-        return Err(TlsMaterialError::InvalidCaCertificate(None));
-    }
-    Ok(roots)
+fn client_ca_roots(ca_pem: &str) -> Result<RootCertStore, ClientTlsError> {
+    parse_ca_roots(ca_pem).map_err(|error| match error {
+        CertParseError::MalformedPem => ClientTlsError::InvalidCaCertificate(None),
+        CertParseError::InvalidDer(source) => ClientTlsError::InvalidCaCertificate(Some(source)),
+    })
 }
 
 fn parse_client_identity(
-    identity: &ClientIdentity,
-) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsMaterialError> {
-    let mut chain = Vec::new();
-    for item in CertificateDer::pem_slice_iter(identity.certificate_pem.as_bytes()) {
-        let cert = item.map_err(|_| TlsMaterialError::InvalidCertificate(None))?;
-        ParsedCertificate::try_from(&cert)
-            .map_err(|error| TlsMaterialError::InvalidCertificate(Some(error)))?;
-        chain.push(cert);
-    }
-    if chain.is_empty() {
-        return Err(TlsMaterialError::InvalidCertificate(None));
-    }
-    let key = PrivateKeyDer::from_pem_slice(identity.private_key_pem.expose_secret().as_bytes())
-        .map_err(|_| TlsMaterialError::InvalidPrivateKey)?;
+    identity: &ClientIdentity<'_>,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ClientTlsError> {
+    let chain = parse_cert_chain(identity.certificate_pem).map_err(|error| match error {
+        CertParseError::MalformedPem => ClientTlsError::InvalidCertificate(None),
+        CertParseError::InvalidDer(source) => ClientTlsError::InvalidCertificate(Some(source)),
+    })?;
+    let key = parse_private_key(identity.private_key_pem)
+        .map_err(|_| ClientTlsError::InvalidPrivateKey)?;
     Ok((chain, key))
 }
 
@@ -147,12 +126,12 @@ mod tests {
     use std::error::Error as _;
 
     use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair};
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret as _, SecretString};
     use tls_test_support::new_issuer;
 
     use super::*;
 
-    fn test_pki() -> (String, ClientIdentity, SecretString) {
+    fn test_pki() -> (String, String, SecretString, SecretString) {
         let issuer = new_issuer();
         let client_key = KeyPair::generate().unwrap();
         let mut leaf_params = CertificateParams::new(vec!["client.test".to_owned()]).unwrap();
@@ -161,10 +140,8 @@ mod tests {
         let other_key = KeyPair::generate().unwrap();
         (
             issuer.pem(),
-            ClientIdentity {
-                certificate_pem: leaf.pem(),
-                private_key_pem: SecretString::from(client_key.serialize_pem()),
-            },
+            leaf.pem(),
+            SecretString::from(client_key.serialize_pem()),
             SecretString::from(other_key.serialize_pem()),
         )
     }
@@ -236,15 +213,19 @@ mod tests {
 
     #[test]
     fn custom_ca_and_identity_validate_material_and_pairing() {
-        let (ca_pem, identity, other_key) = test_pki();
+        let (ca_pem, cert_pem, key_pem, other_key) = test_pki();
+        let identity = ClientIdentity {
+            certificate_pem: &cert_pem,
+            private_key_pem: &key_pem,
+        };
         assert!(
             !format!("{identity:?}").contains("PRIVATE KEY"),
             "Debug must redact private key PEM"
         );
 
         let with_ca = client_tls_config(&ClientTlsMaterial {
-            ca_certificate_pem: Some(ca_pem.clone()),
-            identity: Some(identity.clone()),
+            ca_certificate_pem: Some(&ca_pem),
+            identity: Some(identity),
         })
         .unwrap();
         assert_eq!(with_ca.alpn_protocols, vec![b"h2".to_vec()]);
@@ -252,22 +233,22 @@ mod tests {
         for _ in 0..2 {
             let platform_mtls = client_tls_config(&ClientTlsMaterial {
                 ca_certificate_pem: None,
-                identity: Some(identity.clone()),
+                identity: Some(identity),
             })
             .unwrap();
             assert_eq!(platform_mtls.alpn_protocols, vec![b"h2".to_vec()]);
         }
 
-        for ca_certificate_pem in [Some(ca_pem.clone()), None] {
+        for ca_certificate_pem in [Some(ca_pem.as_str()), None] {
             let mismatched = ClientTlsMaterial {
                 ca_certificate_pem,
                 identity: Some(ClientIdentity {
-                    certificate_pem: identity.certificate_pem.clone(),
-                    private_key_pem: other_key.clone(),
+                    certificate_pem: &cert_pem,
+                    private_key_pem: &other_key,
                 }),
             };
             let error = client_tls_config(&mismatched).unwrap_err();
-            assert_matches!(&error, ClientError::ClientIdentityMismatch(_));
+            assert_matches!(&error, ClientTlsError::IdentityMismatch(_));
             assert!(error.to_string().contains("does not match the certificate"));
             assert_matches!(
                 error.source().and_then(|source| source.downcast_ref()),
@@ -279,57 +260,54 @@ mod tests {
                 .map(|cause| format!("{cause}; {cause:?}"));
             for formatted in std::iter::once(format!("{mismatched:?}")).chain(diagnostics) {
                 assert!(!formatted.contains("-----BEGIN"));
-                assert!(!formatted.contains(identity.certificate_pem.lines().nth(1).unwrap()));
+                assert!(!formatted.contains(cert_pem.lines().nth(1).unwrap()));
                 assert!(!formatted.contains(other_key.expose_secret().lines().nth(1).unwrap()));
             }
         }
 
         assert_matches!(
             client_tls_config(&ClientTlsMaterial {
-                ca_certificate_pem: Some(String::new()),
+                ca_certificate_pem: Some(""),
                 identity: None,
             })
             .unwrap_err(),
-            ClientError::Tls(TlsMaterialError::InvalidCaCertificate(None))
+            ClientTlsError::InvalidCaCertificate(None)
         );
         assert_matches!(
             client_tls_config(&ClientTlsMaterial {
-                ca_certificate_pem: Some(ca_pem.clone()),
+                ca_certificate_pem: Some(&ca_pem),
                 identity: Some(ClientIdentity {
-                    certificate_pem:
-                        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_owned(),
-                    private_key_pem: identity.private_key_pem.clone(),
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+                    private_key_pem: &key_pem,
                 }),
             })
             .unwrap_err(),
-            ClientError::Tls(TlsMaterialError::InvalidCertificate(Some(_)))
+            ClientTlsError::InvalidCertificate(Some(_))
         );
+        let bad_key = SecretString::from("-----BEGIN PRIVATE KEY secret-credential");
         let malformed = client_tls_config(&ClientTlsMaterial {
-            ca_certificate_pem: Some(ca_pem.clone()),
+            ca_certificate_pem: Some(&ca_pem),
             identity: Some(ClientIdentity {
-                certificate_pem: identity.certificate_pem.clone(),
-                private_key_pem: SecretString::from("-----BEGIN PRIVATE KEY secret-credential"),
+                certificate_pem: &cert_pem,
+                private_key_pem: &bad_key,
             }),
         })
         .unwrap_err();
-        assert_matches!(
-            &malformed,
-            ClientError::Tls(TlsMaterialError::InvalidPrivateKey)
-        );
+        assert_matches!(&malformed, ClientTlsError::InvalidPrivateKey);
         assert!(malformed.source().is_none());
         assert!(!format!("{malformed}; {malformed:?}").contains("secret-credential"));
 
+        let bad_der =
+            SecretString::from("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n");
         let invalid_der = client_tls_config(&ClientTlsMaterial {
-            ca_certificate_pem: Some(ca_pem),
+            ca_certificate_pem: Some(&ca_pem),
             identity: Some(ClientIdentity {
-                certificate_pem: identity.certificate_pem,
-                private_key_pem: SecretString::from(
-                    "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
-                ),
+                certificate_pem: &cert_pem,
+                private_key_pem: &bad_der,
             }),
         })
         .unwrap_err();
-        assert_matches!(&invalid_der, ClientError::ClientIdentitySetup(_));
+        assert_matches!(&invalid_der, ClientTlsError::IdentitySetup(_));
         assert_matches!(
             invalid_der
                 .source()

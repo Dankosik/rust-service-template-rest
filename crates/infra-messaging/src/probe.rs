@@ -95,7 +95,6 @@ pub struct MessagingProbe {
     pub(crate) shared: Arc<Shared>,
 }
 
-#[health::async_trait]
 impl Probe for MessagingProbe {
     fn name(&self) -> &'static str {
         "messaging"

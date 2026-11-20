@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode, header::AUTHORIZATION};
-use infra_outbound_http::{Client, Error as HttpError};
-use operation_context::{Deadline, OperationContext};
+use infra_outbound_http::{Client, DispatchError, Error as HttpError, Origin};
+use operation_context::OperationContext;
 use tokio::time::Instant;
 
 use crate::{
@@ -64,6 +64,11 @@ impl ExchangeTokens {
 
 impl ServiceHttpClient {
     #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.resource.origin()
+    }
+
+    #[must_use]
     pub const fn with_context<'a>(
         &'a self,
         context: &'a OperationContext,
@@ -76,25 +81,13 @@ impl ServiceHttpClient {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
-        deadline: Instant,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         execute_authenticated(
             &self.resource,
-            request,
             context,
+            request,
             Grant::Service(&self.tokens),
         )
         .await
@@ -102,14 +95,22 @@ impl ServiceHttpClient {
 }
 
 impl ServiceRequestClient<'_> {
+    #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.client.origin()
+    }
+
     pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
-        self.client
-            .execute_with_context(request, self.context)
-            .await
+        self.client.execute(self.context, request).await
     }
 }
 
 impl ExchangeHttpClient {
+    #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.resource.origin()
+    }
+
     #[must_use]
     pub const fn with_context<'a>(
         &'a self,
@@ -123,28 +124,14 @@ impl ExchangeHttpClient {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
-        subject: &OnBehalfOf,
-        deadline: Instant,
-    ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            subject,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
-    }
-
-    pub async fn execute_with_context(
-        &self,
-        request: Request<Bytes>,
-        subject: &OnBehalfOf,
         context: &OperationContext,
+        request: Request<Bytes>,
+        subject: &OnBehalfOf,
     ) -> Result<Response<Bytes>, Error> {
         execute_authenticated(
             &self.resource,
-            request,
             context,
+            request,
             Grant::Exchange(&self.tokens, subject),
         )
         .await
@@ -152,14 +139,17 @@ impl ExchangeHttpClient {
 }
 
 impl ExchangeRequestClient<'_> {
+    #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.client.origin()
+    }
+
     pub async fn execute(
         &self,
         request: Request<Bytes>,
         subject: &OnBehalfOf,
     ) -> Result<Response<Bytes>, Error> {
-        self.client
-            .execute_with_context(request, subject, self.context)
-            .await
+        self.client.execute(self.context, request, subject).await
     }
 }
 
@@ -190,13 +180,13 @@ impl Grant<'_> {
 
 async fn execute_authenticated(
     resource: &Client,
-    request: Request<Bytes>,
     context: &OperationContext,
+    request: Request<Bytes>,
     grant: Grant<'_>,
 ) -> Result<Response<Bytes>, Error> {
     let has_authorization = request.headers().contains_key(AUTHORIZATION);
     let mut prepared = resource
-        .prepare(request, context)
+        .prepare(context, request)
         .map_err(Error::at_prepare)?;
     let deadline = acquisition_deadline(prepared.context());
     grant.check_active(deadline)?;
@@ -206,8 +196,8 @@ async fn execute_authenticated(
     let acquired = grant.acquire_for_request(deadline).await?;
     prepared.set_authorization(acquired.header.clone());
     prepared
-        .send(
-            || acquired.check_expiry(Instant::now()).is_ok(),
+        .send_checked(
+            || acquired.check_expiry(Instant::now()),
             |status| {
                 if status == StatusCode::UNAUTHORIZED {
                     acquired.reject_if_old_enough();
@@ -227,10 +217,10 @@ impl Error {
         }
     }
 
-    fn at_send(error: HttpError) -> Self {
+    fn at_send(error: DispatchError<AcquisitionError>) -> Self {
         match error {
-            HttpError::DispatchRefused => AcquisitionError::InvalidResponse.into(),
-            other => Self::Resource(other),
+            DispatchError::Refused(error) => Self::Acquisition(error),
+            DispatchError::Exchange(error) => Self::Resource(error.into_error()),
         }
     }
 }

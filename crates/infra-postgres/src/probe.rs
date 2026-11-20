@@ -27,7 +27,6 @@ impl PostgresProbe {
     }
 }
 
-#[health::async_trait]
 impl Probe for PostgresProbe {
     fn name(&self) -> &'static str {
         "postgres"

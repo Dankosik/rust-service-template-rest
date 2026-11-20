@@ -818,8 +818,8 @@ async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) 
     }
 }
 
-async fn exercise_client_destination(address: &str, certificate: String, token: &str) {
-    let transport = infra_outbound_grpc::Client::try_new(
+async fn exercise_client_destination(address: &str, certificate: &str, token: &str) {
+    let transport = infra_outbound_grpc::Client::builder(
         &format!("https://{address}"),
         infra_outbound_grpc::ClientSecurity::Tls(infra_outbound_grpc::ClientTlsMaterial {
             ca_certificate_pem: Some(certificate),
@@ -827,6 +827,7 @@ async fn exercise_client_destination(address: &str, certificate: String, token: 
         }),
         Duration::from_secs(5),
     )
+    .build()
     .expect("observed client");
     let mut client = EchoServiceClient::new(transport);
     let mut request = Request::new(UnaryRequest {
@@ -959,7 +960,7 @@ fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str, trusted
     example.await_line("service_ready");
     oidc.runtime.block_on(async {
         exercise_server_privacy(&address, &certificate, &oidc.token).await;
-        exercise_client_destination(&address, certificate, &oidc.token).await;
+        exercise_client_destination(&address, &certificate, &oidc.token).await;
     });
     example.terminate();
     let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));

@@ -9,24 +9,24 @@ struct Flaky {
     calls: Arc<AtomicU32>,
 }
 
-#[async_trait]
 impl Probe for Flaky {
     fn name(&self) -> &'static str {
         "flaky"
     }
-    async fn check(&self) -> Result<(), ProbeError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        if self.healthy.load(Ordering::Relaxed) {
-            Ok(())
-        } else {
-            Err(ProbeError::from_static("connection refused"))
-        }
+    fn check(&self) -> impl Future<Output = Result<(), ProbeError>> + Send {
+        std::future::poll_fn(|_| {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::task::Poll::Ready(if self.healthy.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(ProbeError::from_static("connection refused"))
+            })
+        })
     }
 }
 
 struct Hanging;
 
-#[async_trait]
 impl Probe for Hanging {
     fn name(&self) -> &'static str {
         "hanging"
@@ -41,7 +41,6 @@ struct Slow {
     delay: Duration,
 }
 
-#[async_trait]
 impl Probe for Slow {
     fn name(&self) -> &'static str {
         self.name
@@ -57,7 +56,6 @@ struct Gated {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[async_trait]
 impl Probe for Gated {
     fn name(&self) -> &'static str {
         "gated"
@@ -79,10 +77,10 @@ fn policy() -> RefreshPolicy {
     .unwrap()
 }
 
-fn flaky_probe(healthy: bool) -> (Box<dyn Probe>, Arc<AtomicBool>, Arc<AtomicU32>) {
+fn flaky_probe(healthy: bool) -> (BoxedProbe, Arc<AtomicBool>, Arc<AtomicU32>) {
     let flag = Arc::new(AtomicBool::new(healthy));
     let calls = Arc::new(AtomicU32::new(0));
-    let probe = Box::new(Flaky {
+    let probe = BoxedProbe::new(Flaky {
         healthy: Arc::clone(&flag),
         calls: Arc::clone(&calls),
     });
@@ -320,7 +318,7 @@ async fn a_failed_round_starting_fresh_cannot_revive_readiness_after_expiry() {
     let readiness = Readiness::new(
         vec![
             probe,
-            Box::new(Slow {
+            BoxedProbe::new(Slow {
                 name: "slow",
                 delay: policy().probe_budget / 2,
             }),
@@ -353,7 +351,7 @@ async fn a_success_observed_after_the_budget_cannot_admit_startup() {
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let release = Arc::new(tokio::sync::Notify::new());
     let readiness = Readiness::new(
-        vec![Box::new(Gated {
+        vec![BoxedProbe::new(Gated {
             hold: Arc::new(AtomicBool::new(true)),
             release: Arc::clone(&release),
         })],
@@ -432,7 +430,7 @@ async fn refresh_until_stops_while_an_evaluation_is_in_flight() {
     let readiness = Readiness::new(
         vec![
             probe,
-            Box::new(Gated {
+            BoxedProbe::new(Gated {
                 hold: Arc::clone(&hold),
                 release: Arc::new(tokio::sync::Notify::new()),
             }),
@@ -468,7 +466,7 @@ async fn an_already_cancelled_refresher_skips_an_overdue_round() {
 async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_named() {
     let (healthy, _, healthy_calls) = flaky_probe(true);
     let (failing, _, failing_calls) = flaky_probe(false);
-    let readiness = Readiness::new(vec![Box::new(Hanging), healthy, failing], policy());
+    let readiness = Readiness::new(vec![BoxedProbe::new(Hanging), healthy, failing], policy());
     let verdict = readiness.prepare().await;
     std::assert_matches!(
         verdict,
@@ -487,7 +485,7 @@ async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
     let hold = Arc::new(AtomicBool::new(false));
     let release = Arc::new(tokio::sync::Notify::new());
     let readiness = Readiness::new(
-        vec![Box::new(Gated {
+        vec![BoxedProbe::new(Gated {
             hold: Arc::clone(&hold),
             release: Arc::clone(&release),
         })],
@@ -510,11 +508,11 @@ async fn a_slow_probe_does_not_spend_another_probes_budget() {
     let delay = policy().probe_budget * 3 / 4;
     let readiness = Readiness::new(
         vec![
-            Box::new(Slow {
+            BoxedProbe::new(Slow {
                 name: "first",
                 delay,
             }),
-            Box::new(Slow {
+            BoxedProbe::new(Slow {
                 name: "second",
                 delay,
             }),
@@ -574,7 +572,7 @@ async fn each_completed_check_is_counted_by_outcome() {
     refresher.refresh().await;
     refresher.refresh().await;
     std::assert_matches!(
-        Readiness::new(vec![Box::new(Hanging)], policy())
+        Readiness::new(vec![BoxedProbe::new(Hanging)], policy())
             .prepare()
             .await,
         Err(NotReady::TimedOut { .. })
@@ -598,8 +596,8 @@ async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
         let readiness = Readiness::new(
             vec![
                 healthy,
-                Box::new(Hanging),
-                Box::new(Slow {
+                BoxedProbe::new(Hanging),
+                BoxedProbe::new(Slow {
                     name: "slow",
                     delay: Duration::ZERO,
                 }),
@@ -845,7 +843,7 @@ async fn a_ready_watch_reports_a_failed_check_published_after_a_stall_before_it_
 async fn a_ready_watch_reports_a_stall_that_ends_in_a_timed_out_check_of_a_running_refresher() {
     let hold = Arc::new(AtomicBool::new(false));
     let readiness = Readiness::new(
-        vec![Box::new(Gated {
+        vec![BoxedProbe::new(Gated {
             hold: Arc::clone(&hold),
             release: Arc::new(tokio::sync::Notify::new()),
         })],

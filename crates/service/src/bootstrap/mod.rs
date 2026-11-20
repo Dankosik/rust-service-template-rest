@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::{PreparedReadiness, Probe, Readiness, RefreshPolicy};
+use health::{BoxedProbe, PreparedReadiness, Readiness, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions};
 use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options};
 use infra_telemetry::{
@@ -139,6 +139,8 @@ pub(crate) enum BootstrapError {
     // template:begin grpc:bootstrap-grpc-error
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
+    #[error(transparent)]
+    GrpcTlsRequired(#[from] infra_grpc::TlsRequiredError),
     #[error("gRPC service registration: {0}")]
     GrpcRegistration(#[source] RegistrationError),
     // template:end grpc:bootstrap-grpc-error
@@ -446,7 +448,7 @@ async fn start(
         unused_mut,
         reason = "profiles without PostgreSQL or messaging have no probe"
     )]
-    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+    let mut probes: Vec<BoxedProbe> = Vec::new();
     // template:begin authn:bootstrap-authn-prepare
     let bearer = authn::prepare(config, background).await?;
     // template:end authn:bootstrap-authn-prepare
@@ -456,7 +458,9 @@ async fn start(
     // template:begin postgres:bootstrap-postgres-startup
     if let Some(postgres) = config.postgres() {
         let pool = postgres::open(postgres, config, background, &mut dependencies.postgres).await?;
-        probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
+        probes.push(BoxedProbe::new(infra_postgres::PostgresProbe::new(
+            pool.clone(),
+        )));
         migrate::verify_history(pool).await?;
     }
     // template:end postgres:bootstrap-postgres-startup
@@ -911,6 +915,7 @@ mod tests {
             ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
             echo_service_server::{EchoService, EchoServiceServer},
         };
+        use infra_grpc::RequestExt as _;
         use infra_outbound_grpc::{Client, ClientSecurity};
         use tonic::{Request, Response, Status};
         use tonic_reflection::pb::v1::{
@@ -933,7 +938,7 @@ mod tests {
                 &self,
                 request: Request<UnaryRequest>,
             ) -> Result<Response<UnaryResponse>, Status> {
-                let caller = infra_grpc::require_caller(&request)?;
+                let caller = request.caller()?;
                 let query = ServerReflectionRequest {
                     message_request: Some(MessageRequest::ListServices(String::new())),
                     ..Default::default()
@@ -1002,8 +1007,9 @@ mod tests {
         pub(super) fn registration(origin: String) -> super::ServiceRegistration {
             super::ServiceRegistration::default().with_grpc(move |services, _, _| {
                 let directory =
-                    Client::try_new(&origin, ClientSecurity::Plaintext, Duration::from_secs(5))?;
-                services.set_listener_layer(tower::util::MapResponseLayer::new(
+                    Client::builder(&origin, ClientSecurity::Plaintext, Duration::from_secs(5))
+                        .build()?;
+                services.add_listener_layer(tower::util::MapResponseLayer::new(
                     |mut response: axum::response::Response| {
                         response
                             .headers_mut()
@@ -1012,17 +1018,13 @@ mod tests {
                     },
                 ));
                 services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-                services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
-                    directory,
-                ))))?;
-                services.add_reflection()?;
+                let mut echo = services.add(EchoServiceServer::new(Echo(
+                    ServerReflectionClient::new(directory),
+                )))?;
                 for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                    services
-                        .allow_callers(&format!("/example.v1.EchoService/{method}"), &["orders"])?;
+                    echo.allow_callers(method, &["orders"])?;
                 }
-                for path in infra_grpc::REFLECTION_PATHS {
-                    services.allow_callers(path, &["orders"])?;
-                }
+                services.add_reflection()?.allow_callers(&["orders"])?;
                 Ok(())
             })
         }
@@ -1178,14 +1180,15 @@ mod tests {
         .unwrap();
         let address = serving.grpc_server.as_ref().unwrap().local_addr();
         let origin = format!("https://{address}");
-        let resource = infra_outbound_grpc::Client::try_new(
+        let resource = infra_outbound_grpc::Client::builder(
             &origin,
             infra_outbound_grpc::ClientSecurity::Tls(infra_outbound_grpc::ClientTlsMaterial {
-                ca_certificate_pem: Some(certificate.root_pem),
+                ca_certificate_pem: Some(&certificate.root_pem),
                 identity: None,
             }),
             Duration::from_secs(5),
         )
+        .build()
         .unwrap();
         let status = EchoServiceClient::new(resource.clone())
             .unary(UnaryRequest::default())

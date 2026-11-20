@@ -68,61 +68,62 @@ async-nats = { workspace = true, features = ["jetstream"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
 nats-test-support = { workspace = true }
-operation-context = { workspace = true }
 # template:end outbox:test-messaging-outbox-dependencies
+# template:begin test-operation-context:test-operation-context-dependencies
+operation-context = { workspace = true }
+# template:end test-operation-context:test-operation-context-dependencies
 # template:begin test-digest:test-digest-dependency
 sha2 = { workspace = true }
 # template:end test-digest:test-digest-dependency
 # template:begin outbound-http:test-outbound-http-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
+wiremock = { workspace = true }
 # template:end outbound-http:test-outbound-http-dependencies
 # template:begin inbound-webhooks:test-inbound-webhooks-dependencies
 http = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:test-inbound-webhooks-dependencies
-url = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
-wiremock = { workspace = true }
-moka = { workspace = true, features = ["future"] }
-backon = { workspace = true, features = ["tokio-sleep"] }
-proptest = { workspace = true, features = ["std"] }
-insta = { workspace = true, features = ["json"] }
-validator = { workspace = true, features = ["derive"] }
-bon = { workspace = true }
-time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
-rust_decimal = { workspace = true, features = ["std", "serde-with-str"] }
-uuid = { workspace = true, features = ["std", "serde", "v4"] }
-json-patch = { workspace = true }
-semver = { workspace = true, features = ["std"] }
-ipnet = { workspace = true, features = ["std"] }
-base64 = { workspace = true, features = ["std"] }
-csv = { workspace = true }
-camino = { workspace = true }
-tempfile = { workspace = true, features = ["getrandom"] }
-walkdir = { workspace = true }
-fs-err = { workspace = true }
-strsim = { workspace = true }
-unicode-segmentation = { workspace = true }
-unicode-normalization = { workspace = true, features = ["std"] }
-regex = { workspace = true, features = ["std", "unicode", "perf"] }
-bstr = { workspace = true, features = ["std"] }
-heck = { workspace = true }
-bytes = { workspace = true, features = ["std"] }
-tokio-util = { workspace = true, features = ["io", "rt"] }
+# template:begin test-runtime:test-runtime-dependencies
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "process", "test-util"] }
+# template:end test-runtime:test-runtime-dependencies
+# template:begin source-template:test-utility-recipe-dependencies
+axum-extra = { workspace = true, features = ["typed-header"] }
+bon = { workspace = true }
+bstr = { workspace = true, features = ["std"] }
+camino = { workspace = true }
+csv = { workspace = true }
+fs-err = { workspace = true }
+heck = { workspace = true }
+indexmap = { workspace = true, features = ["std"] }
+insta = { workspace = true, features = ["json"] }
+ipnet = { workspace = true, features = ["std"] }
+itertools = { workspace = true, features = ["use_std"] }
+json-patch = { workspace = true }
+moka = { workspace = true, features = ["future"] }
+proptest = { workspace = true, features = ["std"] }
+regex = { workspace = true, features = ["std", "unicode", "perf"] }
+rust_decimal = { workspace = true, features = ["std", "serde-with-str"] }
+semver = { workspace = true, features = ["std"] }
+serde_with = { workspace = true, features = ["std", "macros"] }
+strsim = { workspace = true }
+unicode-normalization = { workspace = true, features = ["std"] }
+unicode-segmentation = { workspace = true }
+url = { workspace = true }
+validator = { workspace = true, features = ["derive"] }
+walkdir = { workspace = true }
+# template:end source-template:test-utility-recipe-dependencies
+# template:begin postgres:test-postgres-health-dependency
+axum = { workspace = true, features = ["json", "query"] }
+backon = { workspace = true, features = ["tokio-sleep"] }
+bytes = { workspace = true, features = ["std"] }
+derive_more = { workspace = true, features = ["display", "as_ref", "from", "error"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 infra-http = { workspace = true }
-axum-test = { workspace = true }
-axum-extra = { workspace = true, features = ["typed-header"] }
-axum = { workspace = true, features = ["json", "query"] }
-derive_more = { workspace = true, features = ["display", "as_ref", "from", "error"] }
-serde_with = { workspace = true, features = ["std", "macros"] }
-serde_json = { workspace = true, features = ["std", "raw_value"] }
-serde = { workspace = true, features = ["std", "derive"] }
-indexmap = { workspace = true, features = ["std"] }
-itertools = { workspace = true, features = ["use_std"] }
-# template:begin postgres:test-postgres-health-dependency
 infra-http-transport = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde_json = { workspace = true, features = ["std", "raw_value"] }
+tempfile = { workspace = true, features = ["getrandom"] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
 utoipa = { workspace = true, features = ["macros"] }
 health = { workspace = true }
 tracing = { workspace = true }
@@ -153,12 +154,16 @@ infra-bearerauthn = { workspace = true, features = ["test-support"] }
 secrecy = { workspace = true }
 # template:end test-introspection-fixtures:test-introspection-fixture-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
+axum-test = { workspace = true }
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "http1", "service"] }
-async-trait = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
 # template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 # template:begin jobs:test-jobs-dev-dependencies
+base64 = { workspace = true, features = ["std"] }
 nix = { workspace = true, features = ["signal"] }
+time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
+uuid = { workspace = true, features = ["std", "serde", "v4"] }
 # template:end jobs:test-jobs-dev-dependencies
 
 # template:begin jobs:test-jobs-worker-fixture

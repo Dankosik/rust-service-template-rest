@@ -224,7 +224,7 @@ impl Fixture {
     }
 
     fn resource_client(&self) -> Client {
-        Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
+        Client::try_new_for_test_http(self.origin.as_str(), TOKEN_LIMITS).unwrap()
     }
 
     fn service_client(&self) -> ServiceHttpClient {
@@ -249,7 +249,7 @@ impl Fixture {
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         client
-            .execute(request, deadline(Duration::from_secs(10)))
+            .execute(&timeout_context(Duration::from_secs(10)), request)
             .await
     }
 
@@ -270,9 +270,9 @@ impl Fixture {
     ) -> Result<Response<Bytes>, Error> {
         client
             .execute(
+                &timeout_context(Duration::from_secs(10)),
                 request,
                 &subject(subject_token),
-                deadline(Duration::from_secs(10)),
             )
             .await
     }
@@ -505,12 +505,12 @@ fn prepare_registration(options: Options) -> Registration {
     Registration::prepare_for_test_http(options).unwrap()
 }
 
-fn deadline(after: Duration) -> Instant {
-    Instant::now() + after
+fn timeout_context(after: Duration) -> OperationContext {
+    OperationContext::with_timeout(after)
 }
 
-fn token_context() -> infra_outbound_http::RequestContext {
-    OperationContext::with_timeout(Duration::from_secs(10)).into()
+fn token_context() -> OperationContext {
+    OperationContext::with_timeout(Duration::from_secs(10))
 }
 
 async fn advance(duration: Duration) {

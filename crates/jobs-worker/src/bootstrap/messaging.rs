@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use health::Probe;
+use health::BoxedProbe;
 use infra_messaging::{
     Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
     Registry as MessagingRegistry, TransportSecurity,
@@ -148,9 +148,9 @@ fn messaging_options(
     })
 }
 
-pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
+pub(super) fn probe(resources: &Resources) -> Option<BoxedProbe> {
     let messaging = resources.admitted_messaging()?;
-    Some(Box::new(messaging.probe()))
+    Some(BoxedProbe::new(messaging.probe()))
 }
 
 pub(super) fn start_consumer(

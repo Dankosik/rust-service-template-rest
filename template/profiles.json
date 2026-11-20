@@ -249,7 +249,14 @@
   "profiles": {
     "source-template": {
       "when": false,
-      "remove_when_unselected": []
+      "remove_when_unselected": [
+        "test/tests/utility_async.rs",
+        "test/tests/utility_collections.rs",
+        "test/tests/utility_data.rs",
+        "test/tests/utility_http.rs",
+        "test/tests/utility_text_io.rs",
+        "test/tests/utility_values.rs"
+      ]
     },
     "runtime-progress": {
       "when": false,
@@ -275,7 +282,6 @@
         "test/tests/postgres/",
         "test/tests/support/commit_proxy.rs",
         "test/fixtures/migrations/",
-        "test/src/lib.rs",
         "env/pgbouncer/",
         "scripts/checks/migrations.py",
         "scripts/tests/test_migrations.py",
@@ -324,6 +330,7 @@
         "crates/config/src/grpc/",
         "crates/grpc-contracts/",
         "crates/infra-grpc/",
+        "crates/infra-grpc-core/",
         "crates/infra-outbound-grpc/",
         "crates/infra-telemetry/src/traces/tests/delivery/",
         "crates/service/examples/grpc.rs",
@@ -454,6 +461,14 @@
       "when": {"outbox": "postgres"},
       "remove_when_unselected": []
     },
+    "test-operation-context": {
+      "when": {"any": [{"outbound_http": "bounded"}, {"outbox": "postgres"}]},
+      "remove_when_unselected": []
+    },
+    "test-runtime": {
+      "when": {"any": [{"database": "postgres"}, {"outbound_http": "bounded"}]},
+      "remove_when_unselected": []
+    },
     "test-metrics": {
       "when": {"any": [{"http_idempotency": "postgres"}, {"jobs": "postgres"}]},
       "remove_when_unselected": []
@@ -504,7 +519,8 @@
       "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}]},
       "remove_when_unselected": [
         "env/docker-compose.yml",
-        "scripts/integration.py"
+        "scripts/integration.py",
+        "scripts/tests/test_integration.py"
       ]
     },
     "outbox": {

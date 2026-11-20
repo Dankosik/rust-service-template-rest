@@ -174,6 +174,17 @@ impl OperationContext {
             () = self.cancellation.cancelled() => Stopped::Cancelled,
         }
     }
+
+    pub async fn run<F: Future>(&self, future: F) -> Result<F::Output, Stopped> {
+        tokio::select! {
+            biased;
+            reason = self.wait_stopped() => Err(reason),
+            output = future => {
+                self.check()?;
+                Ok(output)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +283,40 @@ mod tests {
         );
         parent.cancel();
         assert_eq!(wait.await, Stopped::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_stops_on_deadline_or_cancellation_and_rechecks_on_completion() {
+        let active = OperationContext::with_timeout(Duration::from_secs(1));
+        assert_eq!(active.run(async { 42 }).await, Ok(42));
+
+        let expired = OperationContext::with_timeout(Duration::ZERO);
+        let mut ran = false;
+        let result = expired
+            .run(async {
+                ran = true;
+            })
+            .await;
+        assert_eq!(result, Err(Stopped::Deadline));
+        assert!(!ran);
+
+        let cancels_during_work = OperationContext::with_timeout(Duration::from_secs(5));
+        let result = cancels_during_work
+            .run(async {
+                cancels_during_work.cancel();
+                7
+            })
+            .await;
+        assert_eq!(result, Err(Stopped::Cancelled));
+
+        let pending_timeout = OperationContext::with_timeout(Duration::from_secs(1));
+        let mut run = pin!(pending_timeout.run(std::future::pending::<()>()));
+        assert!(
+            poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(run.await, Err(Stopped::Deadline));
     }
 }

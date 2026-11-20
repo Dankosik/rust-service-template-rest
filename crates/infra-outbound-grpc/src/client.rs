@@ -37,31 +37,50 @@ const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 type TlsTarget = (TlsConnector, rustls::pki_types::ServerName<'static>);
 type TransportStream = Either<TcpStream, TlsStream<TcpStream>>;
 
-#[derive(Clone, Debug)]
-pub enum ClientSecurity {
+#[derive(Clone, Copy)]
+struct ContextConflict;
+
+#[derive(Clone, Copy, Debug)]
+pub enum ClientSecurity<'a> {
     Plaintext,
-    Tls(ClientTlsMaterial),
+    Tls(ClientTlsMaterial<'a>),
 }
 
-#[derive(Clone, derive_more::Debug, Default)]
-pub struct ClientTlsMaterial {
-    #[debug(skip)]
-    pub ca_certificate_pem: Option<String>,
-    pub identity: Option<ClientIdentity>,
+impl ClientSecurity<'static> {
+    #[must_use]
+    pub const fn tls() -> Self {
+        Self::Tls(ClientTlsMaterial {
+            ca_certificate_pem: None,
+            identity: None,
+        })
+    }
 }
 
-#[derive(Clone, derive_more::Debug)]
-pub struct ClientIdentity {
+#[derive(Clone, Copy, derive_more::Debug, Default)]
+pub struct ClientTlsMaterial<'a> {
     #[debug(skip)]
-    pub certificate_pem: String,
+    pub ca_certificate_pem: Option<&'a str>,
+    pub identity: Option<ClientIdentity<'a>>,
+}
+
+#[derive(Clone, Copy, derive_more::Debug)]
+pub struct ClientIdentity<'a> {
     #[debug(skip)]
-    pub private_key_pem: SecretString,
+    pub certificate_pem: &'a str,
+    #[debug(skip)]
+    pub private_key_pem: &'a SecretString,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientTimeout {
     FullRpc(Duration),
     OpeningOnly(Duration),
+}
+
+impl From<Duration> for ClientTimeout {
+    fn from(timeout: Duration) -> Self {
+        Self::FullRpc(timeout)
+    }
 }
 
 impl ClientTimeout {
@@ -80,6 +99,58 @@ impl ClientTimeout {
             Self::OpeningOnly(_) => caller_timeout.map(|budget| Deadline::new(started_at, budget)),
         };
         (opening, lifetime)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ClientBuilder<'a> {
+    destination: &'a str,
+    security: ClientSecurity<'a>,
+    timeout: ClientTimeout,
+    opening_limit: Option<NonZeroUsize>,
+}
+
+impl ClientBuilder<'_> {
+    #[must_use]
+    pub fn opening_limit(mut self, limit: impl Into<Option<NonZeroUsize>>) -> Self {
+        self.opening_limit = limit.into();
+        self
+    }
+
+    pub fn build(self) -> Result<Client, ClientError> {
+        if self
+            .opening_limit
+            .is_some_and(|limit| limit.get() > Semaphore::MAX_PERMITS)
+        {
+            return Err(ClientError::InvalidOpeningLimit);
+        }
+        let (uri, origin, tls) = parse_destination(self.destination, self.security)?;
+        let endpoint = Endpoint::from(uri)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .http2_keep_alive_interval(Duration::from_mins(1))
+            .keep_alive_timeout(Duration::from_secs(20))
+            .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+            .initial_stream_window_size(HTTP2_STREAM_WINDOW);
+        let destination = crate::observe::Destination::from_uri(endpoint.uri());
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+        http.set_nodelay(true);
+        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+        http.set_keepalive(Some(Duration::from_mins(1)));
+        http.set_keepalive_interval(Some(Duration::from_secs(15)));
+        http.set_keepalive_retries(Some(3));
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
+        Ok(Client {
+            origin,
+            channel: Channel::new(GrpcConnector { http, tls }, endpoint),
+            destination,
+            timeout: self.timeout,
+            openings: self
+                .opening_limit
+                .map(|limit| Arc::new(Semaphore::new(limit.get()))),
+            series: crate::observe::Series::client(),
+        })
     }
 }
 
@@ -149,56 +220,18 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn try_new(
-        destination: &str,
-        security: ClientSecurity,
-        timeout: Duration,
-    ) -> Result<Self, ClientError> {
-        Self::with_timeout_policy(destination, security, ClientTimeout::FullRpc(timeout))
-    }
-
-    pub fn with_timeout_policy(
-        destination: &str,
-        security: ClientSecurity,
-        timeout: ClientTimeout,
-    ) -> Result<Self, ClientError> {
-        Self::with_opening_limit(destination, security, timeout, None)
-    }
-
-    pub fn with_opening_limit(
-        destination: &str,
-        security: ClientSecurity,
-        timeout: ClientTimeout,
-        opening_limit: Option<NonZeroUsize>,
-    ) -> Result<Self, ClientError> {
-        if opening_limit.is_some_and(|limit| limit.get() > Semaphore::MAX_PERMITS) {
-            return Err(ClientError::InvalidOpeningLimit);
-        }
-        let (uri, origin, tls) = parse_destination(destination, security)?;
-        let endpoint = Endpoint::from(uri)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .http2_keep_alive_interval(Duration::from_mins(1))
-            .keep_alive_timeout(Duration::from_secs(20))
-            .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
-            .initial_stream_window_size(HTTP2_STREAM_WINDOW);
-        let destination = crate::observe::Destination::from_uri(endpoint.uri());
-        let mut http = HttpConnector::new();
-        http.enforce_http(false);
-        http.set_nodelay(true);
-        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
-        http.set_keepalive(Some(Duration::from_mins(1)));
-        http.set_keepalive_interval(Some(Duration::from_secs(15)));
-        http.set_keepalive_retries(Some(3));
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
-        Ok(Self {
-            origin,
-            channel: Channel::new(GrpcConnector { http, tls }, endpoint),
+    #[must_use]
+    pub fn builder<'a>(
+        destination: &'a str,
+        security: ClientSecurity<'a>,
+        timeout: impl Into<ClientTimeout>,
+    ) -> ClientBuilder<'a> {
+        ClientBuilder {
             destination,
-            timeout,
-            openings: opening_limit.map(|limit| Arc::new(Semaphore::new(limit.get()))),
-            series: crate::observe::Series::client(),
-        })
+            security,
+            timeout: timeout.into(),
+            opening_limit: None,
+        }
     }
 
     #[must_use]
@@ -211,42 +244,9 @@ impl Client {
         OriginParts::parse(origin).is_some_and(|other| self.origin.matches(&other))
     }
 
-    pub fn prepare_call(&self, mut request: Request<Body>) -> Result<PreparedCall, tonic::Status> {
-        let started_at = Instant::now();
-        let caller_timeout = crate::grpc_timeout(request.headers());
-        if caller_timeout.is_none() {
-            request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
-        }
-        let contexts = derive_call_contexts(
-            self.timeout,
-            started_at,
-            caller_timeout,
-            request.extensions().get::<OperationContext>(),
-        );
-        let call = crate::observe::Call::start(self.series, &request, self.destination.as_ref());
-        otel_http::inject_context(
-            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
-            request.headers_mut(),
-        );
-        let permit = match acquire_opening_permit(self.openings.as_ref(), &contexts.opening) {
-            Ok(permit) => permit,
-            Err(status) => return Err(call.refuse(status)),
-        };
-        Ok(PreparedCall {
-            channel: self.channel.clone(),
-            request,
-            opening: contexts.opening,
-            lifetime: contexts.lifetime,
-            watch_stop: contexts.watch_stop,
-            call,
-            cancel_on_drop: contexts.cancel_on_drop,
-            permit,
-        })
-    }
-
     #[must_use]
-    pub fn refuse_call(&self, request: &Request<Body>, status: tonic::Status) -> tonic::Status {
-        crate::observe::Call::start(self.series, request, self.destination.as_ref()).refuse(status)
+    pub fn with_context(&self, context: &OperationContext) -> WithContext<Self> {
+        WithContext::new(self.clone(), context)
     }
 }
 
@@ -263,10 +263,53 @@ impl Service<Request<Body>> for Client {
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        match self.prepare_call(request) {
+        match PreparedCall::prepare(self, request) {
             Ok(prepared) => futures_util::future::Either::Right(Box::pin(prepared.send())),
             Err(status) => futures_util::future::Either::Left(std::future::ready(Err(status))),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WithContext<S> {
+    inner: S,
+    context: OperationContext,
+}
+
+#[must_use]
+pub fn bind_context<S>(inner: S, context: &OperationContext) -> WithContext<S> {
+    WithContext::new(inner, context)
+}
+
+impl<S> WithContext<S> {
+    #[must_use]
+    pub(crate) fn new(inner: S, context: &OperationContext) -> Self {
+        Self {
+            inner,
+            context: context.clone(),
+        }
+    }
+}
+
+impl<S> Service<Request<Body>> for WithContext<S>
+where
+    S: Service<Request<Body>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(context)
+    }
+
+    fn call(&mut self, mut request: Request<Body>) -> Self::Future {
+        if request.extensions().get::<OperationContext>().is_some() {
+            request.extensions_mut().insert(ContextConflict);
+        } else {
+            request.extensions_mut().insert(self.context.clone());
+        }
+        self.inner.call(request)
     }
 }
 
@@ -285,40 +328,98 @@ pub struct PreparedCall {
     cancel_on_drop: DropGuard,
     #[debug(skip)]
     permit: Option<OwnedSemaphorePermit>,
+    #[debug(skip)]
+    on_status: Option<StatusHook>,
 }
 
 impl PreparedCall {
+    pub fn prepare(client: &Client, mut request: Request<Body>) -> Result<Self, tonic::Status> {
+        let context_conflict = request
+            .extensions_mut()
+            .remove::<ContextConflict>()
+            .is_some();
+        let started_at = Instant::now();
+        let caller_timeout = crate::protocol::grpc_timeout(request.headers());
+        if caller_timeout.is_none() {
+            request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
+        }
+        let call = crate::observe::start_call(client.series, &request, client.destination.as_ref());
+        if context_conflict {
+            return Err(call.refuse(tonic::Status::internal(
+                "request operation context conflicts with client context",
+            )));
+        }
+        let contexts = derive_call_contexts(
+            client.timeout,
+            started_at,
+            caller_timeout,
+            request.extensions().get::<OperationContext>(),
+        );
+        otel_http::inject_context(
+            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
+            request.headers_mut(),
+        );
+        let permit = match acquire_opening_permit(client.openings.as_ref(), &contexts.opening) {
+            Ok(permit) => permit,
+            Err(status) => return Err(call.refuse(status)),
+        };
+        Ok(Self {
+            channel: client.channel.clone(),
+            request,
+            opening: contexts.opening,
+            lifetime: contexts.lifetime,
+            watch_stop: contexts.watch_stop,
+            call,
+            cancel_on_drop: contexts.cancel_on_drop,
+            permit,
+            on_status: None,
+        })
+    }
+
     #[must_use]
     pub const fn opening_context(&self) -> &OperationContext {
         &self.opening
     }
 
-    pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
-        self.request.headers_mut()
+    pub fn try_step<T>(
+        mut self,
+        step: impl FnOnce(&OperationContext, &mut http::HeaderMap) -> Result<T, tonic::Status>,
+    ) -> Result<(Self, T), tonic::Status> {
+        match step(&self.opening, self.request.headers_mut()) {
+            Ok(value) => Ok((self, value)),
+            Err(status) => Err(self.call.refuse(status)),
+        }
+    }
+
+    pub async fn try_await<T>(
+        self,
+        future: impl Future<Output = Result<T, tonic::Status>>,
+    ) -> Result<(Self, T), tonic::Status> {
+        match future.await {
+            Ok(value) => Ok((self, value)),
+            Err(status) => Err(self.call.refuse(status)),
+        }
     }
 
     #[must_use]
-    pub fn refuse(self, status: tonic::Status) -> tonic::Status {
-        self.call.refuse(status)
+    pub fn on_status(mut self, hook: impl FnOnce(tonic::Code) + Send + 'static) -> Self {
+        self.on_status = Some(match self.on_status.take() {
+            Some(previous) => Box::new(move |code| {
+                previous(code);
+                hook(code);
+            }),
+            None => Box::new(hook),
+        });
+        self
     }
 
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
-        self.send_inner(|_| Ok(()), None).await
+        self.send_with_dispatch(|_| Ok(())).await
     }
 
-    pub async fn send_with_dispatch_check(
-        self,
-        check: impl FnOnce() -> Result<(), tonic::Status> + Send,
-        on_status: impl FnOnce(tonic::Code) + Send + 'static,
-    ) -> Result<Response<Body>, tonic::Status> {
-        self.send_inner(move |_| check(), Some(Box::new(on_status)))
-            .await
-    }
-
-    pub(crate) async fn send_inner(
+    pub async fn send_with_dispatch(
         self,
         prepare_dispatch: impl FnOnce(&mut http::HeaderMap) -> Result<(), tonic::Status> + Send,
-        on_status: Option<StatusHook>,
     ) -> Result<Response<Body>, tonic::Status> {
         let Self {
             mut channel,
@@ -329,29 +430,31 @@ impl PreparedCall {
             call,
             cancel_on_drop,
             permit,
+            on_status,
         } = self;
         let (mut parts, body) = request.into_parts();
         let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
         let (body, upload_guard) = guard_upload(body);
         let mut request = Request::from_parts(parts, body);
-        let result = async {
-            let outcome = tokio::select! {
-                biased;
-                reason = opening.wait_stopped() => Err(client_stopped_status(reason)),
-                dispatched = async {
-                    let ready = channel.ready().await.map_err(|err| transport_status(&err))?;
-                    opening.check().map_err(client_stopped_status)?;
-                    prepare_dispatch(request.headers_mut())?;
-                    opening.check().map_err(client_stopped_status)?;
-                    apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
-                    ready.call(request).await.map_err(|err| transport_status(&err))
-                } => dispatched,
-            };
-            opening.check().map_err(client_stopped_status)?;
-            outcome
-        }
-        .instrument(call.span().clone())
-        .await;
+        let result = opening
+            .run(async {
+                let ready = channel
+                    .ready()
+                    .await
+                    .map_err(|err| transport_status(&err))?;
+                opening.check().map_err(client_stopped_status)?;
+                prepare_dispatch(request.headers_mut())?;
+                opening.check().map_err(client_stopped_status)?;
+                apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
+                ready
+                    .call(request)
+                    .await
+                    .map_err(|err| transport_status(&err))
+            })
+            .instrument(call.span().clone())
+            .await
+            .map_err(client_stopped_status)
+            .and_then(std::convert::identity);
         drop(permit);
         let mut response = match result {
             Ok(response) => response,
@@ -426,7 +529,7 @@ impl Service<http::Uri> for GrpcConnector {
 
 fn parse_destination(
     raw: &str,
-    security: ClientSecurity,
+    security: ClientSecurity<'_>,
 ) -> Result<(http::Uri, ClientOrigin, Option<TlsTarget>), ClientError> {
     if raw.contains('#')
         || shared_rules::uri::has_whitespace_or_control(raw)
@@ -541,13 +644,13 @@ fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
 mod tests {
     use std::assert_matches;
 
-    use rustls::ServerConfig;
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use tls_test_support::TlsMaterial;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
     use super::*;
+    use crate::ClientTlsError;
 
     #[tokio::test]
     async fn strict_destination_validation_rejects_malformed_and_mismatched_uris() {
@@ -569,12 +672,11 @@ mod tests {
             "unix:///tmp/grpc.sock",
             "ftp://example.test",
         ] {
-            for security in [
-                ClientSecurity::Plaintext,
-                ClientSecurity::Tls(ClientTlsMaterial::default()),
-            ] {
+            for security in [ClientSecurity::Plaintext, ClientSecurity::tls()] {
                 assert_matches!(
-                    Client::try_new(invalid, security, Duration::from_secs(1)).unwrap_err(),
+                    Client::builder(invalid, security, Duration::from_secs(1))
+                        .build()
+                        .unwrap_err(),
                     ClientError::InvalidDestination,
                     "{invalid:?}"
                 );
@@ -582,43 +684,47 @@ mod tests {
         }
 
         assert_matches!(
-            Client::try_new(
+            Client::builder(
                 "https://example.test",
                 ClientSecurity::Plaintext,
                 Duration::from_secs(1),
             )
+            .build()
             .unwrap_err(),
             ClientError::DestinationSecurityMismatch
         );
         assert_matches!(
-            Client::try_new(
+            Client::builder(
                 "http://example.test",
-                ClientSecurity::Tls(ClientTlsMaterial::default()),
+                ClientSecurity::tls(),
                 Duration::from_secs(1),
             )
+            .build()
             .unwrap_err(),
             ClientError::DestinationSecurityMismatch
         );
         assert_matches!(
-            Client::with_opening_limit(
+            Client::builder(
                 "http://example.test",
                 ClientSecurity::Plaintext,
-                ClientTimeout::FullRpc(Duration::from_secs(1)),
-                NonZeroUsize::new(Semaphore::MAX_PERMITS + 1),
-            ),
+                Duration::from_secs(1),
+            )
+            .opening_limit(NonZeroUsize::new(Semaphore::MAX_PERMITS + 1))
+            .build(),
             Err(ClientError::InvalidOpeningLimit)
         );
 
         let bad_ca = ClientSecurity::Tls(ClientTlsMaterial {
             ca_certificate_pem: Some(
-                "-----BEGIN CERTIFICATE-----\nbm90LWEtY2VydA==\n-----END CERTIFICATE-----\n"
-                    .to_owned(),
+                "-----BEGIN CERTIFICATE-----\nbm90LWEtY2VydA==\n-----END CERTIFICATE-----\n",
             ),
             identity: None,
         });
         assert_matches!(
-            Client::try_new("https://example.test", bad_ca, Duration::from_secs(1)).unwrap_err(),
-            ClientError::Tls(crate::TlsMaterialError::InvalidCaCertificate(Some(_)))
+            Client::builder("https://example.test", bad_ca, Duration::from_secs(1))
+                .build()
+                .unwrap_err(),
+            ClientError::Tls(ClientTlsError::InvalidCaCertificate(Some(_)))
         );
 
         for valid_http in [
@@ -626,11 +732,12 @@ mod tests {
             "http://example.test/",
             "http://[::1]:50051",
         ] {
-            Client::try_new(
+            Client::builder(
                 valid_http,
                 ClientSecurity::Plaintext,
                 Duration::from_secs(1),
             )
+            .build()
             .unwrap();
         }
         for valid_https in [
@@ -639,12 +746,9 @@ mod tests {
             "https://[::1]:50051",
             "https://127.0.0.1:50051",
         ] {
-            Client::try_new(
-                valid_https,
-                ClientSecurity::Tls(ClientTlsMaterial::default()),
-                Duration::from_secs(1),
-            )
-            .unwrap();
+            Client::builder(valid_https, ClientSecurity::tls(), Duration::from_secs(1))
+                .build()
+                .unwrap();
         }
     }
 
@@ -667,7 +771,10 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         let mut headers = http::HeaderMap::new();
         apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, caller_budget))).unwrap();
-        assert_eq!(crate::grpc_timeout(&headers), Some(Duration::from_secs(4)));
+        assert_eq!(
+            crate::protocol::grpc_timeout(&headers),
+            Some(Duration::from_secs(4))
+        );
         assert_eq!(opening.remaining(), Duration::from_secs(1));
         assert_eq!(full_life.unwrap().remaining(), Duration::from_secs(1));
         assert_eq!(open_only_life.unwrap().remaining(), Duration::from_secs(4));
@@ -683,23 +790,59 @@ mod tests {
             tonic::Code::DeadlineExceeded
         );
 
-        let client = Client::with_timeout_policy(
+        let client = Client::builder(
             "http://127.0.0.1:1",
             ClientSecurity::Plaintext,
             ClientTimeout::OpeningOnly(Duration::from_secs(10)),
         )
+        .build()
         .unwrap();
         let mut request = Request::new(Body::empty());
         request.headers_mut().insert(
             crate::protocol::GRPC_TIMEOUT,
             http::HeaderValue::from_static("+5S"),
         );
-        let mut prepared = client.prepare_call(request).unwrap();
+        let prepared = PreparedCall::prepare(&client, request).unwrap();
         assert!(!prepared.watch_stop);
         assert!(
             !prepared
-                .headers_mut()
+                .request
+                .headers()
                 .contains_key(crate::protocol::GRPC_TIMEOUT)
+        );
+    }
+
+    #[tokio::test]
+    async fn with_context_propagates_cancellation_and_refuses_competing_request_context() {
+        let client = Client::builder(
+            "http://127.0.0.1:1",
+            ClientSecurity::Plaintext,
+            Duration::from_secs(5),
+        )
+        .build()
+        .unwrap();
+        let cancelled = OperationContext::unbounded();
+        cancelled.cancel();
+        let status = client
+            .with_context(&cancelled)
+            .oneshot(Request::new(Body::empty()))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Cancelled);
+
+        let mut competing = Request::new(Body::empty());
+        competing
+            .extensions_mut()
+            .insert(OperationContext::unbounded());
+        let conflict = client
+            .with_context(&OperationContext::unbounded())
+            .oneshot(competing)
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code(), tonic::Code::Internal);
+        assert_eq!(
+            conflict.message(),
+            "request operation context conflicts with client context"
         );
     }
 
@@ -707,14 +850,10 @@ mod tests {
     async fn tls_connector_rejects_peer_without_h2_alpn() {
         let material = TlsMaterial::new("127.0.0.1");
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
-        let mut server_config = ServerConfig::builder_with_provider(
-            rustls::crypto::aws_lc_rs::default_provider().into(),
-        )
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![material.cert.into()], key)
-        .unwrap();
+        let mut server_config = infra_grpc_core::tls::tls13_server_builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![material.cert.into()], key)
+            .unwrap();
         server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
@@ -725,14 +864,15 @@ mod tests {
             let _ = acceptor.accept(tcp).await;
         });
 
-        let mut client = Client::try_new(
+        let mut client = Client::builder(
             &format!("https://{address}"),
             ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(material.root_pem),
+                ca_certificate_pem: Some(&material.root_pem),
                 identity: None,
             }),
             Duration::from_secs(5),
         )
+        .build()
         .unwrap();
         let request = Request::builder()
             .method("POST")

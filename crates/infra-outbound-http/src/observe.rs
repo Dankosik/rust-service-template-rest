@@ -2,6 +2,7 @@ use std::{error::Error as StdError, fmt, mem::DropGuard, sync::Arc, time::Instan
 
 use http::{HeaderMap, Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
+use operation_context::OperationContext;
 use tracing::Span;
 
 use shared_rules::{
@@ -9,9 +10,9 @@ use shared_rules::{
     otel_http::{HttpMethod, response_status_code},
 };
 
-use crate::{Error, RequestContext, policy::Origin};
+use crate::{Error, Origin, TransportErrorKind};
 
-pub const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
+pub(crate) const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
 pub(crate) const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
@@ -19,16 +20,45 @@ pub(crate) const REQUEST_DURATION_BUCKETS: &[f64] = &[
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DURATION_BUCKETS)];
 
+impl TransportErrorKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tls => "tls",
+            Self::Connect => "connect",
+            Self::Protocol => "protocol",
+            Self::Other => "transport",
+        }
+    }
+
+    const fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Tls => "HTTP transport failed during the TLS exchange",
+            Self::Connect => "HTTP transport failed during connection setup",
+            Self::Protocol => "HTTP transport failed while parsing the response",
+            Self::Other => "HTTP transport failed",
+        }
+    }
+}
+
 impl Error {
+    #[must_use]
+    pub fn transport_kind(&self) -> Option<TransportErrorKind> {
+        match self {
+            Self::Transport { source } => Some(classify_transport_error(&**source)),
+            Self::InvalidTarget | Self::Timeout | Self::Cancelled | Self::ResponseBodyTooLarge => {
+                None
+            }
+        }
+    }
+
     #[must_use]
     pub fn diagnostic_reason(&self) -> &'static str {
         match self {
             Self::InvalidTarget => "target is invalid",
             Self::Timeout => "operation timed out",
             Self::Cancelled => "operation was cancelled",
-            Self::DispatchRefused => "dispatch was refused",
             Self::ResponseBodyTooLarge => "response body is too large",
-            Self::Transport { source } => describe_transport_error(&**source).diagnostic,
+            Self::Transport { source } => classify_transport_error(&**source).diagnostic(),
         }
     }
 }
@@ -67,10 +97,11 @@ impl Outcome {
         match error {
             Error::Cancelled => Self::Cancelled,
             Error::InvalidTarget => Self::Failed("invalid_target"),
-            Error::DispatchRefused => Self::Failed("dispatch_refused"),
             Error::Timeout => Self::Failed("timeout"),
             Error::ResponseBodyTooLarge => Self::Failed("response_body_too_large"),
-            Error::Transport { source } => Self::Failed(describe_transport_error(&**source).label),
+            Error::Transport { source } => {
+                Self::Failed(classify_transport_error(&**source).label())
+            }
         }
     }
 
@@ -88,7 +119,7 @@ struct AttemptInner<'a> {
     method: HttpMethod,
     template: Option<&'static str>,
     server: &'a Server,
-    context: &'a RequestContext,
+    context: &'a OperationContext,
     status: Option<StatusCode>,
     span: Span,
 }
@@ -161,7 +192,7 @@ impl<'a> Attempt<'a> {
         method: &Method,
         template: Option<UrlTemplate>,
         server: &'a Server,
-        context: &'a RequestContext,
+        context: &'a OperationContext,
     ) -> Self {
         let method = HttpMethod::parse(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
@@ -220,6 +251,11 @@ impl<'a> Attempt<'a> {
         }
         inner.status
     }
+
+    pub(crate) fn finish_dispatch_refused(self) {
+        let inner = DropGuard::dismiss(self.0);
+        inner.emit(Outcome::Failed("dispatch_refused"));
+    }
 }
 
 fn describe_histogram() {
@@ -251,39 +287,22 @@ fn status_label(status: StatusCode) -> &'static str {
     response_status_code(status.as_u16()).unwrap_or_default()
 }
 
-struct TransportErrorDescription {
-    label: &'static str,
-    diagnostic: &'static str,
-}
-
-fn describe_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorDescription {
+fn classify_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorKind {
     let causes = || error_chain::causes(source);
     if error_chain::contains::<rustls::Error>(source) {
-        TransportErrorDescription {
-            label: "tls",
-            diagnostic: "HTTP transport failed during the TLS exchange",
-        }
+        TransportErrorKind::Tls
     } else if causes()
         .filter_map(<dyn StdError>::downcast_ref::<hyper_util::client::legacy::Error>)
         .any(hyper_util::client::legacy::Error::is_connect)
     {
-        TransportErrorDescription {
-            label: "connect",
-            diagnostic: "HTTP transport failed during connection setup",
-        }
+        TransportErrorKind::Connect
     } else if causes()
         .filter_map(<dyn StdError>::downcast_ref::<hyper::Error>)
         .any(hyper::Error::is_parse)
     {
-        TransportErrorDescription {
-            label: "protocol",
-            diagnostic: "HTTP transport failed while parsing the response",
-        }
+        TransportErrorKind::Protocol
     } else {
-        TransportErrorDescription {
-            label: "transport",
-            diagnostic: "HTTP transport failed",
-        }
+        TransportErrorKind::Other
     }
 }
 

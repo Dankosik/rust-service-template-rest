@@ -1,4 +1,4 @@
-use std::{future::poll_fn, sync::Arc, task::Poll};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use compact_str::CompactString;
@@ -32,16 +32,17 @@ impl Producer {
         &self,
         tx: &mut Tx<'_, impl TxMode>,
         endpoint_id: &str,
-        body: Vec<u8>,
+        body: impl Into<Bytes>,
         content_type: &str,
     ) -> Result<JobId, OutboundError> {
+        let body = body.into();
         self.preflight(endpoint_id, body.len(), content_type)
             .await?;
         let delivery = Delivery {
             version: delivery_version(),
             endpoint_id: CompactString::from(endpoint_id),
             content_type: CompactString::from(content_type),
-            body: Bytes::from(body),
+            body,
         };
         Ok(infra_jobs::enqueue(tx, &delivery).await?)
     }
@@ -91,7 +92,7 @@ async fn escaped_len(
     while !rest.is_empty() {
         let end = rest.floor_char_boundary(*budget);
         if end == 0 {
-            yield_once().await;
+            tokio::task::yield_now().await;
             *budget = PREFLIGHT_BYTES_PER_POLL;
             continue;
         }
@@ -103,19 +104,6 @@ async fn escaped_len(
         rest = tail;
     }
     Ok(len)
-}
-
-async fn yield_once() {
-    let mut yielded = false;
-    poll_fn(|cx| {
-        if yielded {
-            return Poll::Ready(());
-        }
-        yielded = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await;
 }
 
 #[derive(Debug, thiserror::Error)]

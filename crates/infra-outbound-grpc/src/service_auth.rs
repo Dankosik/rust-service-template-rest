@@ -4,9 +4,11 @@ use std::task::{Context, Poll};
 use futures_util::future::{BoxFuture, Either};
 use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
+use operation_context::OperationContext;
 use tonic::body::Body;
 
-use crate::{Client, ClientError, PreparedCall};
+use crate::transport::PreparedCall;
+use crate::{Client, ClientError, WithContext};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -35,13 +37,21 @@ impl Client {
 }
 
 impl ServiceTokenClient {
+    #[must_use]
+    pub fn with_context(&self, context: &OperationContext) -> WithContext<Self> {
+        WithContext::new(self.clone(), context)
+    }
+
     fn prepare(&self, request: http::Request<Body>) -> Result<PreparedCall, tonic::Status> {
-        let mut prepared = self.client.prepare_call(request)?;
-        if prepared.headers_mut().contains_key(AUTHORIZATION) {
-            return Err(prepared.refuse(tonic::Status::internal(
-                "authorization conflicts with the service token",
-            )));
-        }
+        let prepared = PreparedCall::prepare(&self.client, request)?;
+        let (prepared, ()) = prepared.try_step(|_, headers| {
+            if headers.contains_key(AUTHORIZATION) {
+                return Err(tonic::Status::internal(
+                    "authorization conflicts with the service token",
+                ));
+            }
+            Ok(())
+        })?;
         Ok(prepared)
     }
 }
@@ -64,20 +74,17 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
             Err(status) => return Either::Left(std::future::ready(Err(status))),
         };
         let tokens = self.tokens.clone();
-        Either::Right(Box::pin(prepared.send_inner(
-            move |headers| {
-                let authorization = tokens.authorization().map_err(|error| {
-                    let mut status = tonic::Status::unavailable("service token unavailable");
-                    status.set_source(Arc::new(error));
-                    status
-                })?;
-                if let Some(value) = authorization {
-                    headers.insert(AUTHORIZATION, value);
-                }
-                Ok(())
-            },
-            None,
-        )))
+        Either::Right(Box::pin(prepared.send_with_dispatch(move |headers| {
+            let authorization = tokens.authorization().map_err(|error| {
+                let mut status = tonic::Status::unavailable("service token unavailable");
+                status.set_source(Arc::new(error));
+                status
+            })?;
+            if let Some(value) = authorization {
+                headers.insert(AUTHORIZATION, value);
+            }
+            Ok(())
+        })))
     }
 }
 
@@ -87,7 +94,6 @@ mod tests {
     use std::time::Duration;
 
     use infra_serviceauth::{ServiceName, TokenSource, test_support::TestKey};
-    use operation_context::OperationContext;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -101,11 +107,12 @@ mod tests {
         let catalog: ServiceName = "catalog".parse().unwrap();
         let origin = http::Uri::from_static("https://peer.example:443");
         let tokens = source.receiver(catalog.clone(), origin.clone()).unwrap();
-        let plain = Client::try_new(
+        let plain = Client::builder(
             "http://127.0.0.1:1",
             ClientSecurity::Plaintext,
             Duration::from_secs(1),
         )
+        .build()
         .unwrap();
         assert_matches!(
             plain.with_service_tokens(tokens.clone()).unwrap_err(),
@@ -116,14 +123,16 @@ mod tests {
             .unwrap();
         assert!(plain.with_service_tokens(disabled).is_ok());
         let ca = rcgen::generate_simple_self_signed(["peer.example".to_owned()]).unwrap();
-        let client = Client::try_new(
+        let ca_pem = ca.cert.pem();
+        let client = Client::builder(
             "https://PEER.example",
             ClientSecurity::Tls(crate::ClientTlsMaterial {
-                ca_certificate_pem: Some(ca.cert.pem()),
+                ca_certificate_pem: Some(&ca_pem),
                 identity: None,
             }),
             Duration::from_secs(1),
         )
+        .build()
         .unwrap();
         for wrong in [
             "https://other.example",

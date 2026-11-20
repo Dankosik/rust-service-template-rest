@@ -130,6 +130,7 @@ disallowed-methods = [
     { path = "std::process::Command::status", reason = "use tokio::process::Command; build scripts and owned synchronous process fixtures need a narrow exception" },
     { path = "std::process::Child::wait", reason = "use tokio::process::Command; build scripts and owned synchronous process fixtures need a narrow exception" },
     { path = "std::process::Child::wait_with_output", reason = "use tokio::process::Command; build scripts and owned synchronous process fixtures need a narrow exception" },
+    # template:begin source-template:clippy-utility-disallowed-methods
     { path = "fs_err::read", reason = "use tokio::fs or bounded owned blocking work; synchronous fixture IO needs a narrow exception", allow-invalid = true },
     { path = "fs_err::read_to_string", reason = "use tokio::fs or bounded owned blocking work; synchronous fixture IO needs a narrow exception", allow-invalid = true },
     { path = "fs_err::write", reason = "use tokio::fs or bounded owned blocking work; synchronous fixture IO needs a narrow exception", allow-invalid = true },
@@ -151,6 +152,7 @@ disallowed-methods = [
     { path = "fs_err::File::create", reason = "use tokio::fs or bounded owned blocking work", allow-invalid = true },
     { path = "fs_err::OpenOptions::open", reason = "use tokio::fs::OpenOptions or bounded owned blocking work", allow-invalid = true },
     { path = "walkdir::WalkDir::new", reason = "use tokio::fs directory traversal or bounded owned blocking work", allow-invalid = true },
+    # template:end source-template:clippy-utility-disallowed-methods
     { path = "ureq::get", reason = "use the configured asynchronous outbound HTTP client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
     { path = "ureq::post", reason = "use the configured asynchronous outbound HTTP client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
     { path = "ureq::put", reason = "use the configured asynchronous outbound HTTP client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
@@ -204,10 +206,12 @@ disallowed-types = [
     { path = "reqwest::blocking::Body", reason = "use the asynchronous client; the startup exporter owns its blocking exception", allow-invalid = true },
     { path = "std::process::Command", reason = "use tokio::process::Command; build scripts and owned synchronous process fixtures need a narrow exception" },
     { path = "std::process::Child", reason = "use tokio::process::Command; build scripts and owned synchronous process fixtures need a narrow exception" },
+    # template:begin source-template:clippy-utility-disallowed-fs-types
     { path = "fs_err::File", reason = "use tokio::fs or an explicitly owned blocking fixture", allow-invalid = true },
     { path = "fs_err::OpenOptions", reason = "use tokio::fs or an explicitly owned blocking fixture", allow-invalid = true },
     { path = "fs_err::ReadDir", reason = "use tokio::fs or an explicitly owned blocking fixture", allow-invalid = true },
     { path = "walkdir::WalkDir", reason = "use tokio::fs directory traversal or bounded owned blocking work", allow-invalid = true },
+    # template:end source-template:clippy-utility-disallowed-fs-types
     { path = "ureq::Agent", reason = "use the asynchronous client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
     { path = "ureq::RequestBuilder", reason = "use the asynchronous client; synchronous HTTP fixtures need a narrow exception", allow-invalid = true },
     # Request data enters through `infra_http::extract::{Json, Query, Path}`, whose
@@ -218,7 +222,9 @@ disallowed-types = [
     { path = "axum::Json", reason = "use infra_http::extract::Json: its rejections are Problems and it renders the same response", allow-invalid = true },
     { path = "axum::extract::Query", reason = "use infra_http::extract::Query: its rejections are Problems", allow-invalid = true },
     { path = "axum::extract::Path", reason = "use infra_http::extract::Path: its rejections are Problems" },
+    # template:begin source-template:clippy-utility-disallowed-axum-extra-types
     { path = "axum_extra::extract::Query", reason = "use infra_http::extract::Query: its rejections are Problems and it reads a repeated key into a list", allow-invalid = true },
     { path = "axum_extra::extract::OptionalQuery", reason = "use infra_http::extract::Query with optional members: its rejections are Problems", allow-invalid = true },
     { path = "axum_extra::TypedHeader", reason = "read the header with HeaderMapExt::typed_try_get and answer a Problem: this extractor rejects with text/plain", allow-invalid = true },
+    # template:end source-template:clippy-utility-disallowed-axum-extra-types
 ]

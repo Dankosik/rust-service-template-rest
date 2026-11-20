@@ -1,12 +1,22 @@
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::{
+    io,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::{
+    HttpConnector,
+    dns::{GaiAddrs, GaiFuture, GaiResolver, Name},
+};
 use parking_lot::Mutex;
+use tower::Service;
 
-use crate::{BuildError, Limits, policy::Origin};
+use crate::{BuildError, Limits, Origin};
 
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
 static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
@@ -17,14 +27,112 @@ pub(crate) type Transport = hyper_util::client::legacy::Client<
     Full<Bytes>,
 >;
 
-#[cfg(not(test))]
-#[expect(
-    clippy::cfg_not_test,
-    reason = "unit tests substitute the deterministic FixtureResolver without altering the Client type"
-)]
-pub(crate) type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver;
-#[cfg(test)]
-pub(crate) type Resolver = crate::test_support::FixtureResolver;
+#[derive(Clone)]
+pub(crate) enum Resolver {
+    Gai(GaiResolver),
+    #[cfg(any(test, feature = "test-support"))]
+    Fixture(FixtureResolver),
+}
+
+impl Resolver {
+    pub(crate) fn new() -> Self {
+        Self::Gai(GaiResolver::new())
+    }
+}
+
+pub(crate) enum ResolvedAddrs {
+    Gai(GaiAddrs),
+    #[cfg(any(test, feature = "test-support"))]
+    Fixture(std::vec::IntoIter<SocketAddr>),
+}
+
+impl Iterator for ResolvedAddrs {
+    type Item = SocketAddr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Gai(addrs) => addrs.next(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Fixture(addrs) => addrs.next(),
+        }
+    }
+}
+
+pub(crate) enum ResolveFuture {
+    Gai(GaiFuture),
+    #[cfg(any(test, feature = "test-support"))]
+    Fixture(std::future::Ready<Result<std::vec::IntoIter<SocketAddr>, io::Error>>),
+}
+
+impl Future for ResolveFuture {
+    type Output = Result<ResolvedAddrs, io::Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut *self {
+            Self::Gai(future) => Pin::new(future).poll(cx).map_ok(ResolvedAddrs::Gai),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Fixture(future) => Pin::new(future).poll(cx).map_ok(ResolvedAddrs::Fixture),
+        }
+    }
+}
+
+impl Service<Name> for Resolver {
+    type Response = ResolvedAddrs;
+    type Error = io::Error;
+    type Future = ResolveFuture;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self {
+            Self::Gai(resolver) => resolver.poll_ready(cx),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Fixture(resolver) => resolver.poll_ready(cx),
+        }
+    }
+
+    fn call(&mut self, name: Name) -> Self::Future {
+        match self {
+            Self::Gai(resolver) => ResolveFuture::Gai(resolver.call(name)),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Fixture(resolver) => ResolveFuture::Fixture(resolver.call(name)),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub(crate) struct FixtureResolver(Arc<Mutex<Vec<SocketAddr>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl FixtureResolver {
+    pub(crate) fn with_addresses(addresses: Vec<SocketAddr>) -> Self {
+        Self(Arc::new(Mutex::new(addresses)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace(&self, addresses: Vec<SocketAddr>) {
+        *self.0.lock() = addresses;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Service<Name> for FixtureResolver {
+    type Response = std::vec::IntoIter<SocketAddr>;
+    type Error = io::Error;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Name) -> Self::Future {
+        let addresses = self.0.lock().clone();
+        std::future::ready(if addresses.is_empty() {
+            Err(io::Error::other("no fixture listener"))
+        } else {
+            Ok(addresses.into_iter())
+        })
+    }
+}
 
 pub async fn prepare_tls() -> Result<(), BuildError> {
     if TLS_CONFIG.get().is_none() {
@@ -51,10 +159,27 @@ pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> 
     Ok(TLS_CONFIG.get_or_init(|| config))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn tls_config_with_root(root_der: &[u8]) -> Result<rustls::ClientConfig, BuildError> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(root_der.to_vec()))
+        .map_err(|source| BuildError::Tls {
+            source: Box::new(source),
+        })?;
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|source| BuildError::Tls {
+            source: Box::new(source),
+        })
+        .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
+}
+
 fn platform_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
-    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_platform_verifier()?

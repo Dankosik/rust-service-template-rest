@@ -1488,17 +1488,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "delegate"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2062,7 +2051,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "grpc-contracts"
 version = "0.1.0"
 dependencies = [
- "derive-where",
  "prost",
  "prost-types",
  "tonic",
@@ -2167,7 +2155,6 @@ dependencies = [
 name = "health"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2646,6 +2633,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infra-bearerauthn",
+ "infra-grpc-core",
  "infra-http",
  "infra-http-transport",
  "infra-outbound-grpc",
@@ -2681,6 +2669,29 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "utoipa",
+]
+
+[[package]]
+name = "infra-grpc-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "metrics",
+ "opentelemetry",
+ "parking_lot",
+ "rustls",
+ "secrecy",
+ "shared-rules",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
 ]
 
 [[package]]
@@ -2971,6 +2982,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper-util",
+ "infra-grpc-core",
  "infra-http-transport",
  "infra-serviceauth",
  "metrics",
@@ -3002,9 +3014,7 @@ name = "infra-outbound-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "delegate",
  "derive_more",
- "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -3019,7 +3029,6 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "shared-rules",
- "smallvec",
  "thiserror",
  "tls-test-support",
  "tokio",
@@ -3029,7 +3038,6 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -3141,7 +3149,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "arrayvec",
- "async-trait",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
@@ -3194,7 +3201,6 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "async-nats",
- "async-trait",
  "axum",
  "axum-extra",
  "axum-test",

@@ -391,14 +391,10 @@ async fn run_handler(
         Stopped::Deadline => Outcome::TimedOut,
         Stopped::Cancelled => Outcome::Retryable,
     };
-    let result = tokio::select! {
-        biased;
-        reason = context.wait_stopped() => return stopped(reason),
-        result = AssertUnwindSafe(dispatch).catch_unwind() => result,
+    let result = match context.run(AssertUnwindSafe(dispatch).catch_unwind()).await {
+        Ok(result) => result,
+        Err(reason) => return stopped(reason),
     };
-    if let Some(reason) = context.stopped() {
-        return stopped(reason);
-    }
     match result {
         Ok(Ok(())) => Outcome::Success,
         Ok(Err(DispatchError::Handler(HandlerError::Permanent))) => Outcome::Permanent,

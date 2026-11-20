@@ -148,7 +148,6 @@ impl From<&infra_outbound_http::Error> for TransportFailure {
             infra_outbound_http::Error::Cancelled => Self::Cancelled,
             infra_outbound_http::Error::ResponseBodyTooLarge => Self::ResponseLimit,
             infra_outbound_http::Error::InvalidTarget
-            | infra_outbound_http::Error::DispatchRefused
             | infra_outbound_http::Error::Transport { .. } => Self::Transport,
         }
     }

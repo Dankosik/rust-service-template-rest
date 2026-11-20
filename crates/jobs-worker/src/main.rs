@@ -4,7 +4,7 @@ use std::process::ExitCode;
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 // template:begin inbound-webhooks:worker-webhooks-inbound-imports
-use infra_webhooks::inbound::{Consumers, Processor};
+use infra_webhooks::inbound::Consumers;
 // template:end inbound-webhooks:worker-webhooks-inbound-imports
 // template:begin webhooks:worker-outbound-webhooks-module
 mod outbound_webhooks;
@@ -23,8 +23,9 @@ fn register(
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
     let consumers = Consumers::new();
-    consumers.require(registration.inbound_webhook_endpoints())?;
-    Processor::new(consumers).register(&mut registration.jobs);
+    consumers
+        .into_processor(registration.inbound_webhook_endpoints())?
+        .register(&mut registration.jobs);
     // template:end inbound-webhooks:worker-webhooks-register-inbound
     Ok(())
 }

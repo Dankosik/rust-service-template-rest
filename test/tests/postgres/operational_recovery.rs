@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
-use health::{Readiness, ReadinessControl, RefreshPolicy};
+use health::{BoxedProbe, Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
 use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
 use infra_postgres::{CloseOutcome, Pool, PostgresProbe};
@@ -90,7 +90,10 @@ struct Instance {
 
 impl Instance {
     async fn start(pool: Pool) -> Self {
-        let probes = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
+        let probes = Readiness::new(
+            vec![BoxedProbe::new(PostgresProbe::new(pool.clone()))],
+            POLICY,
+        );
         let readiness = probes.control();
         let refresher = probes.prepare().await.unwrap().activate().unwrap();
         assert!(readiness.reader().verdict().is_ok());
@@ -459,7 +462,7 @@ mod grpc {
         echo_service_client::EchoServiceClient,
         echo_service_server::{EchoService, EchoServiceServer},
     };
-    use infra_grpc::{Limits, Services};
+    use infra_grpc::{Limits, ServerOptions, Services};
     use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
     use std::pin::Pin;
     use tonic::{Request, Response, Status};
@@ -554,15 +557,18 @@ mod grpc {
             services
                 .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
                 .unwrap();
-            services
+            #[allow(
+                unused_mut,
+                unused_variables,
+                reason = "the bearer profile registers scope requirements on the handle"
+            )]
+            let mut echo = services
                 .add(EchoServiceServer::new(DatabaseEcho(pool)))
                 .unwrap();
             // template:end postgres-grpc-consumers:recovery-grpc-module-4
             // template:begin postgres-grpc-auth:recovery-scope-requirements
             for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                services
-                    .require_scopes(&format!("/example.v1.EchoService/{method}"), &[])
-                    .unwrap();
+                echo.require_scopes(method, &[]).unwrap();
             }
             // template:end postgres-grpc-auth:recovery-scope-requirements
             // template:begin postgres-grpc-consumers:recovery-grpc-module-bounds
@@ -575,20 +581,32 @@ mod grpc {
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
             });
-            let app = infra_grpc::router(services, reader, authentication, limits, false).unwrap();
+            let app = services
+                .build(
+                    reader,
+                    authentication,
+                    ServerOptions {
+                        limits,
+                        trust_trace_context: false,
+                    },
+                )
+                .unwrap();
             let listener =
                 infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let server = app.serve(listener, options, None).unwrap();
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
-                Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),
+                Client::builder(&destination, ClientSecurity::Plaintext, CALL)
+                    .build()
+                    .unwrap(),
             );
             let mut health = HealthClient::new(
-                Client::with_timeout_policy(
+                Client::builder(
                     &destination,
                     ClientSecurity::Plaintext,
                     ClientTimeout::OpeningOnly(CALL),
                 )
+                .build()
                 .unwrap(),
             );
             let watch = timeout(CALL, health.watch(health_request()))

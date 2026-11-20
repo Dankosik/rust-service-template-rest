@@ -147,14 +147,11 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() 
     let gate = fixture.block_tokens();
     let client = fixture.service_client();
     let operation = OperationContext::with_timeout(Duration::from_secs(1));
-    let request_context = OperationContext::unbounded();
-    let mut request = fixture.request();
-    request.extensions_mut().insert(request_context.clone());
-    let mut exchange = Box::pin(client.execute_with_context(request, &operation));
+    let mut exchange = Box::pin(client.execute(&operation, fixture.request()));
     fixture.drive_until_token_received(exchange.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    request_context.cancel();
+    operation.cancel();
     assert_matches!(
         exchange.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
@@ -170,13 +167,10 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_before_token_work() 
     let fixture = Fixture::new().await;
     let client = fixture.service_client();
     let operation = OperationContext::with_timeout(Duration::ZERO);
-    let request_context = OperationContext::unbounded();
-    request_context.cancel();
-    let mut request = fixture.request();
-    request.extensions_mut().insert(request_context);
+    operation.cancel();
 
     assert_matches!(
-        client.execute_with_context(request, &operation).await,
+        client.execute(&operation, fixture.request()).await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
     assert_eq!(fixture.token_request_count(), 0);
@@ -193,7 +187,7 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
         .service_tokens(&[])
         .http(
             Client::try_new_for_test_http(
-                &fixture.origin,
+                fixture.origin.as_str(),
                 infra_outbound_http::Limits {
                     operation_timeout: Duration::from_secs(3),
                     ..TOKEN_LIMITS
@@ -203,7 +197,7 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
         )
         .unwrap();
     let context = OperationContext::with_timeout(Duration::from_secs(30));
-    let mut call = Box::pin(client.execute_with_context(fixture.request(), &context));
+    let mut call = Box::pin(client.execute(&context, fixture.request()));
     tokio::select! { () = fixture.token_received() => {}, result = &mut call => panic!("token must be gated: {result:?}"), }
     advance(Duration::from_secs(2)).await;
     token_gate.add_permits(1);
@@ -312,8 +306,9 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         ),
     ] {
         fixture.token_raw(response);
-        let error = fixture.service_client()
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        let error = fixture
+            .service_client()
+            .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
             .await
             .unwrap_err();
         assert_matches!(&error, Error::Acquisition(actual) if *actual == expected);
@@ -401,9 +396,7 @@ async fn a_stopped_call_preserves_cancellation_and_a_live_call_refuses_conflicti
         Err(Error::AuthorizationConflict)
     );
     assert_matches!(
-        service
-            .execute_with_context(conflicting.clone(), &cancelled)
-            .await,
+        service.execute(&cancelled, conflicting.clone()).await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
     );
     let exchange = fixture.exchange_client();
@@ -415,9 +408,7 @@ async fn a_stopped_call_preserves_cancellation_and_a_live_call_refuses_conflicti
         Err(Error::AuthorizationConflict)
     );
     assert_matches!(
-        exchange
-            .execute_with_context(conflicting, &alice, &cancelled)
-            .await,
+        exchange.execute(&cancelled, conflicting, &alice).await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
     );
     assert_eq!(fixture.token_request_count(), 0);
@@ -459,7 +450,7 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
         .service_tokens(&[])
         .http(
             Client::try_new_for_test_http(
-                &fixture.origin,
+                fixture.origin.as_str(),
                 infra_outbound_http::Limits {
                     response_body_bytes: 8,
                     ..TOKEN_LIMITS

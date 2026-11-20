@@ -245,7 +245,11 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
     let expired_subject = subject("expired");
     assert_matches!(
         client
-            .execute(fixture.request(), &expired_subject, Instant::now())
+            .execute(
+                &OperationContext::with_timeout(Duration::ZERO),
+                fixture.request(),
+                &expired_subject,
+            )
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
@@ -292,9 +296,8 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     let mut leader = Box::pin(fixture.send_exchange(&client, "subject"));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
     let context = OperationContext::with_timeout(Duration::from_secs(10));
-    let mut request = fixture.request();
-    request.extensions_mut().insert(context.clone());
-    let mut waiter = Box::pin(fixture.send_exchange_request(&client, request, "subject"));
+    let waiter_subject = subject("subject");
+    let mut waiter = Box::pin(client.execute(&context, fixture.request(), &waiter_subject));
     poll_pending(waiter.as_mut()).await;
     context.cancel();
     assert_matches!(
@@ -307,7 +310,10 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     );
     assert_matches!(
         service_client
-            .execute(fixture.request(), Instant::now())
+            .execute(
+                &OperationContext::with_timeout(Duration::ZERO),
+                fixture.request()
+            )
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
@@ -327,7 +333,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     let resource = Client::try_new_for_test_http(
-        &fixture.origin,
+        fixture.origin.as_str(),
         infra_outbound_http::Limits {
             operation_timeout: Duration::from_secs(10),
             ..TOKEN_LIMITS
@@ -348,11 +354,8 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
         .unwrap();
     let gate = fixture.block_tokens();
     let subject_token = subject("subject");
-    let mut leader = Box::pin(client.execute(
-        fixture.request(),
-        &subject_token,
-        deadline(Duration::from_secs(4)),
-    ));
+    let leader_context = timeout_context(Duration::from_secs(4));
+    let mut leader = Box::pin(client.execute(&leader_context, fixture.request(), &subject_token));
     fixture.drive_until_token_received(leader.as_mut()).await;
     let mut waiter = Box::pin(fixture.send_exchange(&client, "subject"));
     poll_pending(waiter.as_mut()).await;

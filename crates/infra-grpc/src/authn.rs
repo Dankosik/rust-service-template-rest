@@ -10,7 +10,6 @@ use operation_context::OperationContext;
 use crate::Failure;
 use crate::call::check_open;
 use crate::router::reject_with_budget;
-use crate::status::internal_status;
 
 pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:begin oidc-jwt:grpc-verifier-setting-jwt
@@ -23,13 +22,6 @@ pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     "service_auth.mode = jwt",
     // template:end service-auth:grpc-verifier-setting-service-tokens
 ];
-
-pub fn require_principal<T>(request: &tonic::Request<T>) -> Result<&Principal, tonic::Status> {
-    request
-        .extensions()
-        .get::<Principal>()
-        .ok_or_else(internal_status)
-}
 
 pub(crate) fn strip_identity(extensions: &mut http::Extensions) {
     extensions.remove::<Principal>();
@@ -65,7 +57,7 @@ pub(crate) async fn authenticate(
             .iter()
             .map(http::HeaderValue::as_bytes);
         verifier
-            .authenticate_presented_with_context(authorization, Transport::Grpc, context)
+            .authenticate_presented(context, authorization, Transport::Grpc)
             .await
     };
     check_open(context)?;
