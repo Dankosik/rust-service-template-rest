@@ -29,7 +29,6 @@ infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
 metrics = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
-serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 tracing = { workspace = true, features = ["std"] }
@@ -39,16 +38,13 @@ enum-map = { workspace = true, features = ["derive"] }
 arrayvec = { workspace = true }
 httpdate = { workspace = true }
 infra-outbound-http = { workspace = true }
-serde_json = { workspace = true, features = ["std"] }
 shared-rules = { workspace = true }
 url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies
 arc-swap = { workspace = true }
 axum = { workspace = true }
-http-body-util = { workspace = true }
 infra-http = { workspace = true }
-parking_lot = { workspace = true }
 smallvec = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros"] }
@@ -61,4 +57,5 @@ infra-postgres = { workspace = true, features = ["test-support"] }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:webhooks-inbound-test-dependencies
 proptest = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

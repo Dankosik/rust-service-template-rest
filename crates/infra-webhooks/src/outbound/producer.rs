@@ -62,7 +62,7 @@ impl Producer {
             return Err(OutboundError::UnknownEndpoint);
         }
 
-        let empty_len = Delivery::empty_serialized_len().map_err(EnqueueError::Serialize)?;
+        let empty_len = Delivery::empty_serialized_len()?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
         let content_type_len = escaped_len(content_type, &mut budget, |fragment| {
             HeaderValue::from_bytes(fragment.as_bytes())

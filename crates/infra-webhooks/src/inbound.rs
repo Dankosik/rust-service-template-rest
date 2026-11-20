@@ -14,11 +14,9 @@ use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, JobKind, KindName, enqueue};
 use infra_postgres::{Isolation, Pool, TxError, TxOptions, failure_cause, observed, sqlstate};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use smallvec::SmallVec;
 use tokio::time::Instant;
 
-use crate::StreamingBase64;
 use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
@@ -393,20 +391,22 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
     }
 }
 
-#[serde_as]
+#[derive(Clone, Deserialize, Serialize)]
+struct ContentType(#[serde(with = "crate::base64_bytes")] SmallVec<[u8; 32]>);
+
 #[derive(Clone, derive_more::Debug, Deserialize, Serialize)]
 pub struct Incoming {
     #[serde(skip_deserializing, default = "incoming_version")]
     version: u8,
     endpoint_id: CompactString,
     #[debug("{:?}", "[REDACTED]")]
-    #[serde_as(as = "StreamingBase64")]
+    #[serde(with = "crate::base64_bytes")]
     message_id: MessageId,
     #[debug("{:?}", content_type.is_some())]
-    #[serde_as(as = "Option<StreamingBase64>")]
-    content_type: Option<SmallVec<[u8; 32]>>,
+    #[serde(default)]
+    content_type: Option<ContentType>,
     #[debug("{:?}", "[REDACTED]")]
-    #[serde_as(as = "StreamingBase64")]
+    #[serde(with = "crate::base64_bytes")]
     body: Bytes,
 }
 
@@ -421,7 +421,7 @@ impl Incoming {
             version: incoming_version(),
             endpoint_id: CompactString::from(endpoint_id),
             message_id: admitted.message_id,
-            content_type: content_type.map(SmallVec::from_slice),
+            content_type: content_type.map(|bytes| ContentType(SmallVec::from_slice(bytes))),
             body: admitted.body.into_bytes(),
         }
     }
@@ -438,7 +438,7 @@ impl Incoming {
 
     #[must_use]
     pub fn content_type(&self) -> Option<&[u8]> {
-        self.content_type.as_deref()
+        self.content_type.as_ref().map(|bytes| bytes.0.as_slice())
     }
 
     #[must_use]
@@ -545,5 +545,27 @@ mod tests {
         assert_eq!(format!("{protocol:?}"), r#"Rejection("invalid_signature")"#);
         assert_eq!(format!("{custom:?}"), r#"Rejection("invalid_signature")"#);
         assert_eq!(PAYLOAD_TOO_LARGE, Rejection::new("payload_too_large"));
+    }
+
+    #[test]
+    fn incoming_deserializes_omitted_content_type_and_unpadded_base64() {
+        let omitted: Incoming = serde_json::from_str(
+            r#"{"version":1,"endpoint_id":"partner","message_id":"aWQ","body":"cmF3/w"}"#,
+        )
+        .expect("omitted content_type and unpadded base64");
+        assert_eq!(omitted.endpoint_id(), "partner");
+        assert_eq!(omitted.message_id(), b"id");
+        assert_eq!(omitted.content_type(), None);
+        assert_eq!(omitted.body(), b"raw\xff");
+        assert_eq!(
+            serde_json::to_string(&omitted).expect("serialized"),
+            r#"{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":null,"body":"cmF3/w=="}"#
+        );
+
+        let unpadded_type: Incoming = serde_json::from_str(
+            r#"{"version":1,"endpoint_id":"partner","message_id":"aWQ","content_type":"/w","body":""}"#,
+        )
+        .expect("unpadded content_type");
+        assert_eq!(unpadded_type.content_type(), Some(b"\xff".as_slice()));
     }
 }
