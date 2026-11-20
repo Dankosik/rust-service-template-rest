@@ -16,7 +16,6 @@ use crate::resources::Resources;
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct ConnectedMessaging {
-    pub(super) probe: MessagingProbe,
     pub(super) consumer: Option<Consumer>,
     // template:begin outbox:worker-bootstrap-connected-outbox
     pub(super) outbox: infra_messaging::OutboxProducer,
@@ -82,7 +81,7 @@ pub(super) async fn connect_messaging(
     // template:end outbox:worker-bootstrap-connect-messaging-pool
     cancel: &CancellationToken,
     retained: &mut Option<MessagingStartup>,
-) -> Result<ConnectedMessaging, WorkerError> {
+) -> Result<(MessagingProbe, ConnectedMessaging), WorkerError> {
     let MessagingPlan {
         options,
         retained_messages,
@@ -110,13 +109,15 @@ pub(super) async fn connect_messaging(
     } else {
         None
     };
-    Ok(ConnectedMessaging {
-        probe: messaging.probe(),
-        consumer,
-        // template:begin outbox:worker-bootstrap-connected-outbox-value
-        outbox,
-        // template:end outbox:worker-bootstrap-connected-outbox-value
-    })
+    Ok((
+        messaging.probe(),
+        ConnectedMessaging {
+            consumer,
+            // template:begin outbox:worker-bootstrap-connected-outbox-value
+            outbox,
+            // template:end outbox:worker-bootstrap-connected-outbox-value
+        },
+    ))
 }
 
 fn messaging_options(

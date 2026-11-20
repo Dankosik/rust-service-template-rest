@@ -397,7 +397,7 @@ async fn prepare(
     // template:begin messaging:worker-bootstrap-messaging-connect
     let connected = match capabilities.messaging.take() {
         Some(plan) => {
-            let connected = messaging::connect_messaging(
+            let (probe, connected) = messaging::connect_messaging(
                 plan,
                 // template:end messaging:worker-bootstrap-messaging-connect
                 // template:begin outbox:worker-bootstrap-messaging-pool-arg
@@ -408,7 +408,7 @@ async fn prepare(
                 &mut resources.dependencies.broker,
             )
             .await?;
-            probes.push(health::BoxedProbe::new(connected.probe));
+            probes.push(health::BoxedProbe::new(probe));
             if let Some(consumer) = &connected.consumer {
                 probes.push(health::BoxedProbe::new(consumer.probe()));
             }

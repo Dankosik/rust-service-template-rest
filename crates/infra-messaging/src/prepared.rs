@@ -26,11 +26,15 @@ pub struct PreparedEvent {
 
 impl fmt::Debug for PreparedEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let publication_id = self
+            .distinct_publication_id
+            .as_deref()
+            .unwrap_or(&self.message_id);
         formatter
             .debug_struct("PreparedEvent")
             .field("subject", &self.subject)
             .field("message_id", &self.message_id)
-            .field("publication_id", &self.publication_id())
+            .field("publication_id", &publication_id)
             .field("event_type", &self.event_type)
             .field("schema_version", &self.schema_version)
             .field("occurred_at", &self.occurred_at)
