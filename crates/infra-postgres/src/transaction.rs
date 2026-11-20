@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::error::{QUERY_CANCELED, STATEMENT_COMPLETION_UNKNOWN, sqlstate};
-use crate::observe::{self, TransactionObservation, TransactionOutcome};
+use crate::observe::{self, TransactionObservation};
 use crate::observed;
 use crate::pool::{Pool, format_pg_duration};
 
@@ -110,54 +110,44 @@ impl TxMode for () {}
 impl TxMode for OperationDeadline {}
 
 trait TxModeExt<E: From<TxError>>: TxMode {
-    fn acquisition_failure(&self, error: TxError) -> E {
-        error.into()
+    fn acquisition_expired(&self, _error: &TxError) -> Option<E> {
+        None
     }
 
-    fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E>;
+    fn check_expiry(&self) -> Result<(), E>;
 
-    fn check_before_commit(
-        &mut self,
-        observation: &mut TransactionObservation,
-    ) -> impl Future<Output = Result<(), E>> + Send;
+    fn check_before_commit(&mut self) -> impl Future<Output = Result<(), E>> + Send;
 }
 
 impl<E: From<TxError>> TxModeExt<E> for () {
-    fn check_expiry(&self, _: &mut TransactionObservation) -> Result<(), E> {
+    fn check_expiry(&self) -> Result<(), E> {
         Ok(())
     }
 
-    fn check_before_commit(
-        &mut self,
-        _: &mut TransactionObservation,
-    ) -> impl Future<Output = Result<(), E>> + Send {
+    fn check_before_commit(&mut self) -> impl Future<Output = Result<(), E>> + Send {
         std::future::poll_fn(|_| Poll::Ready(Ok(())))
     }
 }
 
 impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for OperationDeadline {
-    fn acquisition_failure(&self, error: TxError) -> E {
+    fn acquisition_expired(&self, error: &TxError) -> Option<E> {
         if matches!(error, TxError::Acquire(sqlx::Error::PoolTimedOut)) && Instant::now() >= self.at
         {
-            return OperationDeadlineElapsed.into();
+            Some(OperationDeadlineElapsed.into())
+        } else {
+            None
         }
-        error.into()
     }
 
-    fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E> {
+    fn check_expiry(&self) -> Result<(), E> {
         if self.expired {
-            observation.end(TransactionOutcome::RolledBack);
             return Err(OperationDeadlineElapsed.into());
         }
         Ok(())
     }
 
-    async fn check_before_commit(
-        &mut self,
-        observation: &mut TransactionObservation,
-    ) -> Result<(), E> {
+    async fn check_before_commit(&mut self) -> Result<(), E> {
         if self.remaining_ms_or_expire().await.is_none() {
-            observation.end(TransactionOutcome::RolledBack);
             return Err(OperationDeadlineElapsed.into());
         }
         Ok(())
@@ -675,6 +665,20 @@ impl Pool {
     }
 }
 
+enum StepFailure<E> {
+    Driver { error: TxError, mapped: Option<E> },
+    RolledBack(E),
+}
+
+impl<E> From<TxError> for StepFailure<E> {
+    fn from(error: TxError) -> Self {
+        Self::Driver {
+            error,
+            mapped: None,
+        }
+    }
+}
+
 async fn transaction<M: TxModeExt<E>, T, E, F>(
     pool: &Pool,
     options: TxOptions,
@@ -688,13 +692,14 @@ where
 {
     let span = observe::transaction_span(pool);
     let mut observation = TransactionObservation::start(span.clone(), pool.metrics());
-    async {
+    let outcome = async {
         let acquired = Box::pin(pool.acquire_for_transaction(acquire_deadline)).await;
         observation.record_connection_wait();
-        let connection = acquired
-            .map_err(TxError::Acquire)
-            .inspect_err(|error| observation.record_failure(error))
-            .map_err(|error| mode.acquisition_failure(error))?;
+        let connection = acquired.map_err(|error| {
+            let error = TxError::Acquire(error);
+            let mapped = mode.acquisition_expired(&error);
+            StepFailure::Driver { error, mapped }
+        })?;
         let mut guard = DiscardOnDrop {
             connection,
             discard: true,
@@ -703,8 +708,7 @@ where
             None => guard.connection.begin().await,
             Some(statement) => guard.connection.begin_with(statement).await,
         }
-        .map_err(TxError::Begin)
-        .inspect_err(|error| observation.record_failure(error))?;
+        .map_err(TxError::Begin)?;
         guard.discard = false;
 
         let mut handle = Tx {
@@ -715,28 +719,46 @@ where
             next_savepoint: 0,
         };
         let result = f(&mut handle).await;
-        handle.mode.check_expiry(&mut observation)?;
-        let value = result.inspect_err(|_| observation.end(TransactionOutcome::RolledBack))?;
+        handle
+            .mode
+            .check_expiry()
+            .map_err(StepFailure::RolledBack)?;
+        let value = result.map_err(StepFailure::RolledBack)?;
         if !(options.read_only || handle.proven_alive) {
             let proof = (&mut handle).execute("SELECT 1").await;
-            handle.mode.check_expiry(&mut observation)?;
-            proof
-                .map_err(TxError::CommitFailed)
-                .inspect_err(|error| observation.record_failure(error))?;
+            handle
+                .mode
+                .check_expiry()
+                .map_err(StepFailure::RolledBack)?;
+            proof.map_err(TxError::CommitFailed)?;
         }
-        handle.mode.check_before_commit(&mut observation).await?;
+        handle
+            .mode
+            .check_before_commit()
+            .await
+            .map_err(StepFailure::RolledBack)?;
         let notifications = handle.notifications;
         observation.begin_commit();
-        tx.commit()
-            .await
-            .map_err(classify_commit)
-            .inspect_err(|error| observation.record_failure(error))?;
-        observation.end(TransactionOutcome::Committed);
+        tx.commit().await.map_err(classify_commit)?;
         dispatch_notifications(pool, guard, notifications);
         Ok(value)
     }
     .instrument(span)
-    .await
+    .await;
+    match outcome {
+        Ok(value) => {
+            observation.commit();
+            Ok(value)
+        }
+        Err(StepFailure::RolledBack(error)) => {
+            observation.roll_back();
+            Err(error)
+        }
+        Err(StepFailure::Driver { error, mapped }) => {
+            observation.fail(&error);
+            Err(mapped.unwrap_or_else(|| error.into()))
+        }
+    }
 }
 
 fn classify_commit(err: sqlx::Error) -> TxError {

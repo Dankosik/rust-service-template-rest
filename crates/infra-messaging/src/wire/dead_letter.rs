@@ -10,9 +10,8 @@ use super::{
     required_header, valid_subject, validate_outbound_identity,
 };
 use crate::error::EnvelopeError;
-use enum_map::EnumMap;
+use enum_map::{Enum, EnumMap};
 
-use crate::observe::{OutcomeLabel as _, outcome_label};
 use crate::prepared::{PreparedEvent, PreparedEventParts};
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
@@ -27,11 +26,20 @@ const RETAINED_HEADERS: [HeaderName; 6] = [
     crate::trace::TRACESTATE,
 ];
 
-outcome_label! {
-    pub(crate) enum DeadLetterReason {
-        Malformed => "malformed",
-        Permanent => "permanent",
-        Exhausted => "exhausted",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+pub(crate) enum DeadLetterReason {
+    Malformed,
+    Permanent,
+    Exhausted,
+}
+
+impl DeadLetterReason {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::Permanent => "permanent",
+            Self::Exhausted => "exhausted",
+        }
     }
 }
 

@@ -13,15 +13,24 @@ use tracing::Instrument as _;
 use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::{EnvelopeError, PublishError, PublishRejection};
 use crate::messaging::Shared;
-use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
+use crate::observe::{Outcomes, record_span_outcome};
 use crate::prepared::{PreparedEvent, Publication};
 use crate::wire::{encode_publication, validate_header_bytes};
 
-outcome_label! {
-    enum PublishOutcome {
-        Acknowledged => "acknowledged",
-        Rejected => "rejected",
-        Ambiguous => "ambiguous",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum)]
+enum PublishOutcome {
+    Acknowledged,
+    Rejected,
+    Ambiguous,
+}
+
+impl PublishOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Acknowledged => "acknowledged",
+            Self::Rejected => "rejected",
+            Self::Ambiguous => "ambiguous",
+        }
     }
 }
 
@@ -38,7 +47,13 @@ pub(crate) struct PublishMetrics {
 impl PublishMetrics {
     pub(crate) fn register() -> Self {
         Self {
-            outcomes: Outcomes::register(PUBLISH_TOTAL, PUBLISH_DURATION_SECONDS, "result", None),
+            outcomes: Outcomes::register(
+                PUBLISH_TOTAL,
+                PUBLISH_DURATION_SECONDS,
+                "result",
+                None,
+                PublishOutcome::label,
+            ),
             admission_refused: metrics::counter!(PUBLISH_ADMISSION_REFUSED_TOTAL),
         }
     }

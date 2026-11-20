@@ -4,8 +4,7 @@ use grpc_contracts::example::v1::{
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_server::{EchoService, EchoServiceServer},
 };
-use infra_grpc::{Failure, RequestExt as _, ServiceRegistration, Services};
-use service_failure::Code;
+use infra_grpc::{Code, Failure, RequestExt as _, ServiceRegistration, Services};
 use tonic::{Request, Response, Status};
 
 const MAX_MESSAGE_BYTES: usize = 1024;
