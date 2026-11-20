@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use infra_postgres::PgPool;
+use infra_webhooks::inbound::Verifiers;
 use infra_webhooks::inbound::route::WebhookState;
-use infra_webhooks::inbound::{Receiver, Verifier};
 use infra_webhooks::protocol::{EndpointKeyOwners, KeyRing, SigningKey};
 use secrecy::ExposeSecret;
 use service_config::{Config, InboundWebhookKey};
@@ -18,7 +16,7 @@ pub(super) fn prepare(
         return Ok(WebhookState::inert());
     }
     let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksWithoutPostgres)?;
-    let mut bindings = Vec::with_capacity(webhooks.len());
+    let mut verifiers = Verifiers::new();
     let mut owners = EndpointKeyOwners::default();
     for (endpoint_id, endpoint) in webhooks {
         let active = signing_key(endpoint_id, &endpoint.active_key)?;
@@ -29,10 +27,9 @@ pub(super) fn prepare(
             .transpose()?;
         let keys = KeyRing::new(active, previous);
         owners.register(endpoint_id, &keys)?;
-        let verifier: Arc<dyn Verifier> = Arc::new(keys);
-        bindings.push((endpoint_id.clone(), verifier));
+        verifiers.bind(endpoint_id.as_str(), keys);
     }
-    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
+    Ok(WebhookState::active(verifiers.into_receiver(pool.clone())))
 }
 
 fn signing_key(endpoint: &str, key: &InboundWebhookKey) -> Result<SigningKey, BootstrapError> {

@@ -32,7 +32,7 @@ pub use session::StartupError;
 
 const RESERVED_OUTBOX_KIND: Option<&str> = [
     // template:begin outbox:jobs-outbox-reserved-kind
-    outbox::KIND.as_str(),
+    outbox::KIND,
     // template:end outbox:jobs-outbox-reserved-kind
 ]
 .first()

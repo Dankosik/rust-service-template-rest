@@ -98,12 +98,8 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     let jobs = open(&pool).await;
     let target = failed(&pool, Uuid::new_v4(), SECRET).await;
     let before = stored(&pool, &target).await;
-    let wrong_kind = RecoveryTarget::try_new(
-        &target.id().to_string(),
-        "test.other",
-        &target.version().to_string(),
-    )
-    .unwrap();
+    let wrong_kind =
+        RecoveryTarget::try_from_parts(target.id(), "test.other", target.version()).unwrap();
     std::assert_matches!(
         in_tx(&jobs, async |tx| operator::discard(tx, &wrong_kind).await).await,
         Err(OperatorError::Stale)
@@ -174,12 +170,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
         .unwrap_err();
         std::assert_matches!(error, OperatorError::Stale);
     }
-    let next = RecoveryTarget::try_new(
-        &target.id().to_string(),
-        KIND,
-        &receipt.new_version.to_string(),
-    )
-    .unwrap();
+    let next = RecoveryTarget::try_from_parts(target.id(), KIND, receipt.new_version).unwrap();
     in_tx(&jobs, async |tx| operator::redrive(tx, &next).await)
         .await
         .unwrap();

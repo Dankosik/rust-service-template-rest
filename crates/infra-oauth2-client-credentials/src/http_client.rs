@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::{Request, Response, StatusCode, header::AUTHORIZATION};
-use infra_outbound_http::{Client, DispatchError, Error as HttpError, Origin};
+use http::{Request, Response, StatusCode, Uri, header::AUTHORIZATION};
+use infra_outbound_http::{Client, DispatchError, Error as HttpError, ExchangeError};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 
@@ -64,8 +64,17 @@ impl ExchangeTokens {
 
 impl ServiceHttpClient {
     #[must_use]
-    pub const fn origin(&self) -> &Origin {
-        self.resource.origin()
+    pub fn host(&self) -> &str {
+        self.resource.host()
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.resource.port()
+    }
+
+    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.resource.uri(path_and_query)
     }
 
     #[must_use]
@@ -96,8 +105,17 @@ impl ServiceHttpClient {
 
 impl ServiceRequestClient<'_> {
     #[must_use]
-    pub const fn origin(&self) -> &Origin {
-        self.client.origin()
+    pub fn host(&self) -> &str {
+        self.client.host()
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.client.port()
+    }
+
+    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.client.uri(path_and_query)
     }
 
     pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
@@ -107,8 +125,17 @@ impl ServiceRequestClient<'_> {
 
 impl ExchangeHttpClient {
     #[must_use]
-    pub const fn origin(&self) -> &Origin {
-        self.resource.origin()
+    pub fn host(&self) -> &str {
+        self.resource.host()
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.resource.port()
+    }
+
+    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.resource.uri(path_and_query)
     }
 
     #[must_use]
@@ -140,8 +167,17 @@ impl ExchangeHttpClient {
 
 impl ExchangeRequestClient<'_> {
     #[must_use]
-    pub const fn origin(&self) -> &Origin {
-        self.client.origin()
+    pub fn host(&self) -> &str {
+        self.client.host()
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.client.port()
+    }
+
+    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.client.uri(path_and_query)
     }
 
     pub async fn execute(
@@ -184,13 +220,12 @@ async fn execute_authenticated(
     request: Request<Bytes>,
     grant: Grant<'_>,
 ) -> Result<Response<Bytes>, Error> {
-    let has_authorization = request.headers().contains_key(AUTHORIZATION);
     let mut prepared = resource
         .prepare(context, request)
         .map_err(Error::at_prepare)?;
     let deadline = acquisition_deadline(prepared.context());
     grant.check_active(deadline)?;
-    if has_authorization {
+    if prepared.headers().contains_key(AUTHORIZATION) {
         return Err(Error::AuthorizationConflict);
     }
     let acquired = grant.acquire_for_request(deadline).await?;
@@ -213,14 +248,14 @@ impl Error {
         match error {
             HttpError::Timeout => AcquisitionError::Timeout.into(),
             HttpError::Cancelled => AcquisitionError::Cancelled.into(),
-            other => Self::Resource(other),
+            other => Self::Resource(ExchangeError::BeforeResponse(other)),
         }
     }
 
     fn at_send(error: DispatchError<AcquisitionError>) -> Self {
         match error {
             DispatchError::Refused(error) => Self::Acquisition(error),
-            DispatchError::Exchange(error) => Self::Resource(error.into_error()),
+            DispatchError::Exchange(error) => Self::Resource(error),
         }
     }
 }

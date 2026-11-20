@@ -26,7 +26,7 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
 
     let client =
         Client::try_new_for_test_http(&mock.uri(), limits()).expect("loopback mock client");
-    let request = Request::get(client.origin().uri("/provider/items").unwrap())
+    let request = Request::get(client.uri("/provider/items").unwrap())
         .body(Bytes::new())
         .unwrap();
     let response = client
@@ -60,9 +60,11 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     }
     let http_client =
         Client::try_new_for_test_http("http://127.0.0.1:8080", limits()).expect("test http client");
-    std::assert_matches!(
-        Client::try_new(http_client.origin().clone(), limits()),
-        Err(BuildError::InvalidOrigin)
+    assert_eq!(http_client.host(), "127.0.0.1");
+    assert_eq!(http_client.port(), 8080);
+    assert_eq!(
+        http_client.uri("/path").unwrap(),
+        "http://127.0.0.1:8080/path"
     );
     let https_origin = Origin::parse_https("https://provider.example").unwrap();
     std::assert_matches!(

@@ -5,7 +5,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::{BuildError, Client, Origin};
+use infra_outbound_http::Client;
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -20,7 +20,7 @@ use crate::{
     assertion::Signer,
     options::{Scheme, ValidatedOptions, validate_options},
     token::Token,
-    token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
+    token_endpoint::{self, FETCH_TIMEOUT, TokenEndpoint},
 };
 
 mod exchange;
@@ -176,9 +176,7 @@ struct CachedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let validated = validate_options(options, Scheme::Https, Scheme::Https)?;
-        let token_http = Origin::parse_https(&validated.endpoint().origin().ascii_serialization())
-            .map_err(BuildError::from)
-            .and_then(|origin| Client::try_new(origin, TOKEN_LIMITS))
+        let token_http = token_endpoint::build_client(Scheme::Https, validated.endpoint())
             .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }
@@ -186,14 +184,13 @@ impl Registration {
     #[cfg(any(test, feature = "test-support"))]
     pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
         let validated = validate_options(options, Scheme::Http, Scheme::Https)?;
-        let token_http = Client::try_new_for_test_http(
-            &validated.endpoint().origin().ascii_serialization(),
-            TOKEN_LIMITS,
-        )
-        .map_err(|_| ConfigurationError {
-            key: "token_url",
-            reason: "requires an HTTP loopback IP address",
-        })?;
+        let token_http =
+            token_endpoint::build_client(Scheme::Http, validated.endpoint()).map_err(|_| {
+                ConfigurationError {
+                    key: "token_url",
+                    reason: "requires an HTTP loopback IP address",
+                }
+            })?;
         Self::build(validated, token_http)
     }
 
