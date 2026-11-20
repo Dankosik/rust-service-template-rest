@@ -9,7 +9,7 @@ use infra_http_transport::{Drained, Server};
 use infra_jobs::Started;
 // template:end jobs:worker-shutdown-jobs-imports
 // template:begin messaging:worker-shutdown-messaging-imports
-use infra_messaging::CloseOutcome;
+use infra_messaging::{CloseOutcome, MessagingStartup};
 // template:end messaging:worker-shutdown-messaging-imports
 // template:begin jobs:worker-shutdown-postgres-imports
 use infra_postgres::PgPool;
@@ -21,9 +21,6 @@ use service_config::{ShutdownTail, WorkerHttpConfig};
 use tokio::time::Instant;
 
 use crate::background::Background;
-// template:begin messaging:worker-shutdown-broker-import
-use crate::resources::BrokerResource;
-// template:end messaging:worker-shutdown-broker-import
 use crate::resources::{Dependencies, Listeners, Resources, Telemetry, Work};
 use crate::signals::Signals;
 
@@ -477,12 +474,9 @@ async fn close_pool(pool: &PgPool, budget: Duration) -> Outcome {
 // template:end jobs:worker-shutdown-close-pool
 
 // template:begin messaging:worker-shutdown-close-messaging-fn
-async fn close_messaging(broker: BrokerResource, deadline: Instant) -> Outcome {
+async fn close_messaging(broker: MessagingStartup, deadline: Instant) -> Outcome {
     let cancel = tokio_util::sync::CancellationToken::new();
-    let closed = match broker {
-        BrokerResource::Starting(startup) => startup.close(deadline, &cancel).await,
-        BrokerResource::Admitted(messaging) => messaging.close(deadline, &cancel).await,
-    };
+    let closed = broker.close(deadline, &cancel).await;
     match closed {
         CloseOutcome::Complete => {
             tracing::info!("messaging_closed");

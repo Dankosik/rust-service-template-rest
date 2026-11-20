@@ -505,10 +505,14 @@ pub(super) fn describe_metrics() {
 
 #[cfg(test)]
 mod tests {
-    use domain_events::EventPayload;
+    use domain_events::{Event, EventPayload};
 
     use super::*;
-    use crate::registry::Route;
+    use crate::registry::{EventHandler, Route};
+
+    fn accept<T>(_: Event<T>, _: OperationContext) -> std::future::Ready<Result<(), HandlerError>> {
+        std::future::ready(Ok(()))
+    }
 
     #[derive(serde::Deserialize)]
     struct Created;
@@ -535,9 +539,7 @@ mod tests {
             registry
                 .declare(&Route::<Shipped>::new("orders.shipped"))
                 .unwrap();
-            registry
-                .register(&created, |_, _| async { Ok(()) })
-                .unwrap();
+            registry.register(&created, accept).unwrap();
             let metrics = HandlerMetrics::register(&registry);
 
             let handled = metrics.get("order.created");
@@ -575,33 +577,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "the outcome cancellation oracle keeps context extraction beside the returned async handler"
-    )]
     async fn the_handler_token_is_cancelled_when_its_delivery_ends() {
+        struct OutcomeHandler {
+            expected: &'static str,
+            token_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CancellationToken>>>,
+        }
+
+        impl EventHandler<Created> for OutcomeHandler {
+            async fn handle(
+                &self,
+                _event: Event<Created>,
+                context: OperationContext,
+            ) -> Result<(), HandlerError> {
+                assert_eq!(context.remaining(), Some(HANDLER_TIMEOUT));
+                self.token_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(context.cancellation().clone())
+                    .unwrap();
+                if self.expected == "timeout" {
+                    std::future::pending::<()>().await;
+                }
+                assert_ne!(self.expected, "panic", "handler panic fixture");
+                Ok(())
+            }
+        }
+
         for expected in ["timeout", "success", "panic"] {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();
-            let token_tx = std::sync::Mutex::new(Some(token_tx));
             let created = Route::<Created>::new("orders.created");
             let mut registry = Registry::default();
             registry.declare(&created).unwrap();
             registry
-                .register(&created, move |_, context| {
-                    let token_tx = token_tx.lock().unwrap().take();
-                    async move {
-                        assert_eq!(context.remaining(), Some(HANDLER_TIMEOUT));
-                        token_tx
-                            .unwrap()
-                            .send(context.cancellation().clone())
-                            .unwrap();
-                        if expected == "timeout" {
-                            std::future::pending::<()>().await;
-                        }
-                        assert_ne!(expected, "panic", "handler panic fixture");
-                        Ok(())
-                    }
-                })
+                .register(
+                    &created,
+                    OutcomeHandler {
+                        expected,
+                        token_tx: std::sync::Mutex::new(Some(token_tx)),
+                    },
+                )
                 .unwrap();
 
             let delivery = CancellationToken::new();
@@ -626,15 +642,18 @@ mod tests {
             let mut registry = Registry::default();
             registry.declare(&created).unwrap();
             registry
-                .register(&created, move |_, context| async move {
-                    if expected == "timeout" {
-                        let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
-                        assert_eq!(context.remaining(), Some(Duration::ZERO));
-                    } else {
-                        context.cancel();
-                    }
-                    result
-                })
+                .register(
+                    &created,
+                    move |_: Event<Created>, context: OperationContext| async move {
+                        if expected == "timeout" {
+                            let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
+                            assert_eq!(context.remaining(), Some(Duration::ZERO));
+                        } else {
+                            context.cancel();
+                        }
+                        result
+                    },
+                )
                 .unwrap();
             let outcome = run_handler(
                 &registry,
@@ -653,7 +672,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.declare(&created).unwrap();
         registry
-            .register(&created, |_, _| async {
+            .register(&created, |_: Event<Created>, _: OperationContext| async {
                 panic!("cancelled delivery reached the handler");
             })
             .unwrap();

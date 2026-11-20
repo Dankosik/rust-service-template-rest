@@ -210,11 +210,11 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
         .await
         .expect("matching historical job can be redriven");
 
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         messaging_options(&fixture),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    ))
+    )
     .await
     .unwrap();
     let registry = kinds(messaging.outbox_producer().unwrap()).unwrap();

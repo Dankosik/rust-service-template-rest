@@ -1,11 +1,10 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use domain_events::{Event, EventPayload};
 use foldhash::HashMap;
-use futures_util::FutureExt as _;
-use futures_util::future::BoxFuture;
 use operation_context::OperationContext;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -14,17 +13,66 @@ use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::HandlerError;
 use crate::wire::{InboundEnvelopeRef, valid_subject};
 
-type HandlerFuture = BoxFuture<'static, Result<(), HandlerError>>;
-type ErasedHandler = Arc<
-    dyn Fn(
-            &str,
-            time::UtcDateTime,
-            &[u8],
-            OperationContext,
-        ) -> Result<HandlerFuture, serde_json::Error>
-        + Send
-        + Sync,
->;
+type HandlerFuture<'a> = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send + 'a>>;
+
+pub trait EventHandler<T>: Send + Sync + 'static {
+    fn handle(
+        &self,
+        event: Event<T>,
+        context: OperationContext,
+    ) -> impl Future<Output = Result<(), HandlerError>> + Send;
+}
+
+impl<T, F, Fut> EventHandler<T> for F
+where
+    F: Fn(Event<T>, OperationContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
+{
+    fn handle(
+        &self,
+        event: Event<T>,
+        context: OperationContext,
+    ) -> impl Future<Output = Result<(), HandlerError>> + Send {
+        self(event, context)
+    }
+}
+
+trait ErasedEventHandler: Send + Sync {
+    fn call(
+        &self,
+        id: &str,
+        occurred_at: time::UtcDateTime,
+        payload: &[u8],
+        context: OperationContext,
+    ) -> Result<HandlerFuture<'_>, serde_json::Error>;
+}
+
+struct TypedEventHandler<T, H> {
+    handler: H,
+    payload: PhantomData<fn(T)>,
+}
+
+impl<T, H> ErasedEventHandler for TypedEventHandler<T, H>
+where
+    T: EventPayload + DeserializeOwned,
+    H: EventHandler<T>,
+{
+    fn call(
+        &self,
+        id: &str,
+        occurred_at: time::UtcDateTime,
+        payload: &[u8],
+        context: OperationContext,
+    ) -> Result<HandlerFuture<'_>, serde_json::Error> {
+        let payload = serde_json::from_slice::<T>(payload)?;
+        let event = Event {
+            id: id.to_owned(),
+            occurred_at,
+            payload,
+        };
+        Ok(Box::pin(self.handler.handle(event, context)))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
@@ -205,7 +253,7 @@ pub(crate) struct RegisteredRoute {
     pub(crate) subject: async_nats::Subject,
     pub(crate) schema: Option<PayloadSchema>,
     payload_type: TypeId,
-    handler: Option<ErasedHandler>,
+    handler: Option<Arc<dyn ErasedEventHandler>>,
 }
 
 impl RegisteredRoute {
@@ -283,11 +331,13 @@ impl Registry {
         Ok(())
     }
 
-    pub fn register<T, F, Fut>(&mut self, route: &Route<T>, handler: F) -> Result<(), RegistryError>
+    pub fn register<T>(
+        &mut self,
+        route: &Route<T>,
+        handler: impl EventHandler<T>,
+    ) -> Result<(), RegistryError>
     where
         T: EventPayload + DeserializeOwned + 'static,
-        F: Fn(Event<T>, OperationContext) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
         let Some(entry) = self
             .routes
@@ -305,14 +355,9 @@ impl Registry {
                 schema_version: T::SCHEMA_VERSION,
             });
         }
-        entry.handler = Some(Arc::new(move |id, occurred_at, encoded, context| {
-            let payload = serde_json::from_slice::<T>(encoded)?;
-            let event = Event {
-                id: id.to_owned(),
-                occurred_at,
-                payload,
-            };
-            Ok(handler(event, context).boxed())
+        entry.handler = Some(Arc::new(TypedEventHandler {
+            handler,
+            payload: PhantomData,
         }));
         Ok(())
     }
@@ -374,20 +419,27 @@ impl Registry {
             .filter(|entry| entry.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
-        let run = handler(
-            envelope.message_id,
-            envelope.occurred_at,
-            envelope.payload,
-            context,
-        )
-        .map_err(|_| DispatchError::Undecodable)?;
+        let run = handler
+            .call(
+                envelope.message_id,
+                envelope.occurred_at,
+                envelope.payload,
+                context,
+            )
+            .map_err(|_| DispatchError::Undecodable)?;
         run.await.map_err(DispatchError::Handler)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use super::*;
+
+    fn accept<T>(_: Event<T>, _: OperationContext) -> std::future::Ready<Result<(), HandlerError>> {
+        std::future::ready(Ok(()))
+    }
 
     #[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
     struct Created {
@@ -425,7 +477,7 @@ mod tests {
             Err(RegistryError::DuplicateRoute { .. })
         );
         std::assert_matches!(
-            registry.register(&collision, |_, _| async { Ok(()) }),
+            registry.register(&collision, accept),
             Err(RegistryError::MissingRoute { .. })
         );
         assert!(registry.check_publication_limit(1024).is_ok());
@@ -447,16 +499,16 @@ mod tests {
             Route::<Alias>::new("orders.created"),
         ] {
             std::assert_matches!(
-                registry.register(&undeclared, |_, _| async { Ok(()) }),
+                registry.register(&undeclared, accept),
                 Err(RegistryError::MissingRoute { .. })
             );
         }
         let prepared = publication.prepare(&event).unwrap();
         assert_eq!(prepared.subject(), "orders.created");
         assert_eq!(prepared.payload().as_ref(), br#""accepted""#);
-        registry.register(&route, |_, _| async { Ok(()) }).unwrap();
+        registry.register(&route, accept).unwrap();
         std::assert_matches!(
-            registry.register(&route, |_, _| async { Ok(()) }),
+            registry.register(&route, accept),
             Err(RegistryError::DuplicateHandler { .. })
         );
         let document = registry.asyncapi("orders", "1").unwrap();
@@ -492,13 +544,16 @@ mod tests {
             .declare(&Route::<Shipped>::new("orders.shipped"))
             .unwrap();
         registry
-            .register(&created, |event, _| async move {
-                if event.payload.quantity == 0 {
-                    Err(HandlerError::Permanent)
-                } else {
-                    Ok(())
-                }
-            })
+            .register(
+                &created,
+                |event: Event<Created>, _: OperationContext| async move {
+                    if event.payload.quantity == 0 {
+                        Err(HandlerError::Permanent)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
             .unwrap();
         registry
     }
@@ -579,5 +634,55 @@ mod tests {
                 "{payload}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stateful_event_handler_borrows_self_across_await() {
+        struct QuantityAccumulator {
+            total: Arc<AtomicU32>,
+        }
+
+        impl EventHandler<Created> for QuantityAccumulator {
+            async fn handle(
+                &self,
+                event: Event<Created>,
+                _context: OperationContext,
+            ) -> Result<(), HandlerError> {
+                tokio::task::yield_now().await;
+                self.total
+                    .fetch_add(event.payload.quantity, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let total = Arc::new(AtomicU32::new(0));
+        let created = Route::<Created>::new("orders.created");
+        let mut registry = Registry::default();
+        registry.declare(&created).unwrap();
+        registry
+            .register(
+                &created,
+                QuantityAccumulator {
+                    total: Arc::clone(&total),
+                },
+            )
+            .unwrap();
+
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(crate::wire::header_name::MESSAGE_ID, "event-1");
+        headers.insert(crate::wire::header_name::EVENT_TYPE, Created::EVENT_TYPE);
+        headers.insert(crate::wire::header_name::EVENT_SCHEMA, "v2");
+        headers.insert(crate::wire::header_name::CREATED_AT, "2026-09-29T10:00:00Z");
+        headers.insert(crate::wire::header_name::NATS_MSG_ID, "event-1");
+        let envelope =
+            crate::wire::decode_envelope_ref("orders.created", &headers, br#"{"quantity":7}"#)
+                .unwrap();
+        assert_eq!(
+            registry
+                .dispatch("orders.created", envelope, OperationContext::unbounded())
+                .await,
+            Ok(())
+        );
+        assert_eq!(total.load(Ordering::SeqCst), 7);
     }
 }

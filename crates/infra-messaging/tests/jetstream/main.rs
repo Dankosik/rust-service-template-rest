@@ -167,7 +167,7 @@ impl Fixture {
             .expect("fixture route is valid");
         if matches!(topology, Topology::WithDurable) {
             let mut handled = registry.clone();
-            handled.register(&route, |_, _| async { Ok(()) }).unwrap();
+            handled.register(&route, accept).unwrap();
             created
                 .create_consumer(consumer::pull::Config {
                     name: Some(durable.clone()),
@@ -231,6 +231,10 @@ fn deadline() -> Instant {
 
 fn context(deadline: Instant, cancel: &CancellationToken) -> OperationContext {
     OperationContext::new(Some(Deadline::at(deadline)), cancel.clone())
+}
+
+fn accept<T>(_: Event<T>, _: OperationContext) -> std::future::Ready<Result<(), HandlerError>> {
+    std::future::ready(Ok(()))
 }
 
 fn event(id: &str) -> Event<ExampleEvent> {

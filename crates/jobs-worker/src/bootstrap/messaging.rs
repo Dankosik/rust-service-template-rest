@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use infra_messaging::{
-    Consumer, ConsumerOptions, Credentials, Messaging, MessagingOptions,
+    Consumer, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
     Registry as MessagingRegistry, TransportSecurity,
 };
 use service_config::{
@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{WorkerError, worker_identity};
 use crate::background::Background;
-use crate::resources::{BrokerResource, Resources};
+use crate::resources::Resources;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -74,7 +74,7 @@ pub(super) async fn connect_messaging(
     pool: Option<&infra_postgres::PgPool>,
     // template:end outbox:worker-bootstrap-connect-messaging-pool
     cancel: &CancellationToken,
-    retained: &mut Option<BrokerResource>,
+    retained: &mut Option<MessagingStartup>,
 ) -> Result<(Messaging, Option<Consumer>), WorkerError> {
     let MessagingPlan {
         options,
@@ -90,13 +90,8 @@ pub(super) async fn connect_messaging(
     }
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
-    let mut startup = std::mem::DropGuard::new((Box::new(startup), retained), |(startup, slot)| {
-        *slot = Some(BrokerResource::Starting(startup));
-    });
-    let messaging = startup.0.admit().await?;
-    let (_, slot) = std::mem::DropGuard::dismiss(startup);
-    *slot = Some(BrokerResource::Admitted(messaging.clone()));
+    let startup = retained.insert(Messaging::prepare(options, deadline, cancel.child_token())?);
+    let messaging = startup.admit().await?;
     // template:begin outbox:worker-bootstrap-admit-outbox-source
     messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source

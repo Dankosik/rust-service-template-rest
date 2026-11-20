@@ -12,9 +12,9 @@ use crate::validate::{
     Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
 };
 
-const DELIVERY_OVERHEAD_BYTES: u64 = 8 * KIB;
-const MAX_RESIDENT_DELIVERY_MIB: u64 = 64;
-const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * MIB;
+const DELIVERY_OVERHEAD_BYTES: u64 = shared_rules::messaging::HEADER_LIMIT_BYTES as u64;
+const MAX_RESIDENT_DELIVERY_BYTES: u64 = shared_rules::messaging::PUBLICATION_WINDOW_BYTES as u64;
+const MAX_RESIDENT_DELIVERY_MIB: u64 = MAX_RESIDENT_DELIVERY_BYTES / MIB;
 
 const PRODUCER_ACTIVE: &str = "a producer is active";
 const CONSUMER_ACTIVE: &str = "a consumer is active";
