@@ -133,9 +133,9 @@ enum CreateError {
 impl From<CreateError> for Rollback<TerminalProblem> {
     fn from(error: CreateError) -> Self {
         match error {
-            CreateError::Reserved => Self::refuse(
-                Problem::new(Code::UnprocessableContent).detail("the widget name is reserved"),
-            ),
+            CreateError::Reserved => Problem::new(Code::UnprocessableContent)
+                .detail("the widget name is reserved")
+                .into(),
             CreateError::Store(error)
                 if error.as_database_error().is_some_and(|db| {
                     db.is_unique_violation() && db.constraint() == Some("widgets_unique_name")
@@ -232,7 +232,7 @@ async fn create_widget(
 )]
 async fn replace_widget(
     State(state): State<WidgetState>,
-    principal: Principal,
+    VerifiedPrincipal(principal): VerifiedPrincipal,
     delegation: Option<DelegationCredential>,
     Path(_id): Path<i64>,
     Json(input): Json<NewWidget>,
@@ -262,9 +262,6 @@ impl FreshCommand for CreateWidget {
 
     async fn execute(self, tx: &mut Tx<'_>) -> Result<Self::Success, Rollback<Self::Terminal>> {
         let widget = self.widgets.create(tx, &self.input).await?;
-        if widget.color == "invalid-refusal" {
-            return Err(Rollback::refuse(StatusCode::NOT_MODIFIED));
-        }
         Ok(created_response(widget))
     }
 
@@ -1826,26 +1823,6 @@ async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn an_invalid_refusal_rolls_back_the_post(pool: PgPool) {
-    let mounted = Mounted::on(&pool, BUDGET).await;
-    let input = json!({"name": "wrong-status", "color": "invalid-refusal"});
-    let first = mounted.create(ALICE, "k-304", &input, "req-invalid").await;
-    let body = problem(
-        &first,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal_error",
-        "req-invalid",
-    );
-    assert_eq!(body["detail"], "request failed");
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
-    assert_eq!(
-        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
-        0
-    );
-    mounted.finish().await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: PgPool) {
     let recorder = DebuggingRecorder::new();
     let captured = CapturedMetrics::new(&recorder);
@@ -1861,8 +1838,14 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
             "unprocessable_content",
         );
         assert_eq!(body["detail"], "the widget name is reserved");
+        assert!(response.maybe_header("idempotent-replayed").is_none());
     }
     assert_eq!(outcomes(&captured), counts(&[("not_stored", 2)]));
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        0
+    );
 
     let huge = json!({"name": "x".repeat(STORED_BODY_BOUND), "color": "red"});
     let unstorable = mounted.create(ALICE, "k-3", &huge, "req-huge").await;

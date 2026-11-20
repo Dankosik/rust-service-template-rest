@@ -68,6 +68,7 @@ async fn a_request_can_cancel_its_own_work_while_listener_drain_reaches_every_ch
     let handler = move |Extension(info): Extension<ConnectionInfo>| {
         let send = send.clone();
         async move {
+            assert_eq!(info.scheme(), TransportScheme::Http);
             send.send(info.child_drain_token()).await.unwrap();
             "ok"
         }

@@ -7,7 +7,8 @@ use utoipa::openapi::schema::{AnyOfBuilder, Schema};
 use utoipa::openapi::{Components, OpenApi, Ref, RefOr};
 use utoipa::{OpenApi as _, ToResponse};
 
-use super::{FinalizeError, path_operations_mut};
+use super::document::{path_operations_mut, resolve};
+use super::{FinalizeError, FinalizeKind};
 // template:begin authn:http-outcomes-policy-import
 use super::Policy;
 // template:end authn:http-outcomes-policy-import
@@ -16,6 +17,22 @@ use crate::problem::{PROBLEM_MEDIA_TYPE, responses};
 
 const RESPONSE_REFERENCE_PREFIX: &str = "#/components/responses/";
 const MEDIA_TYPE_REFERENCE_PREFIX: &str = "#/components/mediaTypes/";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ResponseFault {
+    #[error("shared response could not be resolved")]
+    UnresolvedSharedResponse,
+    #[error("existing response must resolve within the service document")]
+    UnresolvedExistingResponse,
+    #[error("existing media type must resolve within the service document")]
+    UnresolvedExistingMediaType,
+    #[error("shared media type could not be resolved")]
+    UnresolvedSharedMediaType,
+    #[error("existing header must resolve within the service document")]
+    UnresolvedExistingHeader,
+    #[error("shared header could not be resolved")]
+    UnresolvedSharedHeader,
+}
 
 pub(super) fn compose(
     document: &mut OpenApi,
@@ -42,11 +59,13 @@ pub(super) fn compose(
                 // template:end authn:http-outcomes-operation-argument
                 probes.contains_method(method, path),
             )
-            .map_err(|(status, fault)| FinalizeError::InvalidResponse {
-                path: path.to_owned(),
-                method: method.to_owned(),
-                status,
-                fault,
+            .map_err(|(status, fault)| {
+                FinalizeError::new(FinalizeKind::InvalidResponse {
+                    path: path.to_owned(),
+                    method: method.to_owned(),
+                    status,
+                    fault,
+                })
             })?;
         }
     }
@@ -60,7 +79,7 @@ fn add_outcomes(
     protected: bool,
     // template:end authn:http-outcomes-protected-parameter
     probe: bool,
-) -> Result<(), (String, &'static str)> {
+) -> Result<(), (String, ResponseFault)> {
     let declares_request_body = operation.request_body.is_some();
     let declares_json_body = declares_json_body(operation, components);
     let responses = &mut operation.responses.responses;
@@ -144,7 +163,7 @@ fn merge_response(
     components: &Components,
     status: &str,
     common: RefOr<Response>,
-) -> Result<(), &'static str> {
+) -> Result<(), ResponseFault> {
     let slot = match responses.entry(status.to_owned()) {
         Entry::Vacant(slot) => {
             slot.insert(common);
@@ -154,10 +173,10 @@ fn merge_response(
         Entry::Occupied(slot) => slot.into_mut(),
     };
     let Some(common) = resolve(&common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
-        return Err("shared response could not be resolved");
+        return Err(ResponseFault::UnresolvedSharedResponse);
     };
     let mut merged = resolve(slot, &components.responses, RESPONSE_REFERENCE_PREFIX)
-        .ok_or("existing response must resolve within the service document")?
+        .ok_or(ResponseFault::UnresolvedExistingResponse)?
         .clone();
     if let RefOr::Ref(reference) = slot {
         if !reference.description.is_empty() {
@@ -178,7 +197,7 @@ fn merge_response_content(
     merged: &mut Response,
     common: &Response,
     components: &Components,
-) -> Result<(), &'static str> {
+) -> Result<(), ResponseFault> {
     for (media_type, content) in &common.content {
         let Some(slot) = merged.content.get_mut(media_type) else {
             merged.content.insert(media_type.clone(), content.clone());
@@ -188,14 +207,14 @@ fn merge_response_content(
             continue;
         }
         let mut existing = resolve(slot, &components.media_types, MEDIA_TYPE_REFERENCE_PREFIX)
-            .ok_or("existing media type must resolve within the service document")?
+            .ok_or(ResponseFault::UnresolvedExistingMediaType)?
             .clone();
         let other = resolve(
             content,
             &components.media_types,
             MEDIA_TYPE_REFERENCE_PREFIX,
         )
-        .ok_or("shared media type could not be resolved")?;
+        .ok_or(ResponseFault::UnresolvedSharedMediaType)?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         *slot = RefOr::T(existing);
     }
@@ -206,7 +225,7 @@ fn merge_response_headers(
     merged: &mut Response,
     common: &Response,
     components: &Components,
-) -> Result<(), &'static str> {
+) -> Result<(), ResponseFault> {
     for (name, header) in &common.headers {
         let Some((_, slot)) = merged
             .headers
@@ -220,10 +239,10 @@ fn merge_response_headers(
             continue;
         }
         let mut existing = resolve(slot, &components.headers, "#/components/headers/")
-            .ok_or("existing header must resolve within the service document")?
+            .ok_or(ResponseFault::UnresolvedExistingHeader)?
             .clone();
         let other = resolve(header, &components.headers, "#/components/headers/")
-            .ok_or("shared header could not be resolved")?;
+            .ok_or(ResponseFault::UnresolvedSharedHeader)?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         if let Some(description) = &other.description {
             append_description(existing.description.get_or_insert_default(), description);
@@ -255,30 +274,4 @@ fn union_schema(existing: &mut Option<RefOr<Schema>>, addition: Option<&RefOr<Sc
                 .into(),
         );
     }
-}
-
-pub(super) fn resolve<'a, T>(
-    value: &'a RefOr<T>,
-    components: &'a BTreeMap<String, RefOr<T>>,
-    prefix: &str,
-) -> Option<&'a T> {
-    resolve_when(value, components, prefix, |_| true)
-}
-
-pub(super) fn resolve_when<'a, T>(
-    mut value: &'a RefOr<T>,
-    components: &'a BTreeMap<String, RefOr<T>>,
-    prefix: &str,
-    accept: impl Fn(&Ref) -> bool,
-) -> Option<&'a T> {
-    for _ in 0..=components.len() {
-        match value {
-            RefOr::T(resolved) => return Some(resolved),
-            RefOr::Ref(reference) if accept(reference) => {
-                value = components.get(reference.ref_location.strip_prefix(prefix)?)?;
-            }
-            RefOr::Ref(_) => return None,
-        }
-    }
-    None
 }

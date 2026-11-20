@@ -237,12 +237,26 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let response = axum::Json(&self).into_response();
-        self.attach_to(response)
+        let body = self.encode_body().unwrap_or_else(Body::empty);
+        self.attach_to(Response::new(body))
     }
 }
 
 impl Problem {
+    fn encode_body(&self) -> Option<Body> {
+        let mut writer = BytesMut::with_capacity(128).writer();
+        match serde_json::to_writer(&mut writer, self) {
+            Ok(()) => Some(Body::from(writer.into_inner().freeze())),
+            Err(_) => {
+                tracing::error!(
+                    code = self.code.as_str(),
+                    "http_problem_serialization_failed"
+                );
+                None
+            }
+        }
+    }
+
     fn attach_to(self, mut response: Response) -> Response {
         *response.status_mut() = http_status(self.code);
         response
@@ -270,15 +284,10 @@ pub(crate) fn complete_problem(response: &mut Response, request_id: &HeaderValue
         return;
     };
     problem.request_id = Some(CompactString::from(id));
-    let mut writer = BytesMut::with_capacity(128).writer();
-    let Ok(()) = serde_json::to_writer(&mut writer, &*problem) else {
-        tracing::error!(
-            code = problem.code.as_str(),
-            "http_problem_serialization_failed"
-        );
+    let Some(body) = problem.encode_body() else {
         return;
     };
-    *response.body_mut() = Body::from(writer.into_inner().freeze());
+    *response.body_mut() = body;
     response.headers_mut().remove(CONTENT_LENGTH);
 }
 

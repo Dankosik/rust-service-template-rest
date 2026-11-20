@@ -122,7 +122,7 @@ async fn serve_token_peer(
             async move {
                 let (response, receive) = oneshot::channel();
                 requests.send(response).await.unwrap();
-                axum::Json(receive.await.unwrap())
+                infra_http::extract::Json(receive.await.unwrap())
             }
         }),
     );

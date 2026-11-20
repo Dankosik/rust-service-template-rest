@@ -30,8 +30,12 @@ pub trait ReplaySuccess: IntoResponses {
 
 #[doc(hidden)]
 #[must_use]
-pub fn created_json_responses(schema: RefOr<Schema>) -> BTreeMap<String, RefOr<ApiResponse>> {
-    created_response(JSON, schema)
+pub fn json_responses(
+    status: StatusCode,
+    description: &str,
+    schema: RefOr<Schema>,
+) -> BTreeMap<String, RefOr<ApiResponse>> {
+    typed_response(status, description, JSON, schema)
 }
 
 #[derive(Debug)]
@@ -42,7 +46,7 @@ pub struct CreatedText {
 
 impl IntoResponses for CreatedText {
     fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
-        created_response(TEXT, String::schema())
+        typed_response(StatusCode::CREATED, "created", TEXT, String::schema())
     }
 }
 
@@ -53,15 +57,35 @@ impl ReplaySuccess for CreatedText {
     }
 }
 
-fn created_response(
+#[derive(Debug, Default)]
+pub struct NoContent {
+    pub headers: HeaderMap,
+}
+
+impl IntoResponses for NoContent {
+    fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
+        let response = ApiResponse::builder().description("no content").build();
+        BTreeMap::from([(StatusCode::NO_CONTENT.as_str().to_owned(), response.into())])
+    }
+}
+
+impl ReplaySuccess for NoContent {
+    fn capture(self) -> Result<ReplayableResponse, ReplayError> {
+        ReplayableResponse::empty(StatusCode::NO_CONTENT, &self.headers)
+    }
+}
+
+fn typed_response(
+    status: StatusCode,
+    description: &str,
     media_type: &str,
     schema: RefOr<Schema>,
 ) -> BTreeMap<String, RefOr<ApiResponse>> {
     let response = ApiResponse::builder()
-        .description("created")
+        .description(description)
         .content(media_type, Content::new(Some(schema)))
         .build();
-    BTreeMap::from([(StatusCode::CREATED.as_str().to_owned(), response.into())])
+    BTreeMap::from([(status.as_str().to_owned(), response.into())])
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -214,6 +238,11 @@ mod tests {
         crate::created_json_response!(CreatedAddress(Box<Address>));
         crate::created_json_response!(CreatedCustomer(Box<Customer>));
         crate::created_json_response!(CreatedCustomers(Vec<Customer>));
+        crate::json_response!(
+            UpdatedAddress(Address),
+            status = StatusCode::OK,
+            description = "updated",
+        );
 
         fn document<R: ReplaySuccess>() -> serde_json::Value {
             serde_json::json!({
@@ -221,6 +250,21 @@ mod tests {
                 "components": {"schemas": R::schemas().into_iter().collect::<BTreeMap<_, _>>()},
             })
         }
+
+        let updated = document::<UpdatedAddress>();
+        assert_eq!(updated["responses"]["200"]["description"], "updated");
+        assert_eq!(
+            updated
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .unwrap(),
+            "#/components/schemas/Address"
+        );
+        let no_content = document::<NoContent>();
+        assert_eq!(no_content["responses"]["204"]["description"], "no content");
+        assert!(no_content["responses"]["204"].get("content").is_none());
+        let captured = NoContent::default().capture().unwrap();
+        let response = response_from_record(Record::from(captured.into_success()));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         let root = "/responses/201/content/application~1json/schema";
         assert_eq!(

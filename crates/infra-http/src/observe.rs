@@ -29,7 +29,7 @@ use crate::body::{BodyEnd, on_body_end};
 use crate::harden::AdmissionShed;
 use crate::probes::ProbeRoutes;
 use crate::problem::{Code, Problem};
-use infra_http_transport::{ConnectionInfo, TRACEPARENT, TRACESTATE};
+use infra_http_transport::{ConnectionInfo, TRACEPARENT, TRACESTATE, TransportScheme};
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
 
@@ -419,13 +419,20 @@ impl Scheme {
     }
 }
 
+impl From<TransportScheme> for Scheme {
+    fn from(scheme: TransportScheme) -> Self {
+        match scheme {
+            TransportScheme::Http => Self::Http,
+            TransportScheme::Https => Self::Https,
+        }
+    }
+}
+
 fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> Scheme {
-    match uri
-        .scheme_str()
-        .or_else(|| connection.map(ConnectionInfo::scheme))
-    {
+    match uri.scheme_str() {
         Some("https") => Scheme::Https,
-        _ => Scheme::Http,
+        Some(_) => Scheme::Http,
+        None => connection.map_or(Scheme::Http, |info| info.scheme().into()),
     }
 }
 
