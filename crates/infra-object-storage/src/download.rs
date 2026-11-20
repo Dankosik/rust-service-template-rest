@@ -275,7 +275,8 @@ impl Download {
         });
         let timer = tokio::spawn(async move {
             let stopped = context.wait_stopped().await;
-            if let Some(shared) = std::mem::DropGuard::dismiss(shared_on_exit).upgrade() {
+            let shared = std::mem::DropGuard::dismiss(shared_on_exit).upgrade();
+            if let Some(shared) = shared {
                 terminate(&shared, Termination::Stopped(stopped));
             }
         });

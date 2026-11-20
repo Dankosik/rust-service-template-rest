@@ -396,7 +396,7 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
     ]);
     assert_matches!(
-        generic.object_storage().unwrap().provider,
+        &generic.object_storage().unwrap().provider,
         crate::ObjectStorageProvider::S3Compatible {
             endpoint,
             region: None,
