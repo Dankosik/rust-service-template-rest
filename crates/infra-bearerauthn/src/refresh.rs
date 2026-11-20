@@ -7,7 +7,6 @@ use arc_swap::{ArcSwap, Guard};
 use shared_rules::oidc_jwt::REFRESH_COOLDOWN;
 use tokio::sync::watch;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
@@ -29,11 +28,18 @@ pub(crate) enum SignatureRefresh {
     WorkerLost,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerState {
+    Running,
+    Stopped,
+    Lost,
+}
+
 struct State {
     requested_ticket: u64,
     finished_ticket: u64,
     cooldown_started_at: Instant,
-    stopped: bool,
+    worker: WorkerState,
 }
 
 impl State {
@@ -56,7 +62,6 @@ enum MissAdmission {
 pub(crate) struct KeyStore {
     keys: ArcSwap<KeySet>,
     state: watch::Sender<State>,
-    worker_lost: CancellationToken,
     last_acquisition: metrics::Gauge,
 }
 
@@ -68,7 +73,7 @@ impl KeyStore {
             requested_ticket: 0,
             finished_ticket: 0,
             cooldown_started_at: Instant::now(),
-            stopped: false,
+            worker: WorkerState::Running,
         });
         metrics::describe_gauge!(
             ACQUISITION_METRIC,
@@ -80,7 +85,6 @@ impl KeyStore {
         Arc::new(Self {
             keys,
             state,
-            worker_lost: CancellationToken::new(),
             last_acquisition,
         })
     }
@@ -97,14 +101,14 @@ impl KeyStore {
     fn admit_signature_miss(&self, checked: &Arc<KeySet>) -> MissAdmission {
         let mut admission = MissAdmission::Answer(SignatureRefresh::NoNewerSet);
         self.state.send_if_modified(|state| {
-            if state.stopped {
+            if state.worker == WorkerState::Stopped {
                 return false;
             }
             if let Some(keys) = self.newer_set(checked) {
                 admission = MissAdmission::Answer(SignatureRefresh::NewerSet(keys));
                 return false;
             }
-            if self.worker_lost.is_cancelled() {
+            if state.worker == WorkerState::Lost {
                 admission = MissAdmission::Answer(SignatureRefresh::WorkerLost);
                 return false;
             }
@@ -130,18 +134,18 @@ impl KeyStore {
             MissAdmission::Wait(ticket) => ticket,
         };
         let mut state_changes = self.state.subscribe();
-        match self
-            .worker_lost
-            .run_until_cancelled(
-                state_changes.wait_for(|state| state.stopped || state.finished_ticket >= ticket),
-            )
+        let worker = state_changes
+            .wait_for(|state| {
+                state.worker != WorkerState::Running || state.finished_ticket >= ticket
+            })
             .await
-        {
-            Some(Ok(state)) if !state.stopped => self
+            .map(|state| state.worker);
+        match worker {
+            Ok(WorkerState::Lost) => SignatureRefresh::WorkerLost,
+            Ok(WorkerState::Stopped) | Err(_) => SignatureRefresh::NoNewerSet,
+            Ok(WorkerState::Running) => self
                 .newer_set(checked)
                 .map_or(SignatureRefresh::NoNewerSet, SignatureRefresh::NewerSet),
-            Some(_) => SignatureRefresh::NoNewerSet,
-            None => SignatureRefresh::WorkerLost,
         }
     }
 
@@ -200,7 +204,22 @@ impl KeyStore {
     }
 
     fn stop(&self) {
-        self.state.send_modify(|state| state.stopped = true);
+        self.state
+            .send_modify(|state| state.worker = WorkerState::Stopped);
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "std::mem::DropGuard invokes its drop callback with owned Arc<KeyStore>"
+    )]
+    fn mark_lost(store: Arc<Self>) {
+        store.state.send_if_modified(|state| {
+            if state.worker != WorkerState::Running {
+                return false;
+            }
+            state.worker = WorkerState::Lost;
+            true
+        });
     }
 
     #[cfg(test)]
@@ -222,12 +241,11 @@ fn acquisition_timestamp(now: SystemTime) -> f64 {
 #[derive(derive_more::Debug)]
 #[debug("RefreshDriver([REDACTED])")]
 pub struct RefreshDriver {
-    store: Arc<KeyStore>,
+    store: std::mem::DropGuard<Arc<KeyStore>, fn(Arc<KeyStore>)>,
     provider: ProviderClient,
     source: JwksSource,
     algorithms: AllowedAlgorithms,
     jwks_max_age: Duration,
-    worker_lost_guard: tokio_util::sync::DropGuard,
 }
 
 impl RefreshDriver {
@@ -238,14 +256,12 @@ impl RefreshDriver {
         algorithms: AllowedAlgorithms,
         jwks_max_age: Duration,
     ) -> Self {
-        let worker_lost_guard = store.worker_lost.clone().drop_guard();
         Self {
-            store,
+            store: std::mem::DropGuard::new(store, KeyStore::mark_lost),
             provider,
             source,
             algorithms,
             jwks_max_age,
-            worker_lost_guard,
         }
     }
 
@@ -256,7 +272,6 @@ impl RefreshDriver {
             source,
             algorithms,
             jwks_max_age,
-            worker_lost_guard,
         } = self;
         let next_period = move || refresh_period().min(jwks_max_age / 2);
         let mut next_refresh = Instant::now() + next_period();
@@ -281,8 +296,7 @@ impl RefreshDriver {
                 store.finish(ticket, replacement);
             }
         }
-        store.stop();
-        worker_lost_guard.disarm();
+        std::mem::DropGuard::dismiss(store).stop();
     }
 }
 
@@ -554,7 +568,7 @@ mod tests {
         cancel.cancel();
         worker.await;
         assert_eq!(store.state.borrow().requested_ticket, 2);
-        assert!(store.state.borrow().stopped);
+        assert_eq!(store.state.borrow().worker, super::WorkerState::Stopped);
     }
 
     #[tokio::test(start_paused = true)]
@@ -681,5 +695,22 @@ mod tests {
         store.stop();
         assert_eq!(waiter.await.unwrap(), None);
         assert_eq!(spawn_refresh(&store).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_refresh_driver_marks_the_worker_lost_for_current_and_future_waiters() {
+        let store = KeyStore::new(key_set("old"));
+        let checked = Guard::into_inner(store.current());
+        let driver = worker_with_unavailable_provider(&store, Duration::from_hours(1));
+        store.expire_refresh_cooldown_for_test();
+        let mut waiter = std::pin::pin!(store.refresh_for_signature_miss(&checked));
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        drop(driver);
+        assert_matches!(waiter.await, SignatureRefresh::WorkerLost);
+        assert_matches!(
+            store.refresh_for_signature_miss(&checked).await,
+            SignatureRefresh::WorkerLost
+        );
+        assert_eq!(store.state.borrow().worker, super::WorkerState::Lost);
     }
 }

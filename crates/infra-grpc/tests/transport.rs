@@ -1134,7 +1134,7 @@ async fn verify_http_order_reads(fixture: &Fixture) {
         .unwrap()
         .build(
             fixture.echo.orders.clone(),
-            infra_http::Authentication::Bearer(Box::new(fixture.verifier.clone())),
+            infra_http::Authentication::Bearer(fixture.verifier.clone()),
             &HardenOptions {
                 max_body_bytes: 1024,
                 request_timeout: WAIT,
@@ -2522,7 +2522,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
                     Duration::from_secs(seconds),
                 ));
         }
-        let (prepared, ()) = PreparedCall::prepare(&client, request)
+        let prepared = PreparedCall::prepare(&client, request)
             .unwrap()
             .try_step(|_, headers| {
                 headers.insert("grpc-timeout", http::HeaderValue::from_static("1H"));

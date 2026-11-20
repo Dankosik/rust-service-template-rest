@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::metrics::static_counter;
-
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 const QUEUE_RECORDS: usize = 512;
 const DEEP_QUEUE_RECORDS: usize = QUEUE_RECORDS / 4;
@@ -42,14 +40,14 @@ pub(super) enum DropReason {
 }
 
 impl DropReason {
-    fn counter(self) -> metrics::Counter {
+    const fn label(self) -> &'static str {
         match self {
-            Self::QueueFull => static_counter!(DROPPED_METRIC, "reason" => "queue_full"),
-            Self::Oversize => static_counter!(DROPPED_METRIC, "reason" => "oversize"),
-            Self::SpanCapacity => static_counter!(DROPPED_METRIC, "reason" => "span_capacity"),
-            Self::Busy => static_counter!(DROPPED_METRIC, "reason" => "busy"),
-            Self::Reentrant => static_counter!(DROPPED_METRIC, "reason" => "reentrant"),
-            Self::Closed => static_counter!(DROPPED_METRIC, "reason" => "closed"),
+            Self::QueueFull => "queue_full",
+            Self::Oversize => "oversize",
+            Self::SpanCapacity => "span_capacity",
+            Self::Busy => "busy",
+            Self::Reentrant => "reentrant",
+            Self::Closed => "closed",
         }
     }
 }
@@ -62,11 +60,11 @@ enum SinkOperation {
 }
 
 impl SinkOperation {
-    fn counter(self) -> metrics::Counter {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Write => static_counter!(SINK_ERRORS_METRIC, "operation" => "write"),
-            Self::Flush => static_counter!(SINK_ERRORS_METRIC, "operation" => "flush"),
-            Self::Worker => static_counter!(SINK_ERRORS_METRIC, "operation" => "worker"),
+            Self::Write => "write",
+            Self::Flush => "flush",
+            Self::Worker => "worker",
         }
     }
 }
@@ -543,10 +541,10 @@ pub(super) fn describe_metrics() {
 pub(super) fn publish() {
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
-        reason.counter().absolute(dropped);
+        metrics::counter!(DROPPED_METRIC, "reason" => reason.label()).absolute(dropped);
     }
     for (operation, &errors) in &snapshot.sink_errors {
-        operation.counter().absolute(errors);
+        metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label()).absolute(errors);
     }
 }
 

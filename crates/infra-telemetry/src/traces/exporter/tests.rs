@@ -87,8 +87,9 @@ fn credentials_require_a_matching_explicit_https_collector() {
             general_headers,
         ),
     ] {
+        let headers = typed_headers.map(secrecy::SecretString::from);
         let mut opts = options(typed);
-        opts.otlp_headers = typed_headers.map(secrecy::SecretString::from);
+        opts.otlp_headers = headers.as_ref();
         let error = tracer_provider_for_test(&opts, pairs)
             .unwrap_err()
             .to_string();
@@ -98,9 +99,9 @@ fn credentials_require_a_matching_explicit_https_collector() {
 }
 
 fn tracer_provider_for_test(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
     pairs: &[(&str, &str)],
-) -> Result<super::super::TracerProviderHandle, TracingError> {
+) -> Result<super::super::TracerProviderHandle, super::super::TracingError> {
     tracer_provider(options, env(pairs), &CollectorTrust::from_env(env(pairs)))
 }
 
@@ -142,7 +143,7 @@ fn typed_collector_requires_each_client_identity_file_to_have_a_matching_standar
         ),
     ] {
         let error = tracer_provider_for_test(&options, pairs).unwrap_err();
-        std::assert_matches!(error, TracingError::UnboundCredential { name } if name == expected);
+        std::assert_matches!(error.0, TracingErrorKind::UnboundCredential { name } if name == expected);
         assert!(!error.to_string().contains(identity));
     }
 }
@@ -164,7 +165,7 @@ fn both_endpoint_sources_reject_malformed_or_secret_urls_without_echoing_them() 
             ("", &[(OTEL_EXPORTER_OTLP_ENDPOINT, raw)][..]),
         ] {
             let error = tracer_provider_for_test(&options(typed), pairs).unwrap_err();
-            std::assert_matches!(error, TracingError::InvalidEndpoint { .. });
+            std::assert_matches!(error.0, TracingErrorKind::InvalidEndpoint { .. });
             assert!(!format!("{error:?} {error}").contains("private-marker"));
         }
     }
@@ -259,7 +260,7 @@ fn malformed_header_entries_fail_by_position() {
             raw: Cow::Borrowed(OsStr::new(raw)),
         })
         .unwrap_err();
-        std::assert_matches!(err, TracingError::InvalidHeader { position: p, .. } if p == position,
+        std::assert_matches!(err, TracingErrorKind::InvalidHeader { position: p, .. } if p == position,
             "{raw:?}: {err}"
         );
     }

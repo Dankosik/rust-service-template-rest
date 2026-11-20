@@ -223,11 +223,11 @@ fn admitted_credentials_reach_only_the_selected_tls_collector() {
     const HEADERS: &str =
         "Authorization=Bearer%20fixture,X-Once=%250A,X-Bad-Escape=%0A%ZZ,X-Bad-Utf8=%0A%FF";
     if let Ok(mode) = std::env::var(CHILD) {
+        let endpoint = (mode == "typed").then(|| std::env::var(ENDPOINT).unwrap());
+        let headers = (mode == "typed").then(|| SecretString::from(HEADERS));
         let mut opts = options("");
-        if mode == "typed" {
-            opts.otlp_endpoint = Some(std::env::var(ENDPOINT).unwrap());
-            opts.otlp_headers = Some(SecretString::from(HEADERS));
-        }
+        opts.otlp_endpoint = endpoint.as_deref();
+        opts.otlp_headers = headers.as_ref();
         let provider = runtime().block_on(install_tracer_provider(&opts)).unwrap();
         provider.tracer().start("admitted span").end();
         assert_eq!(shutdown(provider), ProviderShutdown::Completed);

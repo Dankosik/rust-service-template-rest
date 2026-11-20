@@ -526,7 +526,7 @@ async fn start(
     // template:end grpc:bootstrap-grpc-prepare-finish
     let auth = Authentication::Public;
     // template:begin authn:bootstrap-http-bearer-authentication
-    let auth = bearer.map_or(auth, |verifier| Authentication::Bearer(Box::new(verifier)));
+    let auth = bearer.map_or(auth, Authentication::Bearer);
     // template:end authn:bootstrap-http-bearer-authentication
     let app = http_application(
         state,

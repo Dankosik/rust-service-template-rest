@@ -654,7 +654,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         timed.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    let registration = prepare_registration(Options {
+    let registration = prepare_registration(HttpOptions {
         provider_concurrency: nonzero(1),
         ..fixture.options()
     });

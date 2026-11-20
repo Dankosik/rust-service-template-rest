@@ -25,9 +25,7 @@ use crate::call::{ServerCustody, check_open, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::protocol::grpc_timeout;
-use crate::services::{
-    BuiltServices, CallType, ListenerLayer, ListenerService, Methods, REFLECTION_PATHS,
-};
+use crate::services::{BuiltServices, ListenerLayer, ListenerService, MethodKind, Methods};
 use crate::status::{FixedFailure, internal_status};
 use crate::{Error, ResponseContext, Services, TlsRequiredError};
 
@@ -81,8 +79,20 @@ struct BusinessState {
     authentication: BusinessAuth,
     methods: Arc<Methods>,
     request_timeout: Duration,
-    reflection_enabled: bool,
     admission: Option<AdmissionPermits>,
+}
+
+pub(crate) enum Rejection {
+    Status(tonic::Status),
+    // template:begin authn:grpc-rejection-insufficient-scope
+    InsufficientScope(tonic::Status),
+    // template:end authn:grpc-rejection-insufficient-scope
+}
+
+impl From<tonic::Status> for Rejection {
+    fn from(status: tonic::Status) -> Self {
+        Self::Status(status)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -137,7 +147,6 @@ pub(crate) fn build(
         listener_layers,
         names,
         methods,
-        reflection,
         authentication,
     } = services.into_built(authentication)?;
     let limits = options.limits;
@@ -162,7 +171,6 @@ pub(crate) fn build(
                 authentication,
                 methods: Arc::clone(&methods),
                 request_timeout: limits.request_timeout,
-                reflection_enabled: reflection,
                 admission,
             });
             let business = routes
@@ -257,7 +265,7 @@ struct Admitted {
 }
 
 struct StartedCall {
-    call_type: Option<CallType>,
+    method: MethodKind,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
     opening_deadline: Deadline,
@@ -272,7 +280,7 @@ fn start_call(request: &mut Request, methods: &Methods, request_timeout: Duratio
     let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
     let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
     StartedCall {
-        call_type: method.call_type,
+        method: method.kind,
         call,
         fallback,
         opening_deadline,
@@ -287,18 +295,12 @@ struct BusinessLifecycle {
 }
 
 fn business_lifecycle(
-    path: &str,
-    call_type: Option<CallType>,
+    method: MethodKind,
     opening_deadline: Deadline,
     response_deadline: Option<Deadline>,
     connection: Option<infra_http_transport::ConnectionInfo>,
-    reflection_enabled: bool,
 ) -> BusinessLifecycle {
-    let streams_response = matches!(
-        call_type,
-        Some(CallType::ServerStream | CallType::BidiStream)
-    );
-    let response_token = match connection.filter(|_| streams_response) {
+    let response_token = match connection.filter(|_| method.streams_response()) {
         Some(info) => info.child_drain_token(),
         None => CancellationToken::new(),
     };
@@ -310,8 +312,7 @@ fn business_lifecycle(
     ));
     let custody = ServerCustody {
         deadline: response_deadline,
-        end_on_drain: (reflection_enabled && REFLECTION_PATHS.contains(&path))
-            .then(|| response_token.clone()),
+        end_on_drain: method.end_on_drain().then(|| response_token.clone()),
         cancel_on_drop: Some(response_token.drop_guard()),
         ..ServerCustody::default()
     };
@@ -342,22 +343,16 @@ async fn business_call(
 
     let started = start_call(&mut request, &state.methods, state.request_timeout);
     let lifecycle = business_lifecycle(
-        request.uri().path(),
-        started.call_type,
+        started.method,
         started.opening_deadline,
         started.response_deadline,
         connection,
-        state.reflection_enabled,
     );
     request
         .extensions_mut()
         .insert(lifecycle.opening_context.clone());
     request.extensions_mut().insert(lifecycle.response_context);
 
-    #[allow(
-        clippy::result_large_err,
-        reason = "the panic fallback returns the same refusal response"
-    )]
     let outcome = run_in_span(
         async {
             lifecycle
@@ -365,34 +360,30 @@ async fn business_call(
                 .run(open_business(
                     &state,
                     &lifecycle.opening_context,
-                    started.call_type,
+                    started.method.is_registered(),
                     request,
                     next,
                 ))
                 .await
-                .map_err(|reason| stopped_status(reason).into_http())
+                .map_err(|reason| Rejection::from(stopped_status(reason)))
                 .and_then(std::convert::identity)
         },
         started.call.span(),
         started.fallback.as_ref(),
-        || Err(internal_status().into_http()),
+        || Err(Rejection::from(internal_status())),
     )
     .await;
 
     finish_call(outcome, started.call, started.fallback, lifecycle.custody)
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
 async fn open_business(
     state: &BusinessState,
     opening_context: &OperationContext,
-    call_type: Option<CallType>,
+    registered: bool,
     request: Request,
     next: Next,
-) -> Result<Admitted, Response> {
+) -> Result<Admitted, Rejection> {
     let mut remaining_wait = state
         .admission
         .as_ref()
@@ -404,7 +395,7 @@ async fn open_business(
         request,
     )
     .await?;
-    let authenticated: Result<_, Response> = match &state.authentication {
+    let authenticated: Result<_, Rejection> = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
         BusinessAuth::Bearer { verifier, scopes } => {
             crate::authn::authenticate(verifier, scopes, opening_context, request).await
@@ -414,10 +405,9 @@ async fn open_business(
         BusinessAuth::ServiceTokens {
             verifier,
             caller_rules,
-        } => {
-            crate::service_auth::admit_caller(verifier, caller_rules, opening_context, request)
-                .await
-        }
+        } => crate::service_auth::admit_caller(verifier, caller_rules, opening_context, request)
+            .await
+            .map_err(Rejection::from),
         // template:end service-auth:grpc-router-run-service-auth
         BusinessAuth::None => {
             // template:begin service-auth:grpc-router-strip-unverified-authorization
@@ -428,9 +418,11 @@ async fn open_business(
         }
     };
     let request = authenticated?;
-    if call_type.is_none() {
+    if !registered {
         let status = tonic::Status::unimplemented("");
-        return Err(reject_with_budget(opening_context, request, status).await);
+        return Err(reject_with_budget(opening_context, request, status)
+            .await
+            .into());
     }
     let (call_permit, request) = acquire_permit(
         state.admission.as_ref().map(|admission| &admission.call),
@@ -446,16 +438,12 @@ async fn open_business(
     })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
 async fn acquire_permit(
     permits: Option<&Arc<Semaphore>>,
     remaining_wait: &mut Duration,
     opening_context: &OperationContext,
     request: Request,
-) -> Result<(Option<OwnedSemaphorePermit>, Request), Response> {
+) -> Result<(Option<OwnedSemaphorePermit>, Request), tonic::Status> {
     let Some(permits) = permits else {
         return Ok((None, request));
     };
@@ -470,14 +458,14 @@ async fn acquire_permit(
     Ok((Some(permit), request))
 }
 
-async fn reject_shed(opening_context: &OperationContext, request: Request) -> Response {
-    let response =
+async fn reject_shed(opening_context: &OperationContext, request: Request) -> tonic::Status {
+    let status =
         reject_with_budget(opening_context, request, FixedFailure::AtCapacity.status()).await;
     if let Some(reason) = opening_context.stopped() {
-        return stopped_status(reason).into_http();
+        return stopped_status(reason);
     }
     observe::record_shed();
-    response
+    status
 }
 
 fn admission_wait(max_wait: Duration, opening_context: &OperationContext) -> Duration {
@@ -578,30 +566,29 @@ async fn run_in_span<T>(
 }
 
 fn finish_call(
-    outcome: Result<Admitted, Response>,
+    outcome: Result<Admitted, Rejection>,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
     mut custody: ServerCustody,
 ) -> Response {
-    match outcome {
+    let (response, custody) = match outcome {
         Ok(Admitted { response, permit }) => {
             custody.permit = permit;
-            wrap_response(response, call, fallback, custody)
+            (response, custody)
         }
-        Err(response) => {
-            // template:begin authn:grpc-router-scope-refusal-span
-            if response
-                .extensions()
-                .get::<crate::authn::InsufficientScope>()
-                .is_some()
-            {
-                call.record_insufficient_scope();
-            }
-            // template:end authn:grpc-router-scope-refusal-span
+        // template:begin authn:grpc-router-scope-refusal-span
+        Err(Rejection::InsufficientScope(status)) => {
+            call.record_insufficient_scope();
             drop(custody);
-            wrap_response(response, call, fallback, ServerCustody::default())
+            (status.into_http(), ServerCustody::default())
         }
-    }
+        // template:end authn:grpc-router-scope-refusal-span
+        Err(Rejection::Status(status)) => {
+            drop(custody);
+            (status.into_http(), ServerCustody::default())
+        }
+    };
+    wrap_response(response, call, fallback, custody)
 }
 
 const REJECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
@@ -611,14 +598,14 @@ pub(crate) async fn reject_with_budget(
     opening_context: &OperationContext,
     request: Request,
     status: tonic::Status,
-) -> Response {
+) -> tonic::Status {
     let timeout = opening_context
         .remaining()
         .map_or(REJECT_DRAIN_TIMEOUT, |remaining| {
             REJECT_DRAIN_TIMEOUT.min(remaining / 2)
         });
     drain_rejected(request, timeout).await;
-    status.into_http()
+    status
 }
 
 #[warn(clippy::arithmetic_side_effects)]
@@ -658,9 +645,9 @@ mod tests {
         });
         let request = Request::new(axum::body::Body::from_stream(body));
         let context = OperationContext::unbounded();
-        let response =
+        let status =
             reject_with_budget(&context, request, tonic::Status::unavailable("closed")).await;
-        assert_eq!(response.headers()["grpc-status"], "14");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
         assert_eq!(frames.load(Ordering::SeqCst), 4);
     }
 }

@@ -4,14 +4,132 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use opentelemetry::trace::{SpanKind, Status as SpanStatus};
-use shared_rules::grpc::{
-    ERROR_TYPE_ATTR, FALLBACK_SPAN_NAME, RPC_METHOD_ATTR, RPC_METHOD_ORIGINAL_ATTR,
-    RPC_METHOD_OTHER, RPC_STATUS_CODE_ATTR, RPC_SYSTEM_GRPC, RPC_SYSTEM_NAME_ATTR,
-    STATUS_CODE_COUNT, diagnostic_rpc_method_original, status_code_names,
-};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
+
+pub const DIAGNOSTIC_BYTES: usize = 1024;
+pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
+const FALLBACK_SPAN_NAME: &str = "grpc";
+const RPC_SYSTEM_NAME_ATTR: &str = "rpc.system.name";
+const RPC_SYSTEM_GRPC: &str = "grpc";
+const RPC_METHOD_ATTR: &str = "rpc.method";
+const RPC_METHOD_OTHER: &str = "_OTHER";
+const RPC_METHOD_ORIGINAL_ATTR: &str = "rpc.method_original";
+const RPC_STATUS_CODE_ATTR: &str = "rpc.status_code";
+const ERROR_TYPE_ATTR: &str = "error.type";
+
+const STATUS_CODE_COUNT: usize = 17;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusNames {
+    pub span: &'static str,
+    pub metric: &'static str,
+}
+
+#[must_use]
+pub const fn status_code_names(code: tonic::Code) -> StatusNames {
+    match code {
+        tonic::Code::Ok => StatusNames {
+            span: "OK",
+            metric: "OK",
+        },
+        tonic::Code::Cancelled => StatusNames {
+            span: "CANCELLED",
+            metric: "Canceled",
+        },
+        tonic::Code::Unknown => StatusNames {
+            span: "UNKNOWN",
+            metric: "Unknown",
+        },
+        tonic::Code::InvalidArgument => StatusNames {
+            span: "INVALID_ARGUMENT",
+            metric: "InvalidArgument",
+        },
+        tonic::Code::DeadlineExceeded => StatusNames {
+            span: "DEADLINE_EXCEEDED",
+            metric: "DeadlineExceeded",
+        },
+        tonic::Code::NotFound => StatusNames {
+            span: "NOT_FOUND",
+            metric: "NotFound",
+        },
+        tonic::Code::AlreadyExists => StatusNames {
+            span: "ALREADY_EXISTS",
+            metric: "AlreadyExists",
+        },
+        tonic::Code::PermissionDenied => StatusNames {
+            span: "PERMISSION_DENIED",
+            metric: "PermissionDenied",
+        },
+        tonic::Code::ResourceExhausted => StatusNames {
+            span: "RESOURCE_EXHAUSTED",
+            metric: "ResourceExhausted",
+        },
+        tonic::Code::FailedPrecondition => StatusNames {
+            span: "FAILED_PRECONDITION",
+            metric: "FailedPrecondition",
+        },
+        tonic::Code::Aborted => StatusNames {
+            span: "ABORTED",
+            metric: "Aborted",
+        },
+        tonic::Code::OutOfRange => StatusNames {
+            span: "OUT_OF_RANGE",
+            metric: "OutOfRange",
+        },
+        tonic::Code::Unimplemented => StatusNames {
+            span: "UNIMPLEMENTED",
+            metric: "Unimplemented",
+        },
+        tonic::Code::Internal => StatusNames {
+            span: "INTERNAL",
+            metric: "Internal",
+        },
+        tonic::Code::Unavailable => StatusNames {
+            span: "UNAVAILABLE",
+            metric: "Unavailable",
+        },
+        tonic::Code::DataLoss => StatusNames {
+            span: "DATA_LOSS",
+            metric: "DataLoss",
+        },
+        tonic::Code::Unauthenticated => StatusNames {
+            span: "UNAUTHENTICATED",
+            metric: "Unauthenticated",
+        },
+    }
+}
+
+const fn status_slot(code: tonic::Code) -> usize {
+    match code {
+        tonic::Code::Ok => 0,
+        tonic::Code::Cancelled => 1,
+        tonic::Code::Unknown => 2,
+        tonic::Code::InvalidArgument => 3,
+        tonic::Code::DeadlineExceeded => 4,
+        tonic::Code::NotFound => 5,
+        tonic::Code::AlreadyExists => 6,
+        tonic::Code::PermissionDenied => 7,
+        tonic::Code::ResourceExhausted => 8,
+        tonic::Code::FailedPrecondition => 9,
+        tonic::Code::Aborted => 10,
+        tonic::Code::OutOfRange => 11,
+        tonic::Code::Unimplemented => 12,
+        tonic::Code::Internal => 13,
+        tonic::Code::Unavailable => 14,
+        tonic::Code::DataLoss => 15,
+        tonic::Code::Unauthenticated => 16,
+    }
+}
+
+fn diagnostic_rpc_method_original(path: &str) -> Option<&str> {
+    let trimmed = path.trim_start_matches('/');
+    (!trimmed.is_empty() && trimmed.len() <= DIAGNOSTIC_BYTES).then_some(trimmed)
+}
 
 pub trait CallMetrics: Send + Sync + 'static {
     const IS_SERVER: bool;
@@ -32,8 +150,8 @@ impl StatusCounters {
         code: tonic::Code,
         init: impl FnOnce(&'static str) -> metrics::Counter,
     ) {
-        let metric_code = status_code_names(code as usize).metric;
-        self.0[code as usize]
+        let metric_code = status_code_names(code).metric;
+        self.0[status_slot(code)]
             .get_or_init(|| init(metric_code))
             .increment(1);
     }
@@ -61,7 +179,7 @@ struct CallInner<M: CallMetrics> {
 
 impl<M: CallMetrics> CallInner<M> {
     fn emit(&self, code: tonic::Code) {
-        let span_code = status_code_names(code as usize).span;
+        let span_code = status_code_names(code).span;
         self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
         if otel_http::grpc::status_is_error(code as u16, M::IS_SERVER) {
             self.span.set_attribute(ERROR_TYPE_ATTR, span_code);

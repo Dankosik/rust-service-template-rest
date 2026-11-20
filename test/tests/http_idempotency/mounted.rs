@@ -27,7 +27,7 @@ use infra_http::idempotency::{
 };
 use infra_http::{
     Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract,
-    Principal, Problem, REQUEST_ID_HEADER, VerifiedPrincipal,
+    Principal, Problem, REQUEST_ID_HEADER, VerifiedDelegation, VerifiedPrincipal,
 };
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
@@ -621,7 +621,7 @@ impl Mounted {
                     readiness: readiness_reader(),
                     widgets,
                 },
-                Authentication::Bearer(Box::new(provider.verifier())),
+                Authentication::Bearer(provider.verifier()),
                 &options(budget),
                 store,
             )
@@ -960,7 +960,7 @@ async fn authorized_without_idempotency(
 )]
 async fn scoped_alternatives(
     State(calls): State<Arc<Mutex<Vec<DelegationCredential>>>>,
-    Extension(credential): Extension<DelegationCredential>,
+    VerifiedDelegation(credential): VerifiedDelegation,
     headers: axum::http::HeaderMap,
 ) -> &'static str {
     assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
@@ -1005,7 +1005,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
         .unwrap()
         .build(
             readiness_reader(),
-            Authentication::Bearer(Box::new(provider.verifier())),
+            Authentication::Bearer(provider.verifier()),
             &options(BUDGET),
         )
         .unwrap();
@@ -1071,7 +1071,7 @@ fn timeout_router(
     let mut options = options(timeout);
     options.max_in_flight = Some(NonZeroU32::MIN);
     contract
-        .build((), Authentication::Bearer(Box::new(verifier)), &options)
+        .build((), Authentication::Bearer(verifier), &options)
         .unwrap()
 }
 
@@ -1162,7 +1162,7 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
         .unwrap()
         .build(
             readiness_reader(),
-            Authentication::Bearer(Box::new(provider.verifier())),
+            Authentication::Bearer(provider.verifier()),
             &options(BUDGET),
         )
         .unwrap();
@@ -1259,7 +1259,7 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         .unwrap()
         .build(
             readiness_reader(),
-            Authentication::Bearer(Box::new(provider.verifier())),
+            Authentication::Bearer(provider.verifier()),
             &options(BUDGET),
         )
         .unwrap();
@@ -1685,7 +1685,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
                     hold: Arc::default(),
                 }),
             },
-            Authentication::Bearer(Box::new(verifier)),
+            Authentication::Bearer(verifier),
             &HardenOptions {
                 max_body_bytes: MAX_BODY_BYTES,
                 request_timeout: BUDGET,

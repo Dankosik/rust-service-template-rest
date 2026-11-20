@@ -111,7 +111,7 @@ impl Verifier {
         authorization: impl IntoIterator<Item = &'a [u8]>,
         transport: Transport,
     ) -> Result<(Principal, PresentedToken<'a>), Failure> {
-        let counters = &self.counters.transport;
+        let counters = self.transport_counters();
         let refusal_guard = DropGuard::new(transport, |transport| {
             let refusal = context
                 .stopped()
