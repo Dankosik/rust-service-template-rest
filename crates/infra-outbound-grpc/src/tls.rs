@@ -142,7 +142,7 @@ mod tests {
     use std::error::Error as _;
 
     use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair};
-    use secrecy::{ExposeSecret as _, SecretString};
+    use secrecy::ExposeSecret as _;
     use tls_test_support::new_issuer;
 
     use super::*;
