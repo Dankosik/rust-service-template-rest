@@ -12,13 +12,10 @@ use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, JobKind, KindName, enqueue};
-use infra_postgres::{
-    Isolation, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
-};
+use infra_postgres::{Isolation, Pool, TxError, TxOptions, failure_cause, observed, sqlstate};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use smallvec::SmallVec;
-use sqlx::postgres::PgPool;
 use tokio::time::Instant;
 
 use crate::StreamingBase64;
@@ -180,7 +177,7 @@ impl Verifiers {
     }
 
     #[must_use]
-    pub fn into_receiver(self, pool: PgPool) -> Receiver {
+    pub fn into_receiver(self, pool: Pool) -> Receiver {
         Receiver {
             pool,
             endpoints: Arc::new(self.bindings),
@@ -199,7 +196,7 @@ impl fmt::Debug for Verifiers {
 
 #[derive(Clone)]
 pub struct Receiver {
-    pool: PgPool,
+    pool: Pool,
     endpoints: Arc<HashMap<Arc<str>, Arc<dyn Verifier>>>,
 }
 
@@ -258,7 +255,7 @@ impl Receiver {
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn receive_for_endpoint(
-    pool: &PgPool,
+    pool: &Pool,
     endpoint_id: &str,
     verifier: &dyn Verifier,
     headers: &HeaderMap,
@@ -269,8 +266,7 @@ async fn receive_for_endpoint(
     let admitted = admit(verifier, headers, body, now)
         .map_err(|rejection| rejected(endpoint_id, rejection))?;
     let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-    Box::pin(in_tx_with_deadline(
-        pool,
+    Box::pin(pool.in_tx_with_deadline(
         deadline,
         READ_COMMITTED,
         async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
@@ -473,8 +469,7 @@ mod tests {
                 panic!("an oversized body never reaches the verifier")
             }
         }
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://127.0.0.1:1/unreachable")
+        let pool = Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");
         let mut verifiers = Verifiers::new();
         verifiers.bind("provider", Arc::new(MustNotAuthenticate));

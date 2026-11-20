@@ -2,13 +2,13 @@ use std::num::NonZeroU32;
 
 use infra_jobs::{Engine, KindError};
 use infra_messaging::{Messaging, MessagingError};
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 
 use super::WorkerError;
 use super::messaging::RetainedMessages;
 
 pub(super) fn with_publisher(
-    pool: Option<&PgPool>,
+    pool: Option<&Pool>,
     messaging: Option<&Messaging>,
     ordinary: Option<Engine>,
 ) -> Result<Engine, WorkerError> {
@@ -32,7 +32,7 @@ pub(super) fn with_publisher(
 impl RetainedMessages {
     pub(super) fn register_postgres_messages(
         &mut self,
-        pool: Option<&PgPool>,
+        pool: Option<&Pool>,
     ) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
             let pool = pool.cloned().ok_or(WorkerError::PostgresDisabled)?;
@@ -84,7 +84,7 @@ mod tests {
         let dsn =
             infra_postgres::Dsn::admit("postgres://test:test@127.0.0.1:1/test?sslmode=verify-full")
                 .unwrap();
-        let pool = infra_postgres::prepare_pool(
+        let pool = infra_postgres::Pool::prepare(
             &dsn,
             &infra_postgres::PoolOptions {
                 max_connections: std::num::NonZeroU32::MIN,
@@ -92,6 +92,7 @@ mod tests {
                 default_isolation: infra_postgres::Isolation::ReadCommitted,
                 session_settings_source: infra_postgres::SessionSettingsSource::Startup,
                 wait_order: infra_postgres::WaitOrder::Arrival,
+                notifications: true,
             },
         );
         let mut messages = RetainedMessages {
@@ -105,7 +106,7 @@ mod tests {
             ))
         );
         let received = received.await.unwrap();
-        pool.close().await;
+        let _ = pool.close(std::time::Duration::from_secs(1)).await;
         assert!(
             received.is_closed(),
             "factory uses the retained native pool"

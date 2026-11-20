@@ -13,9 +13,9 @@ workspace = true
 
 [features]
 hotpath = []
+test-support = []
 
 [dependencies]
-arc-swap = { workspace = true }
 enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true }

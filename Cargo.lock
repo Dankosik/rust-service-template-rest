@@ -3032,7 +3032,6 @@ dependencies = [
 name = "infra-postgres"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
  "enum-map",
  "foldhash",
  "futures-util",

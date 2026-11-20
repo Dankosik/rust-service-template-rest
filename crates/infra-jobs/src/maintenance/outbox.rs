@@ -82,7 +82,7 @@ struct OutboxSample {
 
 async fn read(primary_group: &WorkerGroup) -> Result<OutboxSample, OperationError> {
     in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
-        Ok(observed(
+        Ok(observed!(
             "sample outbox",
             sqlx::query_as!(
                 OutboxSample,

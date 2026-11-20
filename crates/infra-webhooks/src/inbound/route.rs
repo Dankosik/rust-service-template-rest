@@ -11,7 +11,7 @@ use foldhash::HashMap;
 use infra_http::extract::Path;
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
 use infra_http::{Code, Problem, RequestContext};
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 use metrics::{Counter, SharedString};
 use parking_lot::Mutex;
 use tokio::time::Instant;
@@ -130,7 +130,7 @@ struct ReceiverState {
 }
 
 struct ActiveReceiver {
-    pool: PgPool,
+    pool: Pool,
     endpoints: HashMap<Arc<str>, ConfiguredEndpoint>,
 }
 
@@ -167,7 +167,7 @@ impl ReceiverState {
         }
     }
 
-    fn endpoint(&self, endpoint_id: &str) -> Option<(&PgPool, &ConfiguredEndpoint)> {
+    fn endpoint(&self, endpoint_id: &str) -> Option<(&Pool, &ConfiguredEndpoint)> {
         let active = self.active.as_ref()?;
         let endpoint = active.endpoints.get(endpoint_id)?;
         Some((&active.pool, endpoint))
@@ -429,7 +429,7 @@ mod tests {
 
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let keys = KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None)
             .expect("key");
@@ -515,7 +515,7 @@ mod tests {
             "WebhookState {\n    active: false,\n}"
         );
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let active = WebhookState::active(Verifiers::new().into_receiver(pool));
         assert_eq!(format!("{active:?}"), "WebhookState { active: true }");
@@ -609,7 +609,7 @@ mod tests {
             }
         }
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let mut verifiers = Verifiers::new();
         verifiers.bind("provider", Arc::new(TokenVerifier));

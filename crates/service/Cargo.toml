@@ -97,6 +97,9 @@ utoipa = { workspace = true, features = ["macros", "yaml"] }
 tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
+# template:begin postgres:service-postgres-test-dependency
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end postgres:service-postgres-test-dependency
 # template:begin inbound-webhooks:service-webhooks-lifecycle-dependencies
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "migrate", "macros"] }
 url = { workspace = true }

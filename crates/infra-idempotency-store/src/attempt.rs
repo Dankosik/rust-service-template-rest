@@ -3,8 +3,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    BudgetedTx, Tx, TxError, TxMode, failure_cause, in_tx_with, in_tx_with_deadline, is_transient,
-    observed, sqlstate,
+    BudgetedTx, Tx, TxError, TxMode, failure_cause, is_transient, observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgBindIterExt as _;
@@ -204,10 +203,11 @@ impl Store {
     {
         scope.validate_caller()?;
         attempted(
-            in_tx_with(&self.pool, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
+            self.pool
+                .in_tx_with(READ_COMMITTED, async |tx| {
+                    self.work_in_tx(tx, scope, fingerprint, work).await
+                })
+                .await,
         )
     }
 
@@ -224,10 +224,11 @@ impl Store {
     {
         scope.validate_caller()?;
         attempted(
-            in_tx_with_deadline(&self.pool, deadline, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
+            self.pool
+                .in_tx_with_deadline(deadline, READ_COMMITTED, async |tx| {
+                    self.work_in_tx(tx, scope, fingerprint, work).await
+                })
+                .await,
         )
     }
 
@@ -244,20 +245,29 @@ impl Store {
         if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
             return Err(Stop::Decided(decision));
         }
-        if T::NEEDS_SAVEPOINT {
-            tx.begin_command_savepoint()
+        let written = if T::NEEDS_SAVEPOINT {
+            let mut savepoint = tx
+                .begin_command_savepoint()
                 .await
                 .map_err(|err| sql_failed(&err, "savepoint"))?;
-        }
-        let outcome = work(tx).await.map_err(Stop::RolledBack)?;
-        let written = match outcome {
-            WriteOutcome::Success(record) => Written::Success(record.into_record()),
-            WriteOutcome::TerminalRefusal(refusal) => {
-                let record = refusal.into_record();
-                tx.rollback_command_savepoint()
-                    .await
-                    .map_err(|err| sql_failed(&err, "rollback_command"))?;
-                Written::TerminalRefusal(record)
+            let outcome = work(savepoint.tx()).await.map_err(Stop::RolledBack)?;
+            match outcome {
+                WriteOutcome::Success(record) => Written::Success(record.into_record()),
+                WriteOutcome::TerminalRefusal(refusal) => {
+                    let record = refusal.into_record();
+                    savepoint
+                        .rollback()
+                        .await
+                        .map_err(|err| sql_failed(&err, "rollback_command"))?;
+                    Written::TerminalRefusal(record)
+                }
+            }
+        } else {
+            match work(tx).await.map_err(Stop::RolledBack)? {
+                WriteOutcome::Success(record) => Written::Success(record.into_record()),
+                WriteOutcome::TerminalRefusal(refusal) => {
+                    Written::TerminalRefusal(refusal.into_record())
+                }
             }
         };
         write(tx, scope, fingerprint, written.record(), self.retention).await?;
@@ -540,9 +550,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_caller_with_a_nul_is_refused_before_the_work_runs() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool =
+            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
         let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
@@ -567,7 +576,7 @@ mod tests {
             std::assert_matches!(attempted, Err(AttemptError::Internal));
             assert!(!ran);
         }
-        pool.close().await;
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]

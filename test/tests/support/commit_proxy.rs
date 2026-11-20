@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use infra_postgres::{Dsn, PgPool};
+use infra_postgres::Dsn;
 use integration_tests::{DATABASE_URL, dsn_for, propagate_join_panic, url_for};
+use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;

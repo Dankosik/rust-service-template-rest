@@ -4,14 +4,13 @@ mod record;
 
 use std::time::Duration;
 
-use infra_postgres::{Isolation, TxOptions};
-use sqlx::postgres::PgPool;
+use infra_postgres::{Isolation, Pool, TxOptions};
 
 pub use attempt::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Digest, RefusalMode, RequestFingerprint,
     ScopeKey, WriteOutcome,
 };
-pub use infra_postgres::CleanupError;
+pub use infra_postgres::maintenance::CleanupError;
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, StartupError};
 pub use record::{
     CaptureError, MAX_STORED_BODY_BYTES, Record, SuccessRecord, TerminalRefusal,
@@ -28,7 +27,7 @@ const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    pool: PgPool,
+    pool: Pool,
     retention: Duration,
 }
 
@@ -37,7 +36,7 @@ pub struct Store {
 pub struct InvalidRetention;
 
 impl Store {
-    pub fn new(pool: PgPool, retention: Duration) -> Result<Self, InvalidRetention> {
+    pub fn new(pool: Pool, retention: Duration) -> Result<Self, InvalidRetention> {
         if !(Duration::from_micros(1)..=MAX_RETENTION).contains(&retention) {
             return Err(InvalidRetention);
         }
@@ -54,8 +53,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_is_bounded_before_the_store_can_run_work() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
+        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let max = Duration::from_hours(36_500 * 24);
         assert!(Store::new(pool.clone(), max).is_ok());
@@ -70,6 +68,6 @@ mod tests {
             let rejected = Store::new(pool.clone(), invalid);
             assert_eq!(rejected.unwrap_err(), InvalidRetention);
         }
-        pool.close().await;
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 }

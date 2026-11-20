@@ -2,37 +2,39 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::dsn::DsnError;
+use crate::pool::Pool;
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-pub async fn refresh_password_periodically(
-    pool: PgPool,
-    password_file: PathBuf,
-    cancel: CancellationToken,
-) {
-    metrics::describe_counter!(
-        REFRESHES_METRIC,
-        "Completed periodic password-file reads and future connection-options installations; not database authentication."
-    );
-    let _ = cancel
-        .run_until_cancelled(async {
-            let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut refresh = Refresh::default();
-            loop {
-                ticker.tick().await;
-                refresh.step(&pool, &password_file).await;
-            }
-        })
-        .await;
+impl Pool {
+    pub async fn refresh_password_periodically(
+        self,
+        password_file: PathBuf,
+        cancel: CancellationToken,
+    ) {
+        metrics::describe_counter!(
+            REFRESHES_METRIC,
+            "Completed periodic password-file reads and future connection-options installations; not database authentication."
+        );
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut refresh = Refresh::default();
+                loop {
+                    ticker.tick().await;
+                    refresh.step(&self, &password_file).await;
+                }
+            })
+            .await;
+    }
 }
 
 #[derive(Default)]
@@ -42,7 +44,7 @@ struct Refresh {
 }
 
 impl Refresh {
-    async fn step(&mut self, pool: &PgPool, path: &Path) {
+    async fn step(&mut self, pool: &Pool, path: &Path) {
         let password = match read(path).await {
             Ok(password) => password,
             Err(error) => {
@@ -128,7 +130,7 @@ mod tests {
     use super::*;
     use crate::Dsn;
 
-    fn password(pool: &PgPool) -> Option<String> {
+    fn password(pool: &Pool) -> Option<String> {
         pool.connect_options()
             .to_url_lossy()
             .password()
@@ -163,7 +165,8 @@ mod tests {
             Some(&file),
         )
         .unwrap();
-        let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
+        let pool =
+            Pool::from_test_pool(PgPoolOptions::new().connect_lazy_with(dsn.connect_options()));
         assert_eq!(password(&pool).as_deref(), Some("first"));
         assert!(!format!("{:?}", pool.connect_options()).contains("first"));
         assert!(

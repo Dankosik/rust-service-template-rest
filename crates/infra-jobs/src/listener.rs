@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use backon::BackoffBuilder as _;
+use infra_postgres::Pool;
 use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +28,7 @@ pub(crate) async fn run_listener(engine: &Engine, cancel: CancellationToken) {
     }
 }
 
-fn listener_pool(engine_pool: &PgPool) -> PgPool {
+fn listener_pool(engine_pool: &Pool) -> PgPool {
     PgPoolOptions::new()
         .max_connections(1)
         .idle_timeout(None)
@@ -35,7 +36,7 @@ fn listener_pool(engine_pool: &PgPool) -> PgPool {
         .connect_lazy_with(engine_pool.connect_options().as_ref().clone())
 }
 
-fn follow_connect_options(engine_pool: &PgPool, listener_pool: &PgPool) {
+fn follow_connect_options(engine_pool: &Pool, listener_pool: &PgPool) {
     listener_pool.set_connect_options(engine_pool.connect_options().as_ref().clone());
 }
 

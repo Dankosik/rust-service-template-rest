@@ -5,10 +5,10 @@ use infra_jobs::{JobKind, KindName};
 use infra_messaging::{
     PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
 };
-use infra_postgres::{Tx, TxError, in_tx};
+use infra_postgres::{Pool, Tx, TxError};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 use time::{UtcDateTime, format_description::well_known::Rfc3339};
 
 pub const SCHEMA: &str =
@@ -194,8 +194,8 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
-    in_tx(pool, async |tx| {
+pub async fn migrate(pool: &Pool) -> Result<(), Error> {
+    pool.in_tx(async |tx| {
         sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
         Ok(())
     })
@@ -203,15 +203,13 @@ pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
 }
 
 pub async fn accept(
-    pool: &PgPool,
+    pool: &Pool,
     prepared: &PreparedRequest,
     outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
-    in_tx(pool, async |tx| {
-        accept_in_tx(tx, prepared, outbound, endpoint).await
-    })
-    .await
+    pool.in_tx(async |tx| accept_in_tx(tx, prepared, outbound, endpoint).await)
+        .await
 }
 
 pub async fn accept_in_tx(
@@ -284,10 +282,11 @@ fn accepted_row(row: &sqlx::postgres::PgRow, operation: &Operation) -> Result<Ac
     })
 }
 
-pub async fn read_request(pool: &PgPool, operation: &Operation) -> Result<Option<Accepted>, Error> {
+pub async fn read_request(pool: &Pool, operation: &Operation) -> Result<Option<Accepted>, Error> {
     operation.validate()?;
+    let mut conn = pool.acquire("read reading request").await?;
     let row = sqlx::query("SELECT operation,event_id,event_time,local_job_id::text,outbox_job_id::text,webhook_job_id::text FROM reading_requests WHERE scope=$1::uuid AND operation_id=$2::uuid")
-        .bind(&operation.scope).bind(&operation.operation_id).fetch_optional(pool).await?;
+        .bind(&operation.scope).bind(&operation.operation_id).fetch_optional(&mut *conn).await?;
     row.as_ref()
         .map(|row| accepted_row(row, operation))
         .transpose()
@@ -302,14 +301,13 @@ fn same_operation(encoded: &str, operation: &Operation) -> Result<(), Error> {
 }
 
 pub async fn apply_effect(
-    pool: &PgPool,
+    pool: &Pool,
     channel: Channel,
     operation: &Operation,
 ) -> Result<Effect, Error> {
-    let result = in_tx(pool, async |tx| {
-        apply_effect_in_tx(tx, channel, operation).await
-    })
-    .await;
+    let result = pool
+        .in_tx(async |tx| apply_effect_in_tx(tx, channel, operation).await)
+        .await;
     match result {
         Err(error)
             if error.commit_unknown()
@@ -352,13 +350,14 @@ pub async fn apply_effect_in_tx(
 }
 
 pub async fn read_effect(
-    pool: &PgPool,
+    pool: &Pool,
     channel: Channel,
     operation: &Operation,
 ) -> Result<Option<Effect>, Error> {
     operation.validate()?;
+    let mut conn = pool.acquire("read reading effect").await?;
     let row = sqlx::query("SELECT operation,read_count FROM reading_effects WHERE scope=$1::uuid AND channel=$2 AND operation_id=$3::uuid")
-        .bind(&operation.scope).bind(channel.as_str()).bind(&operation.operation_id).fetch_optional(pool).await?;
+        .bind(&operation.scope).bind(channel.as_str()).bind(&operation.operation_id).fetch_optional(&mut *conn).await?;
     row.map(|row| {
         same_operation(row.try_get("operation")?, operation)?;
         Ok(Effect {

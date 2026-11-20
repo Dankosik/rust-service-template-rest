@@ -30,13 +30,13 @@ use infra_http::{
     Principal, Problem, REQUEST_ID_HEADER, VerifiedDelegation, VerifiedPrincipal,
 };
 use infra_idempotency_store::Store;
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 use integration_tests::{dsn_for, propagate_join_panic};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::Executor as _;
+use sqlx::{Executor as _, PgPool};
 use tls_test_support::TlsMaterial;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -507,7 +507,7 @@ struct Mounted {
     server: TestServer,
     hold: Arc<Hold>,
     provider: Provider,
-    store_pool: PgPool,
+    store_pool: Pool,
 }
 
 #[derive(Clone)]
@@ -596,7 +596,7 @@ impl Mounted {
         Self::new(store_pool, budget).await
     }
 
-    async fn new(store_pool: PgPool, budget: Duration) -> Self {
+    async fn new(store_pool: Pool, budget: Duration) -> Self {
         let provider = Provider::start().await;
         let hold = Arc::new(Hold::default());
         let widgets = Arc::new(SqlWidgets {
@@ -1668,7 +1668,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         .verify_fixture_authorization(authorization.as_bytes())
         .await
         .unwrap();
-    let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
+    let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool");
     let store = Store::new(pool, RETENTION).unwrap();
     let contract = HttpContract::application(bearer_document())
         .unwrap()
@@ -1981,9 +1981,11 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         until_free(|| mounted.create(ALICE, "k-handler", &input, "req-recovered")).await;
     created(&stored, "req-recovered");
     let mut connections = Vec::new();
-    for _ in 0..mounted.store_pool.options().get_max_connections() {
+    for _ in 0..mounted.store_pool.as_sqlx().options().get_max_connections() {
         connections.push(
-            infra_postgres::acquire(&mounted.store_pool, "hold every idempotency connection")
+            mounted
+                .store_pool
+                .acquire("hold every idempotency connection")
                 .await
                 .unwrap(),
         );
@@ -2046,9 +2048,7 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
     create_widgets(&pool).await;
     let dsn = dsn_for(&pool).await;
     let input = json!({"name": "gizmo", "color": "red"});
-    let mut lock_connection = infra_postgres::acquire(&pool, "test lock holder")
-        .await
-        .expect("a lock-holder connection");
+    let mut lock_connection = pool.acquire().await.expect("a lock-holder connection");
 
     for (setting, sqlstate, expected_rows) in [
         ("lock_timeout", "55P03", 1),
@@ -2150,9 +2150,7 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
     .unwrap();
     let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET).await;
     let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
-    let mut connection = infra_postgres::acquire(&pool, "hold widget inserts")
-        .await
-        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
     let mut holder = sqlx::Connection::begin(&mut *connection).await.unwrap();
     (&mut *holder)
         .execute("SELECT pg_advisory_xact_lock(734091)")
@@ -2161,6 +2159,7 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
 
     mounted
         .store_pool
+        .as_sqlx()
         .execute("SET statement_timeout = '150ms'")
         .await
         .unwrap();
@@ -2181,6 +2180,7 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
 
     mounted
         .store_pool
+        .as_sqlx()
         .execute("SET statement_timeout = '8s'")
         .await
         .unwrap();
@@ -2240,9 +2240,7 @@ async fn p9_business_insert_errors_are_classified_and_release_the_key(pool: PgPo
     let key = "k-business-insert";
     let records = "SELECT count(*) FROM http_idempotency_records";
 
-    let mut connection = infra_postgres::acquire(&pool, "hold the widget table lock")
-        .await
-        .expect("a lock-holder connection");
+    let mut connection = pool.acquire().await.expect("a lock-holder connection");
     let mut holder = sqlx::Connection::begin(&mut *connection)
         .await
         .expect("a table-lock holder");

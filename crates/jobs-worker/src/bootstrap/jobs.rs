@@ -54,7 +54,7 @@ pub(super) fn validate_pool_capacity(
 pub(super) async fn build_engine(
     config: &WorkerConfig,
     kinds: Option<Kinds>,
-    pool: Option<&infra_postgres::PgPool>,
+    pool: Option<&infra_postgres::Pool>,
     // template:begin outbox:worker-bootstrap-build-engine-messaging
     messaging: Option<&infra_messaging::Messaging>,
     // template:end outbox:worker-bootstrap-build-engine-messaging

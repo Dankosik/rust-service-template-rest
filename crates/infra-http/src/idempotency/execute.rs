@@ -444,7 +444,7 @@ mod tests {
     async fn an_exhausted_attempt_answers_unavailable_without_waiting_for_acquisition() {
         use futures_util::FutureExt as _;
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://localhost/unused")
+        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let budget = Duration::from_millis(200);
         for elapsed in [Duration::from_millis(100), Duration::from_millis(101)] {
