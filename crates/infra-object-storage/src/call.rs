@@ -5,7 +5,7 @@ use aws_sdk_s3::config::timeout::TimeoutConfig;
 use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::time::Instant;
 
-use crate::error::Call;
+use crate::error::{Call, Failure, OutcomeError};
 
 const MAX_ATTEMPTS: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
@@ -115,6 +115,13 @@ impl CallContext {
 
     pub(crate) fn stopped(&self) -> Option<CallStop> {
         self.context.stopped().map(|stopped| self.classify(stopped))
+    }
+
+    pub(crate) fn check_active<E: OutcomeError>(&self) -> Result<(), Failure<E>> {
+        if let Some(stopped) = self.stopped() {
+            return Err(Failure::not_applied_stop(stopped));
+        }
+        Ok(())
     }
 
     pub(crate) async fn wait_stopped(&self) -> CallStop {

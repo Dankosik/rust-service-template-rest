@@ -702,7 +702,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     assert!(matches!(
         write.await,
         Err(crate::error::CommandError::NotApplied(
-            crate::error::CommandFailure::Stopped(Stopped::Cancelled)
+            crate::error::Refusal::Stopped(Stopped::Cancelled)
         ))
     ));
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
@@ -940,7 +940,7 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    use crate::error::{CommandError, CommandFailure, ErrorType};
+    use crate::error::{CommandError, ErrorType, Refusal};
 
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
@@ -984,7 +984,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(CommandError::NotApplied(CommandFailure::Failed(
+        Poll::Ready(Err(CommandError::NotApplied(Refusal::Failed(
             ErrorType::Other
         ))))
     ));

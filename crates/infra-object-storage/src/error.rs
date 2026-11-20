@@ -11,6 +11,7 @@ use operation_context::Stopped;
 use shared_rules::error_chain;
 
 use crate::call::{CallStop, Interrupted};
+use crate::observe::FailureOutcome;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ObjectStorageError {
@@ -104,6 +105,74 @@ enum FailureKind<'a> {
     Status { status: u16, code: Option<&'a str> },
 }
 
+pub(crate) trait OutcomeError: Copy {
+    fn failure_outcome(self) -> FailureOutcome;
+    fn busy() -> Self;
+    fn too_large() -> Self;
+    fn not_applied_stop(stopped: CallStop) -> Self;
+}
+
+impl OutcomeError for ObjectStorageError {
+    fn failure_outcome(self) -> FailureOutcome {
+        match self {
+            Self::NotFound => FailureOutcome::NotFound,
+            Self::TooLarge => FailureOutcome::TooLarge,
+            Self::Busy => FailureOutcome::Busy,
+            Self::Unavailable | Self::Stopped(_) => FailureOutcome::Unavailable,
+            Self::Rejected => FailureOutcome::Rejected,
+            Self::Integrity => FailureOutcome::Integrity,
+        }
+    }
+
+    fn busy() -> Self {
+        Self::Busy
+    }
+
+    fn too_large() -> Self {
+        Self::TooLarge
+    }
+
+    fn not_applied_stop(stopped: CallStop) -> Self {
+        match stopped {
+            CallStop::Parent(stopped) => Self::Stopped(stopped),
+            CallStop::Timeout => Self::Unavailable,
+        }
+    }
+}
+
+impl OutcomeError for MutationError {
+    fn failure_outcome(self) -> FailureOutcome {
+        match self {
+            Self::OutcomeUnknown(_) => FailureOutcome::Unknown,
+            Self::NotApplied(reason) => match reason {
+                MutationFailure::AlreadyExists => FailureOutcome::AlreadyExists,
+                MutationFailure::TooLarge => FailureOutcome::TooLarge,
+                MutationFailure::Busy => FailureOutcome::Busy,
+                MutationFailure::Conflict
+                | MutationFailure::Unavailable
+                | MutationFailure::Stopped(_) => FailureOutcome::Unavailable,
+                MutationFailure::Rejected => FailureOutcome::Rejected,
+            },
+        }
+    }
+
+    fn busy() -> Self {
+        Self::NotApplied(MutationFailure::Busy)
+    }
+
+    fn too_large() -> Self {
+        Self::NotApplied(MutationFailure::TooLarge)
+    }
+
+    fn not_applied_stop(stopped: CallStop) -> Self {
+        let reason = match stopped {
+            CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
+            CallStop::Timeout => MutationFailure::Unavailable,
+        };
+        Self::NotApplied(reason)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Failure<E = ObjectStorageError> {
     pub(crate) error: E,
@@ -134,36 +203,29 @@ impl<E> Failure<E> {
     }
 }
 
-impl Failure {
-    pub(crate) fn stopped(stopped: CallStop) -> Self {
-        let error = match stopped {
-            CallStop::Parent(stopped) => ObjectStorageError::Stopped(stopped),
-            CallStop::Timeout => ObjectStorageError::Unavailable,
-        };
-        Self::with_stop(error, stopped)
+impl<E: OutcomeError> Failure<E> {
+    pub(crate) fn busy() -> Self {
+        Self::with_error_type(E::busy(), "busy")
+    }
+
+    pub(crate) fn too_large() -> Self {
+        Self::with_error_type(E::too_large(), "too_large")
+    }
+
+    pub(crate) fn not_applied_stop(stopped: CallStop) -> Self {
+        Self::with_stop(E::not_applied_stop(stopped), stopped)
     }
 }
 
 impl From<Interrupted> for Failure {
     fn from(interrupted: Interrupted) -> Self {
-        Self::stopped(interrupted.stopped)
+        Self::not_applied_stop(interrupted.stopped)
     }
 }
 
 impl Failure<MutationError> {
-    pub(crate) const TOO_LARGE: Self = Self::not_applied(MutationFailure::TooLarge, "too_large");
-    pub(crate) const BUSY: Self = Self::not_applied(MutationFailure::Busy, "busy");
-
     const fn not_applied(reason: MutationFailure, error_type: &'static str) -> Self {
         Self::with_error_type(MutationError::NotApplied(reason), error_type)
-    }
-
-    pub(crate) const fn mutation_not_applied_stopped(stopped: CallStop) -> Self {
-        let reason = match stopped {
-            CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
-            CallStop::Timeout => MutationFailure::Unavailable,
-        };
-        Self::with_stop(MutationError::NotApplied(reason), stopped)
     }
 
     pub(crate) const fn mutation_unknown_stopped(stopped: CallStop) -> Self {
@@ -180,15 +242,13 @@ impl From<Interrupted> for Failure<MutationError> {
         if interrupted.polled {
             Self::mutation_unknown_stopped(interrupted.stopped)
         } else {
-            Self::mutation_not_applied_stopped(interrupted.stopped)
+            Self::not_applied_stop(interrupted.stopped)
         }
     }
 }
 
 #[derive(Debug)]
 pub(crate) enum LocalFailure {
-    Busy,
-    TooLarge,
     DownloadAllocation,
     DownloadBody,
     DownloadTimerExited,
@@ -203,8 +263,6 @@ impl From<LocalFailure> for Failure {
     fn from(cause: LocalFailure) -> Self {
         use ObjectStorageError as E;
         let (error, error_type) = match cause {
-            LocalFailure::Busy => (E::Busy, "busy"),
-            LocalFailure::TooLarge => (E::TooLarge, "too_large"),
             LocalFailure::DownloadAllocation => (E::Unavailable, "download_allocation"),
             LocalFailure::DownloadBody => (E::Unavailable, "body"),
             LocalFailure::DownloadTimerExited => (E::Unavailable, "download_timer_exited"),

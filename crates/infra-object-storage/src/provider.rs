@@ -1,33 +1,40 @@
+use aws_sdk_s3::config::{SharedCredentialsProvider, SharedHttpClient};
 use url::Url;
 
+use crate::credentials::{AccessKey, AmazonCredentials};
 use crate::error::ConfigError;
 use crate::put_body::UploadSource;
 
-#[derive(Clone, derive_more::Debug, PartialEq, Eq)]
+#[derive(Clone, derive_more::Debug)]
 pub enum Provider {
     AmazonS3 {
         region: String,
         expected_bucket_owner: String,
+        credentials: AmazonCredentials,
     },
     CloudflareR2 {
         #[debug(skip)]
         endpoint: String,
+        credentials: AccessKey,
     },
     Railway {
         #[debug(skip)]
         endpoint: String,
         region: Option<String>,
+        credentials: AccessKey,
     },
     S3Compatible {
         #[debug(skip)]
         endpoint: String,
         region: Option<String>,
         path_style: bool,
+        credentials: AccessKey,
     },
     Local {
         #[debug(skip)]
         endpoint: String,
         region: Option<String>,
+        credentials: AccessKey,
     },
 }
 
@@ -40,6 +47,22 @@ impl Provider {
             Self::Railway { .. } => "railway",
             Self::S3Compatible { .. } => "s3_compatible",
             Self::Local { .. } => "local",
+        }
+    }
+
+    pub(crate) fn credentials_provider(
+        &self,
+        region: &str,
+        http_client: &SharedHttpClient,
+    ) -> Result<SharedCredentialsProvider, ConfigError> {
+        match self {
+            Self::AmazonS3 { credentials, .. } => {
+                credentials.credentials_provider(region, http_client)
+            }
+            Self::CloudflareR2 { credentials, .. }
+            | Self::Railway { credentials, .. }
+            | Self::S3Compatible { credentials, .. }
+            | Self::Local { credentials, .. } => credentials.credentials_provider(),
         }
     }
 }
@@ -96,6 +119,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
         Provider::AmazonS3 {
             region,
             expected_bucket_owner,
+            ..
         } => {
             let region = validate_region(region)?;
             if expected_bucket_owner.len() != 12
@@ -113,7 +137,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
                 checksum: UploadChecksum::Always,
             })
         }
-        Provider::CloudflareR2 { endpoint } => {
+        Provider::CloudflareR2 { endpoint, .. } => {
             let origin = parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?;
             if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
@@ -125,7 +149,9 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
                 UploadChecksum::InMemoryOnly,
             ))
         }
-        Provider::Railway { endpoint, region } => {
+        Provider::Railway {
+            endpoint, region, ..
+        } => {
             let origin = parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?;
             if origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
@@ -141,13 +167,16 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
             endpoint,
             region,
             path_style,
+            ..
         } => Ok(ResolvedProvider::at_endpoint(
             origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?),
             optional_region(region.as_deref(), "us-east-1")?,
             *path_style,
             UploadChecksum::Never,
         )),
-        Provider::Local { endpoint, region } => Ok(ResolvedProvider::at_endpoint(
+        Provider::Local {
+            endpoint, region, ..
+        } => Ok(ResolvedProvider::at_endpoint(
             origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpOrHttps)?),
             optional_region(region.as_deref(), "us-east-1")?,
             true,
@@ -234,10 +263,17 @@ fn valid_bucket(bucket: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Provider, Target, UploadChecksum, resolve};
+    use super::{AccessKey, AmazonCredentials, Provider, Target, UploadChecksum, resolve};
     use crate::ConfigError;
 
     const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
+
+    fn access_key() -> AccessKey {
+        AccessKey {
+            access_key_id: "AKIDEXAMPLE".to_owned(),
+            secret_access_key: "secret".into(),
+        }
+    }
 
     #[test]
     fn amazon_requires_a_region_and_an_owner() {
@@ -245,6 +281,7 @@ mod tests {
             &Provider::AmazonS3 {
                 region: "eu-central-1".to_owned(),
                 expected_bucket_owner: "123456789012".to_owned(),
+                credentials: AmazonCredentials::WorkloadIdentity,
             },
             "evidence-bucket",
         )
@@ -262,6 +299,7 @@ mod tests {
                 &Provider::AmazonS3 {
                     region: region.to_owned(),
                     expected_bucket_owner: "123456789012".to_owned(),
+                    credentials: AmazonCredentials::WorkloadIdentity,
                 },
                 "evidence-bucket",
             );
@@ -272,6 +310,7 @@ mod tests {
                 &Provider::AmazonS3 {
                     region: region.to_owned(),
                     expected_bucket_owner: "123456789012".to_owned(),
+                    credentials: AmazonCredentials::WorkloadIdentity,
                 },
                 "evidence-bucket",
             );
@@ -282,6 +321,7 @@ mod tests {
                 &Provider::AmazonS3 {
                     region: "us-east-1".to_owned(),
                     expected_bucket_owner: owner.to_owned(),
+                    credentials: AmazonCredentials::WorkloadIdentity,
                 },
                 "evidence-bucket",
             );
@@ -303,6 +343,7 @@ mod tests {
             let admitted = resolve(
                 &Provider::CloudflareR2 {
                     endpoint: endpoint.to_owned(),
+                    credentials: access_key(),
                 },
                 "evidence-bucket",
             )
@@ -330,6 +371,7 @@ mod tests {
             let refused = resolve(
                 &Provider::CloudflareR2 {
                     endpoint: endpoint.to_owned(),
+                    credentials: access_key(),
                 },
                 "evidence-bucket",
             );
@@ -343,6 +385,7 @@ mod tests {
             &Provider::Railway {
                 endpoint: "https://t3.storageapi.dev".to_owned(),
                 region: None,
+                credentials: access_key(),
             },
             "evidence-bucket-jdhhd8oe18xi",
         )
@@ -365,6 +408,7 @@ mod tests {
                 &Provider::Railway {
                     endpoint: endpoint.to_owned(),
                     region: Some("auto".to_owned()),
+                    credentials: access_key(),
                 },
                 "evidence-bucket",
             );
@@ -375,6 +419,7 @@ mod tests {
                 &Provider::Railway {
                     endpoint: "https://t3.storageapi.dev".to_owned(),
                     region: Some(region.to_owned()),
+                    credentials: access_key(),
                 },
                 "evidence-bucket",
             );
@@ -388,6 +433,7 @@ mod tests {
             &Provider::Local {
                 endpoint: "http://127.0.0.1:7070".to_owned(),
                 region: None,
+                credentials: access_key(),
             },
             "evidence-bucket",
         )
@@ -409,6 +455,7 @@ mod tests {
                 endpoint: "https://s3.eu-central-003.backblazeb2.com".to_owned(),
                 region: Some("eu-central-003".to_owned()),
                 path_style: false,
+                credentials: access_key(),
             },
             "evidence-bucket",
         )
@@ -428,6 +475,7 @@ mod tests {
                 endpoint: "https://ceph.internal.example:8443".to_owned(),
                 region: None,
                 path_style: true,
+                credentials: access_key(),
             },
             "evidence-bucket",
         )
@@ -452,6 +500,7 @@ mod tests {
                     endpoint: endpoint.to_owned(),
                     region: None,
                     path_style: false,
+                    credentials: access_key(),
                 },
                 "evidence-bucket",
             );
@@ -464,6 +513,7 @@ mod tests {
         let provider = Provider::Local {
             endpoint: "http://127.0.0.1:7070".to_owned(),
             region: None,
+            credentials: access_key(),
         };
         for bucket in [
             "abc",

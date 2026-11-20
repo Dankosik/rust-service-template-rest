@@ -1,12 +1,8 @@
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use backon::BackoffBuilder;
-use futures_util::future::BoxFuture;
-use futures_util::stream::StreamExt;
 use metrics::{Counter, Gauge};
 use operation_context::{Deadline, OperationContext};
 use parking_lot::Mutex;
@@ -16,28 +12,23 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use zeroize::Zeroizing;
 
 use crate::admission::Admitted;
-use crate::credentials::{PasswordFile, ReadFailure};
+use crate::credentials::{Disposition, PASSWORD_REFRESH_INTERVAL, Rotation};
 use crate::dial::Dialed;
-use crate::error::{CommandError, CommandFailure, ErrorType, error_type};
+use crate::error::{CommandError, ErrorType, UnknownCause, error_type};
+use crate::exchange::{AbandonedReply, Exchange, drain_abandoned_replies, reply_data};
 use crate::namespace::Operation;
-use crate::observe::{
-    ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
-    RETIREMENTS_METRIC,
-};
+use crate::observe::{ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, RETIREMENTS_METRIC};
 use crate::{CloseOutcome, ServerEndpoint};
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
-const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_BACKOFF_MIN_DELAY: Duration = Duration::from_millis(100);
 const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
 const SETUP_BACKOFF_BASE_CAP: Duration = Duration::from_secs(1);
 const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
 const SETUP_BACKOFF_FACTOR: f32 = 2.0;
 const PING_INTERVAL: Duration = Duration::from_secs(2);
-const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 #[path = "tests/full_pipeline.rs"]
@@ -104,112 +95,20 @@ impl Generation {
         tokio::task::consume_budget().await;
         Ok(reservation)
     }
-}
 
-struct AbandonedReply {
-    reservation: OwnedSemaphorePermit,
-    reply: BoxFuture<'static, ()>,
-}
-
-impl AbandonedReply {
-    async fn wait(self) {
-        let _reservation = self.reservation;
-        self.reply.await;
-    }
-}
-
-type QueryFuture<T> = BoxFuture<'static, redis::RedisResult<T>>;
-
-struct InFlight<T> {
-    reply: QueryFuture<T>,
-    reservation: OwnedSemaphorePermit,
-}
-
-struct Exchange<'a, T: Send + 'static> {
-    generation: &'a Generation,
-    in_flight: Option<InFlight<T>>,
-    wire_deadline: Deadline,
-}
-
-impl<'a, T: Send + 'static> Exchange<'a, T> {
-    fn new(
-        generation: &'a Generation,
+    fn exchange<T: Send + 'static>(
+        &self,
         reservation: OwnedSemaphorePermit,
         reply: impl Future<Output = redis::RedisResult<T>> + Send + 'static,
         wire_deadline: Deadline,
-    ) -> Self {
-        Self {
-            generation,
-            in_flight: Some(InFlight {
-                reply: Box::pin(reply),
-                reservation,
-            }),
-            wire_deadline,
-        }
-    }
-}
-
-impl<T: Send + 'static> Future for Exchange<'_, T> {
-    type Output = redis::RedisResult<T>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(mut in_flight) = self.in_flight.take() else {
-            return Poll::Pending;
-        };
-        match in_flight.reply.as_mut().poll(cx) {
-            Poll::Ready(result) => {
-                if reply_requires_retirement(&result) {
-                    self.generation.retired.cancel();
-                }
-                Poll::Ready(result)
-            }
-            Poll::Pending => {
-                self.in_flight = Some(in_flight);
-                Poll::Pending
-            }
-        }
-    }
-}
-
-fn reply_requires_retirement<T>(reply: &redis::RedisResult<T>) -> bool {
-    reply.as_ref().is_err_and(|error| {
-        error_type(error) != ErrorType::ServerErrorReply || error.code() == Some("READONLY")
-    })
-}
-
-impl<T: Send + 'static> Drop for Exchange<'_, T> {
-    fn drop(&mut self) {
-        let Some(InFlight { reply, reservation }) = self.in_flight.take() else {
-            return;
-        };
-        let wire_deadline = self.wire_deadline;
-        let retired = self.generation.retired.clone();
-        let _ = self.generation.abandoned.send(AbandonedReply {
+    ) -> Exchange<'_, T> {
+        Exchange::new(
+            &self.retired,
+            &self.abandoned,
             reservation,
-            reply: Box::pin(async move {
-                tokio::select! {
-                    biased;
-                    result = reply => {
-                        if reply_requires_retirement(&result) {
-                            retired.cancel();
-                        }
-                    }
-                    () = wire_deadline.wait() => {
-                        retired.cancel();
-                    }
-                }
-            }),
-        });
-    }
-}
-
-pub(super) fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::Value> {
-    while let redis::Value::Attribute { data, .. } = reply {
-        reply = *data;
-    }
-    match reply {
-        redis::Value::ServerError(error) => Err(error.into()),
-        data => Ok(data),
+            reply,
+            wire_deadline,
+        )
     }
 }
 
@@ -314,13 +213,12 @@ impl Link {
             retirements,
             tasks: TaskTracker::new(),
         });
-        let exit = SupervisorExit {
-            shared: shared.clone(),
-            admitted,
-        };
         let supervisor = shared
             .tasks
-            .spawn(supervise(exit, command_timeout))
+            .spawn(supervise(
+                std::mem::DropGuard::new((shared.clone(), admitted), close_supervisor),
+                command_timeout,
+            ))
             .abort_handle();
         Self {
             server,
@@ -363,12 +261,8 @@ impl Link {
         let (generation, reservation) = self.reserve_generation(&budget).await?;
         let query = build_query(generation.connection.clone());
         budget.check_before_dispatch(&generation)?;
-        let mut exchange = Exchange::new(
-            &generation,
-            reservation,
-            query,
-            Deadline::after(self.command_timeout),
-        );
+        let mut exchange =
+            generation.exchange(reservation, query, Deadline::after(self.command_timeout));
         let reply = tokio::select! {
             biased;
             reply = &mut exchange => reply,
@@ -376,7 +270,7 @@ impl Link {
                 return Err(CommandError::OutcomeUnknown(budget.classify_stop()));
             }
             () = generation.retired.cancelled() => {
-                return Err(CommandError::OutcomeUnknown(CommandFailure::Failed(ErrorType::Io)));
+                return Err(CommandError::OutcomeUnknown(UnknownCause::Failed(ErrorType::Io)));
             }
         };
         let value = reply.map_err(|error| {
@@ -396,7 +290,7 @@ impl Link {
             biased;
             result = self.shared.acquire() => result,
             () = budget.wait_stopped() => {
-                return Err(CommandError::NotApplied(budget.classify_stop()));
+                return Err(CommandError::NotApplied(budget.classify_stop().into()));
             }
         };
         budget.check_not_stopped()?;
@@ -405,7 +299,7 @@ impl Link {
             biased;
             result = generation.reserve() => result?,
             () = budget.wait_stopped() => {
-                return Err(CommandError::NotApplied(budget.classify_stop()));
+                return Err(CommandError::NotApplied(budget.classify_stop().into()));
             }
             () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
         };
@@ -438,21 +332,21 @@ impl<'a> CommandBudget<'a> {
         }
     }
 
-    fn classify_stop(&self) -> CommandFailure {
+    fn classify_stop(&self) -> UnknownCause {
         self.parent.stopped().map_or(
-            CommandFailure::Failed(ErrorType::Timeout),
-            CommandFailure::Stopped,
+            UnknownCause::Failed(ErrorType::Timeout),
+            UnknownCause::Stopped,
         )
     }
 
-    fn stopped_failure(&self) -> Option<CommandFailure> {
+    fn stopped_failure(&self) -> Option<UnknownCause> {
         self.context.stopped().map(|_| self.classify_stop())
     }
 
     fn check_not_stopped(&self) -> Result<(), CommandError> {
         self.context
             .check()
-            .map_err(|_| CommandError::NotApplied(self.classify_stop()))
+            .map_err(|_| CommandError::NotApplied(self.classify_stop().into()))
     }
 
     fn check_before_dispatch(&self, generation: &Generation) -> Result<(), CommandError> {
@@ -484,24 +378,6 @@ fn register_link_metrics() -> LinkMetrics {
     metrics.commands_in_flight.increment(0.0);
     metrics.retirements.increment(0);
     metrics
-}
-
-struct SupervisorExit {
-    shared: Arc<Shared>,
-    admitted: Admitted,
-}
-
-impl Drop for SupervisorExit {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            tracing::error!(
-                server.address = %self.admitted.server.host,
-                server.port = self.admitted.server.port,
-                "cache_supervisor_panicked"
-            );
-        }
-        self.shared.close();
-    }
 }
 
 enum MaintenanceError {
@@ -576,9 +452,21 @@ async fn ping_generation(generation: &Generation, command_timeout: Duration) -> 
     }
 }
 
-async fn supervise(exit: SupervisorExit, command_timeout: Duration) {
-    let shared = &exit.shared;
-    let admitted = &exit.admitted;
+type SupervisorGuard = std::mem::DropGuard<(Arc<Shared>, Admitted), fn((Arc<Shared>, Admitted))>;
+
+fn close_supervisor((shared, admitted): (Arc<Shared>, Admitted)) {
+    if std::thread::panicking() {
+        tracing::error!(
+            server.address = %admitted.server.host,
+            server.port = admitted.server.port,
+            "cache_supervisor_panicked"
+        );
+    }
+    shared.close();
+}
+
+async fn supervise(exit: SupervisorGuard, command_timeout: Duration) {
+    let (shared, admitted) = &*exit;
     let server = &admitted.server;
     let mut backoff = setup_backoff();
     let mut next_attempt = Instant::now();
@@ -609,7 +497,7 @@ async fn supervise(exit: SupervisorExit, command_timeout: Duration) {
             }
         };
         let Some(cooldown_until) =
-            run_generation(shared, server, dialed, rotation, retired, command_timeout).await
+            run_generation(shared, admitted, dialed, rotation, retired, command_timeout).await
         else {
             return;
         };
@@ -620,12 +508,13 @@ async fn supervise(exit: SupervisorExit, command_timeout: Duration) {
 
 async fn run_generation(
     shared: &Shared,
-    server: &ServerEndpoint,
+    admitted: &Admitted,
     dialed: Dialed,
     rotation: Option<Rotation<'_>>,
     retired: CancellationToken,
     command_timeout: Duration,
 ) -> Option<Instant> {
+    let server = &admitted.server;
     let _driver = dialed.driver;
     let (abandoned, replies) = mpsc::unbounded_channel();
     let generation = Arc::new(Generation {
@@ -641,7 +530,7 @@ async fn run_generation(
     tracing::info!(
         server.address = %server.host,
         server.port = server.port,
-        cache.tls = server.tls,
+        cache.tls = admitted.transport.is_tls(),
         "cache_connected"
     );
     let mut drain = std::pin::pin!(drain_abandoned_replies(replies));
@@ -664,19 +553,21 @@ pub(crate) fn setup_backoff() -> backon::ExponentialBackoff {
         .build()
 }
 
-async fn drain_abandoned_replies(mut replies: mpsc::UnboundedReceiver<AbandonedReply>) {
-    futures_util::stream::poll_fn(|cx| replies.poll_recv(cx))
-        .for_each_concurrent(None, AbandonedReply::wait)
-        .await;
-}
-
 async fn setup_attempt<'a>(
     admitted: &'a Admitted,
     retired: &CancellationToken,
     shared: &'a Shared,
 ) -> Result<(Dialed, Option<Rotation<'a>>), ErrorType> {
     let setup = async {
-        let (settings, rotation) = credentialed_settings(admitted, &shared.tasks).await?;
+        let (settings, rotation) = match &admitted.password_file {
+            Some(file) => {
+                let (settings, rotation) = file
+                    .connect_settings(&admitted.settings, &admitted.server, &shared.tasks)
+                    .await?;
+                (settings, Some(rotation))
+            }
+            None => (admitted.settings.clone(), None),
+        };
         let dialed = connect(admitted, &settings, retired.clone(), shared).await?;
         Ok((dialed, rotation))
     };
@@ -687,49 +578,12 @@ async fn setup_attempt<'a>(
     }
 }
 
-async fn credentialed_settings<'a>(
-    admitted: &'a Admitted,
-    tasks: &'a TaskTracker,
-) -> Result<(redis::RedisConnectionInfo, Option<Rotation<'a>>), ErrorType> {
-    let Some(file) = admitted.password_file.as_ref() else {
-        return Ok((admitted.settings.clone(), None));
-    };
-    let password = file.read(tasks).await.map_err(|error| {
-        warn_password_file_unreadable(&admitted.server, error);
-        ErrorType::Other
-    })?;
-    let settings = admitted
-        .settings
-        .clone()
-        .set_username(file.username())
-        .set_password(password.as_str());
-    Ok((settings, Some(Rotation::new(file, tasks, password))))
-}
-
-fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
-    tracing::warn!(
-        server.address = %server.host,
-        server.port = server.port,
-        %error,
-        "cache_password_file_unreadable"
-    );
-}
-
 fn warn_ping_failed(server: &ServerEndpoint, error: ErrorType) {
     tracing::warn!(
         server.address = %server.host,
         server.port = server.port,
         error.type = error.label(),
         "cache_ping_failed"
-    );
-}
-
-fn warn_password_refresh_failed(server: &ServerEndpoint, error: ErrorType) {
-    tracing::warn!(
-        server.address = %server.host,
-        server.port = server.port,
-        error.type = error.label(),
-        "cache_password_refresh_failed"
     );
 }
 
@@ -750,8 +604,7 @@ async fn connect(
             Ok::<(), redis::aio::SendError>(())
         });
     admitted
-        .server
-        .connect(admitted.tls.as_ref(), settings, config, &shared.tasks)
+        .connect(settings, config, &shared.tasks)
         .await
         .map_err(|error| error_type(&error))
 }
@@ -772,7 +625,18 @@ async fn maintain(
             () = sleep_until(next_refresh), if rotation.is_some() && next_refresh <= next_ping => {
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()
-                    && rotation.refresh_and_record(server, generation, command_timeout).await
+                    && rotation
+                        .refresh_and_record(server, &generation.retired, async |command| {
+                            maintenance_query(
+                                generation,
+                                command,
+                                |value| matches!(value, redis::Value::Okay),
+                                command_timeout,
+                            )
+                            .await
+                            .map_err(|error| error.error_type())
+                        })
+                        .await
                         == Disposition::Retire
                 {
                     return;
@@ -793,158 +657,6 @@ async fn maintain(
                 }
                 next_ping = Instant::now() + PING_INTERVAL;
             }
-        }
-    }
-}
-
-struct Rotation<'a> {
-    file: &'a PasswordFile,
-    tasks: &'a TaskTracker,
-    authenticated_password: Zeroizing<String>,
-    last_warning: Option<RefreshWarning>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RefreshWarning {
-    Unreadable,
-    AuthRefused,
-}
-
-enum RefreshOutcome {
-    ReadFailed(ReadFailure),
-    Unchanged,
-    AuthAccepted,
-    AuthRefused,
-    Failed(ErrorType),
-}
-
-impl RefreshOutcome {
-    fn outcome_label(&self) -> &'static str {
-        match self {
-            Self::ReadFailed(_) => "read_failed",
-            Self::Unchanged => "unchanged",
-            Self::AuthAccepted => "auth_accepted",
-            Self::AuthRefused | Self::Failed(_) => "refresh_failed",
-        }
-    }
-
-    fn error_type(&self) -> Option<ErrorType> {
-        match self {
-            Self::AuthRefused => Some(ErrorType::Auth),
-            Self::Failed(error) => Some(*error),
-            Self::ReadFailed(_) | Self::Unchanged | Self::AuthAccepted => None,
-        }
-    }
-
-    fn disposition(&self) -> Disposition {
-        match self {
-            Self::ReadFailed(_) | Self::Unchanged | Self::AuthAccepted | Self::AuthRefused => {
-                Disposition::Keep
-            }
-            Self::Failed(_) => Disposition::Retire,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Disposition {
-    Keep,
-    Retire,
-}
-
-impl<'a> Rotation<'a> {
-    fn new(
-        file: &'a PasswordFile,
-        tasks: &'a TaskTracker,
-        authenticated_password: Zeroizing<String>,
-    ) -> Self {
-        Self {
-            file,
-            tasks,
-            authenticated_password,
-            last_warning: None,
-        }
-    }
-
-    async fn refresh_and_record(
-        &mut self,
-        server: &ServerEndpoint,
-        generation: &Generation,
-        command_timeout: Duration,
-    ) -> Disposition {
-        let outcome = tokio::select! {
-            biased;
-            () = generation.retired.cancelled() => return Disposition::Retire,
-            outcome = self.refresh(generation, command_timeout) => outcome,
-        };
-        self.record(server, &outcome);
-        outcome.disposition()
-    }
-
-    async fn refresh(
-        &mut self,
-        generation: &Generation,
-        command_timeout: Duration,
-    ) -> RefreshOutcome {
-        let password = match timeout(PASSWORD_READ_TIMEOUT, self.file.read(self.tasks)).await {
-            Ok(Ok(password)) => password,
-            Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
-            Err(_elapsed) => return RefreshOutcome::ReadFailed(ReadFailure::TimedOut),
-        };
-        if password.as_str() == self.authenticated_password.as_str() {
-            return RefreshOutcome::Unchanged;
-        }
-        let mut command = redis::cmd("AUTH");
-        command.arg(self.file.username()).arg(password.as_str());
-        if let Err(error) = maintenance_query(
-            generation,
-            &command,
-            |value| matches!(value, redis::Value::Okay),
-            command_timeout,
-        )
-        .await
-        {
-            return match error.error_type() {
-                ErrorType::Auth => RefreshOutcome::AuthRefused,
-                error => RefreshOutcome::Failed(error),
-            };
-        }
-        if generation.retired.is_cancelled() {
-            return RefreshOutcome::Failed(ErrorType::Io);
-        }
-        self.authenticated_password = password;
-        RefreshOutcome::AuthAccepted
-    }
-
-    fn record(&mut self, server: &ServerEndpoint, outcome: &RefreshOutcome) {
-        let reason = outcome.error_type().map_or("none", ErrorType::label);
-        metrics::counter!(
-            PASSWORD_REFRESHES_METRIC,
-            "outcome" => outcome.outcome_label(),
-            "reason" => reason,
-        )
-        .increment(1);
-        let warning = match outcome {
-            RefreshOutcome::ReadFailed(_) => Some(RefreshWarning::Unreadable),
-            RefreshOutcome::AuthRefused => Some(RefreshWarning::AuthRefused),
-            RefreshOutcome::Unchanged
-            | RefreshOutcome::AuthAccepted
-            | RefreshOutcome::Failed(_) => None,
-        };
-        let previous = std::mem::replace(&mut self.last_warning, warning);
-        if warning.is_some() && warning == previous {
-            return;
-        }
-        match outcome {
-            RefreshOutcome::ReadFailed(error) => warn_password_file_unreadable(server, *error),
-            RefreshOutcome::Unchanged => {}
-            RefreshOutcome::AuthAccepted => tracing::info!(
-                server.address = %server.host,
-                server.port = server.port,
-                "cache_password_reloaded"
-            ),
-            RefreshOutcome::AuthRefused => warn_password_refresh_failed(server, ErrorType::Auth),
-            RefreshOutcome::Failed(error) => warn_password_refresh_failed(server, *error),
         }
     }
 }

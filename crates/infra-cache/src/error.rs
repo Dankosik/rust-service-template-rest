@@ -89,56 +89,72 @@ pub(crate) enum ErrorType {
     Auth,
     ServerErrorReply,
     Parse,
-    ValueTooLarge,
     Other,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum CommandFailure {
+pub(crate) enum UnknownCause {
     Stopped(Stopped),
     Failed(ErrorType),
-    PermissionDenied,
-    InvalidTtl,
 }
 
-impl CommandFailure {
+impl UnknownCause {
     fn operation_error(self) -> OperationError {
         match self {
             Self::Stopped(stopped) => OperationError::Stopped(stopped),
-            Self::Failed(ErrorType::ValueTooLarge) => OperationError::ValueTooLarge,
-            Self::Failed(_) | Self::PermissionDenied | Self::InvalidTtl => {
-                OperationError::Unavailable
-            }
+            Self::Failed(_) => OperationError::Unavailable,
         }
     }
 
     fn unknown_outcome(self) -> UnknownOutcome {
         match self {
             Self::Stopped(stopped) => UnknownOutcome::Stopped(stopped),
+            Self::Failed(_) => UnknownOutcome::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Refusal {
+    Stopped(Stopped),
+    Failed(ErrorType),
+    PermissionDenied,
+    InvalidTtl,
+    ValueTooLarge,
+}
+
+impl Refusal {
+    fn operation_error(self) -> OperationError {
+        match self {
+            Self::Stopped(stopped) => OperationError::Stopped(stopped),
+            Self::ValueTooLarge => OperationError::ValueTooLarge,
             Self::Failed(_) | Self::PermissionDenied | Self::InvalidTtl => {
-                UnknownOutcome::Unavailable
+                OperationError::Unavailable
             }
+        }
+    }
+}
+
+impl From<UnknownCause> for Refusal {
+    fn from(cause: UnknownCause) -> Self {
+        match cause {
+            UnknownCause::Stopped(stopped) => Self::Stopped(stopped),
+            UnknownCause::Failed(error) => Self::Failed(error),
         }
     }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum CommandError {
-    NotApplied(CommandFailure),
-    OutcomeUnknown(CommandFailure),
+    NotApplied(Refusal),
+    OutcomeUnknown(UnknownCause),
 }
 
 impl CommandError {
-    pub(crate) fn failure(self) -> CommandFailure {
-        match self {
-            Self::NotApplied(failure) | Self::OutcomeUnknown(failure) => failure,
-        }
-    }
-
     pub(crate) fn from_reply(
         error: &redis::RedisError,
         operation: Operation,
-        stopped: Option<CommandFailure>,
+        stopped: Option<UnknownCause>,
     ) -> Self {
         let code = error.code();
         if matches!(operation, Operation::Set)
@@ -147,35 +163,36 @@ impl CommandError {
                 detail.eq_ignore_ascii_case("invalid expire time in 'set' command")
             })
         {
-            return Self::NotApplied(CommandFailure::InvalidTtl);
+            return Self::NotApplied(Refusal::InvalidTtl);
         }
-        let failure = stopped.unwrap_or_else(|| match code {
-            Some("NOPERM") => CommandFailure::PermissionDenied,
-            _ => CommandFailure::Failed(error_type(error)),
-        });
+        if code == Some("NOPERM") {
+            return Self::NotApplied(stopped.map_or(Refusal::PermissionDenied, Refusal::from));
+        }
+        let cause = stopped.unwrap_or_else(|| UnknownCause::Failed(error_type(error)));
         match code {
             Some(
-                "READONLY" | "NOAUTH" | "NOPERM" | "OOM" | "LOADING" | "MOVED" | "ASK"
-                | "CLUSTERDOWN" | "MASTERDOWN" | "MISCONF" | "NOREPLICAS" | "BUSY" | "REDIRECT",
-            ) => Self::NotApplied(failure),
-            _ => Self::OutcomeUnknown(failure),
+                "READONLY" | "NOAUTH" | "OOM" | "LOADING" | "MOVED" | "ASK" | "CLUSTERDOWN"
+                | "MASTERDOWN" | "MISCONF" | "NOREPLICAS" | "BUSY" | "REDIRECT",
+            ) => Self::NotApplied(cause.into()),
+            _ => Self::OutcomeUnknown(cause),
         }
     }
 }
 
 impl From<CommandError> for OperationError {
     fn from(error: CommandError) -> Self {
-        error.failure().operation_error()
+        match error {
+            CommandError::NotApplied(refusal) => refusal.operation_error(),
+            CommandError::OutcomeUnknown(cause) => cause.operation_error(),
+        }
     }
 }
 
 impl From<CommandError> for MutationError {
     fn from(error: CommandError) -> Self {
         match error {
-            CommandError::NotApplied(failure) => Self::NotApplied(failure.operation_error()),
-            CommandError::OutcomeUnknown(failure) => {
-                Self::OutcomeUnknown(failure.unknown_outcome())
-            }
+            CommandError::NotApplied(refusal) => Self::NotApplied(refusal.operation_error()),
+            CommandError::OutcomeUnknown(cause) => Self::OutcomeUnknown(cause.unknown_outcome()),
         }
     }
 }
@@ -183,7 +200,7 @@ impl From<CommandError> for MutationError {
 impl From<CommandError> for SetError {
     fn from(error: CommandError) -> Self {
         match error {
-            CommandError::NotApplied(CommandFailure::InvalidTtl) => Self::InvalidTtl,
+            CommandError::NotApplied(Refusal::InvalidTtl) => Self::InvalidTtl,
             _ => Self::Mutation(error.into()),
         }
     }
@@ -191,7 +208,13 @@ impl From<CommandError> for SetError {
 
 impl From<ErrorType> for CommandError {
     fn from(error: ErrorType) -> Self {
-        Self::NotApplied(CommandFailure::Failed(error))
+        Self::NotApplied(Refusal::Failed(error))
+    }
+}
+
+impl From<Refusal> for CommandError {
+    fn from(refusal: Refusal) -> Self {
+        Self::NotApplied(refusal)
     }
 }
 
@@ -203,7 +226,6 @@ impl ErrorType {
             Self::Auth => "auth",
             Self::ServerErrorReply => "response",
             Self::Parse => "parse",
-            Self::ValueTooLarge => "value_too_large",
             Self::Other => "other",
         }
     }

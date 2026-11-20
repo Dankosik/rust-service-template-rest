@@ -8,7 +8,7 @@ use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
-use crate::error::{Failure, MutationError, MutationFailure, ObjectStorageError};
+use crate::error::{Failure, OutcomeError};
 
 const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
@@ -51,7 +51,7 @@ impl Operation {
 }
 
 #[derive(Clone, Copy, enum_map::Enum)]
-enum FailureOutcome {
+pub(crate) enum FailureOutcome {
     NotFound,
     AlreadyExists,
     TooLarge,
@@ -230,61 +230,18 @@ impl OperationGuard {
         DropGuard::dismiss(self.0).finish(Outcome::Ok);
     }
 
-    pub(crate) fn fail(self, failure: &Failure) -> ObjectStorageError {
-        let outcome = match failure.error {
-            ObjectStorageError::NotFound => FailureOutcome::NotFound,
-            ObjectStorageError::TooLarge => FailureOutcome::TooLarge,
-            ObjectStorageError::Busy => FailureOutcome::Busy,
-            ObjectStorageError::Unavailable | ObjectStorageError::Stopped(_) => {
-                FailureOutcome::Unavailable
-            }
-            ObjectStorageError::Rejected => FailureOutcome::Rejected,
-            ObjectStorageError::Integrity => FailureOutcome::Integrity,
-        };
-        DropGuard::dismiss(self.0).record_failure(outcome, failure);
+    pub(crate) fn fail<E: OutcomeError>(self, failure: &Failure<E>) -> E {
+        DropGuard::dismiss(self.0).record_failure(failure.error.failure_outcome(), failure);
         failure.error
     }
 
-    fn fail_mutation(self, failure: &Failure<MutationError>) -> MutationError {
-        let outcome = match failure.error {
-            MutationError::OutcomeUnknown(_) => FailureOutcome::Unknown,
-            MutationError::NotApplied(reason) => match reason {
-                MutationFailure::AlreadyExists => FailureOutcome::AlreadyExists,
-                MutationFailure::TooLarge => FailureOutcome::TooLarge,
-                MutationFailure::Busy => FailureOutcome::Busy,
-                MutationFailure::Conflict
-                | MutationFailure::Unavailable
-                | MutationFailure::Stopped(_) => FailureOutcome::Unavailable,
-                MutationFailure::Rejected => FailureOutcome::Rejected,
-            },
-        };
-        DropGuard::dismiss(self.0).record_failure(outcome, failure);
-        failure.error
-    }
-
-    pub(crate) fn finish_read<T>(
-        self,
-        result: Result<T, Failure>,
-    ) -> Result<T, ObjectStorageError> {
+    pub(crate) fn finish<T, E: OutcomeError>(self, result: Result<T, Failure<E>>) -> Result<T, E> {
         match result {
             Ok(value) => {
                 self.succeed();
                 Ok(value)
             }
             Err(failure) => Err(self.fail(&failure)),
-        }
-    }
-
-    pub(crate) fn finish_mutation<T>(
-        self,
-        result: Result<T, Failure<MutationError>>,
-    ) -> Result<T, MutationError> {
-        match result {
-            Ok(value) => {
-                self.succeed();
-                Ok(value)
-            }
-            Err(failure) => Err(self.fail_mutation(&failure)),
         }
     }
 }

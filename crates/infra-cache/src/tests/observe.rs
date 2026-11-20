@@ -38,7 +38,6 @@ fn a_failed_command_names_its_cause_on_the_series() {
         host: "cache.example".to_owned(),
         port: 6379,
         database_index: 0,
-        tls: true,
     };
     metrics::with_local_recorder(&recorder, || {
         let histograms = NamespaceHistograms::new(crate::namespace!("causes"));
