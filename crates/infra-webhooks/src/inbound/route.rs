@@ -13,9 +13,8 @@ use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_prob
 use infra_http::{Code, Problem, RequestContext};
 use infra_postgres::Pool;
 use metrics::{Counter, SharedString};
-use parking_lot::Mutex;
 use tokio::time::Instant;
-use utoipa::{OpenApi, ToResponse};
+use utoipa::{IntoResponses, OpenApi, ToResponse};
 
 use super::{
     EndpointReceiveError, PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveBody, Receiver, Rejection,
@@ -23,7 +22,7 @@ use super::{
 };
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
-const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
+pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
 #[derive(Clone)]
 pub struct WebhookState {
@@ -188,38 +187,40 @@ impl ReceiverState {
 
 /// webhook endpoint is unknown
 #[derive(Debug, ToResponse)]
-#[expect(
-    dead_code,
-    reason = "The response body exists only for the OpenAPI derive"
-)]
 #[response(content_type = "application/problem+json")]
-struct NotFound(Problem);
+pub struct NotFound(pub Problem);
 
 /// webhook body, message identity, or signature evidence is unacceptable
 #[derive(Debug, ToResponse)]
-#[expect(
-    dead_code,
-    reason = "The response body exists only for the OpenAPI derive"
-)]
 #[response(content_type = "application/problem+json")]
-struct WebhookRejected(Problem);
+pub struct WebhookRejected(pub Problem);
 
 /// durable webhook receipt storage is unavailable
 #[derive(Debug, ToResponse)]
-#[expect(
-    dead_code,
-    reason = "The response body exists only for the OpenAPI derive"
-)]
 #[response(content_type = "application/problem+json")]
-struct ServiceUnavailable(Problem);
+pub struct ServiceUnavailable(pub Problem);
+
+#[derive(Debug, IntoResponses)]
+pub enum ReceiveResponses {
+    /// webhook receipt is durable
+    #[response(status = 204)]
+    Durable,
+    #[response(status = 400)]
+    Rejected(#[ref_response] WebhookRejected),
+    #[response(status = 404)]
+    NotFound(#[ref_response] NotFound),
+    #[response(status = 503)]
+    Unavailable(#[ref_response] ServiceUnavailable),
+}
 
 #[derive(OpenApi)]
 #[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
 struct WebhookComponents;
 
-pub fn router<S>() -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
+pub fn with_webhook_responses<S>(
+    contract: infra_http::HttpContract<S>,
+) -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
 where
-    WebhookState: FromRef<S>,
     S: Clone + Send + Sync + 'static,
 {
     metrics::describe_counter!(
@@ -227,8 +228,15 @@ where
         metrics::Unit::Count,
         "Inbound webhook deliveries by admission outcome."
     );
-    infra_http::http_route!(receive)?
-        .with_components(WebhookComponents::openapi().components.unwrap_or_default())
+    contract.with_components(WebhookComponents::openapi().components.unwrap_or_default())
+}
+
+pub fn router<S>() -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
+where
+    WebhookState: FromRef<S>,
+    S: Clone + Send + Sync + 'static,
+{
+    with_webhook_responses(infra_http::http_route!(receive)?)
 }
 
 #[utoipa::path(
@@ -246,12 +254,7 @@ where
     ),
     request_body(content(("*/*")), description = format!("Original signed binary body, at most {} KiB. No JSON decoding or payload schema is required.", MAX_BODY_BYTES / 1024)),
     security(),
-    responses(
-        (status = 204, description = "webhook receipt is durable"),
-        (status = 400, response = WebhookRejected),
-        (status = 404, response = NotFound),
-        (status = 503, response = ServiceUnavailable),
-    )
+    responses(ReceiveResponses)
 )]
 async fn receive(
     Path(endpoint_id): Path<CompactString>,
@@ -294,7 +297,6 @@ struct EndpointMetrics {
     body_unreadable: OnceLock<Counter>,
     payload_too_large: OnceLock<Counter>,
     custom_rejections: ArcSwap<HashMap<&'static str, Counter>>,
-    custom_rejections_lock: Mutex<()>,
 }
 
 impl EndpointMetrics {
@@ -306,7 +308,6 @@ impl EndpointMetrics {
             body_unreadable: OnceLock::new(),
             payload_too_large: OnceLock::new(),
             custom_rejections: ArcSwap::default(),
-            custom_rejections_lock: Mutex::new(()),
         }
     }
 
@@ -354,19 +355,15 @@ impl EndpointMetrics {
             return;
         }
         drop(snapshot);
-        let guard = self.custom_rejections_lock.lock();
-        let current = self.custom_rejections.load();
-        if let Some(counter) = current.get(reason) {
-            let counter = counter.clone();
-            drop(guard);
-            counter.increment(1);
-            return;
-        }
         let counter = self.rejection_counter(reason);
-        let mut next = (**current).clone();
-        next.insert(reason, counter.clone());
-        self.custom_rejections.store(Arc::new(next));
-        drop(guard);
+        self.custom_rejections.rcu(|current| {
+            if current.contains_key(reason) {
+                return Arc::clone(current);
+            }
+            let mut next = (**current).clone();
+            next.insert(reason, counter.clone());
+            Arc::new(next)
+        });
         counter.increment(1);
     }
 
@@ -382,10 +379,9 @@ impl EndpointMetrics {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::http::header::CONTENT_TYPE;
-    use http_body_util::BodyExt as _;
     use metrics::Label;
     use tower::ServiceExt;
 
@@ -414,12 +410,9 @@ mod tests {
     }
 
     async fn body_text(response: Response) -> String {
-        let bytes = response
-            .into_body()
-            .collect()
+        let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
-            .to_bytes();
+            .expect("response body");
         String::from_utf8(bytes.to_vec()).expect("UTF-8 body")
     }
 
@@ -577,7 +570,7 @@ mod tests {
         post,
         path = "/webhooks/provider",
         security(),
-        responses((status = 204, description = "webhook receipt is durable"))
+        responses(ReceiveResponses)
     )]
     async fn receive_provider(
         State(state): State<WebhookState>,
@@ -614,8 +607,16 @@ mod tests {
         let mut verifiers = Verifiers::new();
         verifiers.bind("provider", Arc::new(TokenVerifier));
         let state = WebhookState::active(verifiers.into_receiver(pool));
-        let app = infra_http::http_route!(receive_provider)
-            .expect("custom provider route registers")
+        let contract = with_webhook_responses(
+            infra_http::http_route!(receive_provider).expect("custom provider route registers"),
+        )
+        .expect("webhook response components attach");
+        let merged = router::<WebhookState>()
+            .expect("standard webhook route registers")
+            .merge(contract.clone())
+            .expect("custom provider route merges without component conflicts");
+        assert!(merged.into_openapi().is_ok());
+        let app = contract
             .build(
                 state,
                 infra_http::Authentication::Public,
