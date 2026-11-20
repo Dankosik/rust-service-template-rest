@@ -31,8 +31,8 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
         .unwrap();
     let response = client
         .execute(
-            request,
             &OperationContext::with_timeout(Duration::from_secs(1)),
+            request,
         )
         .await
         .expect("mock response through bounded client");

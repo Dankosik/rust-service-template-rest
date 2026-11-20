@@ -7,6 +7,7 @@ use bytes::Bytes;
 use http::{HeaderValue, Method, Request, StatusCode, Uri, header};
 use infra_outbound_http::Client;
 use jsonwebtoken::jwk::Jwk;
+use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
 use secrecy::SecretString;
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
@@ -140,8 +141,8 @@ impl Realm {
     async fn send(&self, request: Request<Bytes>) -> http::Response<Bytes> {
         self.http
             .execute(
+                &OperationContext::with_timeout(Duration::from_secs(30)),
                 request,
-                &operation_context::OperationContext::with_timeout(Duration::from_secs(30)),
             )
             .await
             .unwrap()

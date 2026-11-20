@@ -224,7 +224,7 @@ async fn rotation_scenario(
     let first = publication.prepare(&event("before-expiry")).unwrap();
     messaging
         .producer()
-        .publish(&first, &context(&cancel))
+        .publish(&context(&cancel), &first)
         .await
         .expect("old credentials must work before their native expiration");
 
@@ -254,7 +254,7 @@ async fn rotation_scenario(
         loop {
             if messaging
                 .producer()
-                .publish(&after, &context(&cancel))
+                .publish(&context(&cancel), &after)
                 .await
                 .is_ok()
             {

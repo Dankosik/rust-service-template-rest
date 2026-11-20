@@ -25,7 +25,7 @@ async fn standard_request_returns_standard_response_with_full_body() {
     )
     .await;
     let response = fixture_client(address, &material)
-        .execute(request(), &context())
+        .execute(&default_context(), request())
         .await
         .expect("trusted TLS response");
     assert_eq!(response.status(), http::StatusCode::CREATED);
@@ -43,7 +43,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
     let untrusted = TlsMaterial::new(FIXTURE_HOST);
     std::assert_matches!(
         fixture_client(address, &untrusted)
-            .execute(request(), &context())
+            .execute(&default_context(), request())
             .await,
         Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
@@ -56,8 +56,8 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
     std::assert_matches!(
         client
             .execute(
+                &default_context(),
                 request_to("https://different.fixture.test/fixture"),
-                &context()
             )
             .await,
         Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
@@ -93,7 +93,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     for (wire, succeeds) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let result = fixture_client_with_limits(address, &material, ceiling)
-            .execute(request(), &OperationContext::unbounded())
+            .execute(&OperationContext::unbounded(), request())
             .await;
         if succeeds {
             assert_eq!(
@@ -132,7 +132,7 @@ async fn fragmented_body_preserves_bytes_and_discards_trailers() {
             ..limits()
         },
     )
-    .execute(request(), &context())
+    .execute(&default_context(), request())
     .await
     .expect("fragmented exact-ceiling response reaches EOF");
     assert_eq!(response.body().as_ref(), b"abcdefghijklmnopqrstuvwxyz");
@@ -151,7 +151,7 @@ async fn parser_header_count_overflow_is_a_transport_error() {
     )
     .await;
     let error = fixture_client_with_limits(address, &material, parser_limit)
-        .execute(request(), &OperationContext::unbounded())
+        .execute(&OperationContext::unbounded(), request())
         .await
         .expect_err("header overflow precedes an admitted response");
     std::assert_matches!(
@@ -173,7 +173,7 @@ async fn largest_header_count_limit_admits_that_many_response_headers() {
     head.extend_from_slice(b"\r\n");
     let (address, server) = tls_server(&material, head.leak()).await;
     let response = fixture_client_with_limits(address, &material, largest)
-        .execute(request(), &context())
+        .execute(&default_context(), request())
         .await
         .expect("response at the header ceiling");
     assert_eq!(response.headers().len(), MAX_RESPONSE_HEADER_COUNT);
@@ -205,7 +205,7 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
             .expect("head fixture completes within its budget")
         });
         let result = fixture_client(address, &material)
-            .execute(request(), &context())
+            .execute(&default_context(), request())
             .await;
         let written = server.await.expect("head fixture joins");
         if admitted {
@@ -261,7 +261,7 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     for (wire, name, expected) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let error: Error = fixture_client_with_limits(address, &material, ceiling)
-            .execute(request(), &context())
+            .execute(&default_context(), request())
             .await
             .expect_err(name)
             .into();
@@ -287,10 +287,10 @@ async fn expired_deadline_refuses_before_network_work() {
     let client = fixture_client(listener.local_addr().expect("listener address"), &material);
     let expired = client
         .execute(
-            request(),
             &OperationContext::from_deadline(Deadline::at(
                 Instant::now() - Duration::from_millis(1),
             )),
+            request(),
         )
         .await;
     std::assert_matches!(expired, Err(ExchangeError::BeforeResponse(Error::Timeout)));
@@ -326,15 +326,15 @@ async fn stopped_request_context_refuses_all_entry_points_before_dispatch() {
         assert!(refused(
             expired,
             &client
-                .execute(request(), &context)
+                .execute(&context, request())
                 .await
                 .map_err(Error::from)
         ));
         assert!(refused(
             expired,
-            &client.execute_for_headers(request(), &context).await
+            &client.execute_for_headers(&context, request()).await
         ));
-        assert!(refused(expired, &client.prepare(request(), &context)));
+        assert!(refused(expired, &client.prepare(&context, request())));
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
@@ -350,9 +350,9 @@ async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
     let client = fixture_client(listener.local_addr().unwrap(), &material);
     for cancel_parent in [false, true] {
         let parent = OperationContext::unbounded();
-        let prepared = client.prepare(request(), &parent).unwrap();
+        let prepared = client.prepare(&parent, request()).unwrap();
         let child = prepared.context().clone();
-        let exchange = client.execute(request(), &child);
+        let exchange = client.execute(&child, request());
         let (result, _connection) = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(exchange, async {
                 let (connection, _) = listener.accept().await.unwrap();
@@ -395,7 +395,7 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     });
     let client = fixture_client(address, &material);
     let context = OperationContext::with_timeout(Duration::from_secs(2));
-    let exchange = client.execute(request(), &context);
+    let exchange = client.execute(&context, request());
     tokio::pin!(exchange);
     tokio::select! {
         result = &mut exchange => panic!("incomplete body completed: {result:?}"),
@@ -448,7 +448,7 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
         let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let parent_context = OperationContext::with_timeout(Duration::from_secs(parent));
         let result = client
-            .execute(request(), &parent_context)
+            .execute(&parent_context, request())
             .with_subscriber(subscriber)
             .await;
         std::assert_matches!(
@@ -489,7 +489,7 @@ async fn dispatch_can_be_refused_after_request_setup() {
     let mut observed_status = None;
 
     let result = client
-        .prepare(request(), &context)
+        .prepare(&context, request())
         .unwrap()
         .send_checked(
             || {
@@ -562,8 +562,13 @@ async fn terminal_observation_preserves_the_timely_operation_result_once() {
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let client = fixture_client(address, &material);
     let end = Instant::now() + Duration::from_secs(1);
-    let ctx = OperationContext::from_deadline(Deadline::at(end));
-    let response = client.execute(request(), &ctx).await.unwrap();
+    let response = client
+        .execute(
+            &OperationContext::from_deadline(Deadline::at(end)),
+            request(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
     assert!(Instant::now() > end, "terminal callback crossed the end");
     server.abort();
@@ -620,8 +625,8 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
     let mut ceiling = limits();
     ceiling.operation_timeout = Duration::from_secs(10);
     let client = fixture_client_with_limits(address, &material, ceiling);
-    let ctx = OperationContext::with_timeout(Duration::from_secs(10));
-    let mut exchange = Box::pin(client.execute(request(), &ctx));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut exchange = Box::pin(client.execute(&context, request()));
     tokio::select! {
         result = &mut exchange => panic!("response is still gated: {result:?}"),
         result = request_received => result.unwrap(),
@@ -675,8 +680,8 @@ async fn unresponsive_address_leaves_time_for_the_next_one() {
     let response =
         fixture_client_resolving(FIXTURE_HOST, vec![unresponsive, address], &material, limits)
             .execute(
-                request(),
                 &OperationContext::with_timeout(Duration::from_secs(2)),
+                request(),
             )
             .await
             .expect("the second address answers");
@@ -699,7 +704,7 @@ async fn a_reused_client_uses_a_replacement_address_on_its_next_dial() {
 
     assert_eq!(
         client
-            .execute(request(), &context())
+            .execute(&default_context(), request())
             .await
             .expect("old address response")
             .status(),
@@ -710,7 +715,7 @@ async fn a_reused_client_uses_a_replacement_address_on_its_next_dial() {
     resolver.replace(vec![new_address]);
     assert_eq!(
         client
-            .execute(request(), &context())
+            .execute(&default_context(), request())
             .await
             .expect("replacement address response")
             .status(),
@@ -744,7 +749,7 @@ async fn request_is_not_replayed_after_the_peer_received_it() {
     });
     std::assert_matches!(
         fixture_client(address, &material)
-            .execute(request(), &context())
+            .execute(&default_context(), request())
             .await,
         Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
@@ -760,11 +765,11 @@ async fn completed_exchange_reuses_an_idle_https_connection() {
     let (address, server) = tls_server_reuses_one_connection(&material).await;
     let client = fixture_client(address, &material);
     client
-        .execute(request(), &context())
+        .execute(&default_context(), request())
         .await
         .expect("first pooled response");
     let second = client
-        .execute(request(), &context())
+        .execute(&default_context(), request())
         .await
         .expect("second pooled response");
     assert_eq!(second.status(), http::StatusCode::NO_CONTENT);
@@ -787,7 +792,7 @@ async fn target_and_caller_headers_reach_the_wire_unchanged() {
             .insert(name, value.parse().expect("header value"));
     }
     fixture_client(address, &material)
-        .execute(request, &context())
+        .execute(&default_context(), request)
         .await
         .expect("captured request response");
     let wire = captured.await.expect("captured request");
@@ -811,7 +816,7 @@ async fn buffered_body_length_replaces_caller_framing_on_the_wire() {
         .body(Bytes::from_static(b"hello"))
         .expect("misframed request");
     fixture_client(address, &material)
-        .execute(request, &context())
+        .execute(&default_context(), request)
         .await
         .expect("captured request response");
     let wire = captured.await.expect("captured request");
@@ -830,8 +835,8 @@ async fn the_client_sets_host_and_a_default_accept_on_the_wire() {
         tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     fixture_client(address, &material)
         .execute(
+            &default_context(),
             request_to("https://PROVIDER.fixture.test/items"),
-            &context(),
         )
         .await
         .expect("captured request response");
@@ -871,7 +876,7 @@ async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
                 .insert(header::CONTENT_LENGTH, sent.parse().expect("length"));
         }
         fixture_client(address, &material)
-            .execute(request, &context())
+            .execute(&default_context(), request)
             .await
             .expect("captured request response");
         let wire = captured
@@ -919,7 +924,7 @@ async fn opted_in_client_sends_the_context_of_its_named_client_span() {
     );
     fixture_client(address, &material)
         .with_trace_context()
-        .execute(request, &context())
+        .execute(&default_context(), request)
         .await
         .expect("captured request response");
     let wire = captured.await.expect("captured request");
@@ -961,7 +966,7 @@ async fn transport_source_redacts_request_and_response_content() {
             .expect("credential header"),
     );
     let error = fixture_client(address, &material)
-        .execute(request, &context())
+        .execute(&default_context(), request)
         .await
         .expect_err("truncated response fails");
     let mut diagnostics = String::new();
@@ -1096,7 +1101,7 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
     let client = Client::try_new_for_test_https(origin.clone(), limits(), &material.root, address)
         .expect("fixture HTTPS client");
     let response = client
-        .execute(request(), &context())
+        .execute(&default_context(), request())
         .await
         .expect("fixture HTTPS response");
     assert_eq!(response.status(), http::StatusCode::OK);
@@ -1108,7 +1113,7 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
     let untrusted = TlsMaterial::new(FIXTURE_HOST);
     let error = Client::try_new_for_test_https(origin.clone(), limits(), &untrusted.root, address)
         .expect("client with different root")
-        .execute(request(), &context())
+        .execute(&default_context(), request())
         .await
         .expect_err("untrusted root fails TLS")
         .into_error();

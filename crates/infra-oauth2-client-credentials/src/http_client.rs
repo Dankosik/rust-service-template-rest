@@ -81,13 +81,13 @@ impl ServiceHttpClient {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         execute_authenticated(
             &self.resource,
-            request,
             context,
+            request,
             Grant::Service(&self.tokens),
         )
         .await
@@ -101,7 +101,7 @@ impl ServiceRequestClient<'_> {
     }
 
     pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
-        self.client.execute(request, self.context).await
+        self.client.execute(self.context, request).await
     }
 }
 
@@ -124,14 +124,14 @@ impl ExchangeHttpClient {
 
     pub async fn execute(
         &self,
+        context: &OperationContext,
         request: Request<Bytes>,
         subject: &OnBehalfOf,
-        context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
         execute_authenticated(
             &self.resource,
-            request,
             context,
+            request,
             Grant::Exchange(&self.tokens, subject),
         )
         .await
@@ -149,7 +149,7 @@ impl ExchangeRequestClient<'_> {
         request: Request<Bytes>,
         subject: &OnBehalfOf,
     ) -> Result<Response<Bytes>, Error> {
-        self.client.execute(request, subject, self.context).await
+        self.client.execute(self.context, request, subject).await
     }
 }
 
@@ -180,13 +180,13 @@ impl Grant<'_> {
 
 async fn execute_authenticated(
     resource: &Client,
-    request: Request<Bytes>,
     context: &OperationContext,
+    request: Request<Bytes>,
     grant: Grant<'_>,
 ) -> Result<Response<Bytes>, Error> {
     let has_authorization = request.headers().contains_key(AUTHORIZATION);
     let mut prepared = resource
-        .prepare(request, context)
+        .prepare(context, request)
         .map_err(Error::at_prepare)?;
     let deadline = acquisition_deadline(prepared.context());
     grant.check_active(deadline)?;

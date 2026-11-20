@@ -216,10 +216,10 @@ impl Client {
 
     pub async fn execute(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<Response<Bytes>, ExchangeError> {
-        self.prepare(request, context)
+        self.prepare(context, request)
             .map_err(ExchangeError::BeforeResponse)?
             .send_with_response(|| Ok::<(), Infallible>(()), |_| {}, buffer_response)
             .await
@@ -228,10 +228,10 @@ impl Client {
 
     pub async fn execute_for_headers(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<Parts, Error> {
-        self.prepare(request, context)?
+        self.prepare(context, request)?
             .send_with_response(
                 || Ok::<(), Infallible>(()),
                 |_| {},
@@ -243,8 +243,8 @@ impl Client {
 
     pub fn prepare(
         &self,
-        request: Request<Bytes>,
         context: &OperationContext,
+        request: Request<Bytes>,
     ) -> Result<PreparedRequest<'_>, Error> {
         let context = context.child_until(Deadline::after(self.limits.operation_timeout));
         context.check()?;

@@ -492,7 +492,7 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("the same messaging connection publishes after CA rotation");
 
@@ -751,7 +751,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .unwrap();
     messaging
         .producer()
-        .publish(&before, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &before)
         .await
         .unwrap();
     assert_eq!(
@@ -778,8 +778,8 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         messaging
             .producer()
             .publish(
+                &context(Instant::now() + Duration::from_millis(50), &cancel),
                 &contending,
-                &context(Instant::now() + Duration::from_millis(50), &cancel)
             )
             .await,
         Err(PublishError::Ambiguous)
@@ -812,7 +812,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .unwrap();
     messaging
         .producer()
-        .publish(&recovered, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &recovered)
         .await
         .expect("the same retained producer publishes after recovery");
     timeout(Duration::from_secs(10), async {
@@ -867,7 +867,7 @@ async fn save_ack_floor_before_restart() {
         .unwrap();
     let ack = messaging
         .producer()
-        .publish(&record, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &record)
         .await
         .unwrap();
     wait_for_source_ack_at_least(&fixture, ack.sequence).await;

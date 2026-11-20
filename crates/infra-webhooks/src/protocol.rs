@@ -6,11 +6,11 @@ use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use foldhash::HashMap;
-use http::{HeaderMap, HeaderValue, header::GetAll};
+use http::{HeaderMap, HeaderName, HeaderValue, header::GetAll};
 
-pub(crate) const WEBHOOK_ID: &str = "webhook-id";
-pub(crate) const WEBHOOK_TIMESTAMP: &str = "webhook-timestamp";
-pub(crate) const WEBHOOK_SIGNATURE: &str = "webhook-signature";
+const WEBHOOK_ID: HeaderName = HeaderName::from_static("webhook-id");
+const WEBHOOK_TIMESTAMP: HeaderName = HeaderName::from_static("webhook-timestamp");
+const WEBHOOK_SIGNATURE: HeaderName = HeaderName::from_static("webhook-signature");
 
 pub const MAX_BODY_BYTES: usize = 128 * 1024;
 const TIMESTAMP_TOLERANCE_SECONDS: u64 = 300;
@@ -84,11 +84,11 @@ impl<'a> EndpointKeyOwners<'a> {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("webhook endpoints {first} and {second} share an HMAC signing key")]
 pub struct SharedEndpointKey {
-    first: String,
-    second: String,
+    pub first: String,
+    pub second: String,
 }
 
 impl KeyRing {
@@ -133,6 +133,24 @@ impl KeyRing {
         Ok(signatures)
     }
 
+    pub fn write_headers(
+        &self,
+        headers: &mut HeaderMap,
+        message_id: &[u8],
+        timestamp: i64,
+        body: &[u8],
+    ) -> Result<(), ProtocolError> {
+        let signatures = self.signatures(message_id, timestamp, body)?;
+        let id =
+            HeaderValue::from_bytes(message_id).map_err(|_| ProtocolError::InvalidMessageId)?;
+        let signature =
+            HeaderValue::try_from(signatures).map_err(|_| ProtocolError::InvalidSignature)?;
+        headers.insert(WEBHOOK_ID, id);
+        headers.insert(WEBHOOK_TIMESTAMP, HeaderValue::from(timestamp));
+        headers.insert(WEBHOOK_SIGNATURE, signature);
+        Ok(())
+    }
+
     pub fn verify(
         &self,
         headers: &HeaderMap,
@@ -140,12 +158,12 @@ impl KeyRing {
         now: SystemTime,
     ) -> Result<VerifiedMessage, ProtocolError> {
         ensure_body_size(body)?;
-        let message_id = unambiguous_header(headers, WEBHOOK_ID)?;
+        let message_id = unambiguous_header(headers, &WEBHOOK_ID)?;
         ensure_message_id(message_id.as_bytes())?;
-        let timestamp = parse_timestamp(unambiguous_header(headers, WEBHOOK_TIMESTAMP)?)?;
+        let timestamp = parse_timestamp(unambiguous_header(headers, &WEBHOOK_TIMESTAMP)?)?;
         ensure_timestamp_window(timestamp, now)?;
 
-        let signatures = headers.get_all(WEBHOOK_SIGNATURE);
+        let signatures = headers.get_all(&WEBHOOK_SIGNATURE);
         if signatures.iter().next().is_none() {
             return Err(ProtocolError::MissingHeader);
         }
@@ -157,9 +175,12 @@ impl KeyRing {
             })
         };
         let matched = match verify_key(&self.active) {
-            Some(true) => true,
-            Some(false) => self.previous.as_ref().and_then(verify_key) == Some(true),
-            None => false,
+            SignatureMatch::Matched => true,
+            SignatureMatch::Mismatched => self
+                .previous
+                .as_ref()
+                .is_some_and(|key| verify_key(key) == SignatureMatch::Matched),
+            SignatureMatch::NoCandidates => false,
         };
         if matched {
             return Ok(VerifiedMessage {
@@ -179,7 +200,7 @@ pub struct VerifiedMessage {
 
 impl VerifiedMessage {
     #[must_use]
-    pub const fn message_id(&self) -> &Bytes {
+    pub fn message_id(&self) -> &[u8] {
         &self.message_id
     }
 
@@ -237,7 +258,7 @@ pub(crate) fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
 
 fn unambiguous_header<'a>(
     headers: &'a HeaderMap,
-    name: &'static str,
+    name: &HeaderName,
 ) -> Result<&'a HeaderValue, ProtocolError> {
     let mut values = headers.get_all(name).iter();
     let first = values.next().ok_or(ProtocolError::MissingHeader)?;
@@ -284,10 +305,17 @@ fn tag(key: &SigningKey, message_id: &[u8], timestamp: &[u8], body: &[u8]) -> hm
     context.sign()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignatureMatch {
+    Matched,
+    Mismatched,
+    NoCandidates,
+}
+
 fn matches_v1_signature(
     signatures: &GetAll<'_, HeaderValue>,
     make_tag: impl Fn() -> hmac::Tag,
-) -> Option<bool> {
+) -> SignatureMatch {
     let expected = OnceCell::new();
     let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
     let matched = signatures
@@ -304,7 +332,13 @@ fn matches_v1_signature(
                 )
                 .is_ok()
         });
-    expected.get().map(|_| matched)
+    if expected.get().is_none() {
+        SignatureMatch::NoCandidates
+    } else if matched {
+        SignatureMatch::Matched
+    } else {
+        SignatureMatch::Mismatched
+    }
 }
 
 #[cfg(test)]
@@ -416,11 +450,30 @@ mod tests {
                 UNIX_EPOCH + Duration::from_secs(1_649_367_553),
             )
             .unwrap();
-        assert_eq!(
-            verified.message_id().as_ref(),
-            b"msg_27UH4WbU6Z5A5EzD8u03UvzRbpk"
-        );
+        assert_eq!(verified.message_id(), b"msg_27UH4WbU6Z5A5EzD8u03UvzRbpk");
         assert_eq!(verified.timestamp(), 1_649_367_553);
+    }
+
+    #[test]
+    fn write_headers_round_trips_through_verify_and_refuses_non_header_message_ids() {
+        let keys = KeyRing::from_encoded(UPSTREAM_KEY, Some(ARBITRARY_BYTES_KEY)).unwrap();
+        let mut headers = HeaderMap::new();
+        keys.write_headers(&mut headers, b"msg_roundtrip", 1_700_000_000, UPSTREAM_BODY)
+            .unwrap();
+        let verified = keys
+            .verify(
+                &headers,
+                UPSTREAM_BODY,
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .unwrap();
+        assert_eq!(verified.message_id(), b"msg_roundtrip");
+        assert_eq!(verified.timestamp(), 1_700_000_000);
+
+        assert_eq!(
+            keys.write_headers(&mut headers, b"msg\nline", 1_700_000_000, UPSTREAM_BODY),
+            Err(ProtocolError::InvalidMessageId)
+        );
     }
 
     #[test]
@@ -594,10 +647,10 @@ mod tests {
         let malformed_base64 = "!".repeat(super::ENCODED_TAG_BYTES - 1);
         let headers = headers("msg_1", "1", &format!("v1, v1,{malformed_base64}="));
         assert_eq!(
-            super::matches_v1_signature(&headers.get_all(super::WEBHOOK_SIGNATURE), || {
+            super::matches_v1_signature(&headers.get_all(&super::WEBHOOK_SIGNATURE), || {
                 panic!("malformed candidates should be rejected before the HMAC")
             }),
-            None
+            super::SignatureMatch::NoCandidates
         );
     }
 
@@ -642,7 +695,7 @@ mod tests {
         let verified = keys
             .verify(&raw_id_headers, body, UNIX_EPOCH + Duration::from_secs(1))
             .unwrap();
-        assert_eq!(verified.message_id().as_ref(), raw_id);
+        assert_eq!(verified.message_id(), raw_id);
     }
 
     #[test]
@@ -792,7 +845,7 @@ mod tests {
 
                 let headers = header_map(&id, &timestamp_text, &signature).unwrap();
                 let verified = keys.verify(&headers, &body, now).unwrap();
-                prop_assert_eq!(verified.message_id().as_ref(), id.as_slice());
+                prop_assert_eq!(verified.message_id(), id.as_slice());
                 prop_assert_eq!(verified.timestamp(), timestamp);
 
                 if let Some(headers) = header_map(&flip(&id, index, mask), &timestamp_text, &signature) {

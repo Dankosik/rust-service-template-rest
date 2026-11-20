@@ -94,36 +94,22 @@ impl Refusal {
 }
 
 impl Verifier {
-    #[cfg(any(test, feature = "test-support"))]
     pub async fn authenticate<'a>(
         &self,
-        authorization: impl IntoIterator<Item = &'a [u8]>,
-        transport: Transport,
-    ) -> Result<Principal, Failure> {
-        self.authenticate_with_context(
-            authorization,
-            transport,
-            &OperationContext::with_timeout(crate::provider::PROVIDER_TIMEOUT),
-        )
-        .await
-    }
-
-    pub async fn authenticate_with_context<'a>(
-        &self,
-        authorization: impl IntoIterator<Item = &'a [u8]>,
-        transport: Transport,
         context: &OperationContext,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+        transport: Transport,
     ) -> Result<Principal, Failure> {
-        self.authenticate_presented_with_context(authorization, transport, context)
+        self.authenticate_presented(context, authorization, transport)
             .await
             .map(|(principal, _)| principal)
     }
 
-    pub async fn authenticate_presented_with_context<'a>(
+    pub async fn authenticate_presented<'a>(
         &self,
+        context: &OperationContext,
         authorization: impl IntoIterator<Item = &'a [u8]>,
         transport: Transport,
-        context: &OperationContext,
     ) -> Result<(Principal, PresentedToken<'a>), Failure> {
         let counters = &self.counters.transport;
         let refusal_guard = DropGuard::new(transport, |transport| {

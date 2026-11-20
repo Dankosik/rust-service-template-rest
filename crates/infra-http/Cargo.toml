@@ -63,7 +63,7 @@ tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
-tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http", "tracing_level_info"] }
 tracing-opentelemetry = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }

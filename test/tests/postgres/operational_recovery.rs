@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
-use health::{Readiness, ReadinessControl, RefreshPolicy};
+use health::{BoxedProbe, Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
 use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
@@ -89,7 +89,10 @@ struct Instance {
 
 impl Instance {
     async fn start(pool: PgPool) -> Self {
-        let probes = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
+        let probes = Readiness::new(
+            vec![BoxedProbe::new(PostgresProbe::new(pool.clone()))],
+            POLICY,
+        );
         let readiness = probes.control();
         let refresher = probes.prepare().await.unwrap().activate().unwrap();
         assert!(readiness.reader().verdict().is_ok());

@@ -380,7 +380,7 @@ async fn prepare(
     let mut probes = listeners::readiness_probes(resources);
     // template:begin messaging:worker-bootstrap-durable-readiness
     if let Some(consumer) = &consumer {
-        probes.push(Box::new(consumer.probe()));
+        probes.push(health::BoxedProbe::new(consumer.probe()));
     }
     // template:end messaging:worker-bootstrap-durable-readiness
     Ok(Prepared {
@@ -413,7 +413,7 @@ async fn prepare_readiness(
     metrics: &infra_telemetry::Metrics,
     background: &Background,
     resources: &mut Resources,
-    probes: Vec<Box<dyn health::Probe>>,
+    probes: Vec<health::BoxedProbe>,
 ) -> Result<PreparedReadiness, WorkerError> {
     let readiness = Readiness::new(probes, listeners::refresh_policy(config)?);
     let reader = resources.readiness.insert(readiness.control()).reader();

@@ -158,7 +158,7 @@ pub(crate) fn fixture_client_with_resolver(
     Client::with_transport(origin, limits, tls, Resolver::Fixture(resolver))
 }
 
-pub(crate) fn context() -> OperationContext {
+pub(crate) fn default_context() -> OperationContext {
     OperationContext::with_timeout(Duration::from_secs(1))
 }
 

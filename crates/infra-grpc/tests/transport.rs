@@ -1996,10 +1996,10 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     let (verifier, bearer) = BearerFixture::start().await;
     let header = format!("Bearer {}", BearerMode::SELECTED.token(false));
     let (_, previously_verified) = verifier
-        .authenticate_presented_with_context(
+        .authenticate_presented(
+            &operation_context::OperationContext::unbounded(),
             [header.as_bytes()],
             infra_bearerauthn::Transport::Grpc,
-            &operation_context::OperationContext::unbounded(),
         )
         .await
         .unwrap();

@@ -113,7 +113,7 @@ async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, Disco
         .body(Bytes::new())
         .map_err(|_| DiscoveryError::Metadata("issuer discovery URL is invalid"))?;
     let context = OperationContext::with_timeout(FETCH_TIMEOUT);
-    let response = match client.execute(request, &context).await {
+    let response = match client.execute(&context, request).await {
         Ok(response) if response.status() != StatusCode::OK => {
             return Err(DiscoveryError::Status(response.status()));
         }

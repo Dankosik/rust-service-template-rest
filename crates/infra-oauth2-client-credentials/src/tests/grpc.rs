@@ -641,8 +641,8 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
         .unwrap();
     let gate = tokens.block_tokens();
     let active_subject = subject("active");
-    let exchange_context = OperationContext::with_timeout(Duration::from_secs(10));
-    let mut exchange = Box::pin(http.execute(tokens.request(), &active_subject, &exchange_context));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut exchange = Box::pin(http.execute(&context, tokens.request(), &active_subject));
     tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     let error = resource
         .client(&credentials)

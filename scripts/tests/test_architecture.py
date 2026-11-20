@@ -37,6 +37,68 @@ class ArchitectureTests(unittest.TestCase):
             self.assertTrue(any("forbids crates/b/Cargo.toml" in i for i in issues))
             self.assertTrue(any("#[path] reaches outside its package" in i for i in issues))
 
+    def test_allow_all_dependents_and_stale_allowances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for crate in ("shared", "used", "unused", "consumer"):
+                (root / f"crates/{crate}/src").mkdir(parents=True)
+                (root / f"crates/{crate}/src/lib.rs").write_text("", encoding="utf-8")
+            policy = {
+                "roles": {
+                    "shared-rules": {"rule": "std-only-shared-rules", "std_only": True, "allow_all_dependents": True},
+                    "leaf": {"rule": "leaf-only"},
+                    "consumer": {
+                        "rule": "consumer",
+                        "allow_members": {
+                            "crates/used/Cargo.toml": {"reason": "active", "authority": "test"},
+                            "crates/unused/Cargo.toml": {"reason": "stale", "authority": "test"},
+                        },
+                    },
+                    "feature": {
+                        "rule": "scaffold",
+                        "allow_members": {
+                            "crates/used/Cargo.toml": {"reason": "scaffold", "authority": "test"},
+                            "crates/missing/Cargo.toml": {"reason": "removed", "authority": "test"},
+                        },
+                    },
+                },
+                "members": {
+                    "crates/shared/Cargo.toml": {"role": "shared-rules"},
+                    "crates/used/Cargo.toml": {
+                        "role": "leaf",
+                        "allow_dependents": {"members": ["crates/consumer/Cargo.toml", "crates/unused/Cargo.toml"]},
+                    },
+                    "crates/unused/Cargo.toml": {"role": "leaf"},
+                    "crates/consumer/Cargo.toml": {"role": "consumer"},
+                },
+            }
+            meta = {
+                "workspace_members": ["shared", "used", "unused", "consumer"],
+                "packages": [
+                    {"id": "shared", "name": "shared", "manifest_path": str(root / "crates/shared/Cargo.toml"), "dependencies": []},
+                    {"id": "used", "name": "used", "manifest_path": str(root / "crates/used/Cargo.toml"), "dependencies": []},
+                    {"id": "unused", "name": "unused", "manifest_path": str(root / "crates/unused/Cargo.toml"), "dependencies": []},
+                    {
+                        "id": "consumer",
+                        "name": "consumer",
+                        "manifest_path": str(root / "crates/consumer/Cargo.toml"),
+                        "dependencies": [
+                            {"name": "shared", "kind": None, "optional": False, "path": str(root / "crates/shared")},
+                            {"name": "used", "kind": None, "optional": False, "path": str(root / "crates/used")},
+                        ],
+                    },
+                ],
+            }
+            issues = architecture.check(meta, policy, root)
+            self.assertEqual(
+                issues,
+                [
+                    "crates/used/Cargo.toml: stale allow_dependents entry crates/unused/Cargo.toml",
+                    "role consumer: stale allow_members entry crates/unused/Cargo.toml",
+                    "role feature: stale allow_members entry crates/missing/Cargo.toml",
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

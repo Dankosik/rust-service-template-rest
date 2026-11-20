@@ -33,7 +33,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
-tracing-opentelemetry-instrumentation-sdk = { workspace = true }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }

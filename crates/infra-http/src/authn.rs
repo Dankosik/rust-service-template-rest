@@ -108,11 +108,7 @@ async fn authenticate_protected(
             .iter()
             .map(axum::http::HeaderValue::as_bytes);
         verifier
-            .authenticate_presented_with_context(
-                authorization,
-                Transport::Http,
-                context.operation(),
-            )
+            .authenticate_presented(context.operation(), authorization, Transport::Http)
             .await
     };
     let (principal, delegation) = match authorize(context.operation(), result, required) {

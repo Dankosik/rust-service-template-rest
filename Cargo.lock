@@ -2156,7 +2156,6 @@ dependencies = [
 name = "health"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3127,7 +3126,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "arrayvec",
- "async-trait",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
@@ -3180,7 +3178,6 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "async-nats",
- "async-trait",
  "axum",
  "axum-extra",
  "axum-test",
