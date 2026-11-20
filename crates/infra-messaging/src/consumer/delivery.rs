@@ -324,13 +324,15 @@ impl DeliveryHandler {
         };
         let reason = reason.label();
 
-        let deadline = Deadline::after(BROKER_OPERATION_BUDGET);
+        let context = OperationContext::new(
+            Some(Deadline::after(BROKER_OPERATION_BUDGET)),
+            self.abort.clone(),
+        );
         let result = send_publication(
             &self.shared,
             self.dead_letter_subject.clone(),
             message,
-            Some(deadline),
-            &self.abort,
+            &context,
         )
         .await;
         let outcome = match &result {
@@ -549,11 +551,10 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             let created = Route::<Created>::new("orders.created");
             let mut registry = Registry::default();
-            registry.declare(&created).unwrap();
+            registry.declare(&created).unwrap().handle(accept);
             registry
                 .declare(&Route::<Shipped>::new("orders.shipped"))
                 .unwrap();
-            registry.register(&created, accept).unwrap();
             let metrics = HandlerMetrics::register(&registry);
 
             let handled = metrics.get("order.created");
@@ -623,16 +624,10 @@ mod tests {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();
             let created = Route::<Created>::new("orders.created");
             let mut registry = Registry::default();
-            registry.declare(&created).unwrap();
-            registry
-                .register(
-                    &created,
-                    OutcomeHandler {
-                        expected,
-                        token_tx: std::sync::Mutex::new(Some(token_tx)),
-                    },
-                )
-                .unwrap();
+            registry.declare(&created).unwrap().handle(OutcomeHandler {
+                expected,
+                token_tx: std::sync::Mutex::new(Some(token_tx)),
+            });
 
             let delivery = CancellationToken::new();
             let outcome =
@@ -654,21 +649,17 @@ mod tests {
         ] {
             let created = Route::<Created>::new("orders.created");
             let mut registry = Registry::default();
-            registry.declare(&created).unwrap();
-            registry
-                .register(
-                    &created,
-                    move |_: Event<Created>, context: OperationContext| async move {
-                        if expected == "timeout" {
-                            let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
-                            assert_eq!(context.remaining(), Some(Duration::ZERO));
-                        } else {
-                            context.cancel();
-                        }
-                        result
-                    },
-                )
-                .unwrap();
+            registry.declare(&created).unwrap().handle(
+                move |_: Event<Created>, context: OperationContext| async move {
+                    if expected == "timeout" {
+                        let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
+                        assert_eq!(context.remaining(), Some(Duration::ZERO));
+                    } else {
+                        context.cancel();
+                    }
+                    result
+                },
+            );
             let outcome = run_handler(
                 &registry,
                 "orders.created",
@@ -684,12 +675,11 @@ mod tests {
     async fn a_cancelled_delivery_never_invokes_the_handler() {
         let created = Route::<Created>::new("orders.created");
         let mut registry = Registry::default();
-        registry.declare(&created).unwrap();
-        registry
-            .register(&created, |_: Event<Created>, _: OperationContext| async {
+        registry.declare(&created).unwrap().handle(
+            |_: Event<Created>, _: OperationContext| async {
                 panic!("cancelled delivery reached the handler");
-            })
-            .unwrap();
+            },
+        );
         let cancel = CancellationToken::new();
         cancel.cancel();
         let outcome = run_handler(&registry, "orders.created", created_envelope(), &cancel).await;

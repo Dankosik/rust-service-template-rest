@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use operation_context::OperationContext;
 use secrecy::SecretString;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::connection::NativeConnection;
@@ -14,9 +13,6 @@ use crate::error::MessagingError;
 use crate::probe::{MessagingProbe, PublishWorkMetrics};
 use crate::producer::{Producer, PublishMetrics};
 use crate::registry::Registry;
-// template:begin outbox:messaging-outbox-refusal-import
-use crate::topology::report_refusal_failure;
-// template:end outbox:messaging-outbox-refusal-import
 use crate::topology::{TopologyAdmission, admit_topology};
 use crate::wire::HEADER_LIMIT_BYTES;
 
@@ -65,7 +61,7 @@ pub struct Messaging {
 }
 
 // template:begin outbox:messaging-outbox-producer
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OutboxProducer(pub(crate) Producer);
 // template:end outbox:messaging-outbox-producer
 
@@ -79,8 +75,7 @@ struct StartupConfig {
     options: MessagingOptions,
     publication_permits: usize,
     envelope_limit_bytes: usize,
-    deadline: Instant,
-    cancel: CancellationToken,
+    context: OperationContext,
 }
 
 #[derive(Debug)]
@@ -137,14 +132,13 @@ pub enum CloseOutcome {
 impl Messaging {
     pub async fn connect(
         options: MessagingOptions,
-        deadline: Instant,
-        cancel: CancellationToken,
+        context: &OperationContext,
     ) -> Result<Self, MessagingError> {
-        let mut startup = Self::prepare(options, deadline, cancel.clone())?;
+        let mut startup = Self::prepare(options, context)?;
         match startup.admit().await {
             Ok(messaging) => Ok(messaging),
             Err(error) => {
-                let outcome = startup.close(deadline, &cancel).await;
+                let outcome = startup.close(context).await;
                 if outcome != CloseOutcome::Complete {
                     tracing::warn!(?outcome, "messaging_admission_close_incomplete");
                 }
@@ -155,8 +149,7 @@ impl Messaging {
 
     pub fn prepare(
         options: MessagingOptions,
-        deadline: Instant,
-        cancel: CancellationToken,
+        context: &OperationContext,
     ) -> Result<MessagingStartup, MessagingError> {
         if options.max_payload_bytes == 0 {
             return Err(MessagingError::Bounds);
@@ -180,8 +173,7 @@ impl Messaging {
                     options,
                     publication_permits,
                     envelope_limit_bytes,
-                    deadline,
-                    cancel,
+                    context: context.clone(),
                 }),
                 connection: None,
             },
@@ -197,14 +189,9 @@ impl Messaging {
 
     // template:begin outbox:messaging-outbox-producer-access
     pub fn outbox_producer(&self) -> Result<OutboxProducer, MessagingError> {
-        self.topology.outbox_source.map_err(|refusal| {
-            report_refusal_failure(
-                "source_stream",
-                refusal,
-                self.shared.envelope_limit_bytes,
-                None,
-            )
-        })?;
+        self.topology
+            .outbox_source
+            .map_err(|refusal| refusal.report(self.shared.envelope_limit_bytes))?;
         Ok(OutboxProducer(self.producer()))
     }
     // template:end outbox:messaging-outbox-producer-access
@@ -219,8 +206,7 @@ impl Messaging {
     pub async fn consumer(
         &self,
         registry: Registry,
-        deadline: Instant,
-        cancel: &CancellationToken,
+        context: &OperationContext,
     ) -> Result<Consumer, MessagingError> {
         if self.shared.refuses_work() {
             return Err(MessagingError::Unavailable);
@@ -233,19 +219,12 @@ impl Messaging {
         registry
             .require_handlers()
             .map_err(|_| MessagingError::Configuration("no typed event handlers are registered"))?;
-        Consumer::admit(
-            Arc::clone(&self.shared),
-            admission,
-            registry,
-            deadline,
-            cancel,
-        )
-        .await
+        Consumer::admit(Arc::clone(&self.shared), admission, registry, context).await
     }
 
-    pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
+    pub async fn close(self, context: &OperationContext) -> CloseOutcome {
         self.shared.begin_drain();
-        self.shared.connection.close(deadline, cancel).await
+        self.shared.connection.close(context).await
     }
 }
 
@@ -268,9 +247,7 @@ impl MessagingStartup {
         let connection = match connection {
             Some(existing) => existing.clone(),
             slot @ None => {
-                let opened =
-                    NativeConnection::open(&config.options, config.deadline, &config.cancel)
-                        .await?;
+                let opened = NativeConnection::open(&config.options, &config.context).await?;
                 *slot = Some(opened.clone());
                 opened
             }
@@ -287,8 +264,7 @@ impl MessagingStartup {
             config.envelope_limit_bytes,
             client,
             &jetstream,
-            config.deadline,
-            &config.cancel,
+            &config.context,
         )
         .await?;
         let messaging = Messaging {
@@ -320,16 +296,16 @@ impl MessagingStartup {
         }
     }
 
-    pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
+    pub async fn close(self, context: &OperationContext) -> CloseOutcome {
         match self.phase {
             StartupPhase::Starting {
                 connection: Some(connection),
                 ..
-            } => connection.close(deadline, cancel).await,
+            } => connection.close(context).await,
             StartupPhase::Starting {
                 connection: None, ..
             } => CloseOutcome::Complete,
-            StartupPhase::Admitted(messaging) => messaging.close(deadline, cancel).await,
+            StartupPhase::Admitted(messaging) => messaging.close(context).await,
         }
     }
 }
@@ -367,8 +343,7 @@ mod tests {
                         }
                     }),
                 },
-                Instant::now() + BROKER_OPERATION_BUDGET,
-                CancellationToken::new(),
+                &OperationContext::with_timeout(BROKER_OPERATION_BUDGET),
             );
             if accepted {
                 let startup = result.expect("valid bounds are prepared");

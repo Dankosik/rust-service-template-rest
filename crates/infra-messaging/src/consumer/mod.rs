@@ -12,6 +12,7 @@ use async_nats::jetstream::consumer::{
 };
 use async_nats::jetstream::context::{ConsumerInfoError, ConsumerInfoErrorKind};
 use futures_util::{FutureExt as _, StreamExt as _};
+use operation_context::OperationContext;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
@@ -128,7 +129,7 @@ impl PullLimits {
     }
 }
 
-#[derive(Clone, Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConsumerError {
     #[error("messaging durable consumer was deleted, replaced, or reconfigured incompatibly")]
     ConsumerLost,
@@ -147,7 +148,7 @@ pub enum ConsumerError {
 }
 
 impl ConsumerError {
-    const fn requires_delivery_drain(&self) -> bool {
+    const fn requires_delivery_drain(self) -> bool {
         matches!(
             self,
             Self::DeadLetterTooLarge { .. } | Self::DeadLetterStreamSealed { .. }
@@ -174,8 +175,7 @@ impl Consumer {
         shared: Arc<Shared>,
         admission: ConsumerAdmission,
         registry: Registry,
-        deadline: Instant,
-        cancel: &CancellationToken,
+        context: &OperationContext,
     ) -> Result<Self, MessagingError> {
         let ConsumerAdmission {
             options,
@@ -228,8 +228,7 @@ impl Consumer {
             ..Default::default()
         };
         let pull = bounded_operation(
-            deadline,
-            cancel,
+            context,
             bind_durable(
                 &shared.jetstream,
                 &shared.source_stream,
@@ -271,12 +270,12 @@ impl Consumer {
         let task = tokio::spawn(async move {
             let shared = Arc::clone(&self.shared);
             let result = self.run(task_drain).await;
-            if let Err(error) = &result {
+            if let Err(error) = result {
                 if !matches!(error, ConsumerError::DrainTimedOut) {
                     shared.mark_failed();
                     tracing::error!(reason = %error, "messaging_consumer_stopped");
                 }
-                let _ = failure_tx.send(Some(error.clone()));
+                let _ = failure_tx.send(Some(error));
             }
             result
         });
@@ -295,7 +294,7 @@ impl Consumer {
             () = self.handler.abort.cancelled() => Err(ConsumerError::DrainTimedOut),
             result = async {
                 let result = self.consume(&mut deliveries, &drain).await;
-                if result.as_ref().is_err_and(ConsumerError::requires_delivery_drain) {
+                if result.is_err_and(ConsumerError::requires_delivery_drain) {
                     while deliveries.join_next().await.is_some() {}
                 }
                 result
@@ -802,7 +801,7 @@ impl ConsumerHandle {
     pub async fn failed(&self) -> ConsumerError {
         let mut failure = self.failure.clone();
         match failure.wait_for(Option::is_some).await {
-            Ok(error) => error.clone().unwrap_or(ConsumerError::TaskEnded),
+            Ok(error) => (*error).unwrap_or(ConsumerError::TaskEnded),
             Err(_) => ConsumerError::TaskEnded,
         }
     }
@@ -815,14 +814,14 @@ impl ConsumerHandle {
     pub async fn finish(&mut self, deadline: Instant) -> Result<(), ConsumerError> {
         self.drain();
         let task = match &mut self.supervisor {
-            Supervisor::Finished(result) => return result.clone(),
+            Supervisor::Finished(result) => return *result,
             Supervisor::Running(task) => task,
         };
         let result = match tokio::time::timeout_at(deadline, &mut *task).await {
             Ok(result) => result.unwrap_or(Err(ConsumerError::TaskEnded)),
             Err(_) => return Err(ConsumerError::DrainTimedOut),
         };
-        self.supervisor = Supervisor::Finished(result.clone());
+        self.supervisor = Supervisor::Finished(result);
         result
     }
 }

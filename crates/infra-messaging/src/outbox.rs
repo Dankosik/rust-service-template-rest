@@ -1,24 +1,24 @@
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::time::Duration;
 
 use arrayvec::ArrayString;
 use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
-use infra_jobs::outbox::{self as job_outbox, Order, ReconcileOutcome};
+use infra_jobs::outbox::{self as job_outbox, Order};
 use infra_jobs::{Handler, Job, JobError, Kinds, Policy, RetrySchedule};
 use infra_postgres::{Tx, TxMode};
-use operation_context::Deadline;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::UtcDateTime;
 use uuid::NonNilUuid;
 
-use crate::error::{PublishError, PublishRejection};
+use crate::budget::BROKER_OPERATION_BUDGET;
+use crate::error::{PrepareError, PublishError, PublishRejection};
 use crate::prepared::{
     PreparedEvent, Publication, payload_depth_allowed, validate_reconstructed_envelope,
 };
-use crate::{EnvelopeError, OutboxProducer, PublicationRoute};
+use crate::{OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
@@ -33,12 +33,10 @@ const POLICY: Policy = Policy {
     },
 };
 
-pub use infra_jobs::outbox::OutboxEnqueued;
+pub use infra_jobs::outbox::{OutboxEnqueued, ReconcileOutcome};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxEnqueueError {
-    #[error("new outbox events require a publication route bound with for_outbox(publisher_id)")]
-    PublisherRequired,
     #[error("outbox payload is {bytes} bytes; the immutable intent allows {max_bytes}")]
     PayloadTooLarge { bytes: usize, max_bytes: usize },
     #[error("outbox payload contains a decoded NUL character")]
@@ -67,10 +65,20 @@ impl From<job_outbox::OutboxEnqueueError> for OutboxEnqueueError {
     }
 }
 
-#[derive_where::derive_where(Clone, Debug)]
-pub struct OutboxRoute<T: EventPayload> {
+#[derive_where::derive_where(Clone)]
+pub struct OutboxRoute<T> {
     publication: PublicationRoute<T>,
     id_prefix: ArrayString<43>,
+}
+
+impl<T: EventPayload> fmt::Debug for OutboxRoute<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutboxRoute")
+            .field("publication", &self.publication)
+            .field("id_prefix", &self.id_prefix)
+            .finish()
+    }
 }
 
 impl<T: EventPayload> PublicationRoute<T> {
@@ -86,41 +94,84 @@ impl<T: EventPayload> PublicationRoute<T> {
 }
 
 impl<T: EventPayload + Serialize> OutboxRoute<T> {
-    pub fn prepare(&self, event: &Event<T>) -> Result<PreparedEvent, EnvelopeError> {
-        self.publication.prepare_outbox(event, || {
-            crate::wire::prefixed_digest_hex(
-                &self.id_prefix,
-                &Sha256::digest(event.id.as_bytes()).into(),
-            )
-        })
+    pub fn prepare(&self, event: &Event<T>) -> Result<OutboxEvent, PrepareError> {
+        self.publication
+            .prepare_with_id(event, || {
+                crate::wire::prefixed_digest_hex(
+                    &self.id_prefix,
+                    &Sha256::digest(event.id.as_bytes()).into(),
+                )
+            })
+            .map(OutboxEvent)
     }
 }
 
-pub fn kinds(producer: OutboxProducer) -> Result<Kinds, infra_jobs::KindError> {
-    job_outbox::publisher_kinds(POLICY, producer)
-}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboxEvent(PreparedEvent);
 
-#[derive(Default)]
-struct OutboxText<'a> {
-    subject: &'a str,
-    message_id: &'a str,
-    publication_id: &'a str,
-    event_type: &'a str,
-}
-
-impl<'a> OutboxText<'a> {
-    fn fields(self) -> [&'a str; 4] {
-        let Self {
-            subject,
-            message_id,
-            publication_id,
-            event_type,
-        } = self;
-        [subject, message_id, publication_id, event_type]
+impl AsRef<PreparedEvent> for OutboxEvent {
+    fn as_ref(&self) -> &PreparedEvent {
+        &self.0
     }
 }
 
-impl PreparedEvent {
+impl From<OutboxEvent> for PreparedEvent {
+    fn from(event: OutboxEvent) -> Self {
+        event.0
+    }
+}
+
+impl OutboxEvent {
+    #[must_use]
+    pub const fn as_prepared(&self) -> &PreparedEvent {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_prepared(self) -> PreparedEvent {
+        self.0
+    }
+
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        self.0.subject()
+    }
+
+    #[must_use]
+    pub fn message_id(&self) -> &str {
+        self.0.message_id()
+    }
+
+    #[must_use]
+    pub fn publication_id(&self) -> &str {
+        self.0.publication_id()
+    }
+
+    #[must_use]
+    pub fn event_type(&self) -> &str {
+        self.0.event_type()
+    }
+
+    #[must_use]
+    pub const fn schema_version(&self) -> u16 {
+        self.0.schema_version()
+    }
+
+    #[must_use]
+    pub fn schema_label(&self) -> String {
+        self.0.schema_label()
+    }
+
+    #[must_use]
+    pub const fn occurred_at(&self) -> UtcDateTime {
+        self.0.occurred_at()
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &Bytes {
+        self.0.payload()
+    }
+
     pub async fn enqueue(
         &self,
         tx: &mut Tx<'_, impl TxMode>,
@@ -149,15 +200,66 @@ impl PreparedEvent {
         tx: &mut Tx<'_, impl TxMode>,
         order: Option<Order<'_>>,
     ) -> Result<OutboxEnqueued, OutboxEnqueueError> {
+        let intent = self.0.prepare_outbox_intent().await?;
+        Ok(job_outbox::enqueue(tx, &intent, order).await?)
+    }
+}
+
+pub fn kinds(producer: OutboxProducer) -> Result<Kinds, infra_jobs::KindError> {
+    job_outbox::publisher_kinds(POLICY, producer)
+}
+
+#[derive(Default)]
+struct OutboxText<'a> {
+    subject: &'a str,
+    message_id: &'a str,
+    publication_id: &'a str,
+    event_type: &'a str,
+}
+
+impl<'a> OutboxText<'a> {
+    fn fields(self) -> [&'a str; 4] {
+        let Self {
+            subject,
+            message_id,
+            publication_id,
+            event_type,
+        } = self;
+        [subject, message_id, publication_id, event_type]
+    }
+}
+
+impl PreparedEvent {
+    pub async fn reconcile_legacy_outbox(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+    ) -> Result<ReconcileOutcome, OutboxEnqueueError> {
+        self.reconcile_legacy_outbox_with_order(tx, None).await
+    }
+
+    pub async fn reconcile_legacy_outbox_ordered(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+        aggregate_key: &str,
+        version: i64,
+    ) -> Result<ReconcileOutcome, OutboxEnqueueError> {
+        self.reconcile_legacy_outbox_with_order(
+            tx,
+            Some(Order {
+                aggregate_key,
+                version,
+            }),
+        )
+        .await
+    }
+
+    async fn reconcile_legacy_outbox_with_order(
+        &self,
+        tx: &mut Tx<'_, impl TxMode>,
+        order: Option<Order<'_>>,
+    ) -> Result<ReconcileOutcome, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
-        if self.has_bound_publication() {
-            Ok(job_outbox::enqueue(tx, &intent, order).await?)
-        } else {
-            match job_outbox::reconcile(tx, &intent, order).await? {
-                ReconcileOutcome::Matched => Ok(OutboxEnqueued::Duplicate),
-                ReconcileOutcome::Missing => Err(OutboxEnqueueError::PublisherRequired),
-            }
-        }
+        Ok(job_outbox::reconcile(tx, &intent, order).await?)
     }
 
     async fn prepare_outbox_intent(&self) -> Result<PublishDomainEvent, OutboxEnqueueError> {
@@ -230,11 +332,10 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
             occurred_at,
             payload,
         };
-        let deadline = crate::budget::within_operation_budget(job.deadline());
-        let cancel = job.cancellation();
-        let admission = crate::topology::recheck_outbox_source(&producer.shared, deadline, &cancel);
+        let context = job.context().child(BROKER_OPERATION_BUDGET);
+        let admission = crate::topology::recheck_outbox_source(&producer.shared, &context);
         producer
-            .publish_after_admission(&event, Some(Deadline::at(deadline)), &cancel, admission)
+            .publish_after_admission(&event, &context, admission)
             .await
             .map(|_| ())
             .map_err(publication_job_error)

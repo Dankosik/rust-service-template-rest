@@ -9,7 +9,7 @@ use infra_http_transport::{Drained, Server};
 use infra_jobs::Started;
 // template:end jobs:worker-shutdown-jobs-imports
 // template:begin messaging:worker-shutdown-messaging-imports
-use infra_messaging::{CloseOutcome, MessagingStartup};
+use infra_messaging::{CloseOutcome, Deadline, MessagingStartup, OperationContext};
 // template:end messaging:worker-shutdown-messaging-imports
 // template:begin jobs:worker-shutdown-postgres-imports
 use infra_postgres::Pool;
@@ -475,8 +475,9 @@ async fn close_pool(pool: &Pool, budget: Duration) -> Outcome {
 
 // template:begin messaging:worker-shutdown-close-messaging-fn
 async fn close_messaging(broker: MessagingStartup, deadline: Instant) -> Outcome {
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let closed = broker.close(deadline, &cancel).await;
+    let closed = broker
+        .close(&OperationContext::from_deadline(Deadline::at(deadline)))
+        .await;
     match closed {
         CloseOutcome::Complete => {
             tracing::info!("messaging_closed");

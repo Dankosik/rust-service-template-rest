@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
 use infra_jobs::{Engine, KindError};
-use infra_messaging::{Messaging, MessagingError};
+use infra_messaging::{MessagingError, OutboxProducer};
 use infra_postgres::Pool;
 
 use super::WorkerError;
@@ -9,11 +9,11 @@ use super::messaging::RetainedMessages;
 
 pub(super) fn with_publisher(
     pool: Option<&Pool>,
-    messaging: Option<&Messaging>,
+    outbox: Option<OutboxProducer>,
     ordinary: Option<Engine>,
 ) -> Result<Engine, WorkerError> {
-    let messaging = messaging.ok_or(MessagingError::Connection)?;
-    let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer()?)?;
+    let outbox = outbox.ok_or(MessagingError::Connection)?;
+    let kinds = infra_messaging::outbox::kinds(outbox)?;
     match ordinary {
         Some(mut engine) => {
             engine

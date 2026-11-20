@@ -18,11 +18,11 @@ use std::time::SystemTime;
 use async_nats::jetstream::{self, consumer, stream};
 use domain_events::{Event, EventPayload};
 use infra_jobs::{Engine, EnqueueError, Kinds};
-use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
+use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, OutboxEvent, ReconcileOutcome};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
-    ConsumerOptions, EnvelopeError, EventHandler, HandlerError, Messaging, MessagingError,
-    MessagingOptions, Registry, Route, TransportSecurity,
+    ConsumerOptions, EventHandler, HandlerError, Messaging, MessagingError, MessagingOptions,
+    PrepareError, Registry, Route, TransportSecurity,
 };
 use infra_postgres::{Isolation, Pool, TxError};
 use operation_context::{Deadline, OperationContext};
@@ -164,8 +164,7 @@ impl Fixture {
     async fn connect_producer(&self) -> Result<Messaging, MessagingError> {
         Messaging::connect(
             messaging_options(self),
-            Instant::now() + WAIT,
-            CancellationToken::new(),
+            &OperationContext::with_timeout(WAIT),
         )
         .await
     }
@@ -326,10 +325,9 @@ async fn finish(run: EngineRun, pools: &[&Pool]) {
 }
 
 async fn close(messaging: Messaging) {
-    let cancel = CancellationToken::new();
     assert_eq!(
         messaging
-            .close(Instant::now() + CLOSE_BUDGET, &cancel)
+            .close(&OperationContext::with_timeout(CLOSE_BUDGET))
             .await,
         infra_messaging::CloseOutcome::Complete
     );
@@ -370,7 +368,7 @@ async fn outbox_count(pool: &PgPool) -> i64 {
         .expect("outbox row count")
 }
 
-fn prepared(fixture: &Fixture, id: &str, value: &str) -> infra_messaging::PreparedEvent {
+fn prepared(fixture: &Fixture, id: &str, value: &str) -> OutboxEvent {
     fixture
         .publication
         .clone()
@@ -385,7 +383,7 @@ enum Step {
     #[display("caller refused the transaction")]
     Refused,
     #[display("envelope: {_0}")]
-    Envelope(EnvelopeError),
+    Envelope(PrepareError),
     #[display("outbox: {_0}")]
     Outbox(OutboxEnqueueError),
     #[display("jobs: {_0}")]
@@ -427,7 +425,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
             "event-float-retry",
             Payload::Number(Some(f64::NAN)),
             Payload::Number(None),
-            EnvelopeError::Serialization,
+            PrepareError::Serialization,
             b"null".to_vec(),
         ),
         (
@@ -436,7 +434,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
             Payload::Json(
                 serde_json::value::RawValue::from_string(raw127.clone()).expect("raw JSON"),
             ),
-            EnvelopeError::PayloadStructure,
+            PrepareError::PayloadStructure,
             raw127.into_bytes(),
         ),
     ];
@@ -631,8 +629,8 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
 async fn verify_completed_identity(
     messaging: &Messaging,
     business: &Pool,
-    reordered: &infra_messaging::PreparedEvent,
-    same: &infra_messaging::PreparedEvent,
+    reordered: &OutboxEvent,
+    same: &OutboxEvent,
     job_id: &str,
 ) {
     let cleanup = Engine::new(
@@ -685,15 +683,17 @@ async fn independent_publishers_deliver_their_own_event_for_the_same_local_id(po
         .prepare(&event(local_id, "unbound"))
         .unwrap();
     let reconcile = async || {
-        jobs.in_tx(async |tx| -> Result<_, Step> { unscoped.enqueue(tx).await.map_err(Step::from) })
-            .await
+        jobs.in_tx(async |tx| -> Result<_, Step> {
+            unscoped
+                .reconcile_legacy_outbox(tx)
+                .await
+                .map_err(Step::from)
+        })
+        .await
     };
     let (a, b) = tokio::join!(reconcile(), reconcile());
     for outcome in [a, b] {
-        std::assert_matches!(
-            outcome,
-            Err(Step::Outbox(OutboxEnqueueError::PublisherRequired))
-        );
+        std::assert_matches!(outcome, Ok(ReconcileOutcome::Missing));
     }
     assert_eq!(outbox_count(jobs.as_sqlx()).await, 0);
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
@@ -886,8 +886,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
     let relay = AckDroppingRelay::start(&fixture.stream).await;
     let first_messaging = Messaging::connect(
         messaging_options_with_servers(&fixture, vec![relay.url.clone()]),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
+        &OperationContext::with_timeout(WAIT),
     )
     .await
     .expect("producer-only messaging admits through the transparent relay");
@@ -1030,8 +1029,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
             max_payload_bytes: 64,
             ..messaging_options(&fixture)
         },
-        Instant::now() + WAIT,
-        CancellationToken::new(),
+        &OperationContext::with_timeout(WAIT),
     )
     .await
     .expect("producer-only messaging admits before the controlled outage");
@@ -1049,7 +1047,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
             Ok(())
         })
         .await;
-    std::assert_matches!(refused, Err(Step::Envelope(EnvelopeError::PayloadTooLarge)));
+    std::assert_matches!(refused, Err(Step::Envelope(PrepareError::PayloadTooLarge)));
     assert_eq!(outbox_count(jobs.as_sqlx()).await, before);
     let intent = publication
         .prepare(&event("event-exhausted", &"x".repeat(52)))
@@ -1259,7 +1257,7 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     let connect = async |limit| {
         let mut options = messaging_options(&fixture);
         options.max_payload_bytes = limit;
-        Messaging::connect(options, Instant::now() + WAIT, CancellationToken::new())
+        Messaging::connect(options, &OperationContext::with_timeout(WAIT))
             .await
             .unwrap()
     };
@@ -1445,8 +1443,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     let fixture = Fixture::create_with_consumer(true).await;
     let messaging = Messaging::connect(
         consumer_options(&fixture, &fixture.durable),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
+        &OperationContext::with_timeout(WAIT),
     )
     .await
     .expect("messaging consumer topology admits");
@@ -1456,20 +1453,17 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     let registry = effect_registry(&fixture, &effects, &invoked);
     let cancel = CancellationToken::new();
     let mut handle = messaging
-        .consumer(registry, Instant::now() + WAIT, &cancel)
+        .consumer(
+            registry,
+            &OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone()),
+        )
         .await
         .expect("consumer admits")
         .start(&cancel);
     let event = prepared(&fixture, "event-durable-effect", "same");
     messaging
         .producer()
-        .publish(
-            &OperationContext::new(
-                Some(Deadline::at(Instant::now() + WAIT)),
-                CancellationToken::new(),
-            ),
-            &event,
-        )
+        .publish(&OperationContext::with_timeout(WAIT), event.as_prepared())
         .await
         .expect("first publication ACKs");
     poll_until("first durable effect commits", WAIT, POLL, async || {
@@ -1483,13 +1477,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     tokio::time::sleep(fixture.duplicate_window + Duration::from_millis(20)).await;
     messaging
         .producer()
-        .publish(
-            &OperationContext::new(
-                Some(Deadline::at(Instant::now() + WAIT)),
-                CancellationToken::new(),
-            ),
-            &event,
-        )
+        .publish(&OperationContext::with_timeout(WAIT), event.as_prepared())
         .await
         .expect("same-ID publication after broker window ACKs");
     poll_until(
@@ -1616,15 +1604,12 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
 
     let cancel = CancellationToken::new();
     let subscribe = async |durable: &str, registry: Registry| {
-        let messaging = Messaging::connect(
-            consumer_options(&fixture, durable),
-            Instant::now() + WAIT,
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
+        let context = OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone());
+        let messaging = Messaging::connect(consumer_options(&fixture, durable), &context)
+            .await
+            .unwrap();
         let worker = messaging
-            .consumer(registry, Instant::now() + WAIT, &cancel)
+            .consumer(registry, &context)
             .await
             .unwrap()
             .start(&cancel);
@@ -1656,7 +1641,10 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     let original = prepared(&fixture, "fanout-event", "original");
     let publisher = first.0.producer();
     let ack = publisher
-        .publish(&OperationContext::with_timeout(WAIT), &original)
+        .publish(
+            &OperationContext::with_timeout(WAIT),
+            original.as_prepared(),
+        )
         .await
         .unwrap();
     wait_for_both_acks(ack.sequence).await;
@@ -1723,7 +1711,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
         AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, dropped).await;
     let mut options = consumer_options(&fixture, &fixture.durable);
     options.servers = vec![relay.url.clone()];
-    let messaging = Messaging::connect(options, Instant::now() + WAIT, CancellationToken::new())
+    let messaging = Messaging::connect(options, &OperationContext::with_timeout(WAIT))
         .await
         .expect("consumer connects through the settlement relay");
     let effects = template_pool(&pool, 3).await;
@@ -1733,8 +1721,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
     let consumer = messaging
         .consumer(
             effect_registry(&fixture, &effects, &invoked),
-            Instant::now() + WAIT,
-            &cancel,
+            &OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone()),
         )
         .await
         .expect("real durable consumer admits");
@@ -1746,8 +1733,8 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
     let ack = messaging
         .producer()
         .publish(
-            &OperationContext::new(Some(Deadline::at(Instant::now() + WAIT)), cancel.clone()),
-            &event,
+            &OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone()),
+            event.as_prepared(),
         )
         .await
         .unwrap();

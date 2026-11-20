@@ -183,28 +183,64 @@ impl<T: EventPayload> std::fmt::Debug for PublicationRoute<T> {
 }
 
 impl<T: EventPayload + Serialize> PublicationRoute<T> {
-    pub fn prepare(&self, event: &Event<T>) -> Result<crate::PreparedEvent, crate::EnvelopeError> {
-        crate::PreparedEvent::prepare_with_valid_subject(
-            self.route.subject.clone(),
-            event,
-            self.max_payload_bytes,
-        )
+    pub fn prepare(&self, event: &Event<T>) -> Result<crate::PreparedEvent, crate::PrepareError> {
+        self.prepare_with_id(event, || event.id.clone())
     }
 
-    // template:begin outbox:messaging-publication-route-prepare-outbox
-    pub(crate) fn prepare_outbox(
+    pub(crate) fn prepare_with_id(
         &self,
         event: &Event<T>,
-        make_bound_id: impl FnOnce() -> String,
-    ) -> Result<crate::PreparedEvent, crate::EnvelopeError> {
-        crate::PreparedEvent::prepare_outbox_with_valid_subject(
+        make_id: impl FnOnce() -> String,
+    ) -> Result<crate::PreparedEvent, crate::PrepareError> {
+        crate::PreparedEvent::prepare_with_id(
             self.route.subject.clone(),
             event,
             self.max_payload_bytes,
-            make_bound_id,
+            make_id,
         )
     }
-    // template:end outbox:messaging-publication-route-prepare-outbox
+}
+
+pub struct RouteEntry<'a, T> {
+    entry: &'a mut RegisteredRoute,
+    max_publication_bytes: &'a mut usize,
+    payload: PhantomData<fn(T) -> T>,
+}
+
+impl<T: EventPayload> std::fmt::Debug for RouteEntry<'_, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RouteEntry")
+            .field("key", &route_key::<T>())
+            .field("subject", &self.entry.subject)
+            .field("documented", &self.entry.schema.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: EventPayload + 'static> RouteEntry<'_, T> {
+    #[must_use]
+    pub fn publish(&mut self, max_payload_bytes: usize) -> PublicationRoute<T> {
+        *self.max_publication_bytes = (*self.max_publication_bytes).max(max_payload_bytes);
+        PublicationRoute {
+            route: Route {
+                subject: self.entry.subject.clone(),
+                schema: self.entry.schema,
+                payload: PhantomData,
+            },
+            max_payload_bytes,
+        }
+    }
+
+    pub fn handle(self, handler: impl EventHandler<T>)
+    where
+        T: DeserializeOwned,
+    {
+        self.entry.handler = Some(Arc::new(TypedEventHandler {
+            handler,
+            payload: PhantomData,
+        }));
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -299,7 +335,7 @@ impl Registry {
     pub fn declare<T: EventPayload + 'static>(
         &mut self,
         route: &Route<T>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<RouteEntry<'_, T>, RegistryError> {
         let key @ RouteKey {
             event_type,
             schema_version,
@@ -310,7 +346,7 @@ impl Registry {
                 schema_version,
             });
         }
-        if crate::wire::validate_outbound_identity(event_type).is_err() {
+        if !crate::wire::valid_outbound_identity(event_type) {
             return Err(RegistryError::InvalidEventType {
                 event_type,
                 schema_version,
@@ -322,13 +358,17 @@ impl Registry {
                 schema_version,
             });
         };
-        entry.insert(RegisteredRoute {
+        let entry = entry.insert(RegisteredRoute {
             subject: route.subject.clone(),
             schema: route.schema,
             payload_type: TypeId::of::<T>(),
             handler: None,
         });
-        Ok(())
+        Ok(RouteEntry {
+            entry,
+            max_publication_bytes: &mut self.max_publication_bytes,
+            payload: PhantomData,
+        })
     }
 
     pub fn register<T>(
@@ -376,12 +416,7 @@ impl Registry {
         route: &Route<T>,
         max_payload_bytes: usize,
     ) -> Result<PublicationRoute<T>, RegistryError> {
-        self.declare(route)?;
-        self.max_publication_bytes = self.max_publication_bytes.max(max_payload_bytes);
-        Ok(PublicationRoute {
-            route: route.clone(),
-            max_payload_bytes,
-        })
+        Ok(self.declare(route)?.publish(max_payload_bytes))
     }
 
     pub fn check_publication_limit(&self, available: usize) -> Result<(), RegistryError> {
@@ -539,21 +574,17 @@ mod tests {
     fn registry() -> Registry {
         let created = Route::<Created>::new("orders.created");
         let mut registry = Registry::default();
-        registry.declare(&created).unwrap();
+        registry.declare(&created).unwrap().handle(
+            |event: Event<Created>, _: OperationContext| async move {
+                if event.payload.quantity == 0 {
+                    Err(HandlerError::Permanent)
+                } else {
+                    Ok(())
+                }
+            },
+        );
         registry
             .declare(&Route::<Shipped>::new("orders.shipped"))
-            .unwrap();
-        registry
-            .register(
-                &created,
-                |event: Event<Created>, _: OperationContext| async move {
-                    if event.payload.quantity == 0 {
-                        Err(HandlerError::Permanent)
-                    } else {
-                        Ok(())
-                    }
-                },
-            )
             .unwrap();
         registry
     }
@@ -658,24 +689,24 @@ mod tests {
         let total = Arc::new(AtomicU32::new(0));
         let created = Route::<Created>::new("orders.created");
         let mut registry = Registry::default();
-        registry.declare(&created).unwrap();
-        registry
-            .register(
-                &created,
-                QuantityAccumulator {
-                    total: Arc::clone(&total),
-                },
-            )
+        let mut entry = registry.declare(&created).unwrap();
+        let publication = entry.publish(128);
+        entry.handle(QuantityAccumulator {
+            total: Arc::clone(&total),
+        });
+        assert!(registry.check_publication_limit(128).is_ok());
+        assert!(registry.check_publication_limit(127).is_err());
+        let prepared = publication
+            .prepare(&Event {
+                id: "event-1".to_owned(),
+                occurred_at: time::UtcDateTime::UNIX_EPOCH,
+                payload: Created { quantity: 7 },
+            })
             .unwrap();
 
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert(crate::wire::header_name::MESSAGE_ID, "event-1");
-        headers.insert(crate::wire::header_name::EVENT_TYPE, Created::EVENT_TYPE);
-        headers.insert(crate::wire::header_name::EVENT_SCHEMA, "v2");
-        headers.insert(crate::wire::header_name::CREATED_AT, "2026-09-29T10:00:00Z");
-        headers.insert(crate::wire::header_name::NATS_MSG_ID, "event-1");
+        let headers = crate::wire::encode_prepared(&prepared).unwrap();
         let envelope =
-            crate::wire::decode_envelope_ref("orders.created", &headers, br#"{"quantity":7}"#)
+            crate::wire::decode_envelope_ref(prepared.subject(), &headers, prepared.payload())
                 .unwrap();
         assert_eq!(
             registry

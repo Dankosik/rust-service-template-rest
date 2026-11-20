@@ -3,12 +3,11 @@ use std::time::Duration;
 use async_nats::rustls::crypto::{GetRandomFailed, SecureRandom};
 use async_nats::{ConnectErrorKind, ToServerAddrs as _};
 use futures_util::FutureExt as _;
+use operation_context::{Deadline, OperationContext};
 use secrecy::ExposeSecret as _;
 use tokio::sync::watch;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
-use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation, within_operation_budget};
+use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
 use crate::messaging::{CloseOutcome, Credentials, MessagingOptions, TransportSecurity};
@@ -26,8 +25,7 @@ pub(crate) struct NativeConnection {
 impl NativeConnection {
     pub(crate) async fn open(
         options: &MessagingOptions,
-        deadline: Instant,
-        cancel: &CancellationToken,
+        context: &OperationContext,
     ) -> Result<Self, MessagingError> {
         let (closed_event_tx, closed_event) = watch::channel(false);
         let servers: Vec<_> = options
@@ -47,14 +45,15 @@ impl NativeConnection {
             ));
         }
         let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
-        let connect_deadline = within_operation_budget(deadline);
-        let connect_budget = connect_deadline.saturating_duration_since(Instant::now());
+        let connect_deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
+        let connect_budget = connect_deadline.remaining();
+        let connect_context =
+            OperationContext::new(Some(connect_deadline), context.cancellation().clone());
         let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-        let mut connect = connect_options(options.credentials.as_ref(), deadline, cancel)
+        let mut connect = connect_options(options.credentials.as_ref(), context)
             .await?
             .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
-            .initial_connect_deadline(connect_deadline)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
             .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
             .require_tls(require_tls)
@@ -65,6 +64,9 @@ impl NativeConnection {
                 }
                 std::future::ready(())
             });
+        if let Some(instant) = connect_deadline.instant() {
+            connect = connect.initial_connect_deadline(instant);
+        }
         if tls_first {
             connect = connect.tls_first();
         } else if any_tls {
@@ -73,7 +75,7 @@ impl NativeConnection {
         if let Some(root_ca) = options.root_ca_path.clone() {
             connect = connect.add_root_certificates(root_ca);
         }
-        let client = bounded_operation(connect_deadline, cancel, async {
+        let client = bounded_operation(&connect_context, async {
             connect
                 .connect(servers)
                 .await
@@ -86,12 +88,9 @@ impl NativeConnection {
         })
     }
 
-    pub(crate) async fn close(
-        &self,
-        deadline: Instant,
-        cancel: &CancellationToken,
-    ) -> CloseOutcome {
-        let deadline = within_operation_budget(deadline);
+    pub(crate) async fn close(&self, context: &OperationContext) -> CloseOutcome {
+        let deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
+        let bounded = OperationContext::new(Some(deadline), context.cancellation().clone());
         let client = &self.client;
         let mut closed_event = self.closed_event.clone();
         let closed_now = || client.wait_closed().now_or_never() == Some(true);
@@ -111,13 +110,12 @@ impl NativeConnection {
                 CloseOutcome::UnobservedClose
             }
         };
-        let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
+        let outcome = if bounded.stopped().is_some() {
             CloseOutcome::WaitInterrupted
         } else {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => CloseOutcome::WaitInterrupted,
-                () = tokio::time::sleep_until(deadline) => CloseOutcome::WaitInterrupted,
+                _ = bounded.wait_stopped() => CloseOutcome::WaitInterrupted,
                 result = drain => result,
             }
         };
@@ -126,11 +124,11 @@ impl NativeConnection {
             CloseOutcome::WaitInterrupted => client.force_close(),
             CloseOutcome::UnobservedClose => {
                 client.force_close();
-                if Instant::now() < deadline {
+                if bounded.stopped().is_none() {
                     tokio::select! {
                         biased;
-                        () = cancel.cancelled() => {}
-                        _ = tokio::time::timeout_at(deadline, client.wait_closed()) => {}
+                        _ = bounded.wait_stopped() => {}
+                        _ = client.wait_closed() => {}
                     }
                 }
             }
@@ -141,8 +139,7 @@ impl NativeConnection {
 
 async fn connect_options(
     credentials: Option<&Credentials>,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<async_nats::ConnectOptions, MessagingError> {
     match credentials {
         None => Ok(async_nats::ConnectOptions::new()),
@@ -150,7 +147,7 @@ async fn connect_options(
             .credentials(credentials.expose_secret())
             .map_err(|_| credentials_failure(CredentialsFileError::Malformed)),
         Some(Credentials::File(path)) => {
-            let file = bounded_operation(deadline, cancel, async {
+            let file = bounded_operation(context, async {
                 CredentialsFile::admit(path)
                     .await
                     .map_err(credentials_failure)

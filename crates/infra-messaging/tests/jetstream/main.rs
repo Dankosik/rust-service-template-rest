@@ -289,8 +289,9 @@ fn consumer_options(fixture: &Fixture) -> ConsumerOptions {
 }
 
 async fn close(messaging: Messaging) {
-    let cancel = CancellationToken::new();
-    let outcome = messaging.close(deadline(), &cancel).await;
+    let outcome = messaging
+        .close(&OperationContext::with_timeout(Duration::from_secs(5)))
+        .await;
     assert_eq!(outcome, infra_messaging::CloseOutcome::Complete);
 }
 

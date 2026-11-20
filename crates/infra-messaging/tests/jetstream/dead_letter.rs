@@ -25,8 +25,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -42,7 +41,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -140,8 +139,7 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
                 Some(consumer_options(&fixture)),
                 1024,
             ),
-            deadline(),
-            cancel.clone(),
+            &context(deadline(), &cancel),
         )
         .await
         .unwrap();
@@ -159,7 +157,7 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
             .prepare(&event("lost-transfer-ack"))
             .unwrap();
         let mut handle = messaging
-            .consumer(registered, deadline(), &cancel)
+            .consumer(registered, &context(deadline(), &cancel))
             .await
             .unwrap()
             .start(&cancel);
@@ -207,8 +205,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -225,7 +222,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(handlers, deadline(), &cancel)
+        .consumer(handlers, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -292,8 +289,7 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -310,7 +306,7 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(handlers, deadline(), &cancel)
+        .consumer(handlers, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -387,8 +383,7 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -400,7 +395,7 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -448,8 +443,7 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("unsealed streams satisfy admission");
@@ -472,7 +466,7 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("consumer is admitted against an unsealed DLQ")
         .start(&cancel);
@@ -536,8 +530,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -565,7 +558,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -606,8 +599,7 @@ async fn retain_record_before_shrinking_source(
         .expect("the original stream limit fits the retained event");
     let producer = Messaging::connect(
         options(fixture, None, 16 * 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), cancel),
     )
     .await
     .expect("fixture producer is admitted against the original source bound");
@@ -648,8 +640,7 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     worker.concurrency = std::num::NonZeroUsize::new(3).unwrap();
     let messaging = Messaging::connect(
         options(&fixture, Some(worker), 32),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("fixture source stream is admitted for the smaller delivery bound");
@@ -666,7 +657,7 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
         )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -708,15 +699,14 @@ async fn retained_record_above_durable_pull_limit_stops_without_settlement() {
     let retained = retain_record_before_shrinking_source(&fixture, &cancel).await;
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 32),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
     let mut registered = fixture.registry.clone();
     registered.register(&fixture.route, accept).unwrap();
     let admitted = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap();
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
@@ -763,8 +753,7 @@ async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowl
         .expect("DLQ admits newly published source records after the limit reduction");
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 8 * 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .expect("current stream limits satisfy admission");
@@ -773,7 +762,7 @@ async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowl
         .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("current stream limits satisfy consumer admission")
         .start(&cancel);

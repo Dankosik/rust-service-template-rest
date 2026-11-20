@@ -1,18 +1,36 @@
 use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
+use enum_map::{Enum, EnumMap};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use super::{
     CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES, HEADER_PREAMBLE_BYTES, MESSAGE_ID,
-    SHA256_HEX_LEN, checked_header_line_bytes, format_timestamp_bytes, header_line_bytes,
-    header_name, header_value, is_zero_time, parse_schema, parse_timestamp, prefixed_digest_hex,
-    required_header, valid_subject, validate_outbound_identity,
+    SHA256_HEX_LEN, TimestampOutOfRange, checked_header_line_bytes, format_timestamp_bytes,
+    header_line_bytes, header_name, header_value, is_zero_time, parse_schema, parse_timestamp,
+    prefixed_digest_hex, valid_outbound_identity, valid_subject,
 };
-use crate::error::EnvelopeError;
-use enum_map::{Enum, EnumMap};
-
 use crate::prepared::{PreparedEvent, PreparedEventParts};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RestoreError {
+    #[error("dead-letter original subject is invalid")]
+    Subject,
+    #[error("required header {0} is missing")]
+    MissingHeader(&'static str),
+    #[error("event identity is invalid")]
+    Identity,
+    #[error("dead-letter record has no verifiable original message ID")]
+    MessageIdMissing,
+    #[error("event schema is invalid")]
+    Schema,
+    #[error("creation time is invalid")]
+    CreatedAtInvalid,
+    #[error("dead-letter creation time is required")]
+    CreatedAtRequired,
+    #[error("creation time is out of range")]
+    CreatedAtOutOfRange,
+}
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
 const ORIGINAL_ID_PRESENT: HeaderName = HeaderName::from_static("Original-Message-Id-Present");
@@ -129,23 +147,39 @@ pub struct DeadLetterRecord {
     pub stored_at: OffsetDateTime,
 }
 
-pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
+fn required_header<'a>(
+    headers: &'a HeaderMap,
+    header: &'static str,
+) -> Result<&'a str, RestoreError> {
+    headers
+        .get(HeaderName::from_static(header))
+        .map(async_nats::HeaderValue::as_str)
+        .ok_or(RestoreError::MissingHeader(header))
+}
+
+pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, RestoreError> {
     let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT);
     if !valid_subject(subject) {
-        return Err(EnvelopeError::DeadLetterSubject);
+        return Err(RestoreError::Subject);
     }
     let message_id = required_header(&record.headers, MESSAGE_ID)?;
-    validate_outbound_identity(message_id)?;
+    if !valid_outbound_identity(message_id) {
+        return Err(RestoreError::Identity);
+    }
     let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
     if has_ambiguous_original_id(&record.headers, message_id, stored_publication_id) {
-        return Err(EnvelopeError::DeadLetterMessageIdMissing);
+        return Err(RestoreError::MessageIdMissing);
     }
     let event_type = required_header(&record.headers, EVENT_TYPE)?;
-    validate_outbound_identity(event_type)?;
-    let schema_version = parse_schema(required_header(&record.headers, EVENT_SCHEMA)?)?;
-    let occurred_at = parse_timestamp(required_header(&record.headers, CREATED_AT)?)?;
+    if !valid_outbound_identity(event_type) {
+        return Err(RestoreError::Identity);
+    }
+    let schema_version = parse_schema(required_header(&record.headers, EVENT_SCHEMA)?)
+        .ok_or(RestoreError::Schema)?;
+    let occurred_at = parse_timestamp(required_header(&record.headers, CREATED_AT)?)
+        .ok_or(RestoreError::CreatedAtInvalid)?;
     if is_zero_time(occurred_at) {
-        return Err(EnvelopeError::DeadLetterCreatedAtRequired);
+        return Err(RestoreError::CreatedAtRequired);
     }
     let publication_id = record_id(
         "redrive-",
@@ -187,7 +221,7 @@ pub fn dead_letter_id(
     stream_sequence: u64,
     stored_at: OffsetDateTime,
     original_publication_id: &str,
-) -> Result<String, EnvelopeError> {
+) -> Result<String, TimestampOutOfRange> {
     record_id(
         DEAD_LETTER_ID_PREFIX,
         stream,
@@ -203,10 +237,8 @@ fn record_id(
     stream_sequence: u64,
     stored_at: OffsetDateTime,
     publication_id: &str,
-) -> Result<String, EnvelopeError> {
-    let stored_at = stored_at
-        .checked_to_utc()
-        .ok_or(EnvelopeError::CreatedAtOutOfRange)?;
+) -> Result<String, TimestampOutOfRange> {
+    let stored_at = stored_at.checked_to_utc().ok_or(TimestampOutOfRange)?;
     let stored_at = format_timestamp_bytes(stored_at)?;
     let mut sequence = std::fmt::NumBuffer::new();
     let mut hash = Sha256::new();
@@ -312,7 +344,7 @@ mod tests {
         }
     }
 
-    fn restore_failure(record: DeadLetterRecord) -> EnvelopeError {
+    fn restore_failure(record: DeadLetterRecord) -> RestoreError {
         match restore_dead_letter(record) {
             Err(error) => error,
             other => panic!("expected an envelope refusal, got {other:?}"),
@@ -354,17 +386,14 @@ mod tests {
             record.headers.get(header_name::NATS_MSG_ID),
             "transfer keeps Go's wire fallback"
         );
-        assert_eq!(
-            restore_failure(record),
-            EnvelopeError::DeadLetterMessageIdMissing
-        );
+        assert_eq!(restore_failure(record), RestoreError::MessageIdMissing);
     }
 
     #[test]
     fn restore_reports_a_missing_creation_time_as_missing() {
         assert_eq!(
             restore_failure(transferred_record(&envelope_headers_without(CREATED_AT))),
-            EnvelopeError::MissingHeader(CREATED_AT)
+            RestoreError::MissingHeader(CREATED_AT)
         );
     }
 
@@ -372,14 +401,14 @@ mod tests {
     fn restore_rejects_a_record_whose_identity_would_change_on_delivery() {
         let mut record = transferred_record(&envelope_headers());
         record.headers.insert(header_name::MESSAGE_ID, " event-1 ");
-        assert_eq!(restore_failure(record), EnvelopeError::Identity);
+        assert_eq!(restore_failure(record), RestoreError::Identity);
     }
 
     #[test]
     fn restore_names_the_invalid_schema_or_time() {
         for (header, expected) in [
-            (header_name::EVENT_SCHEMA, EnvelopeError::Schema),
-            (header_name::CREATED_AT, EnvelopeError::CreatedAtInvalid),
+            (header_name::EVENT_SCHEMA, RestoreError::Schema),
+            (header_name::CREATED_AT, RestoreError::CreatedAtInvalid),
         ] {
             let mut record = transferred_record(&envelope_headers());
             record.headers.insert(header, "");

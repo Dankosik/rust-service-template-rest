@@ -15,8 +15,7 @@ async fn a_fresh_probe_rejects_silent_stream_metadata_then_recovers() {
     .await;
     let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
-        deadline(),
-        CancellationToken::new(),
+        &OperationContext::with_timeout(Duration::from_secs(5)),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -46,8 +45,7 @@ async fn a_completed_native_runner_refuses_the_retained_probe() {
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let messaging = Messaging::connect(
         options(&fixture, None, 1024),
-        deadline(),
-        CancellationToken::new(),
+        &OperationContext::with_timeout(Duration::from_secs(5)),
     )
     .await
     .expect("fixture source stream is admitted");

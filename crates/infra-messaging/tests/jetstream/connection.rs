@@ -257,8 +257,7 @@ async fn direct_tls_first_admission_refuses_plaintext_seeds() {
         options.security = TransportSecurity::TlsFirst;
         let failure = Messaging::connect(
             options,
-            Instant::now() + Duration::from_secs(5),
-            CancellationToken::new(),
+            &OperationContext::with_timeout(Duration::from_secs(5)),
         )
         .await
         .expect_err("TLS-first must reject plaintext before any dial");
@@ -299,11 +298,9 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
         };
         options.root_ca_path = Some(root.path().to_owned());
         let cancel = CancellationToken::new();
-        let mut connect = tokio::spawn(Messaging::connect(
-            options,
-            Instant::now() + Duration::from_secs(5),
-            cancel.clone(),
-        ));
+        let connect_context = context(Instant::now() + Duration::from_secs(5), &cancel);
+        let mut connect =
+            tokio::spawn(async move { Messaging::connect(options, &connect_context).await });
         let observed = timeout(Duration::from_secs(5), &mut server).await;
         cancel.cancel();
         let connected = timeout(Duration::from_secs(5), &mut connect).await;
@@ -415,11 +412,9 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
         };
         options.root_ca_path = tls_first.then(|| root.path().to_owned());
         let cancel = CancellationToken::new();
-        let mut connect = tokio::spawn(Messaging::connect(
-            options,
-            Instant::now() + Duration::from_secs(5),
-            cancel.clone(),
-        ));
+        let connect_context = context(Instant::now() + Duration::from_secs(5), &cancel);
+        let mut connect =
+            tokio::spawn(async move { Messaging::connect(options, &connect_context).await });
         let recovery = timeout(Duration::from_secs(5), async {
             let (socket, _) = discovered.accept().await.expect("discovered connection");
             if tls_first {
@@ -464,7 +459,7 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
     options.security = TransportSecurity::TlsFirst;
     options.root_ca_path = Some(root_path.clone());
     let cancel = CancellationToken::new();
-    let messaging = Messaging::connect(options, deadline(), cancel.clone())
+    let messaging = Messaging::connect(options, &context(deadline(), &cancel))
         .await
         .expect("the IPv4 relay is admitted with private CA A");
     assert_eq!(*first.accepted.borrow(), 1);
@@ -555,8 +550,7 @@ async fn close_waits_for_the_terminal_connection_event() {
     let _subscriber = tracing::subscriber::set_default(subscriber);
     let messaging = Messaging::connect(
         options(&fixture, None, 1024),
-        deadline(),
-        CancellationToken::new(),
+        &OperationContext::with_timeout(Duration::from_secs(5)),
     )
     .await
     .expect("fixture source stream is admitted");
@@ -567,8 +561,8 @@ async fn close_waits_for_the_terminal_connection_event() {
             .build()
             .expect("close observer runtime");
         let result = runtime.block_on(async move {
-            let cancel = CancellationToken::new();
-            let mut closing = Box::pin(messaging.close(deadline(), &cancel));
+            let close_context = OperationContext::with_timeout(Duration::from_secs(5));
+            let mut closing = Box::pin(messaging.close(&close_context));
             let first = futures_util::poll!(&mut closing);
             entered_rx
                 .recv_timeout(Duration::from_secs(5))
@@ -625,8 +619,7 @@ async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
     .await;
     let mut startup = Messaging::prepare(
         options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
-        deadline(),
-        CancellationToken::new(),
+        &OperationContext::with_timeout(Duration::from_secs(5)),
     )
     .unwrap();
     let mut admission = Box::pin(startup.admit());
@@ -639,7 +632,8 @@ async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
     drop(admission);
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let mut closing = Box::pin(startup.close(deadline(), &cancel));
+    let close_context = context(deadline(), &cancel);
+    let mut closing = Box::pin(startup.close(&close_context));
     assert_eq!(
         futures_util::poll!(&mut closing),
         std::task::Poll::Ready(infra_messaging::CloseOutcome::WaitInterrupted),
@@ -654,8 +648,9 @@ async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
 async fn admitted_startup_retains_messaging_until_closed() {
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
-    let mut startup = Messaging::prepare(options(&fixture, None, 1024), deadline(), cancel.clone())
-        .expect("valid options prepare");
+    let mut startup =
+        Messaging::prepare(options(&fixture, None, 1024), &context(deadline(), &cancel))
+            .expect("valid options prepare");
     assert!(startup.admitted().is_none());
 
     let messaging = startup
@@ -674,7 +669,9 @@ async fn admitted_startup_retains_messaging_until_closed() {
     probe.check().await.expect("admitted connection is ready");
 
     assert_eq!(
-        startup.close(deadline(), &CancellationToken::new()).await,
+        startup
+            .close(&OperationContext::with_timeout(Duration::from_secs(5)))
+            .await,
         infra_messaging::CloseOutcome::Complete
     );
     assert!(
@@ -703,13 +700,13 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
         let (_capture, logged) = capture_logs();
         let messaging = Messaging::connect(
             options(&fixture, None, 1024),
-            deadline(),
-            CancellationToken::new(),
+            &OperationContext::with_timeout(Duration::from_secs(5)),
         )
         .await
         .unwrap();
         let cancel = CancellationToken::new();
-        let mut closing = Box::pin(messaging.clone().close(deadline(), &cancel));
+        let close_context = context(deadline(), &cancel);
+        let mut closing = Box::pin(messaging.clone().close(&close_context));
         if !cancel_at_entry {
             assert!(futures_util::poll!(&mut closing).is_pending());
         }
@@ -741,13 +738,13 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
         assert_eq!(
             messaging
                 .clone()
-                .close(deadline(), &CancellationToken::new())
+                .close(&OperationContext::with_timeout(Duration::from_secs(5)))
                 .await,
             infra_messaging::CloseOutcome::Complete,
             "native termination and its final event remain observable after cancellation"
         );
         assert_eq!(
-            messaging.close(Instant::now(), &cancel).await,
+            messaging.close(&context(Instant::now(), &cancel)).await,
             infra_messaging::CloseOutcome::Complete,
             "both observations at entry take precedence over cancellation and expiry"
         );
@@ -771,8 +768,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
             Some(consumer_options(&fixture)),
             1024,
         ),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
@@ -788,7 +784,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         )
         .unwrap();
     let mut handle = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap()
         .start(&cancel);
@@ -894,15 +890,14 @@ async fn save_ack_floor_before_restart() {
     let cancel = CancellationToken::new();
     let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
+        &context(deadline(), &cancel),
     )
     .await
     .unwrap();
     let mut registry = fixture.registry.clone();
     registry.register(&fixture.route, accept).unwrap();
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .unwrap()
         .start(&cancel);

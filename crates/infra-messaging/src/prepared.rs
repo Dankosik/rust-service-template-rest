@@ -7,58 +7,36 @@ use domain_events::{Event, EventPayload};
 use serde::Serialize;
 use time::UtcDateTime;
 
-use crate::error::EnvelopeError;
+use crate::error::PrepareError;
 use crate::registry::route_key;
+use crate::wire::RestoreError;
 
 const MAX_PAYLOAD_JSON_DEPTH: usize = 127;
 
 #[derive(Clone, PartialEq, Eq)]
-enum EventIdentity {
-    Direct {
-        message_id: String,
-    },
-    Bound {
-        message_id: String,
-        distinct_publication_id: Option<String>,
-    },
-}
-
-impl EventIdentity {
-    fn publication_id(&self) -> &str {
-        match self {
-            Self::Direct { message_id } => message_id,
-            Self::Bound {
-                message_id,
-                distinct_publication_id,
-            } => distinct_publication_id.as_deref().unwrap_or(message_id),
-        }
-    }
-}
-
-impl fmt::Debug for EventIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Direct { message_id } => formatter
-                .debug_struct("Direct")
-                .field("message_id", message_id)
-                .finish(),
-            Self::Bound { message_id, .. } => formatter
-                .debug_struct("Bound")
-                .field("message_id", message_id)
-                .field("publication_id", &self.publication_id())
-                .finish(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
     subject: Subject,
-    identity: EventIdentity,
+    message_id: String,
+    distinct_publication_id: Option<String>,
     event_type: Cow<'static, str>,
     schema_version: u16,
     occurred_at: UtcDateTime,
     payload: Bytes,
+}
+
+impl fmt::Debug for PreparedEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedEvent")
+            .field("subject", &self.subject)
+            .field("message_id", &self.message_id)
+            .field("publication_id", &self.publication_id())
+            .field("event_type", &self.event_type)
+            .field("schema_version", &self.schema_version)
+            .field("occurred_at", &self.occurred_at)
+            .field("payload", &self.payload)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -87,59 +65,32 @@ pub(crate) struct Publication<'a> {
 }
 
 impl PreparedEvent {
-    pub(crate) fn prepare_with_valid_subject<T: EventPayload + Serialize>(
+    pub(crate) fn prepare_with_id<T: EventPayload + Serialize>(
         subject: Subject,
         event: &Event<T>,
         max_payload_bytes: usize,
-    ) -> Result<Self, EnvelopeError> {
-        Self::prepare(subject, event, max_payload_bytes, || {
-            EventIdentity::Direct {
-                message_id: event.id.clone(),
-            }
-        })
-    }
-
-    // template:begin outbox:messaging-outbox-preparation
-    pub(crate) fn prepare_outbox_with_valid_subject<T: EventPayload + Serialize>(
-        subject: Subject,
-        event: &Event<T>,
-        max_payload_bytes: usize,
-        make_bound_id: impl FnOnce() -> String,
-    ) -> Result<Self, EnvelopeError> {
-        Self::prepare(subject, event, max_payload_bytes, || EventIdentity::Bound {
-            message_id: make_bound_id(),
-            distinct_publication_id: None,
-        })
-    }
-
-    pub(crate) const fn has_bound_publication(&self) -> bool {
-        matches!(self.identity, EventIdentity::Bound { .. })
-    }
-    // template:end outbox:messaging-outbox-preparation
-
-    fn prepare<T: EventPayload + Serialize>(
-        subject: Subject,
-        event: &Event<T>,
-        max_payload_bytes: usize,
-        make_identity: impl FnOnce() -> EventIdentity,
-    ) -> Result<Self, EnvelopeError> {
+        make_id: impl FnOnce() -> String,
+    ) -> Result<Self, PrepareError> {
         let payload =
             json_payload::to_vec_bounded(&event.payload, max_payload_bytes).map_err(|error| {
                 match error {
-                    json_payload::EncodeError::Serialize(_) => EnvelopeError::Serialization,
-                    json_payload::EncodeError::TooLarge { .. } => EnvelopeError::PayloadTooLarge,
+                    json_payload::EncodeError::Serialize(_) => PrepareError::Serialization,
+                    json_payload::EncodeError::TooLarge { .. } => PrepareError::PayloadTooLarge,
                 }
             })?;
         if !payload_depth_allowed(&payload) {
-            return Err(EnvelopeError::PayloadStructure);
+            return Err(PrepareError::PayloadStructure);
         }
         let occurred_at = event.occurred_at;
-        crate::wire::validate_outbound_identity(&event.id)?;
+        if !crate::wire::valid_outbound_identity(&event.id) {
+            return Err(PrepareError::Identity);
+        }
         let key = route_key::<T>();
         crate::wire::validate_outbound_created_at(occurred_at)?;
         Ok(Self {
             subject,
-            identity: make_identity(),
+            message_id: make_id(),
+            distinct_publication_id: None,
             event_type: Cow::Borrowed(key.event_type),
             schema_version: key.schema_version,
             occurred_at,
@@ -147,7 +98,7 @@ impl PreparedEvent {
         })
     }
 
-    pub(crate) fn from_parts(parts: PreparedEventParts) -> Result<Self, EnvelopeError> {
+    pub(crate) fn from_parts(parts: PreparedEventParts) -> Result<Self, RestoreError> {
         let PreparedEventParts {
             subject,
             message_id,
@@ -167,10 +118,8 @@ impl PreparedEvent {
         )?;
         Ok(Self {
             subject: Subject::from(subject),
-            identity: EventIdentity::Bound {
-                distinct_publication_id: (message_id != publication_id).then_some(publication_id),
-                message_id,
-            },
+            distinct_publication_id: (message_id != publication_id).then_some(publication_id),
+            message_id,
             event_type: event_type.into(),
             schema_version,
             occurred_at,
@@ -196,15 +145,13 @@ impl PreparedEvent {
     }
     #[must_use]
     pub fn message_id(&self) -> &str {
-        match &self.identity {
-            EventIdentity::Direct { message_id } | EventIdentity::Bound { message_id, .. } => {
-                message_id
-            }
-        }
+        &self.message_id
     }
     #[must_use]
     pub fn publication_id(&self) -> &str {
-        self.identity.publication_id()
+        self.distinct_publication_id
+            .as_deref()
+            .unwrap_or(&self.message_id)
     }
     #[must_use]
     pub fn event_type(&self) -> &str {
@@ -235,17 +182,23 @@ pub(crate) fn validate_reconstructed_envelope(
     event_type: &str,
     schema_version: u16,
     occurred_at: UtcDateTime,
-) -> Result<(), EnvelopeError> {
+) -> Result<(), RestoreError> {
     if !crate::wire::valid_subject(subject) {
-        return Err(EnvelopeError::Subject);
+        return Err(RestoreError::Subject);
     }
     for value in [message_id, publication_id, event_type] {
-        crate::wire::validate_outbound_identity(value)?;
+        if !crate::wire::valid_outbound_identity(value) {
+            return Err(RestoreError::Identity);
+        }
     }
     if schema_version == 0 {
-        return Err(EnvelopeError::Schema);
+        return Err(RestoreError::Schema);
     }
-    crate::wire::validate_outbound_created_at(occurred_at)
+    if crate::wire::is_zero_time(occurred_at) {
+        return Err(RestoreError::CreatedAtRequired);
+    }
+    crate::wire::validate_rfc3339_timestamp(occurred_at)?;
+    Ok(())
 }
 
 pub(crate) fn payload_depth_allowed(mut bytes: &[u8]) -> bool {
@@ -297,16 +250,16 @@ mod tests {
     use time::UtcDateTime;
 
     use super::PreparedEvent;
-    use crate::{EnvelopeError, Registry, Route};
+    use crate::{PrepareError, Registry, RegistryError, Route};
 
     fn prepare<T: EventPayload + Serialize + 'static>(
         subject: &str,
         event: &Event<T>,
         max_payload_bytes: usize,
-    ) -> Result<PreparedEvent, EnvelopeError> {
+    ) -> Result<PreparedEvent, PrepareError> {
         Registry::default()
             .declare_publication(&Route::new(subject), max_payload_bytes)
-            .map_err(|_| EnvelopeError::Subject)?
+            .expect("test subject is valid")
             .prepare(event)
     }
 
@@ -399,7 +352,7 @@ mod tests {
             .capped_at(expected.len() - 1)
             .declare(&mut Registry::default(), &route)
             .unwrap();
-        std::assert_matches!(strict.prepare(&event), Err(EnvelopeError::PayloadTooLarge));
+        std::assert_matches!(strict.prepare(&event), Err(PrepareError::PayloadTooLarge));
         let mut registry = Registry::default();
         service
             .capped_at(usize::MAX)
@@ -430,7 +383,7 @@ mod tests {
             });
             let error = prepare("events.created", &event, 0)
                 .expect_err("non-finite numbers cannot become publishable intent");
-            assert_eq!(error, EnvelopeError::Serialization);
+            assert_eq!(error, PrepareError::Serialization);
             assert_eq!(error.to_string(), "event payload cannot be serialized");
             assert_eq!(event.payload.calls.get(), 1);
         }
@@ -483,7 +436,7 @@ mod tests {
                     );
                 } else {
                     let error = prepared.expect_err("unreadable depth cannot be published");
-                    assert_eq!(error, EnvelopeError::PayloadStructure);
+                    assert_eq!(error, PrepareError::PayloadStructure);
                     assert_eq!(error.to_string(), "event payload structure is invalid");
                 }
                 assert_eq!(event.payload.calls.get(), 1);
@@ -493,10 +446,14 @@ mod tests {
 
     #[test]
     fn preparation_checks_depth_after_size_and_before_event_metadata() {
-        for (subject, limit, expected, calls) in [
-            ("events.*", 0, EnvelopeError::Subject, 0),
-            ("events.created", 0, EnvelopeError::PayloadTooLarge, 1),
-            ("events.created", 1024, EnvelopeError::PayloadStructure, 1),
+        std::assert_matches!(
+            Registry::default()
+                .declare_publication(&Route::<Counted<serde_json::Value>>::new("events.*"), 0),
+            Err(RegistryError::InvalidSubject { .. })
+        );
+        for (limit, expected) in [
+            (0, PrepareError::PayloadTooLarge),
+            (1024, PrepareError::PayloadStructure),
         ] {
             let mut value = serde_json::Value::Null;
             for _ in 0..128 {
@@ -510,10 +467,10 @@ mod tests {
             event.occurred_at = UtcDateTime::from_unix_timestamp(-62_135_596_800)
                 .expect("Go zero time is representable");
             assert_eq!(
-                prepare(subject, &event, limit).expect_err("invalid event"),
+                prepare("events.created", &event, limit).expect_err("invalid event"),
                 expected
             );
-            assert_eq!(event.payload.calls.get(), calls);
+            assert_eq!(event.payload.calls.get(), 1);
         }
     }
 
@@ -528,7 +485,7 @@ mod tests {
             event.id = id.to_owned();
             std::assert_matches!(
                 prepare("events.created", &event, 1024),
-                Err(EnvelopeError::Identity)
+                Err(PrepareError::Identity)
             );
         }
     }
@@ -536,69 +493,53 @@ mod tests {
     #[test]
     fn preparation_serializes_once_and_preserves_error_precedence() {
         struct Case {
-            subject: &'static str,
             limit: usize,
             fail_at_end: bool,
             invalid_id: bool,
             zero_time: bool,
-            expected_error: EnvelopeError,
-            expected_calls: usize,
+            expected_error: PrepareError,
         }
 
+        std::assert_matches!(
+            Registry::default()
+                .declare_publication(&Route::<StreamingPayload>::new("events.*"), 31),
+            Err(RegistryError::InvalidSubject { .. })
+        );
         for case in [
             Case {
-                subject: "events.*",
                 limit: 31,
                 fail_at_end: true,
                 invalid_id: true,
                 zero_time: true,
-                expected_error: EnvelopeError::Subject,
-                expected_calls: 0,
+                expected_error: PrepareError::Serialization,
             },
             Case {
-                subject: "events.created",
-                limit: 31,
-                fail_at_end: true,
-                invalid_id: true,
-                zero_time: true,
-                expected_error: EnvelopeError::Serialization,
-                expected_calls: 1,
-            },
-            Case {
-                subject: "events.created",
                 limit: 31,
                 fail_at_end: false,
                 invalid_id: true,
                 zero_time: true,
-                expected_error: EnvelopeError::PayloadTooLarge,
-                expected_calls: 1,
+                expected_error: PrepareError::PayloadTooLarge,
             },
             Case {
-                subject: "events.created",
                 limit: 0,
                 fail_at_end: false,
                 invalid_id: false,
                 zero_time: false,
-                expected_error: EnvelopeError::PayloadTooLarge,
-                expected_calls: 1,
+                expected_error: PrepareError::PayloadTooLarge,
             },
             Case {
-                subject: "events.created",
                 limit: 32_769,
                 fail_at_end: false,
                 invalid_id: true,
                 zero_time: false,
-                expected_error: EnvelopeError::Identity,
-                expected_calls: 1,
+                expected_error: PrepareError::Identity,
             },
             Case {
-                subject: "events.created",
                 limit: 32_769,
                 fail_at_end: false,
                 invalid_id: false,
                 zero_time: true,
-                expected_error: EnvelopeError::CreatedAtRequired,
-                expected_calls: 1,
+                expected_error: PrepareError::CreatedAtRequired,
             },
         ] {
             let mut event = event(StreamingPayload {
@@ -613,10 +554,10 @@ mod tests {
                 event.occurred_at = UtcDateTime::from_unix_timestamp(-62_135_596_800)
                     .expect("Go zero time is representable");
             }
-            let error = prepare(case.subject, &event, case.limit)
+            let error = prepare("events.created", &event, case.limit)
                 .expect_err("invalid event must be refused");
             assert_eq!(error, case.expected_error);
-            assert_eq!(event.payload.calls.get(), case.expected_calls);
+            assert_eq!(event.payload.calls.get(), 1);
         }
         let event = event(StreamingPayload {
             calls: Cell::new(0),
@@ -629,65 +570,58 @@ mod tests {
         assert_eq!(event.payload.calls.get(), 1);
     }
 
-    // template:begin outbox:messaging-outbox-preparation-tests
     #[test]
-    fn bound_preparation_defers_identity_and_shares_equal_ids_with_restoration() {
+    fn deferred_identity_and_restoration_share_equal_ids_and_keep_distinct_redrive_ids() {
         let subject = async_nats::Subject::from_static("events.created");
         let mut event = event(Counted {
             value: true,
             calls: Cell::new(0),
         });
-        let direct = PreparedEvent::prepare_with_valid_subject(subject.clone(), &event, 4).unwrap();
-        let bound =
-            PreparedEvent::prepare_outbox_with_valid_subject(subject.clone(), &event, 4, || {
-                event.id.clone()
-            })
-            .unwrap();
-        assert_ne!(direct, bound);
-        assert!(bound.has_bound_publication());
-        assert!(std::ptr::eq(bound.message_id(), bound.publication_id()));
+        let prepared =
+            PreparedEvent::prepare_with_id(subject.clone(), &event, 4, || event.id.clone())
+                .unwrap();
+        assert!(std::ptr::eq(
+            prepared.message_id(),
+            prepared.publication_id()
+        ));
 
         let restore = |publication_id: &str| {
             PreparedEvent::from_parts(super::PreparedEventParts {
                 subject: subject.to_string(),
-                message_id: bound.message_id().to_owned(),
+                message_id: prepared.message_id().to_owned(),
                 publication_id: publication_id.to_owned(),
-                event_type: bound.event_type().to_owned(),
-                schema_version: bound.schema_version(),
-                occurred_at: bound.occurred_at(),
-                payload: bound.payload().clone(),
+                event_type: prepared.event_type().to_owned(),
+                schema_version: prepared.schema_version(),
+                occurred_at: prepared.occurred_at(),
+                payload: prepared.payload().clone(),
             })
             .unwrap()
         };
         let restored = restore("event-id");
-        assert_eq!(bound, restored);
+        assert_eq!(prepared, restored);
         assert!(std::ptr::eq(
             restored.message_id(),
             restored.publication_id()
         ));
         assert!(
-            format!("{bound:?}").contains(
-                r#"identity: Bound { message_id: "event-id", publication_id: "event-id" }"#
-            )
+            format!("{prepared:?}")
+                .contains(r#"message_id: "event-id", publication_id: "event-id""#)
         );
         let redrive = restore("redrive-id");
-        assert_ne!(bound, redrive);
+        assert_ne!(prepared, redrive);
         assert!(format!("{redrive:#?}").contains(concat!(
-            "identity: Bound {\n",
-            "        message_id: \"event-id\",\n",
-            "        publication_id: \"redrive-id\",\n",
-            "    }"
+            "message_id: \"event-id\",\n",
+            "    publication_id: \"redrive-id\","
         )));
 
         event.id.clear();
         std::assert_matches!(
-            PreparedEvent::prepare_outbox_with_valid_subject(subject, &event, 4, || {
-                panic!("invalid identity must be rejected before building the bound ID")
+            PreparedEvent::prepare_with_id(subject, &event, 4, || {
+                panic!("invalid identity must be rejected before building the ID")
             }),
-            Err(EnvelopeError::Identity)
+            Err(PrepareError::Identity)
         );
     }
-    // template:end outbox:messaging-outbox-preparation-tests
 
     #[test]
     fn preparation_accepts_only_creation_times_rfc3339_can_carry() {
@@ -712,7 +646,7 @@ mod tests {
                 let prepared = result.expect("the time is in range");
                 crate::wire::encode_prepared(&prepared).expect("an accepted time encodes");
             } else {
-                std::assert_matches!(result, Err(EnvelopeError::CreatedAtOutOfRange));
+                std::assert_matches!(result, Err(PrepareError::CreatedAtOutOfRange));
             }
         }
     }

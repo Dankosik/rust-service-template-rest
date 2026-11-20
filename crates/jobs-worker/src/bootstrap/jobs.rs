@@ -56,7 +56,7 @@ pub(super) async fn build_engine(
     kinds: Option<Kinds>,
     pool: Option<&infra_postgres::Pool>,
     // template:begin outbox:worker-bootstrap-build-engine-messaging
-    messaging: Option<&infra_messaging::Messaging>,
+    outbox: Option<infra_messaging::OutboxProducer>,
     // template:end outbox:worker-bootstrap-build-engine-messaging
 ) -> Result<Option<Engine>, WorkerError> {
     let engine = match kinds {
@@ -68,7 +68,7 @@ pub(super) async fn build_engine(
         None => None,
     };
     // template:begin outbox:worker-bootstrap-outbox-engine
-    let engine = Some(super::outbox::with_publisher(pool, messaging, engine)?);
+    let engine = Some(super::outbox::with_publisher(pool, outbox, engine)?);
     // template:end outbox:worker-bootstrap-outbox-engine
     if let Some(engine) = &engine {
         engine.check_startup().await?;

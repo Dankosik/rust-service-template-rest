@@ -7,11 +7,10 @@ use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
 use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use crate::budget::BROKER_OPERATION_BUDGET;
-use crate::error::{EnvelopeError, PublishError, PublishRejection};
+use crate::error::{PublishEnvelopeError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{Outcomes, record_span_outcome};
 use crate::prepared::{PreparedEvent, Publication};
@@ -77,20 +76,14 @@ impl Producer {
         context: &OperationContext,
         event: &PreparedEvent,
     ) -> Result<PublishAck, PublishError> {
-        self.publish_after_admission(
-            &event.publication(),
-            context.deadline(),
-            context.cancellation(),
-            std::future::ready(Ok(())),
-        )
-        .await
+        self.publish_after_admission(&event.publication(), context, std::future::ready(Ok(())))
+            .await
     }
 
     pub(crate) async fn publish_after_admission(
         &self,
         event: &Publication<'_>,
-        deadline: Option<Deadline>,
-        cancel: &CancellationToken,
+        context: &OperationContext,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
@@ -109,7 +102,7 @@ impl Producer {
             otel.status_code = tracing::field::Empty,
         );
         let result = self
-            .send(event, &span, deadline, cancel, admission)
+            .send(event, &span, context, admission)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -140,8 +133,7 @@ impl Producer {
         &self,
         event: &Publication<'_>,
         span: &tracing::Span,
-        deadline: Option<Deadline>,
-        cancel: &CancellationToken,
+        context: &OperationContext,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         if self.shared.refuses_work() {
@@ -154,14 +146,7 @@ impl Producer {
             self.shared.max_payload_bytes,
         )?;
         admission.await?;
-        send_publication(
-            &self.shared,
-            event.subject.clone(),
-            message,
-            deadline,
-            cancel,
-        )
-        .await
+        send_publication(&self.shared, event.subject.clone(), message, context).await
     }
 }
 
@@ -172,9 +157,9 @@ fn publish_message(
     max_payload_bytes: usize,
 ) -> Result<PublishMessage, PublishRejection> {
     if event.payload.len() > max_payload_bytes {
-        return Err(EnvelopeError::PayloadTooLarge.into());
+        return Err(PublishEnvelopeError::PayloadTooLarge.into());
     }
-    let mut headers = encode_publication(event)?;
+    let mut headers = encode_publication(event).map_err(PublishEnvelopeError::from)?;
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
     validate_header_bytes(&headers)?;
@@ -187,12 +172,11 @@ pub(crate) async fn send_publication(
     shared: &Shared,
     subject: impl ToSubject,
     message: PublishMessage,
-    deadline: Option<Deadline>,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<PublishAck, PublishError> {
-    let local = Deadline::after(BROKER_OPERATION_BUDGET);
-    let deadline = deadline.map_or(local, |parent| parent.earlier(local));
-    if deadline.expired() || cancel.is_cancelled() {
+    let deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
+    let bounded = OperationContext::new(Some(deadline), context.cancellation().clone());
+    if bounded.stopped().is_some() {
         return Err(PublishRejection::ContextStopped.into());
     }
     let exchange = async {
@@ -211,8 +195,7 @@ pub(crate) async fn send_publication(
     };
     let result = tokio::select! {
         biased;
-        () = deadline.wait() => Err(PublishError::Ambiguous),
-        () = cancel.cancelled() => Err(PublishError::Ambiguous),
+        _ = bounded.wait_stopped() => Err(PublishError::Ambiguous),
         result = exchange => result,
     };
     if matches!(
@@ -356,7 +339,7 @@ mod tests {
         std::assert_matches!(
             publish_message(&publication, &tracing::Span::none(), &(stream + "s"), 4),
             Err(PublishRejection::InvalidEnvelope(
-                EnvelopeError::HeadersTooLarge
+                PublishEnvelopeError::HeadersTooLarge
             ))
         );
     }

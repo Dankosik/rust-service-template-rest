@@ -395,13 +395,9 @@ async fn prepare(
     };
     // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin messaging:worker-bootstrap-messaging-connect
-    #[allow(
-        unused_variables,
-        reason = "only the outbox profile passes the admitted broker into jobs::build_engine"
-    )]
-    let (messaging, consumer) = match capabilities.messaging.take() {
+    let connected = match capabilities.messaging.take() {
         Some(plan) => {
-            let (messaging, consumer) = messaging::connect_messaging(
+            let connected = messaging::connect_messaging(
                 plan,
                 // template:end messaging:worker-bootstrap-messaging-connect
                 // template:begin outbox:worker-bootstrap-messaging-pool-arg
@@ -412,13 +408,13 @@ async fn prepare(
                 &mut resources.dependencies.broker,
             )
             .await?;
-            probes.push(health::BoxedProbe::new(messaging.probe()));
-            if let Some(consumer) = &consumer {
+            probes.push(health::BoxedProbe::new(connected.probe));
+            if let Some(consumer) = &connected.consumer {
                 probes.push(health::BoxedProbe::new(consumer.probe()));
             }
-            (Some(messaging), consumer)
+            Some(connected)
         }
-        None => (None, None),
+        None => None,
     };
     // template:end messaging:worker-bootstrap-messaging-connect-finish
     // template:begin jobs:worker-bootstrap-build-engines
@@ -428,7 +424,7 @@ async fn prepare(
         pool.as_ref(),
         // template:end jobs:worker-bootstrap-build-engines
         // template:begin outbox:worker-bootstrap-build-engines-messaging-arg
-        messaging.as_ref(),
+        connected.as_ref().map(|connected| connected.outbox.clone()),
         // template:end outbox:worker-bootstrap-build-engines-messaging-arg
         // template:begin jobs:worker-bootstrap-build-engines-finish
     )
@@ -440,7 +436,7 @@ async fn prepare(
         engine,
         // template:end jobs:worker-bootstrap-prepared-jobs-value
         // template:begin messaging:worker-bootstrap-prepared-consumer-value
-        consumer,
+        consumer: connected.and_then(|connected| connected.consumer),
         // template:end messaging:worker-bootstrap-prepared-consumer-value
     })
 }
