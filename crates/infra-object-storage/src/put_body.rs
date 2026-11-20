@@ -1,4 +1,3 @@
-use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,6 +8,7 @@ use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 use sync_wrapper::SyncWrapper;
 
+use crate::byte_progress::ByteProgress;
 use crate::error::UploadFailure;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -41,12 +41,18 @@ impl PutOutcomes {
         self.0.load(Ordering::Acquire) != 0
     }
 
-    pub(super) fn dispatched(&self) {
+    #[must_use]
+    pub(super) fn begin_dispatch(&self) -> DispatchedPut<'_> {
         self.0.fetch_add(1, Ordering::Release);
+        DispatchedPut(self)
     }
+}
 
-    pub(super) fn settled(&self) {
-        self.0.fetch_sub(1, Ordering::Release);
+pub(super) struct DispatchedPut<'a>(&'a PutOutcomes);
+
+impl DispatchedPut<'_> {
+    pub(super) fn settle(self) {
+        self.0.0.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -127,47 +133,6 @@ impl From<Vec<u8>> for PutBody {
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
 
-pub(crate) enum ByteProgress {
-    Reading(NonZeroU64),
-    AwaitingEof(Option<Bytes>),
-}
-
-impl ByteProgress {
-    pub(crate) fn new(len: u64) -> Self {
-        NonZeroU64::new(len).map_or(Self::AwaitingEof(None), Self::Reading)
-    }
-
-    pub(crate) fn remaining(&self) -> u64 {
-        match self {
-            Self::Reading(remaining) => remaining.get(),
-            Self::AwaitingEof(held) => held.as_ref().map_or(0, |bytes| bytes.len() as u64),
-        }
-    }
-
-    pub(crate) fn accept(&mut self, chunk: Bytes) -> Result<Option<Bytes>, Bytes> {
-        let Self::Reading(remaining) = self else {
-            return Err(chunk);
-        };
-        let Some(next) = remaining.get().checked_sub(chunk.len() as u64) else {
-            return Err(chunk);
-        };
-        if let Some(remaining) = NonZeroU64::new(next) {
-            *self = Self::Reading(remaining);
-            Ok(Some(chunk))
-        } else {
-            *self = Self::AwaitingEof(Some(chunk));
-            Ok(None)
-        }
-    }
-
-    pub(crate) fn finish(&mut self) -> Result<Option<Bytes>, ()> {
-        match self {
-            Self::AwaitingEof(held) => Ok(held.take()),
-            Self::Reading(_) => Err(()),
-        }
-    }
-}
-
 enum ExactLengthPhase {
     Streaming(ByteProgress),
     Draining {
@@ -176,47 +141,44 @@ enum ExactLengthPhase {
     },
 }
 
-enum PhaseStep {
+enum StreamStep {
     Continue,
     Yield(Result<Frame<Bytes>, BoxError>),
+    Drain {
+        held: Option<Bytes>,
+        trailers: Option<Frame<Bytes>>,
+    },
     Mismatch,
 }
 
-impl ExactLengthPhase {
-    fn advance<E: Into<BoxError>>(&mut self, polled: Option<Result<Frame<Bytes>, E>>) -> PhaseStep {
-        match polled {
-            Some(Err(error)) => PhaseStep::Yield(Err(error.into())),
-            Some(Ok(frame)) => match frame.into_data() {
-                Ok(data) => self.on_data(data),
-                Err(trailers) => self.finish_data(Some(trailers)),
+fn advance_stream<E: Into<BoxError>>(
+    progress: &mut ByteProgress,
+    polled: Option<Result<Frame<Bytes>, E>>,
+) -> StreamStep {
+    match polled {
+        Some(Err(error)) => StreamStep::Yield(Err(error.into())),
+        Some(Ok(frame)) => match frame.into_data() {
+            Ok(data) if data.is_empty() => StreamStep::Continue,
+            Ok(data) => match progress.accept(data) {
+                Ok(Some(data)) => StreamStep::Yield(Ok(Frame::data(data))),
+                Ok(None) => StreamStep::Continue,
+                Err(_rejected) => StreamStep::Mismatch,
             },
-            None => self.finish_data(None),
-        }
-    }
-
-    fn on_data(&mut self, data: Bytes) -> PhaseStep {
-        if data.is_empty() {
-            return PhaseStep::Continue;
-        }
-        let Self::Streaming(progress) = self else {
-            return PhaseStep::Mismatch;
-        };
-        match progress.accept(data) {
-            Ok(Some(data)) => PhaseStep::Yield(Ok(Frame::data(data))),
-            Ok(None) => PhaseStep::Continue,
-            Err(_rejected) => PhaseStep::Mismatch,
-        }
-    }
-
-    fn finish_data(&mut self, trailers: Option<Frame<Bytes>>) -> PhaseStep {
-        let Self::Streaming(progress) = self else {
-            return PhaseStep::Mismatch;
-        };
-        let Ok(held) = progress.finish() else {
-            return PhaseStep::Mismatch;
-        };
-        *self = Self::Draining { held, trailers };
-        PhaseStep::Continue
+            Err(trailers) => match progress.finish() {
+                Ok(held) => StreamStep::Drain {
+                    held,
+                    trailers: Some(trailers),
+                },
+                Err(()) => StreamStep::Mismatch,
+            },
+        },
+        None => match progress.finish() {
+            Ok(held) => StreamStep::Drain {
+                held,
+                trailers: None,
+            },
+            Err(()) => StreamStep::Mismatch,
+        },
     }
 }
 
@@ -257,22 +219,28 @@ where
         let mut this = self.project();
         let mut polls_remaining = SOURCE_POLLS_PER_YIELD;
         loop {
-            if let ExactLengthPhase::Draining { held, trailers } = this.phase {
-                if let Some(data) = held.take() {
-                    return Poll::Ready(Some(Ok(Frame::data(data))));
+            let progress = match this.phase {
+                ExactLengthPhase::Draining { held, trailers } => {
+                    if let Some(data) = held.take() {
+                        return Poll::Ready(Some(Ok(Frame::data(data))));
+                    }
+                    return Poll::Ready(trailers.take().map(Ok));
                 }
-                return Poll::Ready(trailers.take().map(Ok));
-            }
+                ExactLengthPhase::Streaming(progress) => progress,
+            };
             if polls_remaining == 0 {
                 context.waker().wake_by_ref();
                 return Poll::Pending;
             }
             polls_remaining -= 1;
             let polled = std::task::ready!(this.inner.as_mut().get_pin_mut().poll_frame(context));
-            match this.phase.advance(polled) {
-                PhaseStep::Continue => {}
-                PhaseStep::Yield(item) => return Poll::Ready(Some(item)),
-                PhaseStep::Mismatch => {
+            match advance_stream(progress, polled) {
+                StreamStep::Continue => {}
+                StreamStep::Yield(item) => return Poll::Ready(Some(item)),
+                StreamStep::Drain { held, trailers } => {
+                    *this.phase = ExactLengthPhase::Draining { held, trailers };
+                }
+                StreamStep::Mismatch => {
                     this.mismatch.store(true, Ordering::Release);
                     *this.phase = ExactLengthPhase::Draining {
                         held: None,

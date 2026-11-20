@@ -16,10 +16,12 @@ async fn plaintext_without_the_allow_flag_is_refused() {
 
 #[tokio::test]
 async fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
+    let parsed = crate::admission::admit(options("redis://127.0.0.1:6379", true, true, None))
+        .expect("plaintext admitted");
+    assert!(!parsed.transport.is_tls());
     let cache = admitted("redis://127.0.0.1:6379", true, true).await;
     assert_eq!(cache.link.server.host, "127.0.0.1");
     assert_eq!(cache.link.server.port, 6379);
-    assert!(!cache.link.server.tls);
     let debug = format!("{cache:?}");
     assert!(
         debug.contains("127.0.0.1") && !debug.contains("redis://"),
@@ -37,8 +39,15 @@ async fn a_missing_password_is_refused_without_the_allow_flag() {
 
 #[tokio::test]
 async fn an_authenticated_tls_address_is_admitted_without_a_server() {
+    let parsed = crate::admission::admit(options(
+        "rediss://:hunter2@cache.example:6380",
+        false,
+        false,
+        None,
+    ))
+    .expect("tls admitted");
+    assert!(parsed.transport.is_tls());
     let cache = admitted("rediss://:hunter2@cache.example:6380", false, false).await;
-    assert!(cache.link.server.tls);
     assert_eq!(cache.link.server.port, 6380);
     let rendered = format!("{cache:?} {}", cache.link.server.host);
     assert!(
@@ -50,19 +59,24 @@ async fn an_authenticated_tls_address_is_admitted_without_a_server() {
 #[tokio::test]
 async fn valkey_schemes_are_admitted_like_redis_schemes() {
     assert!(
-        !admitted("valkey://127.0.0.1:6379", true, true)
-            .await
-            .link
-            .server
-            .tls
+        !crate::admission::admit(options("valkey://127.0.0.1:6379", true, true, None))
+            .expect("valkey plaintext admitted")
+            .transport
+            .is_tls()
     );
     assert!(
-        admitted("valkeys://:hunter2@cache.example:6380", false, false)
-            .await
-            .link
-            .server
-            .tls
+        crate::admission::admit(options(
+            "valkeys://:hunter2@cache.example:6380",
+            false,
+            false,
+            None,
+        ))
+        .expect("valkeys tls admitted")
+        .transport
+        .is_tls()
     );
+    admitted("valkey://127.0.0.1:6379", true, true).await;
+    admitted("valkeys://:hunter2@cache.example:6380", false, false).await;
 }
 
 #[tokio::test]

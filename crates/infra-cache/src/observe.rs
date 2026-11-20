@@ -7,7 +7,7 @@ use metrics::{Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
 
-use crate::error::{CommandError, CommandFailure, ErrorType};
+use crate::error::{CommandError, ErrorType, Refusal};
 use crate::namespace::Operation;
 use crate::{Namespace, ServerEndpoint};
 
@@ -76,12 +76,14 @@ enum Outcome {
     Success(SuccessOutcome),
     Cancelled,
     Failed(ErrorType),
+    ValueTooLarge,
 }
 
 impl Outcome {
     fn error_label(self) -> Option<&'static str> {
         match self {
             Self::Failed(error_type) => Some(error_type.label()),
+            Self::ValueTooLarge => Some("value_too_large"),
             Self::Success(_) | Self::Cancelled => None,
         }
     }
@@ -91,7 +93,7 @@ impl Outcome {
             Self::Success(outcome) => outcome.label(),
             Self::Cancelled => "cancelled",
             Self::Failed(ErrorType::Timeout) => "timeout",
-            Self::Failed(_) => "error",
+            Self::Failed(_) | Self::ValueTooLarge => "error",
         }
     }
 }
@@ -206,30 +208,40 @@ impl<'a> OperationGuard<'a> {
             };
             self.0.span.record("cache.mutation.outcome", effect);
         }
-        match error.failure() {
-            CommandFailure::Stopped(Stopped::Cancelled) => {
+        let refusal = match error {
+            CommandError::NotApplied(refusal) => refusal,
+            CommandError::OutcomeUnknown(cause) => cause.into(),
+        };
+        match refusal {
+            Refusal::Stopped(Stopped::Cancelled) => {
                 DropGuard::dismiss(self.0).finish(Outcome::Cancelled);
             }
-            CommandFailure::Stopped(Stopped::Deadline) => {
+            Refusal::Stopped(Stopped::Deadline) => {
                 self.record_error(ErrorType::Timeout, None);
             }
-            CommandFailure::Failed(error) => self.record_error(error, None),
-            CommandFailure::PermissionDenied => {
+            Refusal::Failed(error) => self.record_error(error, None),
+            Refusal::PermissionDenied => {
                 self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
             }
-            CommandFailure::InvalidTtl => self.record_error(ErrorType::ServerErrorReply, None),
+            Refusal::InvalidTtl => self.record_error(ErrorType::ServerErrorReply, None),
+            Refusal::ValueTooLarge => {
+                self.record_failure(Outcome::ValueTooLarge, "value_too_large", None);
+            }
         }
     }
 
     pub(crate) fn record_error(self, error_type: ErrorType, reason: Option<&'static str>) {
+        self.record_failure(Outcome::Failed(error_type), error_type.label(), reason);
+    }
+
+    fn record_failure(self, outcome: Outcome, label: &'static str, reason: Option<&'static str>) {
         let inner = DropGuard::dismiss(self.0);
-        let label = error_type.label();
         inner.span.record("error.type", label);
         if let Some(reason) = reason {
             inner.span.record("cache.error.reason", reason);
         }
         inner.span.record("otel.status_code", "ERROR");
-        inner.finish(Outcome::Failed(error_type));
+        inner.finish(outcome);
         inner.span.in_scope(|| {
             tracing::debug!(
                 cache.name = inner.histograms.namespace().as_str(),

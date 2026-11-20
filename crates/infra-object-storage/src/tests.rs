@@ -16,9 +16,9 @@ use secrecy::SecretString;
 use crate::error::{Failure, LocalFailure};
 use crate::provider::{UploadChecksum, resolve};
 use crate::{
-    ConfigError, ContentType, CredentialSource, MutationError, MutationFailure, ObjectKey,
-    ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody, PutOptions,
-    UnknownOutcome,
+    AccessKey, AmazonCredentials, ConfigError, ContentType, MutationError, MutationFailure,
+    ObjectKey, ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody,
+    PutOptions, UnknownOutcome,
 };
 
 const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -27,44 +27,50 @@ fn options(provider: Provider) -> ObjectStorageOptions {
     ObjectStorageOptions {
         provider,
         bucket: "evidence-bucket".to_owned(),
-        credentials: access_key("AKIDEXAMPLE", "hunter2-secret"),
         max_object_bytes: 1024,
         max_concurrency: 2,
         operation_timeout: Duration::from_secs(2),
     }
 }
 
-fn access_key(access_key_id: &str, secret_access_key: &str) -> CredentialSource {
-    CredentialSource::AccessKey {
+fn access_key(access_key_id: &str, secret_access_key: &str) -> AccessKey {
+    AccessKey {
         access_key_id: access_key_id.to_owned(),
         secret_access_key: SecretString::from(secret_access_key.to_owned()),
     }
 }
 
+fn default_access_key() -> AccessKey {
+    access_key("AKIDEXAMPLE", "hunter2-secret")
+}
+
 #[test]
 fn credentials_are_required_and_redacted() {
-    let mut missing_id = options(Provider::Local {
+    let missing_id = options(Provider::Local {
         endpoint: "http://127.0.0.1:1".to_owned(),
         region: None,
+        credentials: access_key(" ", "hunter2-secret"),
     });
-    missing_id.credentials = access_key(" ", "hunter2-secret");
     assert_eq!(
         ObjectStorage::try_new(missing_id).unwrap_err(),
         ConfigError::AccessKeyId
     );
 
-    let mut missing_secret = options(Provider::Local {
+    let missing_secret = options(Provider::Local {
         endpoint: "http://127.0.0.1:1".to_owned(),
         region: None,
+        credentials: access_key("AKIDEXAMPLE", ""),
     });
-    missing_secret.credentials = access_key("AKIDEXAMPLE", "");
     assert_eq!(
         ObjectStorage::try_new(missing_secret).unwrap_err(),
         ConfigError::SecretAccessKey
     );
 
+    let credentials = default_access_key();
+    assert_eq!(format!("{credentials:?}"), "AccessKey");
     let options = options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
+        credentials,
     });
     let rendered_options = format!("{options:?}");
     assert_eq!(
@@ -79,39 +85,18 @@ fn credentials_are_required_and_redacted() {
 }
 
 #[test]
-fn workload_identity_is_built_without_io_and_only_for_amazon() {
-    let mut amazon = options(Provider::AmazonS3 {
+fn workload_identity_is_built_without_io() {
+    let credentials = AmazonCredentials::WorkloadIdentity;
+    assert_eq!(format!("{credentials:?}"), "WorkloadIdentity");
+    let amazon = options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
         expected_bucket_owner: "123456789012".to_owned(),
+        credentials,
     });
-    amazon.credentials = CredentialSource::WorkloadIdentity;
-    assert_eq!(format!("{:?}", amazon.credentials), "WorkloadIdentity");
     assert_eq!(
         ObjectStorage::try_new(amazon).unwrap().provider_name(),
         "amazon_s3"
     );
-
-    for provider in [
-        Provider::CloudflareR2 {
-            endpoint: R2_ENDPOINT.to_owned(),
-        },
-        Provider::S3Compatible {
-            endpoint: "https://ceph.internal.example".to_owned(),
-            region: None,
-            path_style: true,
-        },
-        Provider::Local {
-            endpoint: "http://127.0.0.1:1".to_owned(),
-            region: None,
-        },
-    ] {
-        let mut other = options(provider);
-        other.credentials = CredentialSource::WorkloadIdentity;
-        assert_eq!(
-            ObjectStorage::try_new(other).unwrap_err(),
-            ConfigError::Credentials
-        );
-    }
 }
 
 #[test]
@@ -120,6 +105,7 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
         let mut refused = options(Provider::Local {
             endpoint: "http://127.0.0.1:1".to_owned(),
             region: None,
+            credentials: default_access_key(),
         });
         refused.max_concurrency = max_concurrency;
         assert_eq!(
@@ -218,6 +204,7 @@ impl Stub {
         let mut options = options(Provider::Local {
             endpoint: self.endpoint.clone(),
             region: None,
+            credentials: default_access_key(),
         });
         configure(&mut options);
         ObjectStorage::try_new(options).unwrap()
@@ -676,6 +663,7 @@ async fn get_distinguishes_short_eof_from_an_interrupted_body() {
         let mut options = options(Provider::Local {
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
             region: None,
+            credentials: default_access_key(),
         });
         options.operation_timeout = Duration::from_secs(30);
         let storage = ObjectStorage::try_new(options).unwrap();
@@ -840,6 +828,7 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
     let options = options(Provider::Local {
         endpoint: stub.endpoint.clone(),
         region: None,
+        credentials: default_access_key(),
     });
     let resolved = resolve(&options.provider, &options.bucket).unwrap();
     let storage = ObjectStorage::build(
@@ -951,6 +940,7 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
     let mut options = options(Provider::Local {
         endpoint,
         region: None,
+        credentials: default_access_key(),
     });
     options.operation_timeout = Duration::from_secs(5);
     let storage = ObjectStorage::try_new(options).unwrap();
@@ -1016,6 +1006,7 @@ async fn the_span_names_the_region_only_on_amazon() {
     let amazon = ObjectStorage::try_new(options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
         expected_bucket_owner: "123456789012".to_owned(),
+        credentials: AmazonCredentials::AccessKey(default_access_key()),
     }))
     .unwrap();
     amazon
@@ -1035,6 +1026,7 @@ async fn the_span_names_the_region_only_on_amazon() {
 
     let r2 = ObjectStorage::try_new(options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
+        credentials: default_access_key(),
     }))
     .unwrap();
     r2.presign_get(&parent, &key(), Duration::from_mins(1))
@@ -1262,9 +1254,10 @@ async fn metrics_carry_only_operation_and_outcome() {
                 error_type: "404".into(),
                 timeout_source: None,
             });
+        let failure: Failure = LocalFailure::ContentLength.into();
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(&LocalFailure::ContentLength.into());
+            .fail(&failure);
     });
     let rendered = handle.render();
     assert!(
@@ -1430,11 +1423,11 @@ async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
     current.head(&parent, &key()).await.unwrap();
 
     let replacement = Stub::start(|_, _| object(b"{}", &[])).await;
-    let mut replacement_options = options(Provider::Local {
+    let replacement_options = options(Provider::Local {
         endpoint: replacement.endpoint.clone(),
         region: None,
+        credentials: access_key("AKIDROTATED", "rotated-secret"),
     });
-    replacement_options.credentials = access_key("AKIDROTATED", "rotated-secret");
     let reconstructed = ObjectStorage::try_new(replacement_options).unwrap();
     reconstructed.head(&parent, &key()).await.unwrap();
 
@@ -1565,6 +1558,7 @@ fn tls_snapshot_storage(
     let mut options = options(Provider::Local {
         endpoint,
         region: None,
+        credentials: default_access_key(),
     });
     options.operation_timeout = Duration::from_millis(250);
     let resolved = resolve(&options.provider, &options.bucket).unwrap();
@@ -1582,8 +1576,8 @@ fn tls_snapshot_storage(
         .tls_context(tls_context)
         .build_with_resolver(FixtureResolver(address.ip()));
     let credentials = options
-        .credentials
-        .credentials_provider(&resolved, &client)
+        .provider
+        .credentials_provider(&resolved.region, &client)
         .unwrap();
     ObjectStorage::build(options, resolved, client, credentials)
 }

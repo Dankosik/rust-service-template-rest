@@ -3,6 +3,7 @@ mod connection;
 mod credentials;
 mod dial;
 mod error;
+mod exchange;
 mod namespace;
 mod observe;
 
@@ -50,7 +51,6 @@ pub enum CloseOutcome {
 pub(crate) struct ServerEndpoint {
     pub(crate) host: String,
     pub(crate) port: u16,
-    pub(crate) tls: bool,
     pub(crate) database_index: i64,
 }
 
