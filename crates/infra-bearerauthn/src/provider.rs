@@ -1022,7 +1022,7 @@ mod tests {
                 "a:b",
                 "c d",
                 &[("token", "opaque")],
-                CallerStop::Context(&unbounded),
+                super::CallerStop::Context(&unbounded),
             )
             .await
             .unwrap();
@@ -1045,7 +1045,7 @@ mod tests {
                         "fixture",
                         "secret",
                         &[("token", "opaque")],
-                        CallerStop::Context(&unbounded),
+                        super::CallerStop::Context(&unbounded),
                     )
                     .with_subscriber(dispatch.clone())
                     .await,

@@ -208,6 +208,10 @@ impl KeyStore {
             .send_modify(|state| state.worker = WorkerState::Stopped);
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "std::mem::DropGuard invokes its drop callback with owned Arc<KeyStore>"
+    )]
     fn mark_lost(store: Arc<Self>) {
         store.state.send_if_modified(|state| {
             if state.worker != WorkerState::Running {
