@@ -105,11 +105,7 @@ pub(crate) fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
 }
 
 pub(crate) fn limits() -> Limits {
-    Limits {
-        operation_timeout: Duration::from_secs(1),
-        response_header_count: 8,
-        response_body_bytes: 128,
-    }
+    Limits::new(Duration::from_secs(1), 8, 128)
 }
 
 pub(crate) fn fixture_client(address: SocketAddr, material: &TlsMaterial) -> Client {

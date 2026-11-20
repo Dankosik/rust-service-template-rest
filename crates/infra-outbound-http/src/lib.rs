@@ -26,23 +26,108 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub const MAX_RESPONSE_HEADER_COUNT: usize = 24_576;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("outbound HTTP limits are invalid")]
+pub struct InvalidLimits;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
-    pub operation_timeout: Duration,
-    pub response_header_count: usize,
-    pub response_body_bytes: usize,
+    operation_timeout: Duration,
+    response_header_count: usize,
+    response_body_bytes: usize,
 }
 
 impl Limits {
-    pub(crate) fn validate(&self) -> Result<(), BuildError> {
-        if self.operation_timeout.is_zero()
-            || self.response_header_count == 0
-            || self.response_header_count > MAX_RESPONSE_HEADER_COUNT
-            || self.response_body_bytes == 0
-        {
-            return Err(BuildError::InvalidLimits);
+    #[must_use]
+    pub const fn new(
+        operation_timeout: Duration,
+        response_header_count: usize,
+        response_body_bytes: usize,
+    ) -> Self {
+        assert!(
+            !operation_timeout.is_zero(),
+            "outbound HTTP operation_timeout must be non-zero"
+        );
+        assert!(
+            response_header_count > 0 && response_header_count <= MAX_RESPONSE_HEADER_COUNT,
+            "outbound HTTP response_header_count must be between 1 and MAX_RESPONSE_HEADER_COUNT"
+        );
+        assert!(
+            response_body_bytes > 0,
+            "outbound HTTP response_body_bytes must be non-zero"
+        );
+        Self {
+            operation_timeout,
+            response_header_count,
+            response_body_bytes,
         }
-        Ok(())
+    }
+
+    pub const fn try_new(
+        operation_timeout: Duration,
+        response_header_count: usize,
+        response_body_bytes: usize,
+    ) -> Result<Self, InvalidLimits> {
+        if operation_timeout.is_zero()
+            || response_header_count == 0
+            || response_header_count > MAX_RESPONSE_HEADER_COUNT
+            || response_body_bytes == 0
+        {
+            return Err(InvalidLimits);
+        }
+        Ok(Self {
+            operation_timeout,
+            response_header_count,
+            response_body_bytes,
+        })
+    }
+
+    #[must_use]
+    pub const fn operation_timeout(self) -> Duration {
+        self.operation_timeout
+    }
+
+    #[must_use]
+    pub const fn response_header_count(self) -> usize {
+        self.response_header_count
+    }
+
+    #[must_use]
+    pub const fn response_body_bytes(self) -> usize {
+        self.response_body_bytes
+    }
+
+    pub const fn with_operation_timeout(
+        self,
+        operation_timeout: Duration,
+    ) -> Result<Self, InvalidLimits> {
+        Self::try_new(
+            operation_timeout,
+            self.response_header_count,
+            self.response_body_bytes,
+        )
+    }
+
+    pub const fn with_response_header_count(
+        self,
+        response_header_count: usize,
+    ) -> Result<Self, InvalidLimits> {
+        Self::try_new(
+            self.operation_timeout,
+            response_header_count,
+            self.response_body_bytes,
+        )
+    }
+
+    pub const fn with_response_body_bytes(
+        self,
+        response_body_bytes: usize,
+    ) -> Result<Self, InvalidLimits> {
+        Self::try_new(
+            self.operation_timeout,
+            self.response_header_count,
+            response_body_bytes,
+        )
     }
 }
 
@@ -55,22 +140,31 @@ pub enum TransportErrorKind {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum BuildError {
-    #[error("outbound HTTP origin is invalid")]
-    InvalidOrigin,
-    #[error("outbound HTTP limits are invalid")]
-    InvalidLimits,
-    #[error("outbound HTTP TLS configuration failed")]
-    Tls {
-        #[source]
-        source: BoxError,
-    },
+#[error("outbound HTTP TLS configuration failed")]
+pub struct TlsError {
+    #[source]
+    source: BoxError,
 }
 
-impl From<InvalidOrigin> for BuildError {
-    fn from(_: InvalidOrigin) -> Self {
-        Self::InvalidOrigin
+impl TlsError {
+    pub(crate) fn new(source: BoxError) -> Self {
+        Self { source }
     }
+
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn for_test(source: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self { source }
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, thiserror::Error)]
+pub enum TestBuildError {
+    #[error(transparent)]
+    InvalidOrigin(#[from] InvalidOrigin),
+    #[error(transparent)]
+    Tls(#[from] TlsError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +197,21 @@ pub enum ExchangeError {
 }
 
 impl ExchangeError {
+    #[must_use]
+    pub const fn error(&self) -> &Error {
+        match self {
+            Self::BeforeResponse(source) | Self::AfterResponse { source, .. } => source,
+        }
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> Option<StatusCode> {
+        match self {
+            Self::BeforeResponse(_) => None,
+            Self::AfterResponse { status, .. } => Some(*status),
+        }
+    }
+
     #[must_use]
     pub fn into_error(self) -> Error {
         match self {
@@ -159,15 +268,14 @@ impl Client {
             && self.origin.admits(origin)
     }
 
-    pub fn try_new(origin: Origin, limits: Limits) -> Result<Self, BuildError> {
-        limits.validate()?;
+    pub fn try_new(origin: Origin, limits: Limits) -> Result<Self, TlsError> {
         Self::try_with_default_transport(policy::TargetOrigin::Https(origin), limits)
     }
 
     fn try_with_default_transport(
         origin: policy::TargetOrigin,
         limits: Limits,
-    ) -> Result<Self, BuildError> {
+    ) -> Result<Self, TlsError> {
         Ok(Self::with_transport(
             origin,
             limits,
@@ -198,9 +306,9 @@ impl Client {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn try_new_for_test_http(origin: &str, limits: Limits) -> Result<Self, BuildError> {
-        limits.validate()?;
+    pub fn try_new_for_test_http(origin: &str, limits: Limits) -> Result<Self, TestBuildError> {
         Self::try_with_default_transport(policy::admit_test_http_origin(origin)?, limits)
+            .map_err(TestBuildError::from)
     }
 
     #[cfg(feature = "test-support")]
@@ -209,10 +317,9 @@ impl Client {
         limits: Limits,
         root_der: &[u8],
         address: std::net::SocketAddr,
-    ) -> Result<Self, BuildError> {
-        limits.validate()?;
+    ) -> Result<Self, TestBuildError> {
         if !address.ip().is_loopback() {
-            return Err(BuildError::InvalidOrigin);
+            return Err(TestBuildError::InvalidOrigin(InvalidOrigin));
         }
         let tls = transport::tls_config_with_root(root_der)?;
         Ok(Self::with_transport(
@@ -230,9 +337,8 @@ impl Client {
     ) -> Result<Response<Bytes>, ExchangeError> {
         self.prepare(context, request)
             .map_err(ExchangeError::BeforeResponse)?
-            .send_with_response(|| Ok::<(), Infallible>(()), |_| {}, buffer_response)
+            .send()
             .await
-            .map_err(into_exchange_error)
     }
 
     pub async fn execute_for_headers(
@@ -255,7 +361,7 @@ impl Client {
         context: &OperationContext,
         request: Request<Bytes>,
     ) -> Result<PreparedRequest<'_>, Error> {
-        let context = context.child_until(Deadline::after(self.limits.operation_timeout));
+        let context = context.child_until(Deadline::after(self.limits.operation_timeout()));
         context.check()?;
         let request = policy::admit_request(&self.origin, request)?;
         Ok(PreparedRequest {
@@ -290,6 +396,12 @@ impl PreparedRequest<'_> {
         self.request
             .headers_mut()
             .insert(header::AUTHORIZATION, value);
+    }
+
+    pub async fn send(self) -> Result<Response<Bytes>, ExchangeError> {
+        self.send_with_response(|| Ok::<(), Infallible>(()), |_| {}, buffer_response)
+            .await
+            .map_err(into_exchange_error)
     }
 
     pub async fn send_checked<E>(
@@ -361,7 +473,7 @@ impl PreparedRequest<'_> {
             attempt.record_status(response.status());
             on_status(response.status());
             context.check()?;
-            consume(response, client.limits.response_body_bytes, &context)
+            consume(response, client.limits.response_body_bytes(), &context)
                 .await
                 .map_err(SendError::from)
         };
@@ -376,7 +488,7 @@ impl PreparedRequest<'_> {
         });
         match result {
             Ok(value) => {
-                attempt.finish(None);
+                attempt.finish_response();
                 Ok(value)
             }
             Err(SendError::Refused(refused)) => {
@@ -384,7 +496,7 @@ impl PreparedRequest<'_> {
                 Err(DispatchError::Refused(refused))
             }
             Err(SendError::Error(error)) => {
-                let status = attempt.finish(Some(&error));
+                let status = attempt.finish_error(&error);
                 Err(DispatchError::Exchange(match status {
                     Some(status) => ExchangeError::AfterResponse {
                         status,
@@ -450,11 +562,8 @@ where
                 Buffered::Empty => buffered = Buffered::Single(data),
                 Buffered::Single(first) => {
                     let mut collected = Vec::new();
-                    let target = first
-                        .len()
-                        .saturating_add(data.len())
-                        .max(first.len().saturating_mul(2).min(limit));
-                    collected.reserve_exact(target);
+                    let required = first.len().saturating_add(data.len());
+                    reserve_with_capacity_cap(&mut collected, required, first.len(), limit);
                     collected.extend_from_slice(first);
                     collected.extend_from_slice(&data);
                     buffered = Buffered::Multi(collected);
@@ -481,12 +590,21 @@ impl From<Stopped> for Error {
     }
 }
 
-fn append_with_capacity_cap(collected: &mut Vec<u8>, data: &[u8], capacity_cap: usize) {
-    let required = collected.len().saturating_add(data.len());
+fn reserve_with_capacity_cap(
+    collected: &mut Vec<u8>,
+    required: usize,
+    growth_base: usize,
+    capacity_cap: usize,
+) {
     if required > collected.capacity() {
-        let target = required.max(collected.capacity().saturating_mul(2).min(capacity_cap));
+        let target = required.max(growth_base.saturating_mul(2).min(capacity_cap));
         collected.reserve_exact(target - collected.len());
     }
+}
+
+fn append_with_capacity_cap(collected: &mut Vec<u8>, data: &[u8], capacity_cap: usize) {
+    let required = collected.len().saturating_add(data.len());
+    reserve_with_capacity_cap(collected, required, collected.capacity(), capacity_cap);
     collected.extend_from_slice(data);
 }
 

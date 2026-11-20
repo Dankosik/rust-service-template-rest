@@ -21,7 +21,7 @@ derive_more = { workspace = true, features = ["debug"] }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1"] }
-hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12", "rustls-platform-verifier"] }
+hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 metrics = { workspace = true }
 operation-context = { workspace = true }

@@ -44,8 +44,7 @@ impl Registration {
             .into());
         }
         verify_https_metadata(&issuer, &validated.token_url).await?;
-        let token_http = token_endpoint::build_https_client(&validated.token_url)
-            .map_err(TransportBuildFailure::token_url)?;
+        let token_http = token_endpoint::build_https_client(&validated.token_url, "token_url")?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 
@@ -53,6 +52,19 @@ impl Registration {
     pub(crate) async fn prepare_with_oidc_discovery_for_test_http(
         options: HttpDiscoveryOptions,
     ) -> Result<Self, DiscoveryError> {
+        let build_test_http = |url: &Url, endpoint: &'static str| {
+            token_endpoint::build_http_client(url).map_err(|error| match error {
+                infra_outbound_http::TestBuildError::InvalidOrigin(_) => {
+                    DiscoveryError::from(ConfigurationError {
+                        key: endpoint,
+                        reason: "requires an HTTP loopback IP address",
+                    })
+                }
+                infra_outbound_http::TestBuildError::Tls(cause) => {
+                    DiscoveryError::from(TransportBuildFailure::new(endpoint, cause))
+                }
+            })
+        };
         let issuer_url = crate::options::parse_http_url(&options.issuer, "issuer", false)?;
         let token_url = crate::options::parse_http_url(&options.token_url, "token_url", true)?;
         let validated = crate::options::validate_registration(crate::options::RawRegistration {
@@ -65,8 +77,7 @@ impl Registration {
             audience_url: issuer_url.clone(),
             provider_concurrency: options.provider_concurrency,
         })?;
-        let discovery_http = token_endpoint::build_http_client(&issuer_url)
-            .map_err(TransportBuildFailure::issuer)?;
+        let discovery_http = build_test_http(&issuer_url, "issuer")?;
         verify_metadata(
             &options.issuer,
             &issuer_url,
@@ -74,8 +85,7 @@ impl Registration {
             &discovery_http,
         )
         .await?;
-        let token_http = token_endpoint::build_http_client(&validated.token_url)
-            .map_err(TransportBuildFailure::token_url)?;
+        let token_http = build_test_http(&validated.token_url, "token_url")?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 }
@@ -96,8 +106,7 @@ pub async fn verify_oidc_metadata(
 
 async fn verify_https_metadata(issuer: &IssuerUrl, endpoint: &Url) -> Result<(), DiscoveryError> {
     prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
-    let discovery_http =
-        token_endpoint::build_https_client(issuer.url()).map_err(TransportBuildFailure::issuer)?;
+    let discovery_http = token_endpoint::build_https_client(issuer.url(), "issuer")?;
     verify_metadata(issuer.as_str(), issuer.url(), endpoint, &discovery_http).await
 }
 

@@ -118,6 +118,20 @@ impl FromStr for Origin {
     }
 }
 
+impl TryFrom<&Uri> for Origin {
+    type Error = InvalidOrigin;
+
+    fn try_from(uri: &Uri) -> Result<Self, Self::Error> {
+        Self::from_https_uri(uri)
+    }
+}
+
+impl From<Origin> for Uri {
+    fn from(origin: Origin) -> Self {
+        origin.0.uri
+    }
+}
+
 impl From<&Origin> for Uri {
     fn from(origin: &Origin) -> Self {
         origin.0.uri.clone()

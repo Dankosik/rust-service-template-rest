@@ -12,9 +12,7 @@ use tokio::{
 
 use tls_test_support::TlsMaterial;
 
-use crate::{
-    DispatchError, Error, ExchangeError, Limits, MAX_RESPONSE_HEADER_COUNT, test_support::*,
-};
+use crate::{DispatchError, Error, ExchangeError, MAX_RESPONSE_HEADER_COUNT, test_support::*};
 
 #[tokio::test]
 async fn standard_request_returns_standard_response_with_full_body() {
@@ -68,8 +66,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
 #[tokio::test]
 async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut ceiling = limits();
-    ceiling.response_body_bytes = 2;
+    let ceiling = limits().with_response_body_bytes(2).expect("valid limit");
     let cases = [
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
@@ -102,6 +99,8 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
             );
         } else {
             let error = result.expect_err("response exceeds the ceiling after headers");
+            assert_eq!(error.status(), Some(http::StatusCode::OK));
+            std::assert_matches!(error.error(), Error::ResponseBodyTooLarge);
             std::assert_matches!(
                 error,
                 ExchangeError::AfterResponse {
@@ -127,10 +126,7 @@ async fn fragmented_body_preserves_bytes_and_discards_trailers() {
     let response = fixture_client_with_limits(
         address,
         &material,
-        Limits {
-            response_body_bytes: 26,
-            ..limits()
-        },
+        limits().with_response_body_bytes(26).expect("valid limit"),
     )
     .execute(&default_context(), request())
     .await
@@ -143,8 +139,7 @@ async fn fragmented_body_preserves_bytes_and_discards_trailers() {
 #[tokio::test]
 async fn parser_header_count_overflow_is_a_transport_error() {
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut parser_limit = limits();
-    parser_limit.response_header_count = 1;
+    let parser_limit = limits().with_response_header_count(1).expect("valid limit");
     let (address, server) = tls_server(
         &material,
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
@@ -154,6 +149,8 @@ async fn parser_header_count_overflow_is_a_transport_error() {
         .execute(&OperationContext::unbounded(), request())
         .await
         .expect_err("header overflow precedes an admitted response");
+    assert_eq!(error.status(), None);
+    std::assert_matches!(error.error(), Error::Transport { .. });
     std::assert_matches!(
         error,
         ExchangeError::BeforeResponse(Error::Transport { .. })
@@ -164,8 +161,9 @@ async fn parser_header_count_overflow_is_a_transport_error() {
 #[tokio::test]
 async fn largest_header_count_limit_admits_that_many_response_headers() {
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut largest = limits();
-    largest.response_header_count = MAX_RESPONSE_HEADER_COUNT;
+    let largest = limits()
+        .with_response_header_count(MAX_RESPONSE_HEADER_COUNT)
+        .expect("valid limit");
     let mut head = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n".to_vec();
     for index in 1..MAX_RESPONSE_HEADER_COUNT {
         head.extend_from_slice(format!("h{index}:\r\n").as_bytes());
@@ -232,8 +230,7 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     }
 
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut ceiling = limits();
-    ceiling.response_body_bytes = 2;
+    let ceiling = limits().with_response_body_bytes(2).expect("valid limit");
     let cases = [
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nno!".as_slice(),
@@ -440,8 +437,9 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     for (operation, parent) in [(1, 2), (2, 1), (u64::MAX, 1)] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut ceiling = limits();
-        ceiling.operation_timeout = Duration::from_secs(operation);
+        let ceiling = limits()
+            .with_operation_timeout(Duration::from_secs(operation))
+            .expect("valid limit");
         let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
         let subscriber =
             tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
@@ -478,8 +476,9 @@ async fn dispatch_can_be_refused_after_request_setup() {
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut ceiling = limits();
-    ceiling.operation_timeout = Duration::from_secs(5);
+    let ceiling = limits()
+        .with_operation_timeout(Duration::from_secs(5))
+        .expect("valid limit");
     let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
     let subscriber =
         tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
@@ -622,8 +621,9 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
         .await
         .expect("ready-response fixture budget");
     });
-    let mut ceiling = limits();
-    ceiling.operation_timeout = Duration::from_secs(10);
+    let ceiling = limits()
+        .with_operation_timeout(Duration::from_secs(10))
+        .expect("valid limit");
     let client = fixture_client_with_limits(address, &material, ceiling);
     let context = OperationContext::with_timeout(Duration::from_secs(10));
     let mut exchange = Box::pin(client.execute(&context, request()));
@@ -675,8 +675,9 @@ async fn unresponsive_address_leaves_time_for_the_next_one() {
     let (unresponsive, _listener, _queued) = unresponsive_listener().await;
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut limits = limits();
-    limits.operation_timeout = Duration::from_secs(2);
+    let limits = limits()
+        .with_operation_timeout(Duration::from_secs(2))
+        .expect("valid limit");
     let response =
         fixture_client_resolving(FIXTURE_HOST, vec![unresponsive, address], &material, limits)
             .execute(
@@ -1089,7 +1090,7 @@ async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_bet
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
-    use crate::{BuildError, Client, Origin, TransportErrorKind};
+    use crate::{Client, Origin, TestBuildError, TransportErrorKind};
 
     let material = TlsMaterial::new(FIXTURE_HOST);
     let origin = Origin::parse_https(&format!("https://{FIXTURE_HOST}")).expect("origin");
@@ -1127,11 +1128,11 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
             &material.root,
             "10.0.0.1:443".parse().expect("non-loopback address"),
         ),
-        Err(BuildError::InvalidOrigin)
+        Err(TestBuildError::InvalidOrigin(_))
     );
     std::assert_matches!(
         Client::try_new_for_test_https(origin, limits(), b"not-der", address),
-        Err(BuildError::Tls { .. })
+        Err(TestBuildError::Tls(_))
     );
     let http_client =
         Client::try_new_for_test_http("http://127.0.0.1:8080", limits()).expect("test http client");
@@ -1178,4 +1179,22 @@ async fn prepared_request_exposes_headers_and_accepts_non_send_hooks() {
     assert_eq!(observed.get(), Some(http::StatusCode::OK));
     assert_eq!(response.body().as_ref(), b"ok");
     server.await.expect("fixture server joins");
+
+    let (address, captured, server) =
+        tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let client = fixture_client(address, &material);
+    let mut prepared = client
+        .prepare(&default_context(), crate::test_support::request())
+        .expect("prepared request for send");
+    prepared.set_authorization("Bearer direct".parse().expect("auth"));
+    let response = prepared.send().await.expect("direct send response");
+    assert_eq!(response.body().as_ref(), b"ok");
+    assert!(
+        captured
+            .await
+            .expect("captured direct send")
+            .to_ascii_lowercase()
+            .contains("authorization: bearer direct\r\n")
+    );
+    server.await.expect("direct send fixture joins");
 }

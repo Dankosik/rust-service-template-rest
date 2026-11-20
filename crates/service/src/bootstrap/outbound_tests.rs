@@ -38,10 +38,7 @@ async fn resource(Extension(resource): Extension<Resource>, context: RequestCont
                 .body(infra_outbound_http::Bytes::new())
                 .unwrap();
             matches!(
-                client
-                    .with_context(context.operation())
-                    .execute(request)
-                    .await,
+                client.execute(context.operation(), request).await,
                 Err(infra_oauth2_client_credentials::Error::Resource(
                     infra_outbound_http::ExchangeError::BeforeResponse(
                         infra_outbound_http::Error::Transport { .. }
@@ -70,11 +67,7 @@ fn http(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
     let origin = infra_outbound_http::Origin::parse_https("https://127.0.0.1:0").unwrap();
     let transport = infra_outbound_http::Client::try_new(
         origin,
-        infra_outbound_http::Limits {
-            operation_timeout: Duration::from_secs(5),
-            response_header_count: 16,
-            response_body_bytes: 1024,
-        },
+        infra_outbound_http::Limits::new(Duration::from_secs(5), 16, 1024),
     )
     .unwrap();
     Resource::Http(Arc::new(tokens.http(transport).unwrap()))

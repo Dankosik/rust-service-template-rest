@@ -45,11 +45,11 @@ fn outbound(endpoint_ids: &[&str]) -> Producer {
 }
 
 fn limits() -> infra_outbound_http::Limits {
-    infra_outbound_http::Limits {
-        operation_timeout: infra_webhooks::outbound::DELIVERY_POLICY.timeout,
-        response_header_count: 64,
-        response_body_bytes: 64 * 1024,
-    }
+    infra_outbound_http::Limits::new(
+        infra_webhooks::outbound::DELIVERY_POLICY.timeout,
+        64,
+        64 * 1024,
+    )
 }
 
 fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Dispatcher {
