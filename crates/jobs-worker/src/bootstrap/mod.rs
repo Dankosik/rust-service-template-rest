@@ -72,7 +72,7 @@ pub(crate) enum WorkerError {
     Registration(#[from] BuildError),
     // template:begin webhooks:worker-bootstrap-webhook-tls-error
     #[error("outbound webhook TLS preparation failed ({0})")]
-    WebhookTls(#[from] infra_outbound_http::BuildError),
+    WebhookTls(#[from] infra_outbound_http::TlsError),
     // template:end webhooks:worker-bootstrap-webhook-tls-error
     #[error("background task {0} stopped without a stop signal")]
     BackgroundStopped(&'static str),

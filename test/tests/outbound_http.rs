@@ -1,17 +1,13 @@
 use std::time::Duration;
 
 use infra_outbound_http::{
-    BuildError, Bytes, Client, InvalidOrigin, Limits, OperationContext, Origin, Request,
+    Bytes, Client, InvalidOrigin, Limits, OperationContext, Origin, Request, TestBuildError,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn limits() -> Limits {
-    Limits {
-        operation_timeout: Duration::from_secs(1),
-        response_header_count: 8,
-        response_body_bytes: 128,
-    }
+    Limits::new(Duration::from_secs(1), 8, 128)
 }
 
 #[tokio::test]
@@ -54,7 +50,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     ] {
         std::assert_matches!(
             Client::try_new_for_test_http(base, limits()),
-            Err(BuildError::InvalidOrigin),
+            Err(TestBuildError::InvalidOrigin(_)),
             "{base} must be refused"
         );
     }
@@ -74,7 +70,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
             b"not-der",
             "10.0.0.1:443".parse().unwrap(),
         ),
-        Err(BuildError::InvalidOrigin)
+        Err(TestBuildError::InvalidOrigin(_))
     );
     std::assert_matches!(
         Client::try_new_for_test_https(
@@ -83,6 +79,6 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
             b"not-der",
             "127.0.0.1:443".parse().unwrap(),
         ),
-        Err(BuildError::Tls { .. })
+        Err(TestBuildError::Tls(_))
     );
 }

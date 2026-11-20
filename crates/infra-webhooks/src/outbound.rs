@@ -14,7 +14,7 @@ use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http::{HeaderMap, Request, StatusCode, Uri, header};
 use infra_jobs::{Handler, Job, JobError, JobKind, KindName, KindsBuilder, Policy, RetrySchedule};
-use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits, Origin};
+use infra_outbound_http::{Client, Error as HttpError, Limits, Origin, TlsError};
 use metrics::{Counter, SharedString};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -41,11 +41,11 @@ pub const DELIVERY_POLICY: Policy = Policy {
     retry: RetrySchedule::Quartic,
 };
 
-const LIMITS: Limits = Limits {
-    operation_timeout: DELIVERY_POLICY.timeout,
-    response_header_count: RESPONSE_HEADER_COUNT,
-    response_body_bytes: RESPONSE_BODY_BYTES,
-};
+const LIMITS: Limits = Limits::new(
+    DELIVERY_POLICY.timeout,
+    RESPONSE_HEADER_COUNT,
+    RESPONSE_BODY_BYTES,
+);
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Endpoint([REDACTED])")]
@@ -237,7 +237,7 @@ pub enum EndpointError {
     #[error("outbound webhook destination is invalid")]
     InvalidDestination,
     #[error("outbound webhook client configuration is invalid")]
-    Client(#[from] BuildError),
+    Client(#[from] TlsError),
 }
 
 #[derive(Clone, Copy, Debug, Enum)]

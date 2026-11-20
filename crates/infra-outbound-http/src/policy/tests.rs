@@ -3,7 +3,7 @@ use std::time::Duration;
 use http::{Uri, header};
 
 use crate::{
-    BuildError, Client, Error, InvalidOrigin, Limits, MAX_RESPONSE_HEADER_COUNT, Origin, policy,
+    Client, Error, InvalidLimits, InvalidOrigin, Limits, MAX_RESPONSE_HEADER_COUNT, Origin, policy,
     test_support::*,
 };
 
@@ -52,10 +52,15 @@ fn client_binds_one_https_origin() {
     .expect("origin from full HTTPS URI");
     let parsed: Origin = "https://provider.example".parse().expect("FromStr origin");
     assert_eq!(extracted, parsed);
+    assert_eq!(
+        Origin::try_from(&Uri::from_static("https://provider.example/v1")),
+        Ok(parsed.clone())
+    );
     assert_eq!(extracted.host(), "provider.example");
     assert_eq!(extracted.port(), 443);
     assert_eq!(extracted.to_string(), "https://provider.example");
     assert_eq!(&Uri::from(&extracted), extracted.as_uri());
+    assert_eq!(Uri::from(parsed), *extracted.as_uri());
     assert_eq!(
         extracted.uri("/items?q=1").expect("origin uri"),
         Uri::from_static("https://provider.example/items?q=1")
@@ -71,8 +76,12 @@ fn client_binds_one_https_origin() {
             Err(InvalidOrigin),
             "{raw} must be refused"
         );
+        std::assert_matches!(
+            Origin::try_from(&uri),
+            Err(InvalidOrigin),
+            "{raw} must be refused via TryFrom"
+        );
     }
-    std::assert_matches!(BuildError::from(InvalidOrigin), BuildError::InvalidOrigin);
 }
 
 #[test]
@@ -139,15 +148,22 @@ fn the_host_header_names_the_port_only_when_it_is_not_the_default() {
 
 #[test]
 fn limits_must_be_positive_and_bounded() {
-    let mutations: [fn(&mut Limits); 4] = [
-        |limits: &mut Limits| limits.operation_timeout = Duration::ZERO,
-        |limits: &mut Limits| limits.response_header_count = 0,
-        |limits: &mut Limits| limits.response_header_count = MAX_RESPONSE_HEADER_COUNT + 1,
-        |limits: &mut Limits| limits.response_body_bytes = 0,
-    ];
-    for mutate in mutations {
-        let mut invalid = limits();
-        mutate(&mut invalid);
-        std::assert_matches!(invalid.validate(), Err(BuildError::InvalidLimits));
+    let valid = Limits::try_new(Duration::from_secs(2), MAX_RESPONSE_HEADER_COUNT, 64)
+        .expect("valid limits");
+    assert_eq!(valid.operation_timeout(), Duration::from_secs(2));
+    assert_eq!(valid.response_header_count(), MAX_RESPONSE_HEADER_COUNT);
+    assert_eq!(valid.response_body_bytes(), 64);
+
+    for invalid in [
+        Limits::try_new(Duration::ZERO, 8, 128),
+        Limits::try_new(Duration::from_secs(1), 0, 128),
+        Limits::try_new(Duration::from_secs(1), MAX_RESPONSE_HEADER_COUNT + 1, 128),
+        Limits::try_new(Duration::from_secs(1), 8, 0),
+        limits().with_operation_timeout(Duration::ZERO),
+        limits().with_response_header_count(0),
+        limits().with_response_header_count(MAX_RESPONSE_HEADER_COUNT + 1),
+        limits().with_response_body_bytes(0),
+    ] {
+        std::assert_matches!(invalid, Err(InvalidLimits));
     }
 }

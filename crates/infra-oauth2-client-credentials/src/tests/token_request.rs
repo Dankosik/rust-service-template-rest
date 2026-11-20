@@ -348,10 +348,9 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
     fixture.token_json(StatusCode::OK, &exchange_response("exchange-token"));
     let resource = Client::try_new_for_test_http(
         fixture.origin.as_str(),
-        infra_outbound_http::Limits {
-            operation_timeout: Duration::from_secs(20),
-            ..TOKEN_LIMITS
-        },
+        TOKEN_LIMITS
+            .with_operation_timeout(Duration::from_secs(20))
+            .unwrap(),
     )
     .unwrap();
     let client = fixture

@@ -334,10 +334,9 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     let resource = Client::try_new_for_test_http(
         fixture.origin.as_str(),
-        infra_outbound_http::Limits {
-            operation_timeout: Duration::from_secs(10),
-            ..TOKEN_LIMITS
-        },
+        TOKEN_LIMITS
+            .with_operation_timeout(Duration::from_secs(10))
+            .unwrap(),
     )
     .unwrap();
     let client = fixture

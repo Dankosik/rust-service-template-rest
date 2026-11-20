@@ -30,7 +30,7 @@ pub enum PreparationError {
 
 impl PreparationError {
     #[must_use]
-    pub const fn diagnostic_cause(&self) -> Option<&infra_outbound_http::BuildError> {
+    pub const fn diagnostic_cause(&self) -> Option<&infra_outbound_http::TlsError> {
         match self {
             Self::Configuration(_) => None,
             Self::Transport(error) => Some(&error.cause),
@@ -43,22 +43,16 @@ impl PreparationError {
 pub struct TransportBuildFailure {
     endpoint: &'static str,
     #[debug(skip)]
-    cause: infra_outbound_http::BuildError,
+    cause: infra_outbound_http::TlsError,
 }
 
 impl TransportBuildFailure {
-    pub(crate) const fn token_url(cause: infra_outbound_http::BuildError) -> Self {
-        Self {
-            endpoint: "token_url",
-            cause,
-        }
+    pub(crate) const fn new(endpoint: &'static str, cause: infra_outbound_http::TlsError) -> Self {
+        Self { endpoint, cause }
     }
 
-    pub(crate) const fn issuer(cause: infra_outbound_http::BuildError) -> Self {
-        Self {
-            endpoint: "issuer",
-            cause,
-        }
+    pub(crate) const fn issuer(cause: infra_outbound_http::TlsError) -> Self {
+        Self::new("issuer", cause)
     }
 }
 

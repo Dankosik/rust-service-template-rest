@@ -2,7 +2,7 @@ use std::{error::Error as StdError, fmt, mem::DropGuard, sync::Arc, time::Instan
 
 use http::{HeaderMap, Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 use tracing::Span;
 
 use shared_rules::{
@@ -127,8 +127,8 @@ struct AttemptInner<'a> {
 impl AttemptInner<'_> {
     fn abandon(self) {
         let outcome = match self.context.check() {
-            Ok(()) => Outcome::Cancelled,
-            Err(reason) => Outcome::from_error(&Error::from(reason)),
+            Ok(()) | Err(Stopped::Cancelled) => Outcome::Cancelled,
+            Err(Stopped::Deadline) => Outcome::Failed("timeout"),
         };
         self.emit(outcome);
     }
@@ -238,10 +238,14 @@ impl<'a> Attempt<'a> {
         self.0.status = Some(status);
     }
 
-    pub(crate) fn finish(self, error: Option<&Error>) -> Option<StatusCode> {
+    pub(crate) fn finish_response(self) {
+        DropGuard::dismiss(self.0).emit(Outcome::Response);
+    }
+
+    pub(crate) fn finish_error(self, error: &Error) -> Option<StatusCode> {
         let inner = DropGuard::dismiss(self.0);
-        inner.emit(error.map_or(Outcome::Response, Outcome::from_error));
-        if let Some(Error::Transport { source }) = error {
+        inner.emit(Outcome::from_error(error));
+        if let Error::Transport { source } = error {
             inner.span.in_scope(|| {
                 tracing::warn!(
                     error = %DisplayErrorChain(&**source),

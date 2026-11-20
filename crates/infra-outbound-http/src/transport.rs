@@ -16,7 +16,7 @@ use hyper_util::client::legacy::connect::{
 use parking_lot::Mutex;
 use tower::Service;
 
-use crate::{BuildError, Limits, policy::TargetOrigin};
+use crate::{Limits, TlsError, policy::TargetOrigin};
 
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
 static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
@@ -85,7 +85,7 @@ impl Service<Name> for Resolver {
         match self {
             Self::Gai(resolver) => resolver.poll_ready(cx),
             #[cfg(any(test, feature = "test-support"))]
-            Self::Fixture(resolver) => resolver.poll_ready(cx),
+            Self::Fixture(_) => Poll::Ready(Ok(())),
         }
     }
 
@@ -93,7 +93,7 @@ impl Service<Name> for Resolver {
         match self {
             Self::Gai(resolver) => ResolveFuture::Gai(resolver.call(name)),
             #[cfg(any(test, feature = "test-support"))]
-            Self::Fixture(resolver) => ResolveFuture::Fixture(resolver.call(name)),
+            Self::Fixture(resolver) => ResolveFuture::Fixture(resolver.resolve()),
         }
     }
 }
@@ -112,19 +112,8 @@ impl FixtureResolver {
     pub(crate) fn replace(&self, addresses: Vec<SocketAddr>) {
         *self.0.lock() = addresses;
     }
-}
 
-#[cfg(any(test, feature = "test-support"))]
-impl Service<Name> for FixtureResolver {
-    type Response = std::vec::IntoIter<SocketAddr>;
-    type Error = io::Error;
-    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _: Name) -> Self::Future {
+    fn resolve(&self) -> std::future::Ready<Result<std::vec::IntoIter<SocketAddr>, io::Error>> {
         let addresses = self.0.lock().clone();
         std::future::ready(if addresses.is_empty() {
             Err(io::Error::other("no fixture listener"))
@@ -134,18 +123,16 @@ impl Service<Name> for FixtureResolver {
     }
 }
 
-pub async fn prepare_tls() -> Result<(), BuildError> {
+pub async fn prepare_tls() -> Result<(), TlsError> {
     if TLS_CONFIG.get().is_none() {
         tokio::task::spawn_blocking(tls_config)
             .await
-            .map_err(|source| BuildError::Tls {
-                source: Box::new(source),
-            })??;
+            .map_err(|source| TlsError::new(Box::new(source)))??;
     }
     Ok(())
 }
 
-pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
+pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, TlsError> {
     if let Some(config) = TLS_CONFIG.get() {
         return Ok(config);
     }
@@ -153,26 +140,20 @@ pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> 
     if let Some(config) = TLS_CONFIG.get() {
         return Ok(config);
     }
-    let config = platform_tls_config().map_err(|source| BuildError::Tls {
-        source: Box::new(source),
-    })?;
+    let config = platform_tls_config().map_err(|source| TlsError::new(Box::new(source)))?;
     Ok(TLS_CONFIG.get_or_init(|| config))
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn tls_config_with_root(root_der: &[u8]) -> Result<rustls::ClientConfig, BuildError> {
+pub(crate) fn tls_config_with_root(root_der: &[u8]) -> Result<rustls::ClientConfig, TlsError> {
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rustls::pki_types::CertificateDer::from(root_der.to_vec()))
-        .map_err(|source| BuildError::Tls {
-            source: Box::new(source),
-        })?;
+        .map_err(|source| TlsError::new(Box::new(source)))?;
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|source| BuildError::Tls {
-            source: Box::new(source),
-        })
+        .map_err(|source| TlsError::new(Box::new(source)))
         .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
 }
 
@@ -195,7 +176,7 @@ pub(crate) fn build_transport(
     let mut http = HttpConnector::new_with_resolver(resolver);
     http.enforce_http(false);
     http.set_connect_timeout(Some(
-        (limits.operation_timeout / 2).min(CONNECT_TIMEOUT_CAP),
+        (limits.operation_timeout() / 2).min(CONNECT_TIMEOUT_CAP),
     ));
     http.set_nodelay(true);
     http.set_keepalive(Some(Duration::from_secs(15)));
@@ -212,6 +193,6 @@ pub(crate) fn build_transport(
     hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .pool_timer(hyper_util::rt::TokioTimer::new())
         .pool_idle_timeout(Duration::from_secs(30))
-        .http1_max_headers(limits.response_header_count)
+        .http1_max_headers(limits.response_header_count())
         .build(https.enable_http1().wrap_connector(http))
 }

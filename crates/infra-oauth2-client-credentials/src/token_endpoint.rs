@@ -6,7 +6,7 @@ use http::{
     Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use infra_outbound_http::{BuildError, Client, ExchangeError, Limits, Origin};
+use infra_outbound_http::{Client, ExchangeError, Limits, Origin};
 use operation_context::OperationContext;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Deserializer};
@@ -14,24 +14,29 @@ use tokio::{sync::Semaphore, time::Instant};
 use url::{Url, form_urlencoded::Serializer};
 
 use crate::{
-    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Rejection, ServiceTokenTarget,
-    assertion::Signer, token::Token,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, PreparationError, Rejection,
+    ServiceTokenTarget, TransportBuildFailure, assertion::Signer, token::Token,
 };
 
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const TOKEN_LIMITS: Limits = Limits {
-    operation_timeout: FETCH_TIMEOUT,
-    response_header_count: 64,
-    response_body_bytes: 1024 * 1024,
-};
+pub(crate) const TOKEN_LIMITS: Limits = Limits::new(FETCH_TIMEOUT, 64, 1024 * 1024);
 
-pub(crate) fn build_https_client(url: &Url) -> Result<Client, BuildError> {
-    let origin = url.origin().ascii_serialization();
-    Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS)
+pub(crate) fn build_https_client(
+    url: &Url,
+    endpoint: &'static str,
+) -> Result<Client, PreparationError> {
+    let origin = Origin::parse_https(&url.origin().ascii_serialization()).map_err(|_| {
+        ConfigurationError {
+            key: endpoint,
+            reason: "must be a valid HTTPS URL",
+        }
+    })?;
+    Client::try_new(origin, TOKEN_LIMITS)
+        .map_err(|cause| TransportBuildFailure::new(endpoint, cause).into())
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn build_http_client(url: &Url) -> Result<Client, BuildError> {
+pub(crate) fn build_http_client(url: &Url) -> Result<Client, infra_outbound_http::TestBuildError> {
     let origin = url.origin().ascii_serialization();
     Client::try_new_for_test_http(&origin, TOKEN_LIMITS)
 }

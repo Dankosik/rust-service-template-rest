@@ -16,7 +16,7 @@ use tokio::{
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
-    ServiceTokenTarget, TransportBuildFailure,
+    ServiceTokenTarget,
     assertion::{Signer, SignerConfig},
     options::{ValidatedRegistration, validate_options},
     token::Token,
@@ -176,8 +176,7 @@ struct CachedFailure {
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
         let validated = validate_options(options)?;
-        let token_http = token_endpoint::build_https_client(&validated.token_url)
-            .map_err(TransportBuildFailure::token_url)?;
+        let token_http = token_endpoint::build_https_client(&validated.token_url, "token_url")?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }
 
