@@ -86,7 +86,7 @@ impl From<ServiceName> for Arc<str> {
 }
 
 /// RFC 8725 §3.11, RFC 7515 §4.1.9
-#[derive(Clone, Eq, PartialEq, derive_more::Debug, derive_more::Display)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
 #[display("{_0}")]
 pub struct JwtType(Arc<str>);
@@ -123,6 +123,12 @@ impl JwtType {
     }
 }
 
+impl Borrow<str> for JwtType {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl AsRef<str> for JwtType {
     fn as_ref(&self) -> &str {
         self.as_str()
@@ -137,7 +143,7 @@ impl FromStr for JwtType {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug, derive_more::Display)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
 #[display("{_0}")]
 pub struct KeyId(Arc<str>);
@@ -162,6 +168,12 @@ impl KeyId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Borrow<str> for KeyId {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 

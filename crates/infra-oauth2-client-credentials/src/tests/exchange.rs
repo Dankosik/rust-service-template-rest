@@ -175,7 +175,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
     let client = fixture
         .exchange_tokens_with(
-            Options {
+            HttpOptions {
                 provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
@@ -207,7 +207,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
 async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_consume_it() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
-    let registration = prepare_registration(Options {
+    let registration = prepare_registration(HttpOptions {
         provider_concurrency: nonzero(2),
         ..fixture.options()
     });
@@ -276,7 +276,7 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
 async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waiters_leader() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-    let registration = prepare_registration(Options {
+    let registration = prepare_registration(HttpOptions {
         provider_concurrency: nonzero(1),
         ..fixture.options()
     });
@@ -342,7 +342,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     .unwrap();
     let client = fixture
         .exchange_tokens_with(
-            Options {
+            HttpOptions {
                 provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
@@ -399,7 +399,7 @@ async fn a_failed_exchange_is_not_cached() {
     fixture.token_raw(response(StatusCode::INTERNAL_SERVER_ERROR, b"{}"));
     let client = fixture
         .exchange_tokens_with(
-            Options {
+            HttpOptions {
                 provider_concurrency: nonzero(1),
                 ..fixture.options()
             },

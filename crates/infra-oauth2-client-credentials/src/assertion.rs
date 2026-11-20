@@ -1,16 +1,24 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use secrecy::ExposeSecret as _;
+use secrecy::{ExposeSecret as _, SecretString};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::{AcquisitionError, Algorithm, ConfigurationError, Options};
+use crate::{AcquisitionError, Algorithm, ConfigurationError};
 
 /// RFC 7523 §2.2
 const ASSERTION_LIFETIME_SECS: u64 = 60;
 const ASSERTION_BACKDATE_SECS: u64 = 10;
 const ASSERTION_TYP: &str = "client-authentication+jwt";
 const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+pub(crate) struct SignerConfig {
+    pub(crate) client_id: String,
+    pub(crate) private_key: SecretString,
+    pub(crate) key_id: String,
+    pub(crate) algorithm: Algorithm,
+    pub(crate) audience: String,
+}
 
 pub(crate) struct Signer {
     key: jsonwebtoken::EncodingKey,
@@ -20,25 +28,28 @@ pub(crate) struct Signer {
 }
 
 impl Signer {
-    pub(crate) fn try_new(options: Options, now: SystemTime) -> Result<Self, ConfigurationError> {
+    pub(crate) fn try_new(
+        config: SignerConfig,
+        now: SystemTime,
+    ) -> Result<Self, ConfigurationError> {
         let invalid_key = ConfigurationError {
             key: "private_key",
             reason: "must be a PEM key matching its configured algorithm",
         };
-        let pem = options.auth.private_key.expose_secret().as_bytes();
-        let key = match options.auth.algorithm {
+        let pem = config.private_key.expose_secret().as_bytes();
+        let key = match config.algorithm {
             Algorithm::Rs256 | Algorithm::Ps256 => jsonwebtoken::EncodingKey::from_rsa_pem(pem),
             Algorithm::Es256 => jsonwebtoken::EncodingKey::from_ec_pem(pem),
         }
         .map_err(|_| invalid_key)?;
-        let mut header = jsonwebtoken::Header::new(options.auth.algorithm.into());
-        header.kid = Some(options.auth.key_id);
+        let mut header = jsonwebtoken::Header::new(config.algorithm.into());
+        header.kid = Some(config.key_id);
         header.typ = Some(ASSERTION_TYP.to_owned());
         let signer = Self {
             key,
             header,
-            client_id: options.client_id,
-            assertion_audience: options.auth.audience.as_str().to_owned(),
+            client_id: config.client_id,
+            assertion_audience: config.audience,
         };
         let since_unix_epoch = now
             .duration_since(UNIX_EPOCH)

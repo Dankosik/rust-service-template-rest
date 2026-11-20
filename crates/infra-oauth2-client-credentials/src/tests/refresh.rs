@@ -642,7 +642,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         StatusCode::OK,
         &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}),
     );
-    let registration = prepare_registration(Options {
+    let registration = prepare_registration(HttpOptions {
         provider_concurrency: nonzero(1),
         ..fixture.options()
     });

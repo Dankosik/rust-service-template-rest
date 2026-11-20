@@ -221,9 +221,10 @@ or the destination policy changes.
 When migrating a handler that used `VerifiedPrincipal::access_token()`, keep
 identity-only handlers on `VerifiedPrincipal`. For each HTTP operation that
 exchanges the caller's token, declare `x-bearer-delegation: true` alongside
-its bearer security requirement. The handler can then read
-`infra_http::DelegationCredential` from request extensions. Record the
-authorized downstream audience for that exchange.
+its bearer security requirement. The handler can then extract
+`infra_http::VerifiedDelegation` (or read `infra_http::DelegationCredential`
+from request extensions). Record the authorized downstream audience for that
+exchange.
 <!-- template:end authn:production-bearer-delegation -->
 <!-- template:begin grpc-authn:production-rpc-delegation -->
 In bearer mode, declare a scope rule for every registered business RPC. Use

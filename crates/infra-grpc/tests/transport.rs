@@ -1134,7 +1134,7 @@ async fn verify_http_order_reads(fixture: &Fixture) {
         .unwrap()
         .build(
             fixture.echo.orders.clone(),
-            infra_http::Authentication::Bearer(Box::new(fixture.verifier.clone())),
+            infra_http::Authentication::Bearer(fixture.verifier.clone()),
             &HardenOptions {
                 max_body_bytes: 1024,
                 request_timeout: WAIT,

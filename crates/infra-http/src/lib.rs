@@ -29,7 +29,7 @@ pub use harden::HardenOptions;
 use harden::harden;
 pub use observe::HISTOGRAMS;
 // template:begin authn:infra-http-authn-exports
-pub use authn::VerifiedPrincipal;
+pub use authn::{VerifiedDelegation, VerifiedPrincipal};
 pub use infra_bearerauthn::{
     Actor, ClaimAccessError, DelegationCredential, Principal, PrincipalIdentity,
 };

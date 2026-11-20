@@ -126,7 +126,7 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
         fixture.token_json(StatusCode::OK, body);
         let client = fixture
             .service_tokens_with(
-                Options {
+                HttpOptions {
                     provider_concurrency: nonzero(1),
                     ..fixture.options()
                 },
@@ -179,7 +179,7 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     let fixture = Fixture::new().await;
     let client = fixture
         .service_tokens_with(
-            Options {
+            HttpOptions {
                 provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
@@ -332,7 +332,7 @@ async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     let fixture = Fixture::new().await;
     let client = fixture
         .service_tokens_with(
-            Options {
+            HttpOptions {
                 provider_concurrency: nonzero(1),
                 ..fixture.options()
             },

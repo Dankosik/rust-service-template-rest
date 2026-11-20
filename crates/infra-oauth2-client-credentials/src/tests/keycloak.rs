@@ -15,12 +15,11 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    AcquisitionError, Algorithm, EXCHANGE_CAPACITY, Options, Rejection, TOKEN_LIMITS,
-    acquisition_deadline, exchange_target, nonzero, service_target, token_context,
+    AcquisitionError, Algorithm, EXCHANGE_CAPACITY, Rejection, TOKEN_LIMITS, acquisition_deadline,
+    exchange_target, nonzero, service_target, token_context,
 };
 use crate::{
-    IssuerUrl, PrivateKeyJwt, Registration, ServiceTokenTarget, ServiceTokens, TokenUrl,
-    token::Token,
+    Registration, ServiceTokenTarget, ServiceTokens, discovery::HttpDiscoveryOptions, token::Token,
 };
 
 const KEY_ID: &str = "key-1";
@@ -292,20 +291,16 @@ impl Realm {
         key: &KeyPair,
         key_id: &str,
     ) -> Registration {
-        let endpoint = self.token_endpoint(&self.name);
-        let issuer = IssuerUrl::parse_for_test_http(&self.issuer()).unwrap();
-        let options = Options {
-            token_url: TokenUrl::parse_for_test_http(endpoint.as_str()).unwrap(),
+        let options = HttpDiscoveryOptions {
+            issuer: self.issuer(),
+            token_url: self.token_endpoint(&self.name).into(),
             client_id: caller(algorithm),
-            auth: PrivateKeyJwt {
-                private_key: SecretString::from(key.serialize_pem()),
-                key_id: key_id.to_owned(),
-                algorithm,
-                audience: issuer.clone(),
-            },
+            private_key: SecretString::from(key.serialize_pem()),
+            key_id: key_id.to_owned(),
+            algorithm,
             provider_concurrency: nonzero(32),
         };
-        Registration::prepare_with_oidc_discovery_for_test_http(issuer, options)
+        Registration::prepare_with_oidc_discovery_for_test_http(options)
             .await
             .unwrap()
     }

@@ -1,7 +1,10 @@
 use std::time::UNIX_EPOCH;
 
 use super::*;
-use crate::{ConfigurationError, PreparationError, assertion::Signer};
+use crate::{
+    ConfigurationError, PreparationError,
+    assertion::{Signer, SignerConfig},
+};
 
 fn valid_options() -> Options {
     Options {
@@ -74,23 +77,6 @@ fn direct_construction_repeats_sensitive_option_admission() {
             },
             "private_key",
         ),
-        (
-            Options {
-                token_url: TokenUrl::parse_for_test_http("http://identity.example/token").unwrap(),
-                ..valid_options()
-            },
-            "token_url",
-        ),
-        (
-            Options {
-                auth: PrivateKeyJwt {
-                    audience: IssuerUrl::parse_for_test_http("http://issuer.example").unwrap(),
-                    ..valid_options().auth
-                },
-                ..valid_options()
-            },
-            "assertion_audience",
-        ),
     ] {
         let mut options = options;
         let error = Registration::prepare(options.clone()).unwrap_err();
@@ -126,6 +112,13 @@ fn issuer_and_token_url_types_implement_from_str_and_enforce_url_rules() {
         let error = IssuerUrl::parse(audience).unwrap_err();
         assert_eq!(error.key, "issuer", "{audience:?}");
     }
+    assert_eq!(
+        TokenUrl::parse("http://identity.example/token").unwrap_err(),
+        ConfigurationError {
+            key: "token_url",
+            reason: "must use HTTPS",
+        }
+    );
 
     let error = Registration::prepare(Options {
         auth: PrivateKeyJwt {
@@ -244,19 +237,19 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
 
 #[test]
 fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
-    let options = Options {
-        auth: PrivateKeyJwt {
-            private_key: SecretString::from(
-                KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-                    .unwrap()
-                    .serialize_pem(),
-            ),
-            algorithm: Algorithm::Es256,
-            ..valid_options().auth
-        },
-        ..valid_options()
+    let options = valid_options();
+    let config = SignerConfig {
+        client_id: options.client_id,
+        private_key: SecretString::from(
+            KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                .unwrap()
+                .serialize_pem(),
+        ),
+        key_id: options.auth.key_id,
+        algorithm: Algorithm::Es256,
+        audience: options.auth.audience.as_str().to_owned(),
     };
-    let error = Signer::try_new(options, UNIX_EPOCH - Duration::from_secs(1))
+    let error = Signer::try_new(config, UNIX_EPOCH - Duration::from_secs(1))
         .err()
         .unwrap();
     assert_eq!(error.key, "system_clock");
