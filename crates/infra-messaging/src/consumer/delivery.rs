@@ -15,7 +15,7 @@ use super::ConsumerError;
 use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::{HandlerError, PublishError, PublishRejection};
 use crate::messaging::Shared;
-use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
+use crate::observe::{Outcomes, record_span_outcome};
 use crate::producer::send_publication;
 use crate::registry::{DispatchError, Registry};
 use crate::topology::ConsumerAdmission;
@@ -71,6 +71,7 @@ impl HandlerMetrics {
                 HANDLER_DURATION_SECONDS,
                 "outcome",
                 Some(event_type),
+                Outcome::label,
             ),
         };
         Self {
@@ -89,15 +90,28 @@ impl HandlerMetrics {
     }
 }
 
-outcome_label! {
-    enum Outcome {
-        Success => "success",
-        Permanent => "permanent",
-        Retryable => "retryable",
-        TimedOut => "timeout",
-        Panicked => "panic",
-        Unhandled => "unhandled",
-        Undecodable => "undecodable",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum)]
+enum Outcome {
+    Success,
+    Permanent,
+    Retryable,
+    TimedOut,
+    Panicked,
+    Unhandled,
+    Undecodable,
+}
+
+impl Outcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Permanent => "permanent",
+            Self::Retryable => "retryable",
+            Self::TimedOut => "timeout",
+            Self::Panicked => "panic",
+            Self::Unhandled => "unhandled",
+            Self::Undecodable => "undecodable",
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+use std::mem::DropGuard;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -219,11 +220,11 @@ pub async fn observed_statement<T>(
             otel.status_code = tracing::field::Empty,
         )
     };
-    let guard = std::mem::DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
+    let guard = DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
         record_statement_error(started, &span, summary, SharedString::const_str(CANCELLED));
     });
     let result = statement.instrument(span).await;
-    let (started, span) = std::mem::DropGuard::dismiss(guard);
+    let (started, span) = DropGuard::dismiss(guard);
     match &result {
         Ok(_) => {
             let histogram = metrics::with_recorder(|recorder| {
@@ -263,7 +264,7 @@ fn record_statement_error(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-pub(crate) enum TransactionOutcome {
+enum TransactionOutcome {
     Committed,
     RolledBack,
     AcquireFailed,
@@ -274,7 +275,7 @@ pub(crate) enum TransactionOutcome {
 }
 
 impl TransactionOutcome {
-    pub(crate) const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Committed => "committed",
             Self::RolledBack => "rolled_back",
@@ -336,74 +337,83 @@ pub(crate) fn transaction_span(pool: &Pool) -> Span {
     )
 }
 
-pub(crate) struct TransactionObservation<'a> {
+struct TransactionInner<'a> {
     started: Instant,
     span: Span,
     metrics: &'a PoolMetrics,
-    phase: TransactionPhase,
+    committing: bool,
 }
 
-enum TransactionPhase {
-    Running,
-    Committing,
-    Finished(TransactionOutcome),
-}
-
-impl<'a> TransactionObservation<'a> {
-    pub(crate) fn start(span: Span, metrics: &'a PoolMetrics) -> Self {
-        Self {
-            started: Instant::now(),
-            span,
-            metrics,
-            phase: TransactionPhase::Running,
+impl TransactionInner<'_> {
+    fn abandon(self) {
+        if self.committing {
+            tracing::warn!(
+                parent: &self.span,
+                phase = "commit",
+                commit_outcome = "unknown",
+                "postgres_transaction_cancelled"
+            );
         }
+        self.finish(TransactionOutcome::Cancelled);
     }
 
-    pub(crate) fn record_connection_wait(&self) {
+    fn finish(self, outcome: TransactionOutcome) {
+        self.span
+            .record("postgres.transaction.outcome", outcome.label());
         self.metrics
-            .connection_wait()
+            .transaction_duration(outcome)
             .record(self.started.elapsed());
     }
 
-    pub(crate) fn begin_commit(&mut self) {
-        self.phase = TransactionPhase::Committing;
-    }
-
-    pub(crate) fn end(&mut self, outcome: TransactionOutcome) {
-        self.phase = TransactionPhase::Finished(outcome);
-    }
-
-    pub(crate) fn record_failure(&mut self, error: &TxError) {
+    fn fail(self, error: &TxError) {
         let source = error.driver();
         match sqlstate(source) {
             Some(code) => self.span.record("error.type", code.as_ref()),
             None => self.span.record("error.type", failure_cause(source)),
         };
         self.span.record("otel.status_code", "ERROR");
-        self.end(TransactionOutcome::of(error));
+        self.finish(TransactionOutcome::of(error));
     }
 }
 
-impl Drop for TransactionObservation<'_> {
-    fn drop(&mut self) {
-        let outcome = match self.phase {
-            TransactionPhase::Running => TransactionOutcome::Cancelled,
-            TransactionPhase::Committing => {
-                tracing::warn!(
-                    parent: &self.span,
-                    phase = "commit",
-                    commit_outcome = "unknown",
-                    "postgres_transaction_cancelled"
-                );
-                TransactionOutcome::Cancelled
-            }
-            TransactionPhase::Finished(outcome) => outcome,
-        };
-        self.span
-            .record("postgres.transaction.outcome", outcome.label());
-        self.metrics
-            .transaction_duration(outcome)
-            .record(self.started.elapsed());
+pub(crate) struct TransactionObservation<'a>(
+    DropGuard<TransactionInner<'a>, fn(TransactionInner<'a>)>,
+);
+
+impl<'a> TransactionObservation<'a> {
+    pub(crate) fn start(span: Span, metrics: &'a PoolMetrics) -> Self {
+        Self(DropGuard::new(
+            TransactionInner {
+                started: Instant::now(),
+                span,
+                metrics,
+                committing: false,
+            },
+            TransactionInner::abandon,
+        ))
+    }
+
+    pub(crate) fn record_connection_wait(&self) {
+        self.0
+            .metrics
+            .connection_wait()
+            .record(self.0.started.elapsed());
+    }
+
+    pub(crate) fn begin_commit(&mut self) {
+        self.0.committing = true;
+    }
+
+    pub(crate) fn commit(self) {
+        DropGuard::dismiss(self.0).finish(TransactionOutcome::Committed);
+    }
+
+    pub(crate) fn roll_back(self) {
+        DropGuard::dismiss(self.0).finish(TransactionOutcome::RolledBack);
+    }
+
+    pub(crate) fn fail(self, error: &TxError) {
+        DropGuard::dismiss(self.0).fail(error);
     }
 }
 
