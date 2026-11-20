@@ -12,6 +12,7 @@ use crate::TlsMaterialError;
 pub struct ServerTlsMaterial<'a> {
     #[debug(skip)]
     pub certificate_pem: &'a str,
+    #[debug(skip)]
     pub private_key_pem: &'a SecretString,
     #[debug(skip)]
     pub client_ca_pem: Option<&'a str>,

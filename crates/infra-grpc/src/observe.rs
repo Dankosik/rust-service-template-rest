@@ -101,7 +101,7 @@ impl Call {
         let metrics = Arc::clone(
             method
                 .metrics
-                .get_or_init(|| Arc::new(MethodMetrics::build(path, method.call_type))),
+                .get_or_init(|| Arc::new(MethodMetrics::build(path, method.kind.call_type()))),
         );
         let span = open_rpc_span(&SpanKind::Server, metrics.rpc_method.as_ref(), path);
         metrics.started.increment(1);
@@ -252,7 +252,7 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
 
         let path = "/example.v1.EchoService/Unary";
-        let methods = crate::services::Methods::new([(path.into(), CallType::Unary)]);
+        let methods = crate::services::Methods::new([(path.into(), CallType::Unary, false)]);
         let known = Call::start(methods.resolve(path), path);
         known.finish(tonic::Code::Unauthenticated);
 

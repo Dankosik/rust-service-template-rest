@@ -53,9 +53,52 @@ impl CallType {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MethodKind {
+    #[default]
+    Unknown,
+    Registered {
+        call_type: CallType,
+        end_on_drain: bool,
+    },
+}
+
+impl MethodKind {
+    pub(crate) const fn call_type(self) -> Option<CallType> {
+        match self {
+            Self::Unknown => None,
+            Self::Registered { call_type, .. } => Some(call_type),
+        }
+    }
+
+    pub(crate) const fn is_registered(self) -> bool {
+        matches!(self, Self::Registered { .. })
+    }
+
+    pub(crate) const fn streams_response(self) -> bool {
+        matches!(
+            self,
+            Self::Registered {
+                call_type: CallType::ServerStream | CallType::BidiStream,
+                ..
+            }
+        )
+    }
+
+    pub(crate) const fn end_on_drain(self) -> bool {
+        matches!(
+            self,
+            Self::Registered {
+                end_on_drain: true,
+                ..
+            }
+        )
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Method {
-    pub(crate) call_type: Option<CallType>,
+    pub(crate) kind: MethodKind,
     pub(crate) metrics: OnceLock<Arc<MethodMetrics>>,
 }
 
@@ -65,15 +108,18 @@ pub(crate) struct Methods {
 }
 
 impl Methods {
-    pub(crate) fn new(paths: impl IntoIterator<Item = (Box<str>, CallType)>) -> Self {
+    pub(crate) fn new(paths: impl IntoIterator<Item = (Box<str>, CallType, bool)>) -> Self {
         Self {
             registered: paths
                 .into_iter()
-                .map(|(path, call_type)| {
+                .map(|(path, call_type, end_on_drain)| {
                     (
                         path,
                         Method {
-                            call_type: Some(call_type),
+                            kind: MethodKind::Registered {
+                                call_type,
+                                end_on_drain,
+                            },
                             metrics: OnceLock::new(),
                         },
                     )
@@ -103,7 +149,6 @@ pub(crate) struct BuiltServices {
     pub(crate) listener_layers: Vec<ListenerLayer>,
     pub(crate) names: BTreeSet<&'static str>,
     pub(crate) methods: Arc<Methods>,
-    pub(crate) reflection: bool,
     pub(crate) authentication: BusinessAuth,
 }
 
@@ -190,8 +235,15 @@ impl ReflectionRegistration<'_> {
             }
             validate_scope_tokens(path, scopes)?;
         }
+        let scopes: Box<[String]> = scopes.iter().map(|&scope| scope.to_owned()).collect();
         for path in REFLECTION_PATHS {
-            self.services.register_scopes(path, scopes, delegate)?;
+            self.services.scopes.insert(
+                path.to_owned(),
+                crate::authn::ScopeRequirement {
+                    scopes: scopes.clone(),
+                    delegate,
+                },
+            );
         }
         Ok(self)
     }
@@ -364,7 +416,6 @@ impl Services {
             listener_layers,
             routes,
             names,
-            reflection,
             // template:begin authn:grpc-router-bearer-destructure
             scopes,
             // template:end authn:grpc-router-bearer-destructure
@@ -390,7 +441,6 @@ impl Services {
             listener_layers,
             names,
             methods,
-            reflection,
             authentication,
         })
     }
@@ -485,10 +535,10 @@ impl Services {
 
     pub(crate) fn methods(&self) -> Methods {
         let services = self.names.iter().copied().chain([HealthServer::NAME]);
-        Methods::new(
-            self.method_paths(services)
-                .map(|(path, kind)| (path.into_boxed_str(), kind)),
-        )
+        Methods::new(self.method_paths(services).map(|(path, kind)| {
+            let end_on_drain = self.reflection && REFLECTION_PATHS.contains(&path.as_str());
+            (path.into_boxed_str(), kind, end_on_drain)
+        }))
     }
 
     #[allow(

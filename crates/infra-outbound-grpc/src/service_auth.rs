@@ -43,16 +43,14 @@ impl ServiceTokenClient {
     }
 
     fn prepare(&self, request: http::Request<Body>) -> Result<PreparedCall, tonic::Status> {
-        let prepared = PreparedCall::prepare(&self.client, request)?;
-        let (prepared, ()) = prepared.try_step(|_, headers| {
+        PreparedCall::prepare(&self.client, request)?.try_step(|_, headers| {
             if headers.contains_key(AUTHORIZATION) {
                 return Err(tonic::Status::internal(
                     "authorization conflicts with the service token",
                 ));
             }
             Ok(())
-        })?;
-        Ok(prepared)
+        })
     }
 }
 
