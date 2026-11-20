@@ -6,12 +6,20 @@ inputs:
     description: GITHUB_TOKEN used to resolve the green branch on main pushes.
     required: false
     default: ${{ github.token }}
+  main_coalesce_seconds:
+    description: Seconds to wait on main push runs so back-to-back merges coalesce before allocating heavy runners.
+    required: false
+    default: "60"
 
 outputs:
   rust:
     value: ${{ steps.classify.outputs.rust }}
   deps:
     value: ${{ steps.classify.outputs.deps }}
+  profiling:
+    value: ${{ steps.classify.outputs.profiling }}
+  vendor_transport:
+    value: ${{ steps.classify.outputs.vendor_transport }}
   openapi:
     value: ${{ steps.classify.outputs.openapi }}
   grpc:
@@ -20,6 +28,16 @@ outputs:
     value: ${{ steps.classify.outputs.migrations }}
   integration:
     value: ${{ steps.classify.outputs.integration }}
+  integration_db:
+    value: ${{ steps.classify.outputs.integration_db }}
+  sqlx_check:
+    value: ${{ steps.classify.outputs.sqlx_check }}
+  integration_cache:
+    value: ${{ steps.classify.outputs.integration_cache }}
+  integration_object_storage:
+    value: ${{ steps.classify.outputs.integration_object_storage }}
+  integration_messaging:
+    value: ${{ steps.classify.outputs.integration_messaging }}
   oauth:
     value: ${{ steps.classify.outputs.oauth }}
   docker:
@@ -42,6 +60,18 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Coalesce rapid pushes to main
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      shell: bash
+      env:
+        DELAY: ${{ inputs.main_coalesce_seconds }}
+      run: |
+        set -euo pipefail
+        if [[ "${DELAY}" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Waiting ${DELAY}s so back-to-back merges to main coalesce before allocating heavy runners"
+          sleep "${DELAY}"
+        fi
+
     - name: Resolve last green base
       id: green
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'

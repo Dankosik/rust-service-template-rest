@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from template import harness, init as template_init, runtime_progress
+from template import check as template_check, harness, init as template_init, runtime_progress
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,6 +39,50 @@ class DetectChangesTests(unittest.TestCase):
         self.assertTrue(res["openapi"])
         self.assertFalse(res["grpc"])
         self.assertFalse(res["migrations"])
+        self.assertFalse(res["repo_lint"])
+        self.assertFalse(res["profiling"])
+        self.assertFalse(res["vendor_transport"])
+
+        lock_only = DETECT.classify(ROOT, ["Cargo.lock"])
+        self.assertTrue(lock_only["deps"])
+        self.assertFalse(lock_only["profiling"])
+        self.assertFalse(lock_only["vendor_transport"])
+
+        hotpath_res = DETECT.classify(ROOT, ["vendor/hotpath/src/lib.rs"])
+        self.assertTrue(hotpath_res["profiling"])
+        self.assertTrue(hotpath_res["vendor_transport"])
+
+        md_in_crate = DETECT.classify(ROOT, ["crates/service/README.md"])
+        self.assertTrue(md_in_crate["repo_lint"])
+
+        cache_only = DETECT.classify(ROOT, ["crates/infra-cache/src/namespace.rs"])
+        self.assertTrue(cache_only["integration"])
+        self.assertTrue(cache_only["integration_cache"])
+        self.assertFalse(cache_only["integration_db"])
+        self.assertFalse(cache_only["sqlx_check"])
+        self.assertFalse(cache_only["integration_object_storage"])
+        self.assertFalse(cache_only["integration_messaging"])
+
+        s3_only = DETECT.classify(ROOT, ["crates/infra-object-storage/src/download.rs"])
+        self.assertTrue(s3_only["integration"])
+        self.assertTrue(s3_only["integration_object_storage"])
+        self.assertFalse(s3_only["integration_db"])
+        self.assertFalse(s3_only["sqlx_check"])
+        self.assertFalse(s3_only["integration_cache"])
+        self.assertFalse(s3_only["integration_messaging"])
+
+        pg_only = DETECT.classify(ROOT, ["crates/infra-postgres/src/pool.rs"])
+        self.assertTrue(pg_only["integration"])
+        self.assertTrue(pg_only["integration_db"])
+        self.assertTrue(pg_only["sqlx_check"])
+        self.assertFalse(pg_only["integration_cache"])
+        self.assertFalse(pg_only["integration_object_storage"])
+        self.assertFalse(pg_only["integration_messaging"])
+
+        util_test = DETECT.classify(ROOT, ["test/tests/utility_values.rs"])
+        self.assertTrue(util_test["rust"])
+        self.assertFalse(util_test["integration"])
+        self.assertFalse(util_test["integration_db"])
 
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp)
@@ -220,6 +265,33 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
 
             ref.write_text("# Workspace utility crates\n\nNo bullets here.\n", encoding="utf-8")
             self.assertTrue(any("contains no crate entries" in item for item in harness.check_workspace_crates_reference(repo)))
+
+    def test_ci_template_matrix_shards_cover_every_canonical_profile_once(self) -> None:
+        ci_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        section = ci_text.split("template-matrix:", 1)[1].split("  # template:end source-template:ci-template-job", 1)[0]
+        profiles: list[str] = []
+        for match in re.finditer(r"^\s+profiles:\s+(.+)$", section, re.M):
+            profiles.extend(match.group(1).split())
+        self.assertEqual(len(profiles), len(set(profiles)), f"duplicate profiles in template-matrix shards: {profiles}")
+        self.assertEqual(set(profiles), set(template_check.CANONICAL_PROFILES))
+
+    def test_live_workspace_rust_selection_backtest(self) -> None:
+        from scripts.checks import rust_selection
+
+        cache_plan = rust_selection.plan_selection(ROOT, ["crates/infra-cache/src/namespace.rs"])
+        self.assertEqual(cache_plan.mode, "selected")
+        self.assertEqual(cache_plan.packages, ("infra-cache", "service"))
+        self.assertEqual(cache_plan.lint_features, ("infra-cache/integration",))
+
+        openapi_plan = rust_selection.plan_selection(ROOT, ["api/openapi/service.yaml"])
+        self.assertEqual(openapi_plan.mode, "selected")
+        self.assertEqual(openapi_plan.packages, ("service",))
+
+        obs_plan = rust_selection.plan_selection(ROOT, ["crates/infra-telemetry/src/logging.rs"])
+        self.assertEqual(obs_plan.mode, "selected")
+        self.assertIn("infra-telemetry", obs_plan.packages)
+        self.assertIn("service", obs_plan.packages)
+        self.assertNotIn("infra-cache", obs_plan.packages)
 
 
 if __name__ == "__main__":

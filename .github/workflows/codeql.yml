@@ -13,7 +13,7 @@ on:
 
 concurrency:
   group: codeql-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 permissions:
   contents: read
@@ -39,6 +39,7 @@ jobs:
         uses: ./.github/actions/detect-changes # zizmor: ignore[self-repository]
         with:
           github_token: ${{ github.token }}
+          main_coalesce_seconds: ${{ vars.MAIN_PUSH_COALESCE_SECONDS || '60' }}
 
   analyze-actions:
     needs: changes
