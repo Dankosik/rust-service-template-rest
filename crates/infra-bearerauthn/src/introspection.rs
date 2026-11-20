@@ -21,7 +21,7 @@ use crate::{
     InvalidCacheOptions, PreparationError, PresentedToken, Principal, ProviderFailure,
     VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedClaims, validate_introspection_claims},
-    provider::{CallerStop, ProviderClient},
+    provider::{ProviderClient, StopProbe},
 };
 
 const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -202,7 +202,7 @@ impl IntrospectionVerifier {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token.as_str(), &|| context.stopped(), &unix_now)
+                .introspect(token.as_str(), StopProbe::Context(context), &unix_now)
                 .await?
                 .into_principal_checked_at(unix_now()?);
         };
@@ -228,7 +228,7 @@ impl IntrospectionVerifier {
                         let value = verifier
                             .introspect(
                                 token.expose_secret(),
-                                &|| last_waiter_stop.get().copied(),
+                                StopProbe::Waiter(&last_waiter_stop),
                                 &unix_now,
                             )
                             .await?;
@@ -246,7 +246,7 @@ impl IntrospectionVerifier {
     async fn introspect(
         &self,
         token: &str,
-        caller_stop: CallerStop<'_>,
+        caller_stop: StopProbe<'_>,
         unix_now: &impl Fn() -> Result<Duration, VerificationError>,
     ) -> Result<VerifiedClaims, VerificationError> {
         unix_now()?;

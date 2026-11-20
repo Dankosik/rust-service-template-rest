@@ -5,7 +5,7 @@ use std::{
 };
 
 use enum_map::EnumMap;
-use operation_context::Stopped;
+use operation_context::{OperationContext, Stopped};
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
 use tracing::Instrument as _;
@@ -284,7 +284,7 @@ impl ProviderClient {
         client_id: &str,
         client_secret: &str,
         form: &[(&str, &str)],
-        caller_stop: CallerStop<'_>,
+        caller_stop: StopProbe<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let request = {
             let client_id = form_encode(client_id);
@@ -326,6 +326,7 @@ impl Document {
 }
 // template:end oidc-jwt:authn-provider-document
 
+#[derive(Clone, Copy)]
 enum ExchangeMode<'a> {
     #[allow(
         dead_code,
@@ -338,10 +339,49 @@ enum ExchangeMode<'a> {
         dead_code,
         reason = "the JWT-only profile removes introspection requests"
     )]
-    Introspection { caller_stop: CallerStop<'a> },
+    Introspection { caller_stop: StopProbe<'a> },
 }
 
-pub(crate) type CallerStop<'a> = &'a (dyn Fn() -> Option<Stopped> + Sync);
+impl ExchangeMode<'_> {
+    const fn require_json_content_type(self) -> bool {
+        matches!(self, Self::Introspection { .. })
+    }
+
+    const fn deadline(self) -> Option<tokio::time::Instant> {
+        match self {
+            Self::Document { deadline } => deadline,
+            Self::Introspection { .. } => None,
+        }
+    }
+
+    fn abandon_outcome(self) -> Outcome {
+        match self {
+            Self::Document { .. } => Outcome::Cancelled,
+            Self::Introspection { caller_stop } => caller_stop
+                .stopped()
+                .map_or(Outcome::Cancelled, stopped_outcome),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the JWT-only profile removes introspection requests"
+)]
+pub(crate) enum StopProbe<'a> {
+    Context(&'a OperationContext),
+    Waiter(&'a OnceLock<Stopped>),
+}
+
+impl StopProbe<'_> {
+    fn stopped(self) -> Option<Stopped> {
+        match self {
+            Self::Context(context) => context.stopped(),
+            Self::Waiter(stop) => stop.get().copied(),
+        }
+    }
+}
 
 struct Exchange<'a> {
     histograms: &'a OperationHistograms,
@@ -382,19 +422,12 @@ impl<'a> Exchange<'a> {
         request: reqwest::RequestBuilder,
         mode: ExchangeMode<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let (caller_stop, require_json_content_type, deadline) = match mode {
-            ExchangeMode::Introspection { caller_stop } => (Some(caller_stop), true, None),
-            ExchangeMode::Document { deadline } => (None, false, deadline),
-        };
-        let guard = std::mem::DropGuard::new(self, |exchange| {
-            let outcome = caller_stop
-                .and_then(|stopped| stopped())
-                .map_or(Outcome::Cancelled, stopped_outcome);
-            exchange.record(outcome);
+        let guard = std::mem::DropGuard::new(self, move |exchange| {
+            exchange.record(mode.abandon_outcome());
         });
-        let response_body =
-            receive(request, require_json_content_type, &guard.span).instrument(guard.span.clone());
-        let result = match deadline {
+        let response_body = receive(request, mode.require_json_content_type(), &guard.span)
+            .instrument(guard.span.clone());
+        let result = match mode.deadline() {
             None => response_body.await,
             Some(deadline) => tokio::time::timeout_at(deadline, response_body)
                 .await

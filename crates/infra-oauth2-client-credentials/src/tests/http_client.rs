@@ -69,7 +69,11 @@ async fn invalid_resource_target_refuses_before_acquiring_credentials() {
     for request in [foreign, spoofed] {
         assert_matches!(
             fixture.send_request(&client, request).await,
-            Err(Error::Resource(infra_outbound_http::Error::InvalidTarget))
+            Err(Error::Resource(
+                infra_outbound_http::ExchangeError::BeforeResponse(
+                    infra_outbound_http::Error::InvalidTarget
+                )
+            ))
         );
     }
     assert_eq!(fixture.token_request_count(), 0);
@@ -206,7 +210,9 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
     let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
     assert_matches!(
         result,
-        Poll::Ready(Err(Error::Resource(infra_outbound_http::Error::Timeout)))
+        Poll::Ready(Err(Error::Resource(
+            infra_outbound_http::ExchangeError::BeforeResponse(infra_outbound_http::Error::Timeout)
+        )))
     );
     drop(call);
     assert_eq!(fixture.token_request_count(), 1);
@@ -467,7 +473,10 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
     assert_matches!(
         call().await,
         Err(Error::Resource(
-            infra_outbound_http::Error::ResponseBodyTooLarge
+            infra_outbound_http::ExchangeError::AfterResponse {
+                status: StatusCode::UNAUTHORIZED,
+                source: infra_outbound_http::Error::ResponseBodyTooLarge,
+            }
         ))
     );
     assert_eq!(fixture.resource_request_count(), 2);

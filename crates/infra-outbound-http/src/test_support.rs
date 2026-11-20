@@ -155,7 +155,12 @@ pub(crate) fn fixture_client_with_resolver(
 ) -> Client {
     let tls = tls_config_with_root(&material.root).expect("fixture root certificate");
     let origin = Origin::parse_https(&format!("https://{host}")).expect("fixture origin");
-    Client::with_transport(origin, limits, tls, Resolver::Fixture(resolver))
+    Client::with_transport(
+        crate::policy::TargetOrigin::Https(origin),
+        limits,
+        tls,
+        Resolver::Fixture(resolver),
+    )
 }
 
 pub(crate) fn default_context() -> OperationContext {

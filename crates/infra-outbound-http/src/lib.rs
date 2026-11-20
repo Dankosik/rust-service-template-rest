@@ -127,7 +127,7 @@ pub enum DispatchError<E> {
 
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
-    origin: Origin,
+    origin: policy::TargetOrigin,
     #[debug(skip)]
     server: observe::Server,
     limits: Limits,
@@ -138,8 +138,17 @@ pub struct Client {
 
 impl Client {
     #[must_use]
-    pub const fn origin(&self) -> &Origin {
-        &self.origin
+    pub fn host(&self) -> &str {
+        self.origin.host()
+    }
+
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.origin.port()
+    }
+
+    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        self.origin.uri(path_and_query)
     }
 
     #[must_use]
@@ -152,13 +161,13 @@ impl Client {
 
     pub fn try_new(origin: Origin, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
-        if !origin.is_https() {
-            return Err(BuildError::InvalidOrigin);
-        }
-        Self::try_with_default_transport(origin, limits)
+        Self::try_with_default_transport(policy::TargetOrigin::Https(origin), limits)
     }
 
-    fn try_with_default_transport(origin: Origin, limits: Limits) -> Result<Self, BuildError> {
+    fn try_with_default_transport(
+        origin: policy::TargetOrigin,
+        limits: Limits,
+    ) -> Result<Self, BuildError> {
         Ok(Self::with_transport(
             origin,
             limits,
@@ -168,7 +177,7 @@ impl Client {
     }
 
     fn with_transport(
-        origin: Origin,
+        origin: policy::TargetOrigin,
         limits: Limits,
         tls: rustls::ClientConfig,
         resolver: transport::Resolver,
@@ -202,12 +211,12 @@ impl Client {
         address: std::net::SocketAddr,
     ) -> Result<Self, BuildError> {
         limits.validate()?;
-        if !origin.is_https() || !address.ip().is_loopback() {
+        if !address.ip().is_loopback() {
             return Err(BuildError::InvalidOrigin);
         }
         let tls = transport::tls_config_with_root(root_der)?;
         Ok(Self::with_transport(
-            origin,
+            policy::TargetOrigin::Https(origin),
             limits,
             tls,
             transport::Resolver::Fixture(transport::FixtureResolver::with_addresses(vec![address])),
@@ -257,6 +266,7 @@ impl Client {
     }
 }
 
+#[must_use = "send the prepared request or drop it intentionally"]
 #[derive(derive_more::Debug)]
 #[debug("PreparedRequest([REDACTED])")]
 pub struct PreparedRequest<'a> {
@@ -271,6 +281,11 @@ impl PreparedRequest<'_> {
         &self.context
     }
 
+    #[must_use]
+    pub fn headers(&self) -> &HeaderMap {
+        self.request.headers()
+    }
+
     pub fn set_authorization(&mut self, value: HeaderValue) {
         self.request
             .headers_mut()
@@ -279,8 +294,8 @@ impl PreparedRequest<'_> {
 
     pub async fn send_checked<E>(
         self,
-        admit_dispatch: impl FnOnce() -> Result<(), E> + Send,
-        on_status: impl FnOnce(StatusCode) + Send,
+        admit_dispatch: impl FnOnce() -> Result<(), E>,
+        on_status: impl FnOnce(StatusCode),
     ) -> Result<Response<Bytes>, DispatchError<E>> {
         self.send_with_response(admit_dispatch, on_status, buffer_response)
             .await
@@ -288,8 +303,8 @@ impl PreparedRequest<'_> {
 
     async fn send_with_response<T, E>(
         self,
-        admit_dispatch: impl FnOnce() -> Result<(), E> + Send,
-        on_status: impl FnOnce(StatusCode) + Send,
+        admit_dispatch: impl FnOnce() -> Result<(), E>,
+        on_status: impl FnOnce(StatusCode),
         consume: impl AsyncFnOnce(
             Response<hyper::body::Incoming>,
             usize,
@@ -299,6 +314,18 @@ impl PreparedRequest<'_> {
         enum SendError<E> {
             Refused(E),
             Error(Error),
+        }
+
+        impl<E> From<Error> for SendError<E> {
+            fn from(error: Error) -> Self {
+                Self::Error(error)
+            }
+        }
+
+        impl<E> From<Stopped> for SendError<E> {
+            fn from(stopped: Stopped) -> Self {
+                Self::Error(stopped.into())
+            }
         }
 
         let Self {
@@ -318,9 +345,9 @@ impl PreparedRequest<'_> {
         }
         let span = attempt.span();
         let exchange = async {
-            context.check().map_err(|s| SendError::Error(s.into()))?;
+            context.check()?;
             let admitted = admit_dispatch();
-            context.check().map_err(|s| SendError::Error(s.into()))?;
+            context.check()?;
             if let Err(refused) = admitted {
                 return Err(SendError::Refused(refused));
             }
@@ -328,25 +355,23 @@ impl PreparedRequest<'_> {
                 .transport
                 .request(request.map(Full::new))
                 .await
-                .map_err(|source| {
-                    SendError::Error(Error::Transport {
-                        source: Box::new(source),
-                    })
+                .map_err(|source| Error::Transport {
+                    source: Box::new(source),
                 })?;
             attempt.record_status(response.status());
             on_status(response.status());
-            context.check().map_err(|s| SendError::Error(s.into()))?;
+            context.check()?;
             consume(response, client.limits.response_body_bytes, &context)
                 .await
-                .map_err(SendError::Error)
+                .map_err(SendError::from)
         };
         let result = tokio::select! {
             biased;
-            reason = context.wait_stopped() => Err(SendError::Error(Error::from(reason))),
+            reason = context.wait_stopped() => Err(SendError::from(reason)),
             result = exchange.instrument(span) => result,
         }
         .and_then(|response| {
-            context.check().map_err(|s| SendError::Error(s.into()))?;
+            context.check()?;
             Ok(response)
         });
         match result {

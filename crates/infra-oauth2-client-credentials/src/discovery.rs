@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
-use infra_outbound_http::{BuildError, Client, ExchangeError, Origin, prepare_tls};
+use infra_outbound_http::{Client, ExchangeError, prepare_tls};
 use operation_context::OperationContext;
 use serde::Deserialize;
 use url::Url;
@@ -9,7 +9,7 @@ use crate::{
     ConfigurationError, DiscoveryError, DiscoveryTransportError, IssuerUrl, Options, Registration,
     TokenUrl, TransportBuildFailure,
     options::{Scheme, check_url_scheme, parse_discovered_token_endpoint, validate_options},
-    token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
+    token_endpoint::{self, FETCH_TIMEOUT},
 };
 
 #[derive(Deserialize)]
@@ -49,8 +49,8 @@ impl Registration {
             .into());
         }
         verify_metadata(&issuer, validated.endpoint(), scheme).await?;
-        let token_http =
-            build_client(scheme, validated.endpoint()).map_err(TransportBuildFailure::token_url)?;
+        let token_http = token_endpoint::build_client(scheme, validated.endpoint())
+            .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
 }
@@ -71,15 +71,6 @@ pub async fn verify_oidc_metadata(
     verify_metadata(issuer, token_url.url(), Scheme::Https).await
 }
 
-fn build_client(scheme: Scheme, url: &Url) -> Result<Client, BuildError> {
-    let origin = url.origin().ascii_serialization();
-    match scheme {
-        Scheme::Https => Client::try_new(Origin::parse_https(&origin)?, TOKEN_LIMITS),
-        #[cfg(any(test, feature = "test-support"))]
-        Scheme::Http => Client::try_new_for_test_http(&origin, TOKEN_LIMITS),
-    }
-}
-
 async fn verify_metadata(
     issuer: &IssuerUrl,
     endpoint: &Url,
@@ -88,8 +79,8 @@ async fn verify_metadata(
     if scheme == Scheme::Https {
         prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
     }
-    let discovery_http =
-        build_client(scheme, issuer.url()).map_err(TransportBuildFailure::issuer)?;
+    let discovery_http = token_endpoint::build_client(scheme, issuer.url())
+        .map_err(TransportBuildFailure::issuer)?;
     let metadata = fetch_metadata(issuer.url(), &discovery_http).await?;
     if metadata.issuer != issuer.as_str() {
         return Err(DiscoveryError::Metadata(

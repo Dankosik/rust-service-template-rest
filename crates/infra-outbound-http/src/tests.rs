@@ -1135,17 +1135,47 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
     );
     let http_client =
         Client::try_new_for_test_http("http://127.0.0.1:8080", limits()).expect("test http client");
-    std::assert_matches!(
-        Client::try_new(http_client.origin().clone(), limits()),
-        Err(BuildError::InvalidOrigin)
+    assert_eq!(http_client.host(), "127.0.0.1");
+    assert_eq!(http_client.port(), 8080);
+    assert_eq!(
+        http_client.uri("/items").expect("test http uri"),
+        http::Uri::from_static("http://127.0.0.1:8080/items")
     );
-    std::assert_matches!(
-        Client::try_new_for_test_https(
-            http_client.origin().clone(),
-            limits(),
-            &material.root,
-            address,
-        ),
-        Err(BuildError::InvalidOrigin)
-    );
+}
+
+#[tokio::test]
+async fn prepared_request_exposes_headers_and_accepts_non_send_hooks() {
+    use std::{cell::Cell, convert::Infallible, rc::Rc};
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let client = fixture_client(address, &material);
+    let mut request = request();
+    request
+        .headers_mut()
+        .insert(header::AUTHORIZATION, "Bearer test".parse().expect("auth"));
+    let prepared = client
+        .prepare(&default_context(), request)
+        .expect("prepared request");
+    assert_eq!(prepared.headers()[header::AUTHORIZATION], "Bearer test");
+
+    let admitted = Rc::new(Cell::new(false));
+    let observed = Rc::new(Cell::new(None));
+    let admitted_hook = Rc::clone(&admitted);
+    let observed_hook = Rc::clone(&observed);
+    let response = prepared
+        .send_checked(
+            move || {
+                admitted_hook.set(true);
+                Ok::<(), Infallible>(())
+            },
+            move |status| observed_hook.set(Some(status)),
+        )
+        .await
+        .expect("send_checked response");
+    assert!(admitted.get());
+    assert_eq!(observed.get(), Some(http::StatusCode::OK));
+    assert_eq!(response.body().as_ref(), b"ok");
+    server.await.expect("fixture server joins");
 }

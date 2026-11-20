@@ -10,7 +10,7 @@ use shared_rules::{
     otel_http::{HttpMethod, response_status_code},
 };
 
-use crate::{Error, Origin, TransportErrorKind};
+use crate::{Error, TransportErrorKind, policy::TargetOrigin};
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
@@ -74,7 +74,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-    pub(crate) fn new(origin: &Origin) -> Self {
+    pub(crate) fn new(origin: &TargetOrigin) -> Self {
         let port = origin.port();
         let mut buffer = fmt::NumBuffer::new();
         Self {
