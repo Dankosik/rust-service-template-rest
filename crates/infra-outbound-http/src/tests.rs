@@ -12,7 +12,9 @@ use tokio::{
 
 use tls_test_support::TlsMaterial;
 
-use crate::{Error, Limits, MAX_RESPONSE_HEADER_COUNT, test_support::*};
+use crate::{
+    DispatchError, Error, ExchangeError, Limits, MAX_RESPONSE_HEADER_COUNT, test_support::*,
+};
 
 #[tokio::test]
 async fn standard_request_returns_standard_response_with_full_body() {
@@ -43,7 +45,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
         fixture_client(address, &untrusted)
             .execute(&default_context(), request())
             .await,
-        Err(Error::Transport { .. })
+        Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
     server.await.expect("untrusted fixture server succeeds");
 
@@ -58,7 +60,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
                 request_to("https://different.fixture.test/fixture"),
             )
             .await,
-        Err(Error::Transport { .. })
+        Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
     server.await.expect("hostname fixture server succeeds");
 }
@@ -91,7 +93,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     for (wire, succeeds) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let result = fixture_client_with_limits(address, &material, ceiling)
-            .execute_buffered(&OperationContext::unbounded(), request())
+            .execute(&OperationContext::unbounded(), request())
             .await;
         if succeeds {
             assert_eq!(
@@ -102,7 +104,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
             let error = result.expect_err("response exceeds the ceiling after headers");
             std::assert_matches!(
                 error,
-                crate::ExchangeError::AfterResponse {
+                ExchangeError::AfterResponse {
                     status: http::StatusCode::OK,
                     source: Error::ResponseBodyTooLarge,
                 }
@@ -149,12 +151,12 @@ async fn parser_header_count_overflow_is_a_transport_error() {
     )
     .await;
     let error = fixture_client_with_limits(address, &material, parser_limit)
-        .execute_buffered(&OperationContext::unbounded(), request())
+        .execute(&OperationContext::unbounded(), request())
         .await
         .expect_err("header overflow precedes an admitted response");
     std::assert_matches!(
         error,
-        crate::ExchangeError::BeforeResponse(Error::Transport { .. })
+        ExchangeError::BeforeResponse(Error::Transport { .. })
     );
     server.await.expect("parser header fixture joins");
 }
@@ -213,7 +215,7 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
         } else {
             std::assert_matches!(
                 result,
-                Err(Error::Transport { ref source }) if source.source()
+                Err(ExchangeError::BeforeResponse(Error::Transport { ref source })) if source.source()
                     .and_then(|cause| cause.downcast_ref::<hyper::Error>())
                     .is_some_and(hyper::Error::is_parse),
                 "expected the HTTP parser to reject the oversized head, write: {written:?}"
@@ -258,10 +260,11 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     ];
     for (wire, name, expected) in cases {
         let (address, server) = tls_server(&material, wire).await;
-        let error = fixture_client_with_limits(address, &material, ceiling)
+        let error: Error = fixture_client_with_limits(address, &material, ceiling)
             .execute(&default_context(), request())
             .await
-            .expect_err(name);
+            .expect_err(name)
+            .into();
         match expected {
             Expected::BodyTooLarge => std::assert_matches!(error, Error::ResponseBodyTooLarge),
             Expected::Transport => {
@@ -290,7 +293,7 @@ async fn expired_deadline_refuses_before_network_work() {
             request(),
         )
         .await;
-    std::assert_matches!(expired, Err(Error::Timeout));
+    std::assert_matches!(expired, Err(ExchangeError::BeforeResponse(Error::Timeout)));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
             .await
@@ -299,7 +302,15 @@ async fn expired_deadline_refuses_before_network_work() {
 }
 
 #[tokio::test]
-async fn stopped_request_context_refuses_before_dispatch() {
+async fn stopped_request_context_refuses_all_entry_points_before_dispatch() {
+    fn refused<T>(expired: bool, result: &Result<T, Error>) -> bool {
+        if expired {
+            matches!(result, Err(Error::Timeout))
+        } else {
+            matches!(result, Err(Error::Cancelled))
+        }
+    }
+
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let client = fixture_client(listener.local_addr().expect("address"), &material);
@@ -312,24 +323,18 @@ async fn stopped_request_context_refuses_before_dispatch() {
         if !expired {
             context.cancel();
         }
-        let refused = |result: Result<_, Error>| {
-            if expired {
-                matches!(result, Err(Error::Timeout))
-            } else {
-                matches!(result, Err(Error::Cancelled))
-            }
-        };
-        let mut supplied = request();
-        supplied.extensions_mut().insert(context.clone());
-        assert!(refused(client.execute(&default_context(), supplied).await));
-        let mut supplied = request();
-        supplied.extensions_mut().insert(context.clone());
         assert!(refused(
-            client
-                .execute(&OperationContext::unbounded(), supplied)
+            expired,
+            &client
+                .execute(&context, request())
                 .await
+                .map_err(Error::from)
         ));
-        assert!(refused(client.execute(&context, request()).await));
+        assert!(refused(
+            expired,
+            &client.execute_for_headers(&context, request()).await
+        ));
+        assert!(refused(expired, &client.prepare(&context, request())));
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
@@ -343,27 +348,25 @@ async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = fixture_client(listener.local_addr().unwrap(), &material);
-    for cancelled in 0..3 {
-        let scopes = [(); 3].map(|()| OperationContext::unbounded());
-        let mut outer = request();
-        outer.extensions_mut().insert(scopes[1].clone());
-        let parent = client.prepare(&scopes[0], outer).unwrap();
-        let mut inner = request();
-        inner.extensions_mut().insert(scopes[2].clone());
-        let exchange = client.execute_buffered(parent.context().clone(), inner);
+    for cancel_parent in [false, true] {
+        let parent = OperationContext::unbounded();
+        let prepared = client.prepare(&parent, request()).unwrap();
+        let child = prepared.context().clone();
+        let exchange = client.execute(&child, request());
         let (result, _connection) = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(exchange, async {
                 let (connection, _) = listener.accept().await.unwrap();
-                scopes[cancelled].cancel();
+                if cancel_parent {
+                    parent.cancel();
+                } else {
+                    child.cancel();
+                }
                 connection
             })
         })
         .await
         .expect("a cancelled exchange must finish during the TLS handshake");
-        std::assert_matches!(
-            result,
-            Err(crate::ExchangeError::BeforeResponse(Error::Cancelled))
-        );
+        std::assert_matches!(result, Err(ExchangeError::BeforeResponse(Error::Cancelled)));
     }
 }
 
@@ -402,7 +405,8 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     std::assert_matches!(
         tokio::time::timeout(Duration::from_millis(200), exchange)
             .await
-            .expect("cancellation must end waiting before the local ceiling"),
+            .expect("cancellation must end waiting before the local ceiling")
+            .map_err(Error::from),
         Err(Error::Cancelled)
     );
     server.abort();
@@ -442,14 +446,16 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
         let subscriber =
             tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
         let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let parent_context = OperationContext::with_timeout(Duration::from_secs(parent));
         let result = client
-            .execute(
-                &OperationContext::with_timeout(Duration::from_secs(parent)),
-                request(),
-            )
+            .execute(&parent_context, request())
             .with_subscriber(subscriber)
             .await;
-        std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
+        std::assert_matches!(
+            result,
+            Err(ExchangeError::BeforeResponse(Error::Timeout)),
+            "{result:?}"
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), listener.accept())
                 .await
@@ -464,6 +470,12 @@ async fn dispatch_can_be_refused_after_request_setup() {
     use tracing::instrument::WithSubscriber as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
+    #[derive(Debug, Eq, PartialEq, thiserror::Error)]
+    #[error("credential expired before dispatch")]
+    struct Refused;
+
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut ceiling = limits();
@@ -471,6 +483,7 @@ async fn dispatch_can_be_refused_after_request_setup() {
     let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
     let subscriber =
         tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let credential_expiry = Instant::now() + Duration::from_secs(1);
     let context = OperationContext::with_timeout(Duration::from_secs(5));
     let mut observed_status = None;
@@ -478,15 +491,32 @@ async fn dispatch_can_be_refused_after_request_setup() {
     let result = client
         .prepare(&context, request())
         .unwrap()
-        .send(
-            || Instant::now() < credential_expiry,
+        .send_checked(
+            || {
+                if Instant::now() < credential_expiry {
+                    Ok(())
+                } else {
+                    Err(Refused)
+                }
+            },
             |status| observed_status = Some(status),
         )
         .with_subscriber(subscriber)
         .await;
 
-    std::assert_matches!(result, Err(Error::DispatchRefused));
+    std::assert_matches!(result, Err(DispatchError::Refused(Refused)));
     assert_eq!(observed_status, None);
+    let scrape = recorder.handle().render();
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"error\"",
+                "error_type=\"dispatch_refused\"",
+            ],
+        ),
+        1
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
             .await
@@ -615,7 +645,11 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     let result = exchange.await;
-    std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
+    std::assert_matches!(
+        result,
+        Err(ExchangeError::BeforeResponse(Error::Timeout)),
+        "{result:?}"
+    );
 }
 
 async fn unresponsive_listener() -> (SocketAddr, tokio::net::TcpListener, Vec<TcpStream>) {
@@ -717,7 +751,7 @@ async fn request_is_not_replayed_after_the_peer_received_it() {
         fixture_client(address, &material)
             .execute(&default_context(), request())
             .await,
-        Err(Error::Transport { .. })
+        Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
     assert!(
         !server.await.expect("replay fixture joins"),
@@ -986,7 +1020,7 @@ async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_bet
         }
     }
 
-    let context: crate::RequestContext = operation_context::OperationContext::unbounded().into();
+    let context = OperationContext::unbounded();
     let payload = Bytes::from(b"single-frame-payload".to_vec());
     let expected_ptr = payload.as_ptr();
     let single = FrameBody {
@@ -1032,7 +1066,7 @@ async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_bet
         Err(Error::ResponseBodyTooLarge)
     );
 
-    let op = operation_context::OperationContext::unbounded();
+    let op = OperationContext::unbounded();
     let cancel = op.clone();
     let cancelled_between_frames = FrameBody {
         frames: VecDeque::from([
@@ -1047,7 +1081,71 @@ async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_bet
         polls: 0,
     };
     std::assert_matches!(
-        crate::collect_bounded_body(cancelled_between_frames, 64, &op.into()).await,
+        crate::collect_bounded_body(cancelled_between_frames, 64, &op).await,
         Err(Error::Cancelled)
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
+    use crate::{BuildError, Client, Origin, TransportErrorKind};
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let origin = Origin::parse_https(&format!("https://{FIXTURE_HOST}")).expect("origin");
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntls",
+    )
+    .await;
+    let client = Client::try_new_for_test_https(origin.clone(), limits(), &material.root, address)
+        .expect("fixture HTTPS client");
+    let response = client
+        .execute(&default_context(), request())
+        .await
+        .expect("fixture HTTPS response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.body().as_ref(), b"tls");
+    server.await.expect("fixture TLS server joins");
+
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let untrusted = TlsMaterial::new(FIXTURE_HOST);
+    let error = Client::try_new_for_test_https(origin.clone(), limits(), &untrusted.root, address)
+        .expect("client with different root")
+        .execute(&default_context(), request())
+        .await
+        .expect_err("untrusted root fails TLS")
+        .into_error();
+    assert_eq!(error.transport_kind(), Some(TransportErrorKind::Tls));
+    server.await.expect("untrusted fixture TLS server joins");
+
+    std::assert_matches!(
+        Client::try_new_for_test_https(
+            origin.clone(),
+            limits(),
+            &material.root,
+            "10.0.0.1:443".parse().expect("non-loopback address"),
+        ),
+        Err(BuildError::InvalidOrigin)
+    );
+    std::assert_matches!(
+        Client::try_new_for_test_https(origin, limits(), b"not-der", address),
+        Err(BuildError::Tls { .. })
+    );
+    let http_client =
+        Client::try_new_for_test_http("http://127.0.0.1:8080", limits()).expect("test http client");
+    std::assert_matches!(
+        Client::try_new(http_client.origin().clone(), limits()),
+        Err(BuildError::InvalidOrigin)
+    );
+    std::assert_matches!(
+        Client::try_new_for_test_https(
+            http_client.origin().clone(),
+            limits(),
+            &material.root,
+            address,
+        ),
+        Err(BuildError::InvalidOrigin)
     );
 }

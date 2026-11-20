@@ -14,7 +14,7 @@ use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http::{HeaderMap, Request, StatusCode, Uri, header};
 use infra_jobs::{Handler, Job, JobError, JobKind, KindName, KindsBuilder, Policy, RetrySchedule};
-use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
+use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits, Origin};
 use metrics::{Counter, SharedString};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -66,7 +66,9 @@ impl Endpoint {
             .ok()
             .filter(|destination| destination.scheme() == "https" && is_admissible(destination))
             .ok_or(EndpointError::InvalidDestination)?;
-        let client = Client::try_new(&destination, LIMITS)?;
+        let origin = Origin::parse_https(&destination.origin().ascii_serialization())
+            .map_err(|_| EndpointError::InvalidDestination)?;
+        let client = Client::try_new(origin, LIMITS)?;
         Ok(Self::from_destination(destination, client, keys))
     }
 
@@ -257,9 +259,7 @@ impl FailureKind {
             HttpError::Timeout => Self::Timeout,
             HttpError::Cancelled => Self::Cancelled,
             HttpError::Transport { .. } => Self::Transport,
-            HttpError::InvalidTarget
-            | HttpError::DispatchRefused
-            | HttpError::ResponseBodyTooLarge => Self::Client,
+            HttpError::InvalidTarget | HttpError::ResponseBodyTooLarge => Self::Client,
         }
     }
 

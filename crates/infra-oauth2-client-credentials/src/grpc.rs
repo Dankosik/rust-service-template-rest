@@ -124,16 +124,15 @@ impl AuthenticatedClient {
                 }
             })?;
         let (prepared, context) = prepared.try_step(|opening, headers| {
-            let context = infra_outbound_http::RequestContext::from(opening);
             self.tokens
-                .check_active(acquisition_deadline(&context))
+                .check_active(acquisition_deadline(opening))
                 .map_err(acquisition_status)?;
             if headers.contains_key(AUTHORIZATION) {
                 return Err(Status::internal(
                     "authorization conflicts with client credentials",
                 ));
             }
-            Ok(context)
+            Ok(opening.clone())
         })?;
         Ok(Box::pin(send_admitted(
             prepared,
@@ -146,7 +145,7 @@ impl AuthenticatedClient {
 async fn send_admitted(
     prepared: PreparedCall,
     tokens: BoundTokens,
-    context: infra_outbound_http::RequestContext,
+    context: OperationContext,
 ) -> Result<Response<Body>, Status> {
     let (prepared, token) = prepared
         .try_await(async {

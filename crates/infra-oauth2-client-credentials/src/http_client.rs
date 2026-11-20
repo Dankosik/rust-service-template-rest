@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode, header::AUTHORIZATION};
-use infra_outbound_http::{Client, Error as HttpError};
+use infra_outbound_http::{Client, DispatchError, Error as HttpError, Origin};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 
@@ -64,6 +64,11 @@ impl ExchangeTokens {
 
 impl ServiceHttpClient {
     #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.resource.origin()
+    }
+
+    #[must_use]
     pub const fn with_context<'a>(
         &'a self,
         context: &'a OperationContext,
@@ -90,12 +95,22 @@ impl ServiceHttpClient {
 }
 
 impl ServiceRequestClient<'_> {
+    #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.client.origin()
+    }
+
     pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
         self.client.execute(self.context, request).await
     }
 }
 
 impl ExchangeHttpClient {
+    #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.resource.origin()
+    }
+
     #[must_use]
     pub const fn with_context<'a>(
         &'a self,
@@ -124,6 +139,11 @@ impl ExchangeHttpClient {
 }
 
 impl ExchangeRequestClient<'_> {
+    #[must_use]
+    pub const fn origin(&self) -> &Origin {
+        self.client.origin()
+    }
+
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -176,8 +196,8 @@ async fn execute_authenticated(
     let acquired = grant.acquire_for_request(deadline).await?;
     prepared.set_authorization(acquired.header.clone());
     prepared
-        .send(
-            || acquired.check_expiry(Instant::now()).is_ok(),
+        .send_checked(
+            || acquired.check_expiry(Instant::now()),
             |status| {
                 if status == StatusCode::UNAUTHORIZED {
                     acquired.reject_if_old_enough();
@@ -197,10 +217,10 @@ impl Error {
         }
     }
 
-    fn at_send(error: HttpError) -> Self {
+    fn at_send(error: DispatchError<AcquisitionError>) -> Self {
         match error {
-            HttpError::DispatchRefused => AcquisitionError::InvalidResponse.into(),
-            other => Self::Resource(other),
+            DispatchError::Refused(error) => Self::Acquisition(error),
+            DispatchError::Exchange(error) => Self::Resource(error.into_error()),
         }
     }
 }

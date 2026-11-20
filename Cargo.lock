@@ -1488,17 +1488,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "delegate"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3025,9 +3014,7 @@ name = "infra-outbound-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "delegate",
  "derive_more",
- "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -3042,7 +3029,6 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "shared-rules",
- "smallvec",
  "thiserror",
  "tls-test-support",
  "tokio",
@@ -3052,7 +3038,6 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]

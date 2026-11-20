@@ -296,9 +296,8 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     let mut leader = Box::pin(fixture.send_exchange(&client, "subject"));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
     let context = OperationContext::with_timeout(Duration::from_secs(10));
-    let mut request = fixture.request();
-    request.extensions_mut().insert(context.clone());
-    let mut waiter = Box::pin(fixture.send_exchange_request(&client, request, "subject"));
+    let waiter_subject = subject("subject");
+    let mut waiter = Box::pin(client.execute(&context, fixture.request(), &waiter_subject));
     poll_pending(waiter.as_mut()).await;
     context.cancel();
     assert_matches!(
@@ -334,7 +333,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     let resource = Client::try_new_for_test_http(
-        &fixture.origin,
+        fixture.origin.as_str(),
         infra_outbound_http::Limits {
             operation_timeout: Duration::from_secs(10),
             ..TOKEN_LIMITS

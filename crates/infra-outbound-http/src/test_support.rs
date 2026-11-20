@@ -2,14 +2,13 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
     time::Duration,
 };
 
 use bytes::Bytes;
 use http::Request;
-use hyper_util::client::legacy::connect::dns::Name;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use operation_context::OperationContext;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -27,7 +26,12 @@ use tokio_rustls::{
 
 use tls_test_support::TlsMaterial;
 
-use crate::{Client, Limits, Url, policy};
+pub(crate) use crate::transport::FixtureResolver;
+use crate::{
+    Client, Limits, Origin,
+    observe::{REQUEST_DURATION_BUCKETS, REQUEST_DURATION_METRIC},
+    transport::{Resolver, tls_config_with_root},
+};
 
 pub(crate) const FIXTURE_HOST: &str = "provider.fixture.test";
 pub(crate) const FIXTURE_URL: &str = "https://provider.fixture.test/fixture";
@@ -79,8 +83,8 @@ impl tracing::Subscriber for SpanDiagnostics {
 pub(crate) fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Full(crate::REQUEST_DURATION_METRIC.to_owned()),
-            crate::observe::REQUEST_DURATION_BUCKETS,
+            Matcher::Full(REQUEST_DURATION_METRIC.to_owned()),
+            REQUEST_DURATION_BUCKETS,
         )
         .expect("observation buckets are valid")
         .build_recorder()
@@ -98,42 +102,6 @@ pub(crate) fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
             count.parse::<usize>().expect("integer histogram count")
         })
         .sum()
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct FixtureResolver(Arc<Mutex<Vec<SocketAddr>>>);
-
-impl FixtureResolver {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn with_addresses(addresses: Vec<SocketAddr>) -> Self {
-        Self(Arc::new(Mutex::new(addresses)))
-    }
-
-    pub(crate) fn replace(&self, addresses: Vec<SocketAddr>) {
-        *self.0.lock().expect("fixture resolver addresses") = addresses;
-    }
-}
-
-impl tower::Service<Name> for FixtureResolver {
-    type Response = std::vec::IntoIter<SocketAddr>;
-    type Error = std::io::Error;
-    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _: Name) -> Self::Future {
-        let addresses = self.0.lock().expect("fixture resolver addresses").clone();
-        std::future::ready(if addresses.is_empty() {
-            Err(std::io::Error::other("no fixture listener"))
-        } else {
-            Ok(addresses.into_iter())
-        })
-    }
 }
 
 pub(crate) fn limits() -> Limits {
@@ -185,27 +153,13 @@ pub(crate) fn fixture_client_with_resolver(
     material: &TlsMaterial,
     limits: Limits,
 ) -> Client {
-    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(material.root.clone()))
-        .expect("fixture root certificate");
-    let tls = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("fixture TLS protocol versions")
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let origin = policy::admit_origin(&url(&format!("https://{host}/"))).expect("fixture origin");
-    Client::with_transport(origin, limits, tls, resolver)
+    let tls = tls_config_with_root(&material.root).expect("fixture root certificate");
+    let origin = Origin::parse_https(&format!("https://{host}")).expect("fixture origin");
+    Client::with_transport(origin, limits, tls, Resolver::Fixture(resolver))
 }
 
-pub(crate) fn url(raw: &str) -> Url {
-    Url::parse(raw).expect("fixture URL")
-}
-
-pub(crate) fn default_context() -> operation_context::OperationContext {
-    operation_context::OperationContext::with_timeout(Duration::from_secs(1))
+pub(crate) fn default_context() -> OperationContext {
+    OperationContext::with_timeout(Duration::from_secs(1))
 }
 
 pub(crate) fn request() -> Request<Bytes> {

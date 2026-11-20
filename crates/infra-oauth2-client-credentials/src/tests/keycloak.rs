@@ -59,7 +59,7 @@ impl Realm {
             panic!("OAUTH_TEST_KEYCLOAK_URL is unset; run just test-integration-oauth")
         });
         let origin = Url::parse(&origin).unwrap();
-        let http = Client::try_new_for_test_http(&origin, TOKEN_LIMITS).unwrap();
+        let http = Client::try_new_for_test_http(origin.as_str(), TOKEN_LIMITS).unwrap();
         let (driver_shutdown, _) = watch::channel(());
         let mut realm = Self {
             origin,

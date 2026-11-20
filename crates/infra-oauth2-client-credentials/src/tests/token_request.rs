@@ -347,7 +347,7 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchange-token"));
     let resource = Client::try_new_for_test_http(
-        &fixture.origin,
+        fixture.origin.as_str(),
         infra_outbound_http::Limits {
             operation_timeout: Duration::from_secs(20),
             ..TOKEN_LIMITS
@@ -359,7 +359,7 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
         .http(resource)
         .unwrap();
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
-        if key.name() == infra_outbound_http::REQUEST_DURATION_METRIC
+        if key.name() == "http_client_request_duration_seconds"
             && key
                 .labels()
                 .any(|label| label.key() == "http.request.method" && label.value() == "POST")
@@ -474,42 +474,33 @@ impl<F: Fn(&metrics::Key)> metrics::Recorder for ObserveMetricRegistration<F> {
 }
 
 #[tokio::test]
-async fn cancellation_during_token_http_completion_is_recorded_for_both_parent_scopes() {
+async fn cancellation_during_token_http_completion_is_recorded() {
     for delegated in [false, true] {
-        for extension in [false, true] {
-            let fixture = Fixture::new().await;
-            let mut request = fixture.request();
-            let caller = OperationContext::with_timeout(Duration::from_secs(10));
-            let operation = OperationContext::with_timeout(Duration::from_secs(10));
-            let context = if extension {
-                request.extensions_mut().insert(caller.clone());
-                &operation
-            } else {
-                &caller
-            };
-            let outcomes = Mutex::new(Vec::new());
-            let recorder = ObserveMetricRegistration(|key: &metrics::Key| match key.name() {
-                "http_client_request_duration_seconds" => caller.cancel(),
-                "oauth2_token_acquisitions_total" => {
-                    let outcome = key.labels().find(|label| label.key() == "outcome").unwrap();
-                    outcomes.lock().unwrap().push(outcome.value().to_owned());
-                }
-                _ => {}
-            });
-            let _recorder = metrics::set_default_local_recorder(&recorder);
-            let result = if delegated {
-                fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-                let client = fixture.exchange_client();
-                client.execute(context, request, &subject("subject")).await
-            } else {
-                let client = fixture.service_client();
-                client.execute(context, request).await
-            };
-            assert_matches!(result, Err(Error::Acquisition(AcquisitionError::Cancelled)));
-            assert_eq!(*outcomes.lock().unwrap(), ["cancelled"]);
-            assert_eq!(fixture.resource_request_count(), 0);
-            fixture.finish().await;
-        }
+        let fixture = Fixture::new().await;
+        let request = fixture.request();
+        let caller = OperationContext::with_timeout(Duration::from_secs(10));
+        let outcomes = Mutex::new(Vec::new());
+        let recorder = ObserveMetricRegistration(|key: &metrics::Key| match key.name() {
+            "http_client_request_duration_seconds" => caller.cancel(),
+            "oauth2_token_acquisitions_total" => {
+                let outcome = key.labels().find(|label| label.key() == "outcome").unwrap();
+                outcomes.lock().unwrap().push(outcome.value().to_owned());
+            }
+            _ => {}
+        });
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let result = if delegated {
+            fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
+            let client = fixture.exchange_client();
+            client.execute(&caller, request, &subject("subject")).await
+        } else {
+            let client = fixture.service_client();
+            client.execute(&caller, request).await
+        };
+        assert_matches!(result, Err(Error::Acquisition(AcquisitionError::Cancelled)));
+        assert_eq!(*outcomes.lock().unwrap(), ["cancelled"]);
+        assert_eq!(fixture.resource_request_count(), 0);
+        fixture.finish().await;
     }
 }
 
@@ -539,57 +530,48 @@ async fn drive_cancelled_provider_completion(
 #[tokio::test]
 async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attempt() {
     for delegated in [false, true] {
-        for extension in [false, true] {
-            let fixture = Fixture::new().await;
-            let request = fixture.request();
-            let caller = OperationContext::with_timeout(Duration::from_secs(10));
-            let mut first = request.clone();
-            let operation = OperationContext::with_timeout(Duration::from_secs(10));
-            let context = if extension {
-                first.extensions_mut().insert(caller.clone());
-                &operation
-            } else {
-                &caller
-            };
-            let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
-                if key.name() == "oauth2_token_acquisitions_total"
-                    && key
-                        .labels()
-                        .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
-                {
-                    caller.cancel();
-                }
-            });
-            let _recorder = metrics::set_default_local_recorder(&recorder);
-            fixture.token_json(
-                StatusCode::BAD_REQUEST,
-                &serde_json::json!({"error": "invalid_client"}),
-            );
-            let gate = fixture.block_tokens();
-            if delegated {
-                let client = fixture.exchange_client();
-                let subject_token = subject("subject");
-                drive_cancelled_provider_completion(
-                    &fixture,
-                    &gate,
-                    Box::pin(client.execute(context, first, &subject_token)),
-                    Box::pin(fixture.send_exchange_request(&client, request, "subject")),
-                )
-                .await;
-            } else {
-                let client = fixture.service_client();
-                drive_cancelled_provider_completion(
-                    &fixture,
-                    &gate,
-                    Box::pin(client.execute(context, first)),
-                    Box::pin(fixture.send_request(&client, request)),
-                )
-                .await;
+        let fixture = Fixture::new().await;
+        let request = fixture.request();
+        let caller = OperationContext::with_timeout(Duration::from_secs(10));
+        let first = request.clone();
+        let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
+            if key.name() == "oauth2_token_acquisitions_total"
+                && key
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
+            {
+                caller.cancel();
             }
-            assert_eq!(fixture.token_request_count(), 2);
-            assert_eq!(fixture.resource_request_count(), 1);
-            fixture.finish().await;
+        });
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        fixture.token_json(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "invalid_client"}),
+        );
+        let gate = fixture.block_tokens();
+        if delegated {
+            let client = fixture.exchange_client();
+            let subject_token = subject("subject");
+            drive_cancelled_provider_completion(
+                &fixture,
+                &gate,
+                Box::pin(client.execute(&caller, first, &subject_token)),
+                Box::pin(fixture.send_exchange_request(&client, request, "subject")),
+            )
+            .await;
+        } else {
+            let client = fixture.service_client();
+            drive_cancelled_provider_completion(
+                &fixture,
+                &gate,
+                Box::pin(client.execute(&caller, first)),
+                Box::pin(fixture.send_request(&client, request)),
+            )
+            .await;
         }
+        assert_eq!(fixture.token_request_count(), 2);
+        assert_eq!(fixture.resource_request_count(), 1);
+        fixture.finish().await;
     }
 }
 
@@ -639,10 +621,10 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let mut captured = RecordedMetrics::default();
     let fixture = Fixture::new().await;
-    let far = || timeout_context(Duration::from_secs(10));
+    let far = timeout_context(Duration::from_secs(10));
     let reused = fixture.service_client();
     for _ in 0..2 {
-        reused.execute(&far(), fixture.request()).await.unwrap();
+        reused.execute(&far, fixture.request()).await.unwrap();
     }
     fixture.token_raw(response(
         StatusCode::BAD_REQUEST,
@@ -650,7 +632,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     ));
     fixture
         .service_client()
-        .execute(&far(), fixture.request())
+        .execute(&far, fixture.request())
         .await
         .unwrap_err();
     fixture.token_raw(response(
@@ -659,17 +641,13 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
     ));
     fixture
         .exchange_client()
-        .execute(&far(), fixture.request(), &subject("subject"))
+        .execute(&far, fixture.request(), &subject("subject"))
         .await
         .unwrap_err();
     let gate = fixture.block_tokens();
     let timed = fixture.service_client();
-    let mut request = fixture.request();
-    request
-        .extensions_mut()
-        .insert(OperationContext::with_timeout(Duration::from_secs(1)));
-    let timed_context = far();
-    let mut timed = Box::pin(timed.execute(&timed_context, request));
+    let short = OperationContext::with_timeout(Duration::from_secs(1));
+    let mut timed = Box::pin(timed.execute(&short, fixture.request()));
     fixture.drive_until_token_received(timed.as_mut()).await;
     advance(Duration::from_secs(1)).await;
     assert_matches!(
@@ -693,22 +671,20 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         .unwrap()
         .http(fixture.resource_client())
         .unwrap();
-    let dropped_context = far();
-    let mut dropped = Box::pin(dropped_client.execute(&dropped_context, fixture.request()));
+    let mut dropped = Box::pin(dropped_client.execute(&far, fixture.request()));
     fixture.drive_until_token_received(dropped.as_mut()).await;
     captured.drain(&snapshotter);
     let before_capacity = captured.outbound_samples;
     assert!(before_capacity > 0);
     assert_matches!(
         exchange_client
-            .execute(&far(), fixture.request(), &subject("at-capacity"))
+            .execute(&far, fixture.request(), &subject("at-capacity"))
             .await,
         Err(Error::Acquisition(AcquisitionError::AtCapacity))
     );
     captured.drain(&snapshotter);
     assert_eq!(captured.outbound_samples, before_capacity);
-    let waiter_context = far();
-    let mut waiter = Box::pin(dropped_client.execute(&waiter_context, fixture.request()));
+    let mut waiter = Box::pin(dropped_client.execute(&far, fixture.request()));
     poll_pending(waiter.as_mut()).await;
     drop(waiter);
     drop(dropped);

@@ -16,27 +16,24 @@ default = []
 test-support = []
 
 [dependencies]
-derive_more = { workspace = true, features = ["debug"] }
-delegate = { workspace = true }
-futures-util = { workspace = true, features = ["alloc"] }
-operation-context = { workspace = true }
-http = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
+derive_more = { workspace = true, features = ["debug"] }
+http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12", "rustls-platform-verifier"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 metrics = { workspace = true }
+operation-context = { workspace = true }
 parking_lot = { workspace = true }
 rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = { workspace = true }
+shared-rules = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
-shared-rules = { workspace = true }
-smallvec = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "time"] }
-url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
@@ -45,6 +42,5 @@ opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 tls-test-support = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-tower = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["registry"] }

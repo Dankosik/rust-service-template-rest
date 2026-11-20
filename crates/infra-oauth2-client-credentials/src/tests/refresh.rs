@@ -375,28 +375,20 @@ async fn assert_closed_service_calls(
 ) {
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
-    for (after, request_context, expected) in [
-        (Duration::from_secs(10), None, AcquisitionError::Unavailable),
-        (Duration::ZERO, None, AcquisitionError::Timeout),
+    for (context, expected) in [
         (
-            Duration::from_secs(10),
-            Some(OperationContext::with_timeout(Duration::ZERO)),
+            OperationContext::with_timeout(Duration::from_secs(10)),
+            AcquisitionError::Unavailable,
+        ),
+        (
+            OperationContext::with_timeout(Duration::ZERO),
             AcquisitionError::Timeout,
         ),
-        (
-            Duration::from_secs(10),
-            Some(cancelled),
-            AcquisitionError::Cancelled,
-        ),
+        (cancelled, AcquisitionError::Cancelled),
     ] {
-        let mut request = request();
-        if let Some(context) = request_context {
-            request.extensions_mut().insert(context);
-        }
-        let context = OperationContext::with_timeout(after);
         let error = client
             .with_context(&context)
-            .execute(request)
+            .execute(request())
             .await
             .unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
@@ -410,28 +402,20 @@ async fn assert_closed_exchange_calls(
 ) {
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
-    for (after, request_context, expected) in [
-        (Duration::from_secs(10), None, AcquisitionError::Unavailable),
-        (Duration::ZERO, None, AcquisitionError::Timeout),
+    for (context, expected) in [
         (
-            Duration::from_secs(10),
-            Some(OperationContext::with_timeout(Duration::ZERO)),
+            OperationContext::with_timeout(Duration::from_secs(10)),
+            AcquisitionError::Unavailable,
+        ),
+        (
+            OperationContext::with_timeout(Duration::ZERO),
             AcquisitionError::Timeout,
         ),
-        (
-            Duration::from_secs(10),
-            Some(cancelled),
-            AcquisitionError::Cancelled,
-        ),
+        (cancelled, AcquisitionError::Cancelled),
     ] {
-        let mut request = request();
-        if let Some(context) = request_context {
-            request.extensions_mut().insert(context);
-        }
-        let context = OperationContext::with_timeout(after);
         let error = client
             .with_context(&context)
-            .execute(request, subject_token)
+            .execute(request(), subject_token)
             .await
             .unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
