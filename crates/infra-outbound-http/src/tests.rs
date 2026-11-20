@@ -1182,7 +1182,8 @@ async fn prepared_request_exposes_headers_and_accepts_non_send_hooks() {
 
     let (address, captured, server) =
         tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
-    let mut prepared = fixture_client(address, &material)
+    let client = fixture_client(address, &material);
+    let mut prepared = client
         .prepare(&default_context(), crate::test_support::request())
         .expect("prepared request for send");
     prepared.set_authorization("Bearer direct".parse().expect("auth"));
