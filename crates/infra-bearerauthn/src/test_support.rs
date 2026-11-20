@@ -6,7 +6,7 @@ pub use crate::jwt::JwtFixture;
 // template:begin oidc-introspection:authn-introspection-test-support
 use tokio_util::sync::CancellationToken;
 
-use crate::{Failure, provider};
+use crate::{PreparationError, provider};
 
 pub use crate::introspection::prepare_introspection_with_fixture;
 
@@ -22,7 +22,7 @@ impl FixtureTransport {
         fixture_addr: std::net::SocketAddr,
         fixture_root_der: &[u8],
         cancel: CancellationToken,
-    ) -> Result<Self, Failure> {
+    ) -> Result<Self, PreparationError> {
         provider::new_fixture_client(fixture_host, fixture_addr, fixture_root_der, cancel)
             .map(|provider| Self { provider })
     }

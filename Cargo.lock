@@ -3064,7 +3064,6 @@ dependencies = [
  "enum-map",
  "foldhash",
  "http",
- "indexmap 2.14.2",
  "jsonwebtoken",
  "metrics",
  "metrics-util",

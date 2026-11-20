@@ -1,11 +1,17 @@
-use std::{cell::Cell, num::NonZeroU32, str::FromStr};
+use std::{
+    borrow::Borrow,
+    cell::Cell,
+    hash::{Hash, Hasher},
+    num::NonZeroU32,
+    str::FromStr,
+};
 
 use secrecy::{ExposeSecret as _, SecretString};
 use shared_rules::uri;
 use tokio::sync::Semaphore;
 use url::Url;
 
-use crate::ConfigurationError;
+use crate::{ConfigurationError, assertion::SignerConfig};
 
 /// RFC 8725bis §3.1
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,15 +31,44 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
-struct HttpsUrl {
+#[derive(Clone, Eq)]
+struct ParsedUrl {
     exact: String,
     url: Url,
 }
 
-impl HttpsUrl {
-    fn parse(raw: &str, key: &'static str, allow_query: bool) -> Result<Self, ConfigurationError> {
+impl PartialEq for ParsedUrl {
+    fn eq(&self, other: &Self) -> bool {
+        self.exact == other.exact
+    }
+}
+
+impl Hash for ParsedUrl {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.exact.hash(state);
+    }
+}
+
+impl ParsedUrl {
+    fn parse_https(
+        raw: &str,
+        key: &'static str,
+        allow_query: bool,
+    ) -> Result<Self, ConfigurationError> {
         let url = parse_provider_url(raw, key, Some(("https", "must use HTTPS")), allow_query)?;
+        Ok(Self {
+            exact: raw.to_owned(),
+            url,
+        })
+    }
+
+    #[cfg(test)]
+    fn parse_http(
+        raw: &str,
+        key: &'static str,
+        allow_query: bool,
+    ) -> Result<Self, ConfigurationError> {
+        let url = parse_http_url(raw, key, allow_query)?;
         Ok(Self {
             exact: raw.to_owned(),
             url,
@@ -53,13 +88,18 @@ impl HttpsUrl {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[derive(Clone, Eq, Hash, PartialEq, derive_more::Debug)]
 #[debug("IssuerUrl([REDACTED])")]
-pub struct IssuerUrl(HttpsUrl);
+pub struct IssuerUrl(ParsedUrl);
 
 impl IssuerUrl {
     pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
-        HttpsUrl::parse(raw, "issuer", false).map(Self)
+        ParsedUrl::parse_https(raw, "issuer", false).map(Self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_http(raw: &str) -> Result<Self, ConfigurationError> {
+        ParsedUrl::parse_http(raw, "issuer", false).map(Self)
     }
 
     #[must_use]
@@ -73,6 +113,12 @@ impl IssuerUrl {
 
     pub(crate) fn into_parts(self) -> (String, Url) {
         self.0.into_parts()
+    }
+}
+
+impl Borrow<str> for IssuerUrl {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -90,13 +136,13 @@ impl FromStr for IssuerUrl {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[derive(Clone, Eq, Hash, PartialEq, derive_more::Debug)]
 #[debug("TokenUrl([REDACTED])")]
-pub struct TokenUrl(HttpsUrl);
+pub struct TokenUrl(ParsedUrl);
 
 impl TokenUrl {
     pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
-        HttpsUrl::parse(raw, "token_url", true).map(Self)
+        ParsedUrl::parse_https(raw, "token_url", true).map(Self)
     }
 
     #[must_use]
@@ -110,6 +156,12 @@ impl TokenUrl {
 
     pub(crate) fn into_url(self) -> Url {
         self.0.url
+    }
+}
+
+impl Borrow<str> for TokenUrl {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -207,40 +259,9 @@ fn scope_parameter(
     Ok((!joined.is_empty()).then_some(joined))
 }
 
-pub(crate) struct RawRegistration {
-    pub(crate) token_url: Url,
-    pub(crate) client_id: String,
-    pub(crate) private_key: SecretString,
-    pub(crate) key_id: String,
-    pub(crate) algorithm: Algorithm,
-    pub(crate) audience_exact: String,
-    pub(crate) audience_url: Url,
-    pub(crate) provider_concurrency: NonZeroU32,
-}
-
-impl From<Options> for RawRegistration {
-    fn from(options: Options) -> Self {
-        let (audience_exact, audience_url) = options.auth.audience.into_parts();
-        Self {
-            token_url: options.token_url.into_url(),
-            client_id: options.client_id,
-            private_key: options.auth.private_key,
-            key_id: options.auth.key_id,
-            algorithm: options.auth.algorithm,
-            audience_exact,
-            audience_url,
-            provider_concurrency: options.provider_concurrency,
-        }
-    }
-}
-
 pub(crate) struct ValidatedRegistration {
     pub(crate) token_url: Url,
-    pub(crate) client_id: String,
-    pub(crate) private_key: SecretString,
-    pub(crate) key_id: String,
-    pub(crate) algorithm: Algorithm,
-    pub(crate) audience: String,
+    pub(crate) signer: SignerConfig,
     pub(crate) permits: usize,
 }
 
@@ -318,33 +339,44 @@ pub(crate) fn parse_discovered_token_endpoint(raw: &str) -> Option<Url> {
 pub(crate) fn validate_options(
     options: Options,
 ) -> Result<ValidatedRegistration, ConfigurationError> {
-    validate_registration(options.into())
+    validate_registration(
+        options.token_url.into_url(),
+        options.client_id,
+        options.auth,
+        options.provider_concurrency,
+    )
 }
 
 pub(crate) fn validate_registration(
-    raw: RawRegistration,
+    token_url: Url,
+    client_id: String,
+    auth: PrivateKeyJwt,
+    provider_concurrency: NonZeroU32,
 ) -> Result<ValidatedRegistration, ConfigurationError> {
-    let permits = validate_provider_concurrency(raw.provider_concurrency)?;
+    let permits = validate_provider_concurrency(provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    if raw.client_id.trim().is_empty() {
+    if client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
-    if raw.key_id.trim().is_empty() {
+    if auth.key_id.trim().is_empty() {
         return error("key_id", "must be nonempty");
     }
-    if raw.private_key.expose_secret().trim().is_empty() {
+    if auth.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
-    if raw.audience_url == raw.token_url {
+    let (audience, audience_url) = auth.audience.into_parts();
+    if audience_url == token_url {
         return error("assertion_audience", "must differ from the token endpoint");
     }
     Ok(ValidatedRegistration {
-        token_url: raw.token_url,
-        client_id: raw.client_id,
-        private_key: raw.private_key,
-        key_id: raw.key_id,
-        algorithm: raw.algorithm,
-        audience: raw.audience_exact,
+        token_url,
+        signer: SignerConfig {
+            client_id,
+            private_key: auth.private_key,
+            key_id: auth.key_id,
+            algorithm: auth.algorithm,
+            audience,
+        },
         permits,
     })
 }

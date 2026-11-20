@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -10,6 +9,7 @@ use std::{
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use enum_map::EnumMap;
+use foldhash::HashMap;
 use jsonwebtoken::{
     Algorithm,
     jwk::{
@@ -22,7 +22,7 @@ use tokio::time::Instant;
 
 use crate::{
     DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwksError, PreparationError,
-    PreparationPhase, ProviderFailure, VerificationError, VerificationReason,
+    PreparationPhase, VerificationError, VerificationReason,
     jwt::discover_jwks_uri,
     provider::{Document, ProviderClient},
 };
@@ -199,8 +199,8 @@ fn parse_jwks_entries(
     bytes: &[u8],
     configured: AllowedAlgorithms,
 ) -> Result<ParsedKeySet, KeySetFailure> {
-    let JsonObject(raw) =
-        serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
+    let JsonObject(raw) = serde_json::from_slice::<JsonObject<RawJwks>>(bytes)
+        .map_err(|_| KeySetFailure::Jwks(JwksError::Parse))?;
     let mut rejected = EnumMap::<KeyRejection, u64>::default();
     let mut keys = Vec::new();
     for value in raw.keys {
@@ -245,7 +245,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
     if parsed.has_non_encryption_rejections_without_keys() {
-        return Err(KeySetFailure::NoUsableKeys);
+        return Err(KeySetFailure::Jwks(JwksError::NoUsableKeys));
     }
     let mut by_algorithm = EnumMap::<JwtAlgorithm, AlgorithmKeys>::default();
     for key in parsed.keys {
@@ -275,10 +275,7 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
         Conflicting,
     }
 
-    let mut bindings =
-        HashMap::<Box<[u8]>, RsaBinding, foldhash::quality::RandomState>::with_hasher(
-            foldhash::quality::RandomState::default(),
-        );
+    let mut bindings = HashMap::<Box<[u8]>, RsaBinding>::default();
     for key in keys
         .iter()
         .filter(|key| key.algorithm.family() == KeyFamily::Rsa)
@@ -552,7 +549,7 @@ impl JwksSource {
         let bytes = provider
             .get_document(uri.url(), Document::Jwks, Some(deadline))
             .await
-            .map_err(KeySetFailure::Fetch)?;
+            .map_err(|failure| KeySetFailure::Jwks(JwksError::Fetch(failure)))?;
         let parsed = parse_jwks_entries(&bytes, algorithms)?;
         let keys = build_key_set(parsed, acquired_at.unwrap_or_else(Instant::now))?;
         Ok(Arc::new(keys))
@@ -563,9 +560,7 @@ impl JwksSource {
 pub(crate) enum KeySetFailure {
     Discovery(DiscoveryError),
     DiscoveryTimeout,
-    Fetch(ProviderFailure),
-    Parse,
-    NoUsableKeys,
+    Jwks(JwksError),
 }
 
 impl From<KeySetFailure> for PreparationError {
@@ -573,9 +568,7 @@ impl From<KeySetFailure> for PreparationError {
         match failure {
             KeySetFailure::Discovery(error) => Self::Discovery(error),
             KeySetFailure::DiscoveryTimeout => Self::Timeout(PreparationPhase::Discovery),
-            KeySetFailure::Fetch(failure) => Self::Jwks(JwksError::Fetch(failure)),
-            KeySetFailure::Parse => Self::Jwks(JwksError::Parse),
-            KeySetFailure::NoUsableKeys => Self::Jwks(JwksError::NoUsableKeys),
+            KeySetFailure::Jwks(error) => Self::Jwks(error),
         }
     }
 }
@@ -584,9 +577,9 @@ impl KeySetFailure {
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::Discovery(_) | Self::DiscoveryTimeout => "discovery",
-            Self::Fetch(_) => "fetch",
-            Self::Parse => "parse",
-            Self::NoUsableKeys => "no_usable_keys",
+            Self::Jwks(JwksError::Fetch(_)) => "fetch",
+            Self::Jwks(JwksError::Parse) => "parse",
+            Self::Jwks(JwksError::NoUsableKeys) => "no_usable_keys",
         }
     }
 }
@@ -644,7 +637,8 @@ pub(crate) mod tests {
         JWT_SIGNING_DER, ensure_crypto_provider, jwk, key_set, rsa_signing,
     };
     use super::{
-        JwtAlgorithm, KeySetFailure, SignatureInput, SignatureVerificationError, parse_key_set,
+        JwksError, JwtAlgorithm, KeySetFailure, SignatureInput, SignatureVerificationError,
+        parse_key_set,
     };
     use crate::test_metrics::{Diagnostics, labeled};
 
@@ -824,7 +818,7 @@ pub(crate) mod tests {
                 if withdrawn {
                     Ok(true)
                 } else {
-                    Err(KeySetFailure::NoUsableKeys)
+                    Err(KeySetFailure::Jwks(JwksError::NoUsableKeys))
                 },
                 "{metadata}"
             );
@@ -835,7 +829,7 @@ pub(crate) mod tests {
         ]});
         assert_eq!(
             parse_key_set(&serde_json::to_vec(&keys).unwrap(), &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::NoUsableKeys)
+            Some(KeySetFailure::Jwks(JwksError::NoUsableKeys))
         );
     }
 
@@ -851,12 +845,12 @@ pub(crate) mod tests {
             (
                 serde_json::json!({"use":"enc", "kty":"EC","crv":"P-256","x":ec["x"],"y":ec["y"]}),
                 "ES512",
-                Err(KeySetFailure::NoUsableKeys),
+                Err(KeySetFailure::Jwks(JwksError::NoUsableKeys)),
             ),
             (
                 serde_json::json!({"kty":"OKP","crv":"X25519","x":"!"}),
                 "ECDH-ES",
-                Err(KeySetFailure::NoUsableKeys),
+                Err(KeySetFailure::Jwks(JwksError::NoUsableKeys)),
             ),
         ] {
             key["alg"] = algorithm.into();
@@ -898,7 +892,7 @@ pub(crate) mod tests {
     fn an_unreadable_key_set_is_refused() {
         assert_eq!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::Parse)
+            Some(KeySetFailure::Jwks(JwksError::Parse))
         );
     }
 
@@ -915,7 +909,10 @@ pub(crate) mod tests {
                 parse_key_set(&bytes, &[JwtAlgorithm::Rs256])
             })
         });
-        assert_eq!(parsed.err(), Some(KeySetFailure::NoUsableKeys));
+        assert_eq!(
+            parsed.err(),
+            Some(KeySetFailure::Jwks(JwksError::NoUsableKeys))
+        );
         let counters = diagnostics.take_counters();
         assert!(
             counters.iter().any(|(key, value)| {

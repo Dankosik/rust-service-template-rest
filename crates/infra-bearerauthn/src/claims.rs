@@ -1016,11 +1016,11 @@ mod tests {
         assert_eq!(claims.accounts[0].balance, i128::MIN);
         assert_eq!(principal.scopes(), ["read", "write"]);
         let error = principal.claims::<WrongShape>().unwrap_err();
-        assert_eq!(error, crate::ClaimAccessError::InvalidShape);
+        assert_eq!(error, crate::ClaimAccessError);
         assert!(!format!("{error:?} {error} {principal:?}").contains("private-value"));
         assert_eq!(
             principal.claims::<RepeatedMember>().unwrap_err(),
-            crate::ClaimAccessError::InvalidShape
+            crate::ClaimAccessError
         );
     }
 

@@ -65,7 +65,7 @@ async fn prepare_with_provider(
         .await
         .and_then(|keys| {
             if keys.is_empty() {
-                Err(KeySetFailure::NoUsableKeys)
+                Err(KeySetFailure::Jwks(crate::JwksError::NoUsableKeys))
             } else {
                 Ok(keys)
             }

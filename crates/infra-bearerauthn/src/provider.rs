@@ -1,4 +1,6 @@
 use std::{
+    borrow::Borrow,
+    hash::{Hash, Hasher},
     str::FromStr,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
@@ -139,7 +141,7 @@ impl Outcome {
 
 type OperationHistograms = EnumMap<Operation, EnumMap<Outcome, OnceLock<metrics::Histogram>>>;
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[derive(Clone, Eq, Hash, PartialEq, derive_more::Debug)]
 #[debug("IssuerUrl([REDACTED])")]
 pub struct IssuerUrl(EndpointUrl);
 
@@ -164,6 +166,12 @@ impl IssuerUrl {
     // template:end oidc-jwt:authn-provider-issuer-url
 }
 
+impl Borrow<str> for IssuerUrl {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl AsRef<str> for IssuerUrl {
     fn as_ref(&self) -> &str {
         self.as_str()
@@ -178,11 +186,23 @@ impl FromStr for IssuerUrl {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[derive(Clone, Eq, derive_more::Debug)]
 #[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
     exact: String,
     url: Url,
+}
+
+impl PartialEq for EndpointUrl {
+    fn eq(&self, other: &Self) -> bool {
+        self.exact == other.exact
+    }
+}
+
+impl Hash for EndpointUrl {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.exact.hash(state);
+    }
 }
 
 impl EndpointUrl {
@@ -197,6 +217,12 @@ impl EndpointUrl {
 
     pub(crate) fn url(&self) -> &Url {
         &self.url
+    }
+}
+
+impl Borrow<str> for EndpointUrl {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -524,19 +550,19 @@ mod fixture {
     use tokio_util::sync::CancellationToken;
 
     use super::{ProviderClient, client_builder};
-    use crate::Failure;
+    use crate::PreparationError;
 
     pub(crate) fn new_fixture_client(
         fixture_host: &str,
         fixture_addr: std::net::SocketAddr,
         fixture_root_der: &[u8],
         cancel: CancellationToken,
-    ) -> Result<ProviderClient, Failure> {
+    ) -> Result<ProviderClient, PreparationError> {
         if fixture_host.is_empty() || !fixture_addr.ip().is_loopback() {
-            return Err(Failure::Unavailable);
+            return Err(PreparationError::invalid_options());
         }
-        let root =
-            reqwest::Certificate::from_der(fixture_root_der).map_err(|_| Failure::Unavailable)?;
+        let root = reqwest::Certificate::from_der(fixture_root_der)
+            .map_err(|_| PreparationError::ClientBuild)?;
         let resolver = std::sync::Arc::new(FixtureResolver {
             host: fixture_host.to_owned(),
             address: fixture_addr,
@@ -547,7 +573,7 @@ mod fixture {
                 .dns_resolver(resolver)
                 .tls_certs_only([root]),
         )
-        .map_err(|_| Failure::Unavailable)
+        .map_err(|_| PreparationError::ClientBuild)
     }
 
     #[derive(Clone)]
@@ -654,6 +680,10 @@ mod tests {
         let url: IssuerUrl = "https://provider.example/path".parse().unwrap();
         assert_eq!(url.as_str(), "https://provider.example/path");
         assert_eq!(url.as_ref(), "https://provider.example/path");
+        assert!(
+            std::collections::HashSet::from([url.clone()])
+                .contains("https://provider.example/path")
+        );
         assert_eq!(
             IssuerUrl::parse("https://provider.example/path").unwrap(),
             url
@@ -682,6 +712,7 @@ mod tests {
         let endpoint: EndpointUrl = raw.parse().unwrap();
         assert_eq!(endpoint.as_str(), raw);
         assert_eq!(endpoint.as_ref(), raw);
+        assert!(std::collections::HashSet::from([endpoint.clone()]).contains(raw));
         assert_eq!(endpoint.url().as_str(), raw);
         assert_eq!(IssuerUrl::parse(raw), Err(crate::InvalidUrl));
         assert!(!format!("{endpoint:?}").contains("private"));

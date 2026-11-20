@@ -19,7 +19,8 @@ use super::{
     exchange_target, nonzero, service_target, token_context,
 };
 use crate::{
-    Registration, ServiceTokenTarget, ServiceTokens, discovery::HttpDiscoveryOptions, token::Token,
+    IssuerUrl, PrivateKeyJwt, Registration, ServiceTokenTarget, ServiceTokens,
+    test_support::HttpOptions, token::Token,
 };
 
 const KEY_ID: &str = "key-1";
@@ -291,16 +292,19 @@ impl Realm {
         key: &KeyPair,
         key_id: &str,
     ) -> Registration {
-        let options = HttpDiscoveryOptions {
-            issuer: self.issuer(),
+        let issuer = IssuerUrl::parse_http(&self.issuer()).unwrap();
+        let options = HttpOptions {
             token_url: self.token_endpoint(&self.name).into(),
             client_id: caller(algorithm),
-            private_key: SecretString::from(key.serialize_pem()),
-            key_id: key_id.to_owned(),
-            algorithm,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(key.serialize_pem()),
+                key_id: key_id.to_owned(),
+                algorithm,
+                audience: issuer.clone(),
+            },
             provider_concurrency: nonzero(32),
         };
-        Registration::prepare_with_oidc_discovery_for_test_http(options)
+        Registration::prepare_with_oidc_discovery_for_test_http(issuer, options)
             .await
             .unwrap()
     }

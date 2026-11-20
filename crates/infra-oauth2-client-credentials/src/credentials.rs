@@ -1,5 +1,7 @@
 use std::{
+    mem::DropGuard,
     num::NonZeroU32,
+    pin::pin,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -9,15 +11,12 @@ use infra_outbound_http::Client;
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    time::Instant,
-};
+use tokio::{sync::watch, time::Instant};
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
     ServiceTokenTarget,
-    assertion::{Signer, SignerConfig},
+    assertion::Signer,
     options::{ValidatedRegistration, validate_options},
     token::Token,
     token_endpoint::{self, FETCH_TIMEOUT, TokenEndpoint},
@@ -82,9 +81,7 @@ impl RegistrationState {
 pub struct ServiceTokens(Arc<ServiceOwner>);
 
 struct ServiceOwner {
-    inner: Arc<ServiceState>,
-    refresh_requests: mpsc::Sender<RefreshRequest>,
-    _owner_release: oneshot::Sender<()>,
+    inner: DropGuard<Arc<ServiceState>, fn(Arc<ServiceState>)>,
 }
 
 struct RefreshRequest {
@@ -92,50 +89,55 @@ struct RefreshRequest {
     deadline: Instant,
 }
 
+enum RefreshSlot {
+    Idle,
+    Queued(RefreshRequest),
+    Running,
+    Stopped,
+}
+
 #[must_use = "drive and await RefreshDriver::run for the integration lifetime"]
 #[derive(derive_more::Debug)]
 #[debug("RefreshDriver([REDACTED])")]
 pub struct RefreshDriver {
-    inner: Arc<ServiceState>,
-    requests: mpsc::Receiver<RefreshRequest>,
-    owner_gone: oneshot::Receiver<()>,
+    requests: watch::Receiver<RefreshSlot>,
+    inner: DropGuard<Arc<ServiceState>, fn(Arc<ServiceState>)>,
 }
 
 impl RefreshDriver {
-    pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
-        let mut registration_closed = self.inner.registration.closed.clone();
-        let stop = async {
+    pub async fn run(self, shutdown: impl Future<Output = ()>) {
+        let inner = self.inner;
+        let mut requests = self.requests;
+        let mut stop_changes = requests.clone();
+        let mut registration_closed = inner.registration.closed.clone();
+        let mut stop = pin!(async {
             tokio::select! {
                 biased;
                 () = shutdown => {}
                 _ = registration_closed.changed() => {}
-                _ = &mut self.owner_gone => {}
+                _ = stop_changes.wait_for(|slot| matches!(slot, RefreshSlot::Stopped)) => {}
             }
-        };
-        tokio::pin!(stop);
+        });
         loop {
-            let request = tokio::select! {
+            tokio::select! {
                 biased;
                 () = &mut stop => break,
-                request = self.requests.recv() => {
-                    let Some(request) = request else { break };
-                    request
+                result = requests.wait_for(|slot| matches!(slot, RefreshSlot::Queued(_))) => {
+                    if result.is_err() {
+                        break;
+                    }
                 }
+            }
+            let Some(request) = inner.take_queued_refresh() else {
+                continue;
             };
             tokio::select! {
                 biased;
                 () = &mut stop => break,
-                () = self.inner.refresh_ahead(request) => {}
+                () = inner.refresh_ahead(request) => {}
             }
-            self.inner.lock_cached().refresh_pending = false;
+            inner.finish_refresh();
         }
-    }
-}
-
-impl Drop for RefreshDriver {
-    fn drop(&mut self) {
-        self.requests.close();
-        self.inner.lock_cached().refresh_pending = false;
     }
 }
 
@@ -144,14 +146,9 @@ struct ServiceState {
     target: ServiceTokenTarget,
     resource_origin: http::Uri,
     active: ArcSwapOption<ServiceToken>,
-    cached: Mutex<Cached>,
+    cached: Mutex<Option<CachedFailure>>,
+    refresh: watch::Sender<RefreshSlot>,
     fetch_lock: tokio::sync::Mutex<()>,
-}
-
-#[derive(Default)]
-struct Cached {
-    failure: Option<CachedFailure>,
-    refresh_pending: bool,
 }
 
 struct ServiceToken {
@@ -159,18 +156,15 @@ struct ServiceToken {
     refresh_after: Instant,
 }
 
-impl Cached {
-    fn cached_failure(&self, now: Instant) -> Option<AcquisitionError> {
-        self.failure
-            .as_ref()
-            .filter(|failure| now < failure.until)
-            .map(|failure| failure.error)
-    }
-}
-
 struct CachedFailure {
     error: AcquisitionError,
     until: Instant,
+}
+
+impl CachedFailure {
+    fn active(&self, now: Instant) -> Option<AcquisitionError> {
+        (now < self.until).then_some(self.error)
+    }
 }
 
 impl Registration {
@@ -184,26 +178,9 @@ impl Registration {
         validated: ValidatedRegistration,
         token_http: Client,
     ) -> Result<Self, ConfigurationError> {
-        let ValidatedRegistration {
-            token_url,
-            client_id,
-            private_key,
-            key_id,
-            algorithm,
-            audience,
-            permits,
-        } = validated;
-        let signer = Signer::try_new(
-            SignerConfig {
-                client_id,
-                private_key,
-                key_id,
-                algorithm,
-                audience,
-            },
-            SystemTime::now(),
-        )?;
-        let endpoint = TokenEndpoint::new(token_url, token_http, signer, permits)?;
+        let signer = Signer::try_new(validated.signer, SystemTime::now())?;
+        let endpoint =
+            TokenEndpoint::new(validated.token_url, token_http, signer, validated.permits)?;
         let (lifetime, closed) = watch::channel(());
         Ok(Self {
             shared: Arc::new(RegistrationState { endpoint, closed }),
@@ -216,26 +193,23 @@ impl Registration {
         target: ServiceTokenTarget,
         resource_origin: http::Uri,
     ) -> (ServiceTokens, RefreshDriver) {
+        let (refresh, requests) = watch::channel(RefreshSlot::Idle);
         let inner = Arc::new(ServiceState {
             registration: self.shared.clone(),
             target,
             resource_origin,
             active: ArcSwapOption::empty(),
             cached: Mutex::default(),
+            refresh,
             fetch_lock: tokio::sync::Mutex::new(()),
         });
-        let (refresh_requests, requests) = mpsc::channel(1);
-        let (owner_release, owner_gone) = oneshot::channel();
         (
             ServiceTokens(Arc::new(ServiceOwner {
-                inner: inner.clone(),
-                refresh_requests,
-                _owner_release: owner_release,
+                inner: DropGuard::new(Arc::clone(&inner), ServiceState::stop),
             })),
             RefreshDriver {
-                inner,
                 requests,
-                owner_gone,
+                inner: DropGuard::new(inner, ServiceState::stop),
             },
         )
     }
@@ -260,7 +234,7 @@ impl ServiceTokens {
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<(), AcquisitionError> {
         self.0.inner.registration.check_active(deadline)?;
-        if self.0.refresh_requests.is_closed() {
+        if self.0.inner.refresh.is_closed() {
             return Err(AcquisitionError::Unavailable);
         }
         Ok(())
@@ -306,7 +280,7 @@ impl ServiceTokens {
         &self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        let inner = &self.0.inner;
+        let inner: &ServiceState = &self.0.inner;
         let _fetch_guard = tokio::time::timeout_at(deadline.cutoff, inner.fetch_lock.lock())
             .await
             .map_err(|_| deadline.expiry_error())?;
@@ -355,31 +329,55 @@ impl ServiceTokens {
         Some(token)
     }
 
-    fn schedule_refresh_ahead(&self, cached: &mut Cached, now: Instant, token: &Arc<Token>) {
-        if cached.refresh_pending || cached.cached_failure(now).is_some() {
+    fn schedule_refresh_ahead(
+        &self,
+        cached: &mut Option<CachedFailure>,
+        now: Instant,
+        token: &Arc<Token>,
+    ) {
+        if cached
+            .as_ref()
+            .and_then(|failure| failure.active(now))
+            .is_some()
+        {
             return;
         }
-        self.0.inner.defer_refresh(cached, now);
-        cached.refresh_pending = self
-            .0
-            .refresh_requests
-            .try_send(RefreshRequest {
+        let mut queued = false;
+        self.0.inner.refresh.send_if_modified(|slot| {
+            if !matches!(slot, RefreshSlot::Idle) {
+                return false;
+            }
+            *slot = RefreshSlot::Queued(RefreshRequest {
                 current: Arc::clone(token),
                 deadline: now + FETCH_TIMEOUT,
-            })
-            .is_ok();
+            });
+            queued = true;
+            true
+        });
+        if queued {
+            self.0.inner.defer_refresh(cached, now);
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn clear_cached(&self) {
         let mut cached = self.0.inner.lock_cached();
-        *cached = Cached::default();
+        *cached = None;
         self.0.inner.active.store(None);
+        self.0.inner.refresh.send_if_modified(|slot| {
+            if !matches!(slot, RefreshSlot::Stopped) {
+                *slot = RefreshSlot::Idle;
+            }
+            false
+        });
     }
 
     #[cfg(test)]
     pub(crate) fn refresh_pending(&self) -> bool {
-        self.0.inner.lock_cached().refresh_pending
+        matches!(
+            *self.0.inner.refresh.borrow(),
+            RefreshSlot::Queued(_) | RefreshSlot::Running
+        )
     }
 
     #[cfg(test)]
@@ -389,19 +387,57 @@ impl ServiceTokens {
 }
 
 impl ServiceState {
-    fn lock_cached(&self) -> MutexGuard<'_, Cached> {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "std::mem::DropGuard invokes its drop callback with owned Arc<ServiceState>"
+    )]
+    fn stop(state: Arc<Self>) {
+        state.refresh.send_if_modified(|slot| {
+            if matches!(slot, RefreshSlot::Stopped) {
+                return false;
+            }
+            *slot = RefreshSlot::Stopped;
+            true
+        });
+    }
+
+    fn take_queued_refresh(&self) -> Option<RefreshRequest> {
+        let mut request = None;
+        self.refresh.send_if_modified(|slot| {
+            if matches!(slot, RefreshSlot::Queued(_))
+                && let RefreshSlot::Queued(queued) = std::mem::replace(slot, RefreshSlot::Running)
+            {
+                request = Some(queued);
+            }
+            false
+        });
+        request
+    }
+
+    fn finish_refresh(&self) {
+        self.refresh.send_if_modified(|slot| {
+            if matches!(slot, RefreshSlot::Running) {
+                *slot = RefreshSlot::Idle;
+            }
+            false
+        });
+    }
+
+    fn lock_cached(&self) -> MutexGuard<'_, Option<CachedFailure>> {
         self.cached.lock()
     }
 
     fn cached_failure(&self, now: Instant) -> Option<AcquisitionError> {
-        self.lock_cached().cached_failure(now)
+        self.lock_cached()
+            .as_ref()
+            .and_then(|failure| failure.active(now))
     }
 
     fn remember_failure(&self, error: AcquisitionError) {
         if !is_cacheable_failure(error) {
             return;
         }
-        self.lock_cached().failure = Some(CachedFailure {
+        *self.lock_cached() = Some(CachedFailure {
             error,
             until: Instant::now() + FAILURE_WINDOW,
         });
@@ -416,11 +452,11 @@ impl ServiceState {
 
     fn store_service_token_locked(
         &self,
-        cached: &mut Cached,
+        cached: &mut Option<CachedFailure>,
         token: &Arc<Token>,
         now: Instant,
     ) -> bool {
-        cached.failure = None;
+        *cached = None;
         let Some(reuse_until) = token.reusable_until(now) else {
             return false;
         };
@@ -432,7 +468,7 @@ impl ServiceState {
         true
     }
 
-    fn defer_refresh(&self, _cached: &mut Cached, from: Instant) {
+    fn defer_refresh(&self, _cached: &mut Option<CachedFailure>, from: Instant) {
         let next = from + refresh_retry();
         if let Some(service) = self.active.load().as_deref() {
             self.active.store(Some(Arc::new(ServiceToken {
