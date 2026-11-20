@@ -615,6 +615,78 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "signal fixture sends SIGTERM and SIGINT to its own isolated child process"
+    )]
+    async fn verify_queued_second_stop_for_drain() {
+        use futures_util::FutureExt;
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut signals = super::Signals::install().unwrap();
+        let mut terminate_seen = signal(SignalKind::terminate()).unwrap();
+        let mut interrupt_seen = signal(SignalKind::interrupt()).unwrap();
+        let mut background = super::Background::new();
+        let mut background_failures = background.failure_observer();
+        let mut resources = super::Resources::default();
+        let prepared = prepare_worker_and_check_http(&mut background, &mut resources).await;
+        let process = std::process::id().to_string();
+        for signal in ["-TERM", "-INT"] {
+            assert!(
+                std::process::Command::new("kill")
+                    .args([signal, &process])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert_eq!(terminate_seen.recv().await, Some(()));
+            assert_eq!(interrupt_seen.recv().await, Some(()));
+        })
+        .await
+        .unwrap();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::activate_readiness(
+                prepared,
+                &resources,
+                &mut background,
+                &mut background_failures,
+                &mut signals,
+            ),
+        )
+        .await
+        .unwrap();
+        std::assert_matches!(ended, Err(super::Ended::Signal));
+        assert!(
+            !resources.readiness.as_ref().unwrap().reader().is_ready(),
+            "a pending stop must withhold worker readiness"
+        );
+        let first_stop = signals.first_stop();
+        assert!(first_stop.is_some());
+        std::assert_matches!(
+            signals.wait().now_or_never(),
+            Some(Ok(())),
+            "the queued second stop must remain available to expedite drain"
+        );
+        assert_eq!(
+            signals.first_stop(),
+            first_stop,
+            "the second stop must not restart the deadline"
+        );
+        background.close_and_wait().await;
+        resources
+            .listeners
+            .health
+            .unwrap()
+            .drain(Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     #[expect(
         clippy::disallowed_methods,
@@ -661,71 +733,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(async {
-                use futures_util::FutureExt;
-                use tokio::signal::unix::{SignalKind, signal};
-
-                let mut signals = super::Signals::install().unwrap();
-                let mut terminate_seen = signal(SignalKind::terminate()).unwrap();
-                let mut interrupt_seen = signal(SignalKind::interrupt()).unwrap();
-                let mut background = super::Background::new();
-                let mut background_failures = background.failure_observer();
-                let mut resources = super::Resources::default();
-                let prepared = prepare_worker_and_check_http(&mut background, &mut resources).await;
-                let process = std::process::id().to_string();
-                for signal in ["-TERM", "-INT"] {
-                    assert!(
-                        std::process::Command::new("kill")
-                            .args([signal, &process])
-                            .status()
-                            .unwrap()
-                            .success()
-                    );
-                }
-                tokio::time::timeout(Duration::from_secs(2), async {
-                    assert_eq!(terminate_seen.recv().await, Some(()));
-                    assert_eq!(interrupt_seen.recv().await, Some(()));
-                })
-                .await
-                .unwrap();
-                let ended = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    super::activate_readiness(
-                        prepared,
-                        &resources,
-                        &mut background,
-                        &mut background_failures,
-                        &mut signals,
-                    ),
-                )
-                .await
-                .unwrap();
-                std::assert_matches!(ended, Err(super::Ended::Signal));
-                assert!(
-                    !resources.readiness.as_ref().unwrap().reader().is_ready(),
-                    "a pending stop must withhold worker readiness"
-                );
-                let first_stop = signals.first_stop();
-                assert!(first_stop.is_some());
-                std::assert_matches!(
-                    signals.wait().now_or_never(),
-                    Some(Ok(())),
-                    "the queued second stop must remain available to expedite drain"
-                );
-                assert_eq!(
-                    signals.first_stop(),
-                    first_stop,
-                    "the second stop must not restart the deadline"
-                );
-                background.close_and_wait().await;
-                resources
-                    .listeners
-                    .health
-                    .unwrap()
-                    .drain(Duration::from_secs(2))
-                    .await
-                    .unwrap();
-            });
+            .block_on(verify_queued_second_stop_for_drain());
     }
 
     #[tokio::test]
