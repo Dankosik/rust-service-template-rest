@@ -127,7 +127,7 @@ aws-smithy-checksums = { version = "=0.65.1", default-features = false }
 aws-smithy-runtime = { version = "=1.16.1", default-features = false }
 # Existing SDK types used by adapter tests through the supported interceptor API.
 aws-smithy-runtime-api = { version = "=1.20.0", default-features = false }
-aws-smithy-types = { version = "=1.9.3", default-features = false }
+aws-smithy-types = { version = "=1.9.4", default-features = false }
 # A request body (axum's `Body`) is not `Sync`; the SDK requires one.
 sync_wrapper = { version = "1.0.2", default-features = false }
 # template:end object-storage:workspace-object-storage-client
@@ -148,14 +148,14 @@ tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.7.1", default-features = false }
 # Pinned with tonic. Outside the gRPC block because the telemetry tests decode
 # OTLP export bodies with it in every profile.
-prost = { version = "=0.14.4", default-features = false }
+prost = { version = "=0.14.6", default-features = false }
 # template:begin grpc:workspace-grpc-dependencies
 tonic = { version = "=0.14.8", default-features = false }
 tonic-prost = { version = "=0.14.8", default-features = false }
 tonic-health = { version = "=0.14.8", default-features = false }
 tonic-reflection = { version = "=0.14.8", default-features = false }
 tonic-types = { version = "=0.14.8", default-features = false }
-prost-types = { version = "=0.14.4", default-features = false }
+prost-types = { version = "=0.14.6", default-features = false }
 prost-reflect = { version = "0.16.5", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
 # template:begin rustls:workspace-rustls
@@ -172,7 +172,7 @@ serde = { version = "1", default-features = false }
 serde-untagged = { version = "0.1.9", default-features = false }
 serde_json = { version = "1", default-features = false }
 serde_path_to_error = { version = "0.1.20", default-features = false }
-serde_html_form = { version = "0.2.8", default-features = false }
+serde_html_form = { version = "0.4.1", default-features = false }
 toml = { version = "1.1.6", default-features = false }
 jiff = { version = "0.2.37", default-features = false }
 bytesize = { version = "2.7.0", default-features = false }
@@ -207,7 +207,7 @@ sha2 = { version = "0.11.0", default-features = false }
 serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }
 derive-where = { version = "1.7.0", default-features = false }
-educe = { version = "0.7.6", default-features = false }
+educe = { version = "0.8.2", default-features = false }
 const_format = { version = "0.2.37", default-features = false }
 fastrand = { version = "2.5.0", default-features = false }
 pin-project-lite = { version = "0.2.17", default-features = false }
