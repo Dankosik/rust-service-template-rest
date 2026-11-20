@@ -18,18 +18,6 @@ struct Metadata {
     token_endpoint: String,
 }
 
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct HttpDiscoveryOptions {
-    pub(crate) issuer: String,
-    pub(crate) token_url: String,
-    pub(crate) client_id: String,
-    pub(crate) private_key: secrecy::SecretString,
-    pub(crate) key_id: String,
-    pub(crate) algorithm: crate::Algorithm,
-    pub(crate) provider_concurrency: std::num::NonZeroU32,
-}
-
 impl Registration {
     pub async fn prepare_with_oidc_discovery(
         issuer: IssuerUrl,
@@ -50,7 +38,8 @@ impl Registration {
 
     #[cfg(test)]
     pub(crate) async fn prepare_with_oidc_discovery_for_test_http(
-        options: HttpDiscoveryOptions,
+        issuer: IssuerUrl,
+        options: crate::test_support::HttpOptions,
     ) -> Result<Self, DiscoveryError> {
         let build_test_http = |url: &Url, endpoint: &'static str| {
             token_endpoint::build_http_client(url).map_err(|error| match error {
@@ -65,26 +54,22 @@ impl Registration {
                 }
             })
         };
-        let issuer_url = crate::options::parse_http_url(&options.issuer, "issuer", false)?;
         let token_url = crate::options::parse_http_url(&options.token_url, "token_url", true)?;
-        let validated = crate::options::validate_registration(crate::options::RawRegistration {
+        let validated = crate::options::validate_registration(
             token_url,
-            client_id: options.client_id,
-            private_key: options.private_key,
-            key_id: options.key_id,
-            algorithm: options.algorithm,
-            audience_exact: options.issuer.clone(),
-            audience_url: issuer_url.clone(),
-            provider_concurrency: options.provider_concurrency,
-        })?;
-        let discovery_http = build_test_http(&issuer_url, "issuer")?;
-        verify_metadata(
-            &options.issuer,
-            &issuer_url,
-            &validated.token_url,
-            &discovery_http,
-        )
-        .await?;
+            options.client_id,
+            options.auth,
+            options.provider_concurrency,
+        )?;
+        if issuer.url() == &validated.token_url {
+            return Err(ConfigurationError {
+                key: "issuer",
+                reason: "must differ from the token endpoint",
+            }
+            .into());
+        }
+        let discovery_http = build_test_http(issuer.url(), "issuer")?;
+        verify_metadata(&issuer, &validated.token_url, &discovery_http).await?;
         let token_http = build_test_http(&validated.token_url, "token_url")?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
     }
@@ -107,17 +92,16 @@ pub async fn verify_oidc_metadata(
 async fn verify_https_metadata(issuer: &IssuerUrl, endpoint: &Url) -> Result<(), DiscoveryError> {
     prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
     let discovery_http = token_endpoint::build_https_client(issuer.url(), "issuer")?;
-    verify_metadata(issuer.as_str(), issuer.url(), endpoint, &discovery_http).await
+    verify_metadata(issuer, endpoint, &discovery_http).await
 }
 
 async fn verify_metadata(
-    issuer_exact: &str,
-    issuer_url: &Url,
+    issuer: &IssuerUrl,
     endpoint: &Url,
     discovery_http: &Client,
 ) -> Result<(), DiscoveryError> {
-    let metadata = fetch_metadata(issuer_url, discovery_http).await?;
-    if metadata.issuer != issuer_exact {
+    let metadata = fetch_metadata(issuer.url(), discovery_http).await?;
+    if metadata.issuer != issuer.as_str() {
         return Err(DiscoveryError::Metadata(
             "issuer differs from configured issuer",
         ));

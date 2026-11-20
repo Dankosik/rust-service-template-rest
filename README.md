@@ -134,8 +134,9 @@ deleted; selected ones stay inert until configured.
   pass the OAuth registration and target to `background.service_tokens` and return the adapter
   with its authenticated transport. Keep response limits, timeouts and provider
   error mapping in that adapter. In the handler, extract `Extension<MyAdapter>`
-  and `RequestContext`, then bind the transport with `.with_context(ctx.operation())`
-  once for all calls in that request. The process drives and joins token refresh.
+  and `RequestContext`, then pass `ctx.operation()` to HTTP `.execute(...)`
+  calls (or bind a gRPC client with `.with_context(ctx.operation())`).
+  The process drives and joins token refresh.
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 <!-- template:begin grpc:readme-grpc-profile -->
 - `GRPC=enabled`: tonic gRPC on a separate listener and an outbound client

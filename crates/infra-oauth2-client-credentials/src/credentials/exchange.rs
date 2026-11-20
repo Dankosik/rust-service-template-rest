@@ -1,4 +1,6 @@
-use std::{collections::hash_map::Entry, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    collections::hash_map::Entry, mem::DropGuard, num::NonZeroU32, sync::Arc, time::Duration,
+};
 
 use foldhash::HashMap;
 use moka::Expiry;
@@ -87,12 +89,7 @@ impl ExchangeState {
             Entry::Vacant(entry) => {
                 let (sender, receiver) = watch::channel(None);
                 entry.insert(receiver);
-                ExchangeFlight::Leader(ExchangeLeader {
-                    flights: &self.flights,
-                    key,
-                    sender,
-                    completed: None,
-                })
+                ExchangeFlight::Leader(ExchangeLeader::new(&self.flights, key, sender))
             }
         }
     }
@@ -107,25 +104,40 @@ enum ExchangeFlight<'a> {
     Waiter(ExchangeReceiver),
 }
 
-struct ExchangeLeader<'a> {
+struct LeaderFlight<'a> {
     flights: &'a ExchangeFlights,
     key: SubjectKey,
     sender: watch::Sender<Option<ExchangeResult>>,
-    completed: Option<ExchangeResult>,
 }
 
-impl ExchangeLeader<'_> {
-    fn publish(mut self, result: ExchangeResult) {
-        self.completed = Some(result);
+impl LeaderFlight<'_> {
+    fn abandon(self) {
+        self.flights.lock().remove(&self.key);
     }
 }
 
-impl Drop for ExchangeLeader<'_> {
-    fn drop(&mut self) {
-        self.flights.lock().remove(&self.key);
-        if let Some(result) = self.completed.take() {
-            self.sender.send_replace(Some(result));
-        }
+struct ExchangeLeader<'a>(DropGuard<LeaderFlight<'a>, fn(LeaderFlight<'a>)>);
+
+impl<'a> ExchangeLeader<'a> {
+    fn new(
+        flights: &'a ExchangeFlights,
+        key: SubjectKey,
+        sender: watch::Sender<Option<ExchangeResult>>,
+    ) -> Self {
+        Self(DropGuard::new(
+            LeaderFlight {
+                flights,
+                key,
+                sender,
+            },
+            LeaderFlight::abandon,
+        ))
+    }
+
+    fn publish(self, result: ExchangeResult) {
+        let flight = DropGuard::dismiss(self.0);
+        flight.flights.lock().remove(&flight.key);
+        flight.sender.send_replace(Some(result));
     }
 }
 

@@ -51,7 +51,7 @@ impl Principal {
     }
 
     pub fn claims<'a, T: serde::Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError> {
-        serde_json::from_str(&self.identity.payload).map_err(|_| ClaimAccessError::InvalidShape)
+        serde_json::from_str(&self.identity.payload).map_err(|_| ClaimAccessError)
     }
 
     #[must_use]
@@ -154,10 +154,8 @@ impl Actor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum ClaimAccessError {
-    #[error("verified claims do not match the requested type")]
-    InvalidShape,
-}
+#[error("verified claims do not match the requested type")]
+pub struct ClaimAccessError;
 
 // template:begin oidc-introspection:authn-retained-payload
 impl Principal {

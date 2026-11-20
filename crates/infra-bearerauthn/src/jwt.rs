@@ -917,7 +917,9 @@ mod tests {
         tokio::task::yield_now().await;
         verifier.key_store.finish(
             1,
-            Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         assert_eq!(call.await.unwrap(), Err(VerificationReason::UnknownKey));
         assert_eq!(
@@ -1792,7 +1794,9 @@ mod tests {
         let unseen = parse_bearer([unseen.as_bytes()]).unwrap();
         verifier.verify(&cached).await.unwrap();
         tokio::time::advance(Duration::from_hours(1) - Duration::from_nanos(1)).await;
-        verifier.key_store.finish(1, Err(KeySetFailure::Parse));
+        verifier
+            .key_store
+            .finish(1, Err(KeySetFailure::Jwks(crate::JwksError::Parse)));
         verifier.verify(&cached).await.unwrap();
         tokio::time::advance(Duration::from_nanos(1)).await;
         for token in [&cached, &unseen] {

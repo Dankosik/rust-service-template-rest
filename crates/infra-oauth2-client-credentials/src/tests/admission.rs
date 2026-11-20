@@ -95,9 +95,13 @@ fn issuer_and_token_url_types_implement_from_str_and_enforce_url_rules() {
     let issuer: IssuerUrl = "https://issuer.example".parse().unwrap();
     assert_eq!(issuer.as_str(), "https://issuer.example");
     assert_eq!(issuer.as_ref(), "https://issuer.example");
+    assert!(std::collections::HashSet::from([issuer]).contains("https://issuer.example"));
     let token: TokenUrl = "https://identity.example/token?x=1".parse().unwrap();
     assert_eq!(token.as_str(), "https://identity.example/token?x=1");
     assert_eq!(token.as_ref(), "https://identity.example/token?x=1");
+    assert!(
+        std::collections::HashSet::from([token]).contains("https://identity.example/token?x=1")
+    );
 
     for audience in [
         "",

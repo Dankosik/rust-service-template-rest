@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use crate::{
-    DiscoveryError,
+    DiscoveryError, JwksError,
     jwks::{AllowedAlgorithms, JwksSource, KeySet, KeySetFailure},
     provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
@@ -182,10 +182,10 @@ impl KeyStore {
                     KeySetFailure::DiscoveryTimeout => {
                         warn!(reason, cause = "timeout", "authn_jwks_refresh_failed");
                     }
-                    KeySetFailure::Fetch(cause) => {
+                    KeySetFailure::Jwks(JwksError::Fetch(cause)) => {
                         warn!(reason, ?cause, "authn_jwks_refresh_failed");
                     }
-                    KeySetFailure::Parse | KeySetFailure::NoUsableKeys => {
+                    KeySetFailure::Jwks(JwksError::Parse | JwksError::NoUsableKeys) => {
                         warn!(reason, "authn_jwks_refresh_failed");
                     }
                 }
@@ -369,9 +369,9 @@ mod tests {
         assert_eq!(diagnostics.acquisitions().len(), 1);
 
         for failure in [
-            KeySetFailure::Fetch(crate::ProviderFailure::Timeout),
-            KeySetFailure::Parse,
-            KeySetFailure::NoUsableKeys,
+            KeySetFailure::Jwks(crate::JwksError::Fetch(crate::ProviderFailure::Timeout)),
+            KeySetFailure::Jwks(crate::JwksError::Parse),
+            KeySetFailure::Jwks(crate::JwksError::NoUsableKeys),
         ] {
             store.request_periodic();
             store.finish(store.pending().unwrap(), Err(failure));
@@ -630,7 +630,9 @@ mod tests {
         tokio::task::yield_now().await;
         store.finish(
             1,
-            Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(super::KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         assert_eq!(waiter.await.unwrap(), None);
         assert_eq!(spawn_refresh(&store).await.unwrap(), None);
@@ -648,7 +650,9 @@ mod tests {
         store.request_periodic();
         store.finish(
             2,
-            Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(super::KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         assert_eq!(waiter.await.unwrap(), Some(true));
     }
@@ -678,7 +682,9 @@ mod tests {
             .poll(&mut Context::from_waker(Waker::noop()));
         store.finish(
             2,
-            Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         let after_failure = store.refresh_for_signature_miss(&checked).await;
 
