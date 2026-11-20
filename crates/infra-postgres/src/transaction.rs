@@ -114,22 +114,22 @@ trait TxModeExt<E: From<TxError>>: TxMode {
         error.into()
     }
 
-    fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E>;
+    fn check_expiry(&self, observation: &mut TransactionObservation<'_>) -> Result<(), E>;
 
     fn check_before_commit(
         &mut self,
-        observation: &mut TransactionObservation,
+        observation: &mut TransactionObservation<'_>,
     ) -> impl Future<Output = Result<(), E>> + Send;
 }
 
 impl<E: From<TxError>> TxModeExt<E> for () {
-    fn check_expiry(&self, _: &mut TransactionObservation) -> Result<(), E> {
+    fn check_expiry(&self, _: &mut TransactionObservation<'_>) -> Result<(), E> {
         Ok(())
     }
 
     fn check_before_commit(
         &mut self,
-        _: &mut TransactionObservation,
+        _: &mut TransactionObservation<'_>,
     ) -> impl Future<Output = Result<(), E>> + Send {
         std::future::poll_fn(|_| Poll::Ready(Ok(())))
     }
@@ -144,7 +144,7 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for Operati
         error.into()
     }
 
-    fn check_expiry(&self, observation: &mut TransactionObservation) -> Result<(), E> {
+    fn check_expiry(&self, observation: &mut TransactionObservation<'_>) -> Result<(), E> {
         if self.expired {
             observation.end(TransactionOutcome::RolledBack);
             return Err(OperationDeadlineElapsed.into());
@@ -154,7 +154,7 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for Operati
 
     async fn check_before_commit(
         &mut self,
-        observation: &mut TransactionObservation,
+        observation: &mut TransactionObservation<'_>,
     ) -> Result<(), E> {
         if self.remaining_ms_or_expire().await.is_none() {
             observation.end(TransactionOutcome::RolledBack);

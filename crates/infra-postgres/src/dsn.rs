@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use sqlx::ConnectOptions;
@@ -6,10 +7,82 @@ use url::Url;
 
 use crate::credentials::read_password;
 
-const AMBIENT_ENVIRONMENT: [&str; 4] = ["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGOPTIONS"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequiredComponent {
+    Host,
+    Port,
+    User,
+    Password,
+    Database,
+    SslMode,
+}
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum DsnError {
+impl fmt::Display for RequiredComponent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Host => "host",
+            Self::Port => "port",
+            Self::User => "user",
+            Self::Password => "password",
+            Self::Database => "database",
+            Self::SslMode => "sslmode",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueryParameter {
+    SslMode,
+    SslRootCert,
+}
+
+impl fmt::Display for QueryParameter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::SslMode => "sslmode",
+            Self::SslRootCert => "sslrootcert",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AmbientVar {
+    PgSslRootCert,
+    PgSslCert,
+    PgSslKey,
+    PgOptions,
+}
+
+impl AmbientVar {
+    const ALL: [Self; 4] = [
+        Self::PgSslRootCert,
+        Self::PgSslCert,
+        Self::PgSslKey,
+        Self::PgOptions,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PgSslRootCert => "PGSSLROOTCERT",
+            Self::PgSslCert => "PGSSLCERT",
+            Self::PgSslKey => "PGSSLKEY",
+            Self::PgOptions => "PGOPTIONS",
+        }
+    }
+}
+
+impl fmt::Display for AmbientVar {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(transparent)]
+pub struct DsnError(pub(crate) DsnErrorKind);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum DsnErrorKind {
     #[error("postgres dsn is empty")]
     Empty,
     #[error("postgres dsn must use the postgres:// or postgresql:// URL form")]
@@ -21,7 +94,7 @@ pub enum DsnError {
     #[error("postgres dsn was admitted but is not usable as connect options (value redacted)")]
     Unusable,
     #[error("postgres dsn requires an explicit {0}")]
-    Missing(&'static str),
+    Missing(RequiredComponent),
     #[error("postgres dsn must name one tcp host; unix sockets are not supported")]
     Socket,
     #[error("postgres dsn must name one tcp host; fallback hosts are not supported")]
@@ -41,9 +114,9 @@ pub enum DsnError {
     )]
     Parameter,
     #[error("postgres dsn parameter {0} must appear only once")]
-    Repeated(&'static str),
+    Repeated(QueryParameter),
     #[error("postgres dsn must be the only connection source; unset {0} in the environment")]
-    Ambient(&'static str),
+    Ambient(AmbientVar),
     #[error("postgres dsn must not carry a password when postgres.password_file is set")]
     PasswordSources,
     #[error("postgres password file could not be read ({0})")]
@@ -65,8 +138,8 @@ pub struct Dsn {
     password_file: Option<PathBuf>,
 }
 
-impl std::fmt::Debug for Dsn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Dsn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Dsn")
             .field("host", &self.host())
             .field("port", &self.port())
@@ -108,37 +181,49 @@ impl Dsn {
     where
         F: Fn(&str) -> bool,
     {
+        Self::admit_kind(raw, password_file, ssl_policy, is_env_set).map_err(DsnError)
+    }
+
+    fn admit_kind<F>(
+        raw: &str,
+        password_file: Option<&Path>,
+        ssl_policy: SslPolicy,
+        is_env_set: F,
+    ) -> Result<Self, DsnErrorKind>
+    where
+        F: Fn(&str) -> bool,
+    {
         let raw = raw.trim();
         if raw.is_empty() {
-            return Err(DsnError::Empty);
+            return Err(DsnErrorKind::Empty);
         }
-        if let Some(name) = AMBIENT_ENVIRONMENT
+        if let Some(var) = AmbientVar::ALL
             .into_iter()
-            .find(|name| is_env_set(name))
+            .find(|var| is_env_set(var.as_str()))
         {
-            return Err(DsnError::Ambient(name));
+            return Err(DsnErrorKind::Ambient(var));
         }
         if !raw.starts_with("postgres://") && !raw.starts_with("postgresql://") {
-            return Err(DsnError::Scheme);
+            return Err(DsnErrorKind::Scheme);
         }
-        let url = Url::parse(raw).map_err(|_| DsnError::Invalid)?;
+        let url = Url::parse(raw).map_err(|_| DsnErrorKind::Invalid)?;
         if url.fragment().is_some() {
-            return Err(DsnError::Fragment);
+            return Err(DsnErrorKind::Fragment);
         }
         require_components(&url, password_file.is_some())?;
         check_parameters(&url)?;
 
-        let options = PgConnectOptions::from_url(&url).map_err(|_| DsnError::Unusable)?;
+        let options = PgConnectOptions::from_url(&url).map_err(|_| DsnErrorKind::Unusable)?;
         if ssl_policy == SslPolicy::VerifyFull
             && !matches!(options.get_ssl_mode(), PgSslMode::VerifyFull)
         {
-            return Err(DsnError::ServerVerification);
+            return Err(DsnErrorKind::ServerVerification);
         }
         if options.get_socket().is_some() {
-            return Err(DsnError::Socket);
+            return Err(DsnErrorKind::Socket);
         }
         if options.get_host().contains(',') {
-            return Err(DsnError::MultipleHosts);
+            return Err(DsnErrorKind::MultipleHosts);
         }
         let options = match url.host() {
             Some(url::Host::Ipv6(host)) => options.host(&host.to_string()),
@@ -192,30 +277,30 @@ impl Dsn {
     }
 }
 
-fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnError> {
+fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnErrorKind> {
     if url.host_str().is_none_or(str::is_empty) {
-        return Err(DsnError::Missing("host"));
+        return Err(DsnErrorKind::Missing(RequiredComponent::Host));
     }
     if url.port().is_none_or(|port| port == 0) {
-        return Err(DsnError::Missing("port"));
+        return Err(DsnErrorKind::Missing(RequiredComponent::Port));
     }
     if url.username().is_empty() {
-        return Err(DsnError::Missing("user"));
+        return Err(DsnErrorKind::Missing(RequiredComponent::User));
     }
     let url_password = url.password().is_some_and(|password| !password.is_empty());
     match (url_password, password_from_file) {
-        (false, false) => return Err(DsnError::Missing("password")),
-        (true, true) => return Err(DsnError::PasswordSources),
+        (false, false) => return Err(DsnErrorKind::Missing(RequiredComponent::Password)),
+        (true, true) => return Err(DsnErrorKind::PasswordSources),
         _ => {}
     }
     let database = url.path().trim_start_matches('/');
     if database.is_empty() || database.contains('/') {
-        return Err(DsnError::Missing("database"));
+        return Err(DsnErrorKind::Missing(RequiredComponent::Database));
     }
     Ok(())
 }
 
-fn check_parameters(url: &Url) -> Result<(), DsnError> {
+fn check_parameters(url: &Url) -> Result<(), DsnErrorKind> {
     let mut verifies_certificate = None;
     let mut has_root_cert = false;
     for (key, value) in url.query_pairs() {
@@ -224,23 +309,24 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
                 verifies_certificate = Some(match value.as_ref() {
                     "disable" | "require" => false,
                     "verify-ca" | "verify-full" => true,
-                    _ => return Err(DsnError::SslMode),
+                    _ => return Err(DsnErrorKind::SslMode),
                 });
             }
             "sslrootcert" if !has_root_cert => {
                 if !Path::new(value.as_ref()).is_absolute() {
-                    return Err(DsnError::RootCertPath);
+                    return Err(DsnErrorKind::RootCertPath);
                 }
                 has_root_cert = true;
             }
-            "sslmode" => return Err(DsnError::Repeated("sslmode")),
-            "sslrootcert" => return Err(DsnError::Repeated("sslrootcert")),
-            _ => return Err(DsnError::Parameter),
+            "sslmode" => return Err(DsnErrorKind::Repeated(QueryParameter::SslMode)),
+            "sslrootcert" => return Err(DsnErrorKind::Repeated(QueryParameter::SslRootCert)),
+            _ => return Err(DsnErrorKind::Parameter),
         }
     }
-    let verifies_certificate = verifies_certificate.ok_or(DsnError::Missing("sslmode"))?;
+    let verifies_certificate =
+        verifies_certificate.ok_or(DsnErrorKind::Missing(RequiredComponent::SslMode))?;
     if has_root_cert && !verifies_certificate {
-        return Err(DsnError::RootCertWithoutVerification);
+        return Err(DsnErrorKind::RootCertWithoutVerification);
     }
     Ok(())
 }
@@ -325,51 +411,57 @@ mod tests {
     #[test]
     fn every_component_is_required() {
         let cases = [
-            ("", DsnError::Empty),
-            ("   ", DsnError::Empty),
-            ("host=h port=5432 user=u", DsnError::Scheme),
-            ("mysql://app:pw@h:5432/app", DsnError::Scheme),
+            ("", DsnErrorKind::Empty),
+            ("   ", DsnErrorKind::Empty),
+            ("host=h port=5432 user=u", DsnErrorKind::Scheme),
+            ("mysql://app:pw@h:5432/app", DsnErrorKind::Scheme),
             (
                 "postgres://app:pw@h:5432/app?sslmode=require#frag",
-                DsnError::Fragment,
+                DsnErrorKind::Fragment,
             ),
             (
                 "postgres://app:pw@:5432/app?sslmode=require",
-                DsnError::Invalid,
+                DsnErrorKind::Invalid,
             ),
-            ("postgres:///app?sslmode=require", DsnError::Missing("host")),
+            (
+                "postgres:///app?sslmode=require",
+                DsnErrorKind::Missing(RequiredComponent::Host),
+            ),
             (
                 "postgres://app:pw@h/app?sslmode=require",
-                DsnError::Missing("port"),
+                DsnErrorKind::Missing(RequiredComponent::Port),
             ),
             (
                 "postgres://app:pw@h:0/app?sslmode=require",
-                DsnError::Missing("port"),
+                DsnErrorKind::Missing(RequiredComponent::Port),
             ),
             (
                 "postgres://:pw@h:5432/app?sslmode=require",
-                DsnError::Missing("user"),
+                DsnErrorKind::Missing(RequiredComponent::User),
             ),
             (
                 "postgres://app@h:5432/app?sslmode=require",
-                DsnError::Missing("password"),
+                DsnErrorKind::Missing(RequiredComponent::Password),
             ),
             (
                 "postgres://app:@h:5432/app?sslmode=require",
-                DsnError::Missing("password"),
+                DsnErrorKind::Missing(RequiredComponent::Password),
             ),
             (
                 "postgres://app:pw@h:5432?sslmode=require",
-                DsnError::Missing("database"),
+                DsnErrorKind::Missing(RequiredComponent::Database),
             ),
             (
                 "postgres://app:pw@h:5432/app/extra?sslmode=require",
-                DsnError::Missing("database"),
+                DsnErrorKind::Missing(RequiredComponent::Database),
             ),
-            ("postgres://app:pw@h:5432/app", DsnError::Missing("sslmode")),
+            (
+                "postgres://app:pw@h:5432/app",
+                DsnErrorKind::Missing(RequiredComponent::SslMode),
+            ),
         ];
         for (raw, expected) in cases {
-            assert_eq!(parse(raw).err(), Some(expected), "{raw}");
+            assert_eq!(parse(raw).err(), Some(DsnError(expected)), "{raw}");
         }
     }
 
@@ -377,15 +469,15 @@ mod tests {
     fn sockets_and_fallback_hosts_are_refused() {
         assert_eq!(
             parse("postgres://app:pw@%2Fvar%2Frun%2Fpostgresql:5432/app?sslmode=disable").err(),
-            Some(DsnError::Socket)
+            Some(DsnError(DsnErrorKind::Socket))
         );
         assert_eq!(
             parse("postgres://app:pw@h1,h2:5432/app?sslmode=disable").err(),
-            Some(DsnError::MultipleHosts)
+            Some(DsnError(DsnErrorKind::MultipleHosts))
         );
         assert_eq!(
             parse("postgres://app:pw@h1:5432,h2:5432/app?sslmode=disable").err(),
-            Some(DsnError::Invalid)
+            Some(DsnError(DsnErrorKind::Invalid))
         );
     }
 
@@ -399,13 +491,16 @@ mod tests {
             if mode == "verify-full" {
                 assert!(production.is_ok());
             } else {
-                assert_eq!(production.unwrap_err(), DsnError::ServerVerification);
+                assert_eq!(
+                    production.unwrap_err(),
+                    DsnError(DsnErrorKind::ServerVerification)
+                );
             }
         }
         for mode in ["allow", "prefer", "", "REQUIRE", "bogus"] {
             assert_eq!(
                 parse(&format!("postgres://app:pw@h:5432/app?sslmode={mode}")).err(),
-                Some(DsnError::SslMode),
+                Some(DsnError(DsnErrorKind::SslMode)),
                 "{mode}"
             );
         }
@@ -422,14 +517,14 @@ mod tests {
         for mode in ["disable", "require"] {
             assert_eq!(
                 parse(&format!("{base}?sslmode={mode}&{ca}")).err(),
-                Some(DsnError::RootCertWithoutVerification),
+                Some(DsnError(DsnErrorKind::RootCertWithoutVerification)),
                 "{mode}"
             );
         }
         for path in ["rds-ca.pem", "", "system"] {
             assert_eq!(
                 parse(&format!("{base}?sslmode=verify-full&sslrootcert={path}")).err(),
-                Some(DsnError::RootCertPath),
+                Some(DsnError(DsnErrorKind::RootCertPath)),
                 "{path}"
             );
         }
@@ -438,10 +533,13 @@ mod tests {
     #[test]
     fn every_other_parameter_is_refused() {
         let base = "postgres://app:pw@h:5432/app?sslmode=verify-full&sslrootcert=/ca.pem";
-        for key in ["sslmode", "sslrootcert"] {
+        for (key, param) in [
+            ("sslmode", QueryParameter::SslMode),
+            ("sslrootcert", QueryParameter::SslRootCert),
+        ] {
             assert_eq!(
                 parse(&format!("{base}&{key}=x")).err(),
-                Some(DsnError::Repeated(key)),
+                Some(DsnError(DsnErrorKind::Repeated(param))),
                 "{key}"
             );
         }
@@ -466,7 +564,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse(&format!("{base}&{key}=x")).err(),
-                Some(DsnError::Parameter),
+                Some(DsnError(DsnErrorKind::Parameter)),
                 "{key}"
             );
         }
@@ -474,9 +572,13 @@ mod tests {
 
     #[test]
     fn only_a_variable_the_url_cannot_override_refuses_the_dsn() {
-        for name in AMBIENT_ENVIRONMENT {
-            let result = Dsn::admit_with_environment(VALID, |candidate| candidate == name);
-            assert_eq!(result.err(), Some(DsnError::Ambient(name)), "{name}");
+        for var in AmbientVar::ALL {
+            let result = Dsn::admit_with_environment(VALID, |candidate| candidate == var.as_str());
+            assert_eq!(
+                result.err(),
+                Some(DsnError(DsnErrorKind::Ambient(var))),
+                "{var}"
+            );
         }
         for name in ["PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGSSLMODE"] {
             let result = Dsn::admit_with_environment(VALID, |candidate| candidate == name);
@@ -501,22 +603,29 @@ mod tests {
 
         assert_eq!(
             admit(without_password).err(),
-            Some(DsnError::PasswordFile(std::io::ErrorKind::NotFound))
+            Some(DsnError(DsnErrorKind::PasswordFile(
+                std::io::ErrorKind::NotFound
+            )))
         );
         std::fs::write(&file, "\n").unwrap();
         assert_eq!(
             admit(without_password).err(),
-            Some(DsnError::PasswordFileEmpty)
+            Some(DsnError(DsnErrorKind::PasswordFileEmpty))
         );
         std::fs::write(&file, vec![b'x'; 16 * 1024]).unwrap();
         assert!(admit(without_password).is_ok());
         std::fs::write(&file, vec![b'x'; 16 * 1024 + 1]).unwrap();
         assert_eq!(
             admit(without_password).err(),
-            Some(DsnError::PasswordFile(std::io::ErrorKind::InvalidData))
+            Some(DsnError(DsnErrorKind::PasswordFile(
+                std::io::ErrorKind::InvalidData
+            )))
         );
         std::fs::write(&file, "s3cret\n").unwrap();
-        assert_eq!(admit(VALID).err(), Some(DsnError::PasswordSources));
+        assert_eq!(
+            admit(VALID).err(),
+            Some(DsnError(DsnErrorKind::PasswordSources))
+        );
         let dsn = admit(without_password).unwrap();
         assert_eq!(dsn.password_file(), Some(file.as_path()));
         assert_eq!(parse(VALID).unwrap().password_file(), None);

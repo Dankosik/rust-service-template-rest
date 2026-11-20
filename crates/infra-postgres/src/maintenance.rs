@@ -57,7 +57,7 @@ impl CleanupSchedule {
 
 pub async fn run_scheduled_cleanup<E, P, S>(
     cleanup: CleanupName,
-    runs_metric: &'static str,
+    runs_metric: Option<&'static str>,
     cancel: &CancellationToken,
     mut pass: impl FnMut() -> P,
     mut sample: impl FnMut() -> S,
@@ -81,7 +81,9 @@ pub async fn run_scheduled_cleanup<E, P, S>(
                 Ok(PassEnd::Completed) => "completed",
                 Err(_) => "failed",
             };
-            metrics::counter!(runs_metric, "outcome" => outcome).increment(1);
+            if let Some(metric) = runs_metric {
+                metrics::counter!(metric, "outcome" => outcome).increment(1);
+            }
         }
     };
     let observation = async {

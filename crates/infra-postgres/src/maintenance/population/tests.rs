@@ -113,9 +113,9 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
         });
         let receipt = metrics.gauge("last_success_timestamp_seconds");
         for cause in [
-            MaintenanceFailure::Acquire,
-            MaintenanceFailure::TimedOut,
-            MaintenanceFailure::CommitUnknown,
+            FailureCause::Read(MaintenanceFailure::Acquire),
+            FailureCause::TimedOut,
+            FailureCause::Read(MaintenanceFailure::CommitUnknown),
         ] {
             observer.attempt().failed(cause);
             assert_eq!(metrics.gauge("present"), 1.0);

@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum, EnumMap};
@@ -336,10 +336,10 @@ pub(crate) fn transaction_span(pool: &Pool) -> Span {
     )
 }
 
-pub(crate) struct TransactionObservation {
+pub(crate) struct TransactionObservation<'a> {
     started: Instant,
     span: Span,
-    metrics: Arc<PoolMetrics>,
+    metrics: &'a PoolMetrics,
     phase: TransactionPhase,
 }
 
@@ -349,8 +349,8 @@ enum TransactionPhase {
     Finished(TransactionOutcome),
 }
 
-impl TransactionObservation {
-    pub(crate) fn start(span: Span, metrics: Arc<PoolMetrics>) -> Self {
+impl<'a> TransactionObservation<'a> {
+    pub(crate) fn start(span: Span, metrics: &'a PoolMetrics) -> Self {
         Self {
             started: Instant::now(),
             span,
@@ -384,7 +384,7 @@ impl TransactionObservation {
     }
 }
 
-impl Drop for TransactionObservation {
+impl Drop for TransactionObservation<'_> {
     fn drop(&mut self) {
         let outcome = match self.phase {
             TransactionPhase::Running => TransactionOutcome::Cancelled,

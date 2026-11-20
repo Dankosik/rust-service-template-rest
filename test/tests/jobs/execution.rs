@@ -1177,8 +1177,13 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     .execute(&pool)
     .await
     .expect("the rotation");
-    jobs.as_sqlx()
-        .set_connect_options(jobs.connect_options().as_ref().clone().password("second"));
+    jobs.as_sqlx().set_connect_options(
+        jobs.as_sqlx()
+            .connect_options()
+            .as_ref()
+            .clone()
+            .password("second"),
+    );
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(first)
         .fetch_one(&pool)

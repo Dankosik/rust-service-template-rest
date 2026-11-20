@@ -82,10 +82,6 @@ pub enum MaintenanceFailure {
     CommitFailed,
     #[error("postgres transaction commit outcome unknown")]
     CommitUnknown,
-    #[error("maintenance observation timed out")]
-    TimedOut,
-    #[error("maintenance observation clock check failed")]
-    ClockInvalid,
 }
 
 impl MaintenanceFailure {
@@ -97,8 +93,6 @@ impl MaintenanceFailure {
             Self::Statement => "statement",
             Self::CommitFailed => "commit_failed",
             Self::CommitUnknown => "commit_unknown",
-            Self::TimedOut => "timeout",
-            Self::ClockInvalid => "clock_invalid",
         }
     }
 }
@@ -266,8 +260,8 @@ impl MaintenanceObserver {
         let attempt = self.attempt();
         match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, read).await {
             Ok(Ok(sample)) => attempt.record_sample(sample),
-            Ok(Err(failure)) => attempt.failed(failure),
-            Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+            Ok(Err(failure)) => attempt.failed(FailureCause::Read(failure)),
+            Err(_) => attempt.failed(FailureCause::TimedOut),
         }
     }
 
@@ -317,9 +311,26 @@ impl AttemptOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureCause {
+    Read(MaintenanceFailure),
+    TimedOut,
+    ClockInvalid,
+}
+
+impl FailureCause {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Read(failure) => failure.label(),
+            Self::TimedOut => "timeout",
+            Self::ClockInvalid => "clock_invalid",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum UnsuccessfulOutcome {
-    Failed(MaintenanceFailure),
+    Failed(FailureCause),
     Cancelled,
 }
 
@@ -375,7 +386,7 @@ impl MaintenanceAttempt<'_> {
 
     fn record_sample_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
         let Some(received_at) = self.validated_receipt_time(sample, received) else {
-            self.failed_at(MaintenanceFailure::ClockInvalid, received);
+            self.failed_at(FailureCause::ClockInvalid, received);
             return;
         };
         let PopulationSample {
@@ -402,14 +413,14 @@ impl MaintenanceAttempt<'_> {
         self.observer.failing = false;
     }
 
-    fn failed(self, failure: MaintenanceFailure) {
+    fn failed(self, failure: FailureCause) {
         self.failed_at(failure, MaintenanceClock::now());
     }
 
-    fn failed_at(mut self, failure: MaintenanceFailure, clock: MaintenanceClock) {
+    fn failed_at(mut self, failure: FailureCause, clock: MaintenanceClock) {
         self.outcome = AttemptOutcome::Failed;
         self.observer.previous_clock = clock;
-        if failure == MaintenanceFailure::ClockInvalid {
+        if failure == FailureCause::ClockInvalid {
             self.observer.clock_valid.set(0.0);
         }
         self.observer

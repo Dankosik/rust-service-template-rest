@@ -5,7 +5,7 @@ use infra_jobs::{JobKind, KindName};
 use infra_messaging::{
     PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
 };
-use infra_postgres::{Pool, Tx, TxError};
+use infra_postgres::{Pool, Tx, TxError, TxMode};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -213,7 +213,7 @@ pub async fn accept(
 }
 
 pub async fn accept_in_tx(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     prepared: &PreparedRequest,
     outbound: &Producer,
     endpoint: &str,
@@ -235,7 +235,7 @@ pub async fn accept_in_tx(
 }
 
 async fn enqueue_intents(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     prepared: &PreparedRequest,
     outbound: &Producer,
     endpoint: &str,
@@ -320,7 +320,7 @@ pub async fn apply_effect(
 }
 
 pub async fn apply_effect_in_tx(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     channel: Channel,
     operation: &Operation,
 ) -> Result<Effect, Error> {

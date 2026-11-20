@@ -5,13 +5,13 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::dsn::DsnError;
+use crate::dsn::DsnErrorKind;
 use crate::pool::Pool;
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
-pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 impl Pool {
     pub async fn refresh_password_periodically(
@@ -69,20 +69,20 @@ impl Refresh {
     }
 }
 
-async fn read(path: &Path) -> Result<Zeroizing<String>, DsnError> {
+async fn read(path: &Path) -> Result<Zeroizing<String>, DsnErrorKind> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || read_password(&path))
         .await
-        .map_err(|_| DsnError::PasswordFile(io::ErrorKind::Other))?
+        .map_err(|_| DsnErrorKind::PasswordFile(io::ErrorKind::Other))?
 }
 
-pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
-    let mut content = read_file(path).map_err(|error| DsnError::PasswordFile(error.kind()))?;
+pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnErrorKind> {
+    let mut content = read_file(path).map_err(|error| DsnErrorKind::PasswordFile(error.kind()))?;
     let password = Zeroizing::new(shared_rules::secret_file::value(std::mem::take(
         &mut *content,
     )));
     if password.is_empty() {
-        return Err(DsnError::PasswordFileEmpty);
+        return Err(DsnErrorKind::PasswordFileEmpty);
     }
     Ok(password)
 }
@@ -159,7 +159,7 @@ mod tests {
                 crate::SslPolicy::VerifyFull,
             )
             .unwrap_err(),
-            DsnError::ServerVerification,
+            crate::DsnError(DsnErrorKind::ServerVerification),
         );
         let dsn = Dsn::admit_with(
             "postgres://app@127.0.0.1:1/app?sslmode=verify-full",

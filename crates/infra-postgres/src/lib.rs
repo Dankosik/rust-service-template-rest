@@ -10,12 +10,13 @@ mod slots;
 mod test_metrics;
 mod transaction;
 
-pub use credentials::PASSWORD_REFRESH_INTERVAL;
+#[cfg(feature = "test-support")]
+pub const PASSWORD_REFRESH_INTERVAL: std::time::Duration = credentials::PASSWORD_REFRESH_INTERVAL;
 pub use dsn::{Dsn, DsnError, SslPolicy};
 pub use error::{failure_cause, is_transient, sqlstate};
 pub use observe::HISTOGRAMS;
 pub use pool::{
-    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, Pool, PoolOptions, SessionOptions,
+    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, ListenerPool, Pool, PoolOptions, SessionOptions,
     SessionSettingsSource, WaitOrder, connect_session, format_pg_duration,
 };
 pub use probe::{PostgresProbe, SessionProperties, session_properties};
