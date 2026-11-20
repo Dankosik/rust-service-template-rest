@@ -25,6 +25,32 @@ macro_rules! json_response {
             pub headers: ::axum::http::HeaderMap,
         }
 
+        impl $name {
+            #[allow(
+                dead_code,
+                reason = "generated constructors may not all be used by every response type"
+            )]
+            #[must_use]
+            $vis fn new(body: $body) -> Self {
+                Self::with_headers(body, ::axum::http::HeaderMap::new())
+            }
+
+            #[allow(
+                dead_code,
+                reason = "generated constructors may not all be used by every response type"
+            )]
+            #[must_use]
+            $vis fn with_headers(body: $body, headers: ::axum::http::HeaderMap) -> Self {
+                Self { body, headers }
+            }
+        }
+
+        impl ::core::convert::From<$body> for $name {
+            fn from(body: $body) -> Self {
+                Self::new(body)
+            }
+        }
+
         impl ::core::fmt::Debug for $name {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 f.debug_struct(stringify!($name)).finish_non_exhaustive()
@@ -89,7 +115,7 @@ macro_rules! created_json_response {
 }
 
 pub use compose::{CommandHandler, FromCommand, FromCommandPart, route};
-pub use declaration::CompositionError;
+pub(crate) use declaration::CompositionError;
 pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalMode};
 pub use infra_postgres::BudgetedTx as Tx;
 pub use input::CommandInput;

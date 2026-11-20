@@ -53,14 +53,6 @@ impl FinalizeError {
     }
 }
 
-// template:begin http-idempotency:http-store-finalization-from
-impl From<crate::idempotency::CompositionError> for FinalizeError {
-    fn from(error: crate::idempotency::CompositionError) -> Self {
-        Self(FinalizeKind::Idempotency(error))
-    }
-}
-// template:end http-idempotency:http-store-finalization-from
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PathItemField {
     Ref,
@@ -94,7 +86,7 @@ pub(crate) enum FinalizeKind {
     #[error("mounted HTTP idempotency operations require an active idempotency store")]
     MissingIdempotencyStore,
     #[error(transparent)]
-    Idempotency(#[from] crate::idempotency::CompositionError),
+    Idempotency(crate::idempotency::CompositionError),
     // template:end http-idempotency:http-store-finalization-error
     #[error(
         "HTTP contract finalization failed: components.{kind}.{name} conflicts with the shared HTTP contract"

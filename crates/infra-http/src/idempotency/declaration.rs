@@ -18,17 +18,17 @@ use super::{KEY_HEADER, REPLAYED_HEADER};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("idempotent route composition is invalid: {subject}: {rule}")]
-pub struct CompositionError {
+pub(crate) struct CompositionError {
     subject: String,
     rule: Rule,
 }
 
 impl CompositionError {
-    fn new(subject: &str, rule: Rule) -> Self {
-        Self {
+    fn finalize(subject: &str, rule: Rule) -> crate::FinalizeError {
+        crate::FinalizeError::new(crate::contract::FinalizeKind::Idempotency(Self {
             subject: subject.to_owned(),
             rule,
-        }
+        }))
     }
 }
 
@@ -84,19 +84,19 @@ pub(super) fn prepare(
     let paths = &mut document.paths;
     let route_docs = document.external_docs.take();
     let subject = route_subject(paths);
-    let shape = || CompositionError::new(&subject, Rule::Shape);
+    let shape = || CompositionError::finalize(&subject, Rule::Shape);
     let Ok(item) = paths.paths.values_mut().exactly_one() else {
-        return Err(shape().into());
+        return Err(shape());
     };
     if item.ref_path.is_some() {
-        return Err(shape().into());
+        return Err(shape());
     }
     let mut fingerprint_headers = Vec::new();
     collect_fingerprint_headers(
         item.parameters.as_deref().unwrap_or_default(),
         &mut fingerprint_headers,
     )
-    .map_err(|rule| CompositionError::new(&subject, rule))?;
+    .map_err(|rule| CompositionError::finalize(&subject, rule))?;
     let has_additional = !item.additional_operations.is_empty();
     let (method, operation) = path_operations_mut(item)
         .exactly_one()
@@ -106,13 +106,13 @@ pub(super) fn prepare(
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
-    let at_operation = |rule| CompositionError::new(&operation_id, rule);
+    let at_operation = |rule| CompositionError::finalize(&operation_id, rule);
     let method = match (!has_additional, method) {
         (true, "POST") => MethodFilter::POST,
         (true, "PUT") => MethodFilter::PUT,
         (true, "PATCH") => MethodFilter::PATCH,
         (true, "DELETE") => MethodFilter::DELETE,
-        _ => return Err(at_operation(Rule::Method).into()),
+        _ => return Err(at_operation(Rule::Method)),
     };
 
     prepare_key_parameter(operation).map_err(at_operation)?;

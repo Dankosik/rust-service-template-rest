@@ -9,7 +9,6 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, Version};
 use axum::middleware::Next;
 use axum::response::Response;
 use compact_str::{CompactString, format_compact};
-use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http_body::Body as _;
 use metrics::{Gauge, Histogram, Label, SharedString};
@@ -254,7 +253,7 @@ struct RequestObservation {
     log_access: bool,
     observer: Arc<Observer>,
     method: HttpMethod,
-    scheme: Scheme,
+    scheme: TransportScheme,
     matched: Option<MatchedPath>,
     request_id: Option<RequestId>,
     span: tracing::Span,
@@ -378,7 +377,7 @@ fn make_span(
     route: Option<&str>,
     cached_route: Option<Arc<str>>,
     request_id: Option<&str>,
-    scheme: Scheme,
+    scheme: TransportScheme,
 ) -> tracing::Span {
     let name_method = method.span_name_prefix();
     let span_name = match route {
@@ -404,42 +403,18 @@ fn make_span(
     span
 }
 
-#[derive(Clone, Copy, Debug, Enum, Eq, Hash, PartialEq)]
-enum Scheme {
-    Http,
-    Https,
-}
-
-impl Scheme {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Https => "https",
-        }
-    }
-}
-
-impl From<TransportScheme> for Scheme {
-    fn from(scheme: TransportScheme) -> Self {
-        match scheme {
-            TransportScheme::Http => Self::Http,
-            TransportScheme::Https => Self::Https,
-        }
-    }
-}
-
-fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> Scheme {
+fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> TransportScheme {
     match uri.scheme_str() {
-        Some("https") => Scheme::Https,
-        Some(_) => Scheme::Http,
-        None => connection.map_or(Scheme::Http, |info| info.scheme().into()),
+        Some("https") => TransportScheme::Https,
+        Some(_) => TransportScheme::Http,
+        None => connection.map_or(TransportScheme::Http, ConnectionInfo::scheme),
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DurationLabels {
     method: HttpMethod,
-    scheme: Scheme,
+    scheme: TransportScheme,
     status: Option<StatusCode>,
     error_type: Option<&'static str>,
 }
@@ -472,7 +447,7 @@ impl DurationSeries {
 
 #[derive(Debug, Default)]
 struct Series {
-    active: [EnumMap<Scheme, OnceLock<Gauge>>; HttpMethod::COUNT],
+    active: [[OnceLock<Gauge>; 2]; HttpMethod::COUNT],
     durations: ArcSwap<DurationSeries>,
     durations_write: Mutex<()>,
 }
@@ -486,8 +461,8 @@ impl Series {
             .map(|(cached, _)| Arc::clone(cached))
     }
 
-    fn active_gauge(&self, method: HttpMethod, scheme: Scheme) -> &Gauge {
-        self.active[method.index()][scheme].get_or_init(|| {
+    fn active_gauge(&self, method: HttpMethod, scheme: TransportScheme) -> &Gauge {
+        self.active[method.index()][usize::from(scheme.is_tls())].get_or_init(|| {
             metrics::gauge!(
                 ACTIVE_REQUESTS_METRIC,
                 "http_request_method" => method.as_str(),
@@ -585,7 +560,7 @@ mod tests {
                     None,
                     DurationLabels {
                         method: HttpMethod::Other,
-                        scheme: Scheme::Https,
+                        scheme: TransportScheme::Https,
                         status: Some(StatusCode::from_u16(code).unwrap()),
                         error_type: None,
                     },
@@ -617,7 +592,7 @@ mod tests {
                     Some("/items/{id}"),
                     DurationLabels {
                         method: HttpMethod::Get,
-                        scheme: Scheme::Http,
+                        scheme: TransportScheme::Http,
                         status: Some(status),
                         error_type: None,
                     },

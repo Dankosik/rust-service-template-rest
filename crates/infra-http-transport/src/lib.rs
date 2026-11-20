@@ -2,7 +2,7 @@ mod admission;
 mod server;
 mod trace_context;
 
-pub use admission::{acquire_borrowed_within, acquire_within};
+pub use admission::{Admission, acquire_borrowed_within, acquire_within};
 pub use server::{
     AcceptFailure, BindError, BoundListener, ConnectionInfo, ConnectionLimits, DrainError,
     DrainResidue, Drained, Http1Options, Server, TransportScheme,

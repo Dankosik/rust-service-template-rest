@@ -20,7 +20,7 @@ use operation_context::{Deadline, OperationContext, Stopped};
 use tower_http::request_id::RequestId;
 
 use crate::body::hold_guard_until_end;
-use crate::problem::{Code, Problem, complete_problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, complete_problem, sanitized_problem};
 use crate::request_id::REQUEST_ID_HEADER;
 
 #[derive(Clone, Debug)]
@@ -270,12 +270,16 @@ pub(crate) fn extension<T: Clone + Send + Sync + 'static>(parts: &Parts) -> Resu
         .ok_or_else(missing_extension::<T>)
 }
 
-pub(crate) fn missing_extension<T>() -> Response {
+pub(crate) fn missing_extension_problem<T>() -> Problem {
     tracing::error!(
         extractor = std::any::type_name::<T>(),
         "http_extractor_wiring_failed"
     );
-    sanitized_internal_error()
+    sanitized_problem()
+}
+
+pub(crate) fn missing_extension<T>() -> Response {
+    missing_extension_problem::<T>().into_response()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -325,7 +329,6 @@ pub(crate) async fn enforce_request_budget(
         // template:end request-budget:http-request-deadline-field-init
     };
     let version = request.version();
-    request.extensions_mut().insert(context.operation.clone());
     request.extensions_mut().insert(context.clone());
     let stop = |reason| {
         context.operation.cancel();
