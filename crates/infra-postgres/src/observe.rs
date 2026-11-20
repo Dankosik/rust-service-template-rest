@@ -8,7 +8,7 @@ use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
 use crate::maintenance::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
-use crate::pool::{Pool, PoolPolicy};
+use crate::pool::Pool;
 use crate::transaction::TxError;
 
 const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
@@ -105,45 +105,47 @@ pub(crate) fn describe() {
     );
 }
 
-pub fn record_metrics(pool: &Pool, pool_name: &'static str) {
-    let size = f64::from(pool.size());
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a metric gauge is f64; counts stay far below 2^52"
-    )]
-    let idle = pool.num_idle() as f64;
-    metrics::gauge!(
-        CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => pool_name,
-        "db.client.connection.state" => "idle"
-    )
-    .set(idle);
-    metrics::gauge!(
-        CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => pool_name,
-        "db.client.connection.state" => "used"
-    )
-    .set((size - idle).max(0.0));
-    metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => pool_name)
-        .set(f64::from(pool.max_connections()));
-}
+impl Pool {
+    pub fn record_metrics(&self, pool_name: &'static str) {
+        let size = f64::from(self.size());
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a metric gauge is f64; counts stay far below 2^52"
+        )]
+        let idle = self.num_idle() as f64;
+        metrics::gauge!(
+            CONNECTION_COUNT_METRIC,
+            "db.client.connection.pool.name" => pool_name,
+            "db.client.connection.state" => "idle"
+        )
+        .set(idle);
+        metrics::gauge!(
+            CONNECTION_COUNT_METRIC,
+            "db.client.connection.pool.name" => pool_name,
+            "db.client.connection.state" => "used"
+        )
+        .set((size - idle).max(0.0));
+        metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => pool_name)
+            .set(f64::from(self.options().get_max_connections()));
+    }
 
-pub async fn record_metrics_periodically(
-    pool: Pool,
-    pool_name: &'static str,
-    interval: Duration,
-    cancel: CancellationToken,
-) {
-    let _ = cancel
-        .run_until_cancelled(async {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                record_metrics(&pool, pool_name);
-            }
-        })
-        .await;
+    pub async fn record_metrics_periodically(
+        self,
+        pool_name: &'static str,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) {
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    self.record_metrics(pool_name);
+                }
+            })
+            .await;
+    }
 }
 
 pub(crate) async fn observe_acquisition<T>(
@@ -178,15 +180,16 @@ const CANCELLED: &str = "cancelled";
 
 #[macro_export]
 macro_rules! observed {
-    ($summary:literal, $statement:expr $(,)?) => {
-        $crate::__statement_observation::observed_with_success_key(
-            $summary,
+    ($summary:expr, $statement:expr $(,)?) => {{
+        const __OBSERVED_SUMMARY: &str = $summary;
+        $crate::__statement_observation::observed_statement(
+            __OBSERVED_SUMMARY,
             {
                 use $crate::__statement_observation::{Key, Label, OPERATION_DURATION_METRIC};
 
                 static LABELS: [Label; 2] = [
                     Label::from_static_parts("db.system.name", "postgresql"),
-                    Label::from_static_parts("db.query.summary", $summary),
+                    Label::from_static_parts("db.query.summary", __OBSERVED_SUMMARY),
                 ];
                 static SUCCESS_KEY: Key =
                     Key::from_static_parts(OPERATION_DURATION_METRIC, &LABELS);
@@ -194,10 +197,10 @@ macro_rules! observed {
             },
             $statement,
         )
-    };
+    }};
 }
 
-pub async fn observed_with_success_key<T>(
+pub async fn observed_statement<T>(
     summary: &'static str,
     success_key: &'static metrics::Key,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
@@ -223,10 +226,10 @@ pub async fn observed_with_success_key<T>(
     let (started, span) = std::mem::DropGuard::dismiss(guard);
     match &result {
         Ok(_) => {
-            metrics::with_recorder(|recorder| {
+            let histogram = metrics::with_recorder(|recorder| {
                 recorder.register_histogram(success_key, &OPERATION_METADATA)
-            })
-            .record(started.elapsed());
+            });
+            histogram.record(started.elapsed());
         }
         Err(error) => {
             let error_type = match sqlstate(error) {
@@ -259,41 +262,34 @@ fn record_statement_error(
     .record(started.elapsed());
 }
 
-macro_rules! transaction_outcomes {
-    ($($variant:ident => $label:literal),* $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-        pub(crate) enum TransactionOutcome { $($variant),* }
-
-        impl TransactionOutcome {
-            pub(crate) const fn label(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $label,)*
-                }
-            }
-
-            fn duration_histogram(self) -> metrics::Histogram {
-                match self {
-                    $(Self::$variant => metrics::histogram!(
-                        TRANSACTION_DURATION_METRIC,
-                        "outcome" => $label
-                    ),)*
-                }
-            }
-        }
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+pub(crate) enum TransactionOutcome {
+    Committed,
+    RolledBack,
+    AcquireFailed,
+    BeginFailed,
+    CommitFailed,
+    CommitUnknown,
+    Cancelled,
 }
 
-transaction_outcomes!(
-    Committed => "committed",
-    RolledBack => "rolled_back",
-    AcquireFailed => "acquire_failed",
-    BeginFailed => "begin_failed",
-    CommitFailed => "commit_failed",
-    CommitUnknown => "commit_unknown",
-    Cancelled => "cancelled",
-);
-
 impl TransactionOutcome {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::RolledBack => "rolled_back",
+            Self::AcquireFailed => "acquire_failed",
+            Self::BeginFailed => "begin_failed",
+            Self::CommitFailed => "commit_failed",
+            Self::CommitUnknown => "commit_unknown",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn duration_histogram(self) -> metrics::Histogram {
+        metrics::histogram!(TRANSACTION_DURATION_METRIC, "outcome" => self.label())
+    }
+
     const fn of(error: &TxError) -> Self {
         match error {
             TxError::Acquire(_) => Self::AcquireFailed,
@@ -343,7 +339,7 @@ pub(crate) fn transaction_span(pool: &Pool) -> Span {
 pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
-    policy: Arc<PoolPolicy>,
+    metrics: Arc<PoolMetrics>,
     phase: TransactionPhase,
 }
 
@@ -354,18 +350,17 @@ enum TransactionPhase {
 }
 
 impl TransactionObservation {
-    pub(crate) fn start(span: Span, policy: Arc<PoolPolicy>) -> Self {
+    pub(crate) fn start(span: Span, metrics: Arc<PoolMetrics>) -> Self {
         Self {
             started: Instant::now(),
             span,
-            policy,
+            metrics,
             phase: TransactionPhase::Running,
         }
     }
 
     pub(crate) fn record_connection_wait(&self) {
-        self.policy
-            .metrics()
+        self.metrics
             .connection_wait()
             .record(self.started.elapsed());
     }
@@ -406,8 +401,7 @@ impl Drop for TransactionObservation {
         };
         self.span
             .record("postgres.transaction.outcome", outcome.label());
-        self.policy
-            .metrics()
+        self.metrics
             .transaction_duration(outcome)
             .record(self.started.elapsed());
     }

@@ -1,16 +1,16 @@
 use std::time::Duration;
 
 use infra_postgres::maintenance::{
-    Cleanup, CleanupBatchOptions, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure,
-    PopulationSample, in_observation_tx, run_scheduled_cleanup,
+    CleanupBatchOptions, CleanupError, CleanupName, CleanupPass, CleanupPassResult,
+    MaintenanceFailure, PopulationSample, in_observation_tx, run_scheduled_cleanup,
 };
 use infra_postgres::{Tx, failure_cause, observed, sqlstate};
 use tokio_util::sync::CancellationToken;
 
 use crate::{READ_COMMITTED, Store};
 
+const CLEANUP: CleanupName = CleanupName::new("http_idempotency");
 const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-const HTTP_IDEMPOTENCY_CLEANUP: Cleanup = Cleanup::new("http_idempotency");
 
 const EXPIRED_RECORDS_BATCH: CleanupBatchOptions = CleanupBatchOptions {
     transaction: READ_COMMITTED,
@@ -34,8 +34,7 @@ pub enum StartupError {
 impl Store {
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         let writable = observed!("check idempotency session", async {
-            let mut connection =
-                infra_postgres::acquire(&self.pool, "check idempotency startup").await?;
+            let mut connection = self.pool.acquire("check idempotency startup").await?;
             sqlx::query_scalar!(
                 "SELECT NOT pg_is_in_recovery() \
                  AND current_setting('transaction_read_only') = 'off' AS \"writable!\""
@@ -69,7 +68,7 @@ impl Store {
         &self,
         cancel: Option<&CancellationToken>,
     ) -> Result<CleanupPassResult, CleanupError> {
-        CleanupPass::start(HTTP_IDEMPOTENCY_CLEANUP)
+        CleanupPass::start(CLEANUP)
             .run_until_short_batch(
                 &self.pool,
                 cancel,
@@ -109,7 +108,7 @@ impl Store {
             "Expired idempotency records the cleanup deleted."
         );
         run_scheduled_cleanup(
-            HTTP_IDEMPOTENCY_CLEANUP,
+            CLEANUP,
             CLEANUP_RUNS_METRIC,
             &cancel,
             || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },

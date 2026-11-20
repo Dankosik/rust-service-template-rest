@@ -1,3 +1,11 @@
+pub mod protocol;
+// template:begin webhooks:webhooks-outbound-module
+pub mod outbound;
+// template:end webhooks:webhooks-outbound-module
+// template:begin inbound-webhooks:webhooks-inbound-module
+pub mod inbound;
+// template:end inbound-webhooks:webhooks-inbound-module
+
 use base64::{display::Base64Display, engine::general_purpose::STANDARD};
 use serde::{Deserializer, Serializer};
 use serde_with::{DeserializeAs, SerializeAs, base64::Base64};
@@ -18,11 +26,3 @@ where
         <Base64 as DeserializeAs<'de, T>>::deserialize_as(deserializer)
     }
 }
-
-pub mod protocol;
-// template:begin webhooks:webhooks-outbound-module
-pub mod outbound;
-// template:end webhooks:webhooks-outbound-module
-// template:begin inbound-webhooks:webhooks-inbound-module
-pub mod inbound;
-// template:end inbound-webhooks:webhooks-inbound-module

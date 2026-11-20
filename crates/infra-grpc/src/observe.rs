@@ -3,9 +3,11 @@ use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use enum_map::EnumMap;
-use infra_grpc_core::observe::{Call as CoreCall, CallMetrics, StatusCounters, open_rpc_span};
+use infra_grpc_core::observe::{
+    Call as CoreCall, CallMetrics, HANDLING_SECONDS_BUCKETS, StatusCounters, open_rpc_span,
+};
+use infra_grpc_core::protocol::RpcName;
 use opentelemetry::trace::SpanKind;
-use shared_rules::grpc::{HANDLING_SECONDS_BUCKETS, RpcName};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::set_parent_or_fallback;
@@ -101,7 +103,7 @@ impl Call {
         let metrics = Arc::clone(
             method
                 .metrics
-                .get_or_init(|| Arc::new(MethodMetrics::build(path, method.call_type))),
+                .get_or_init(|| Arc::new(MethodMetrics::build(path, method.kind.call_type()))),
         );
         let span = open_rpc_span(&SpanKind::Server, metrics.rpc_method.as_ref(), path);
         metrics.started.increment(1);
@@ -252,7 +254,7 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
 
         let path = "/example.v1.EchoService/Unary";
-        let methods = crate::services::Methods::new([(path.into(), CallType::Unary)]);
+        let methods = crate::services::Methods::new([(path.into(), CallType::Unary, false)]);
         let known = Call::start(methods.resolve(path), path);
         known.finish(tonic::Code::Unauthenticated);
 

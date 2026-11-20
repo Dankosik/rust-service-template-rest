@@ -9,7 +9,7 @@ description: "Durable outcome. Use when a PostgreSQL pool, transaction, commit h
 
 **Profile owners.** Follow `crates/infra-postgres`, `crates/migrate`, `migrations/`, and `justfile` for pool, acquisition, transaction, migration, and integration-test boundaries; if the active service profile omits PostgreSQL, report that capability boundary to the task owner.
 
-**Pool and session scope.** Acquire connections through `infra_postgres::acquire` or `infra_postgres::in_tx` on the shared `infra_postgres::Pool` (which hides raw `sqlx::PgPool::begin`, `acquire`, and `Executor`), keeping single-statement reads on autocommit and reserving dedicated sessions for the migrator.
+**Pool and session scope.** Acquire connections through `Pool::acquire` or `Pool::in_tx` on the shared `infra_postgres::Pool` handle, keeping single-statement reads on autocommit and reserving dedicated sessions for the migrator.
 
 **Transactions and commit uncertainty.** Scope transactions to the concurrency invariant and locks they protect, keeping external side effects and idempotency keys visible across the boundary. Separate `TxError::CommitFailed` (confirmed rollback) from `TxError::CommitUnknown` (timeout, cancellation, or dropped connection during commit, requiring idempotent reconciliation under the same operation ID), and route serialization or deadlock errors to the caller's retry policy.
 

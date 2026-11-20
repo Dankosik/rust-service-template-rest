@@ -16,7 +16,7 @@ use grpc_contracts::example::v1::{
 };
 use infra_grpc::{RequestExt as _, Services};
 use infra_object_storage::{
-    CredentialSource, ObjectKey, ObjectStorage, ObjectStorageOptions, Provider, PutBody, PutOptions,
+    AccessKey, ObjectKey, ObjectStorage, ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
 use serde::Serialize;
 use tokio::sync::{Notify, Semaphore, oneshot};
@@ -524,12 +524,12 @@ fn register(
         provider: Provider::Local {
             endpoint: std::env::var("RUNTIME_PROGRESS_UPLOAD_ENDPOINT").unwrap_or_default(),
             region: Some("us-east-1".to_owned()),
+            credentials: AccessKey {
+                access_key_id: "fixture".to_owned(),
+                secret_access_key: "fixture".into(),
+            },
         },
         bucket: "runtime-progress".to_owned(),
-        credentials: CredentialSource::AccessKey {
-            access_key_id: "fixture".to_owned(),
-            secret_access_key: "fixture".into(),
-        },
         max_object_bytes: UPLOAD_BYTES as u64,
         max_concurrency: 2,
         operation_timeout: Duration::from_secs(8),

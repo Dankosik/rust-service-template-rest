@@ -5,7 +5,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 use crate::ValidationError;
-use crate::de::{BlankAsNone, Keep, Mode, ModeMarker, StrictString, When};
+use crate::de::{BlankAsNone, Keep, Mode, ModeMarker, When};
 use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::{Violations, missing, validate_endpoint_id};
 
@@ -20,7 +20,7 @@ use crate::validate::{Violations, missing, validate_endpoint_id};
 pub(crate) struct InboundWebhooksFields<Endpoint, Secrets: Mode = Keep> {
     endpoints: BTreeMap<String, Endpoint>,
     #[serde(default)]
-    #[serde_as(as = "When<Secrets, BTreeMap<_, StrictString>>")]
+    #[serde_as(as = "When<Secrets>")]
     secrets: BTreeMap<String, SecretString>,
     #[serde(skip)]
     _mode: ModeMarker<Secrets>,
@@ -32,7 +32,6 @@ pub(crate) type InboundWebhooksInput = InboundWebhooksFields<InboundWebhookEndpo
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InboundWebhookEndpointInput {
-    #[serde_as(as = "StrictString")]
     active_key: String,
     #[serde(default)]
     #[serde_as(as = "BlankAsNone")]

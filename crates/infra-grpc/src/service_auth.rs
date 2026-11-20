@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::extract::Request;
-use axum::response::Response;
 use foldhash::{HashMap, HashSet};
 use http::header::AUTHORIZATION;
 use infra_serviceauth::{Caller, ServiceName, Verifier};
@@ -20,16 +19,12 @@ pub(crate) fn strip_caller(extensions: &mut http::Extensions) {
 
 pub(crate) type CallerRules = HashMap<String, HashSet<ServiceName>>;
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
 pub(crate) async fn admit_caller(
     verifier: &Verifier,
     caller_rules: &CallerRules,
     context: &OperationContext,
     mut request: Request,
-) -> Result<Request, Response> {
+) -> Result<Request, tonic::Status> {
     check_open(context)?;
     let result = {
         let authorization = request
@@ -156,12 +151,7 @@ mod tests {
             let rejected = admit_caller(&verifier, &rules, &context, make_request(authorization))
                 .await
                 .unwrap_err();
-            assert_eq!(
-                tonic::Status::from_header_map(rejected.headers())
-                    .unwrap()
-                    .code(),
-                tonic::Code::DeadlineExceeded
-            );
+            assert_eq!(rejected.code(), tonic::Code::DeadlineExceeded);
         }
 
         let cancelled_context = OperationContext::unbounded();
@@ -174,12 +164,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            tonic::Status::from_header_map(cancelled.headers())
-                .unwrap()
-                .code(),
-            tonic::Code::Cancelled
-        );
+        assert_eq!(cancelled.code(), tonic::Code::Cancelled);
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
 
         let live = OperationContext::with_timeout(Duration::from_secs(5));
@@ -191,12 +176,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            tonic::Status::from_header_map(denied.headers())
-                .unwrap()
-                .code(),
-            tonic::Code::PermissionDenied
-        );
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let admitted = admit_caller(&verifier, &rules, &live, make_request(Some(&orders_bearer)))
             .await

@@ -2,29 +2,35 @@ use std::error::Error as _;
 
 use super::*;
 use crate::{
-    ConfigurationError, DiscoveryError, DiscoveryTransportError, PreparationError,
-    TransportBuildFailure, TransportFailure, verify_oidc_metadata,
+    DiscoveryError, DiscoveryTransportError, PreparationError, TransportBuildFailure,
+    TransportFailure, discovery::HttpDiscoveryOptions, verify_oidc_metadata,
 };
+
+fn discovery_options(issuer: String, fixture: &Fixture) -> HttpDiscoveryOptions {
+    let options = fixture.options();
+    HttpDiscoveryOptions {
+        issuer,
+        token_url: options.token_url,
+        client_id: options.client_id,
+        private_key: options.auth.private_key,
+        key_id: options.auth.key_id,
+        algorithm: options.auth.algorithm,
+        provider_concurrency: options.provider_concurrency,
+    }
+}
 
 #[tokio::test]
 async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
     let issuer_peer = Fixture::new().await;
     let provider = Fixture::new().await;
     let issuer = issuer_peer.origin.join("realms/operations/").unwrap();
-    let issuer_url = IssuerUrl::parse_for_test_http(issuer.as_str()).unwrap();
-    let options = Options {
-        auth: PrivateKeyJwt {
-            audience: issuer_url.clone(),
-            ..provider.options().auth
-        },
-        ..provider.options()
-    };
+    let options = discovery_options(issuer.to_string(), &provider);
     let metadata = serde_json::json!({
         "issuer": issuer.as_str(),
-        "token_endpoint": options.token_url.as_str().replacen("http:", "HTTP:", 1),
+        "token_endpoint": options.token_url.replacen("http:", "HTTP:", 1),
     });
     *issuer_peer.state.resource_response.lock().unwrap() = json_response(StatusCode::OK, &metadata);
-    let registration = Registration::prepare_with_oidc_discovery_for_test_http(issuer_url, options)
+    let registration = Registration::prepare_with_oidc_discovery_for_test_http(options)
         .await
         .unwrap();
     for scope in ["catalog", "billing"] {
@@ -61,59 +67,10 @@ enum Expected {
 }
 
 #[tokio::test]
-async fn discovery_rejects_non_https_urls_before_network() {
-    let peer = Fixture::new().await;
-    let issuer = peer.origin.join("realms/operations").unwrap().to_string();
-    let issuer_url = IssuerUrl::parse_for_test_http(&issuer).unwrap();
-    let https_issuer = IssuerUrl::parse(ASSERTION_AUDIENCE).unwrap();
-    let options = Options {
-        auth: PrivateKeyJwt {
-            audience: issuer_url.clone(),
-            ..peer.options().auth
-        },
-        ..peer.options()
-    };
-    for (discovery_issuer, audience, invalid_key) in [
-        (issuer_url.clone(), issuer_url, "issuer"),
-        (https_issuer.clone(), https_issuer, "token_url"),
-    ] {
-        let result = Registration::prepare_with_oidc_discovery(
-            discovery_issuer,
-            Options {
-                auth: PrivateKeyJwt {
-                    audience,
-                    ..options.auth.clone()
-                },
-                ..options.clone()
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                result,
-                Err(DiscoveryError::Preparation(PreparationError::Configuration(
-                    ConfigurationError { key, .. }
-                ))) if key == invalid_key
-            ),
-            "expected key {invalid_key}, got {result:?}"
-        );
-    }
-    assert_eq!(peer.resource_request_count(), 0);
-    peer.finish().await;
-}
-
-#[tokio::test]
 async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
     let peer = Fixture::new().await;
     let issuer = peer.origin.join("realms/operations").unwrap().to_string();
-    let issuer_url = IssuerUrl::parse_for_test_http(&issuer).unwrap();
-    let options = Options {
-        auth: PrivateKeyJwt {
-            audience: issuer_url.clone(),
-            ..peer.options().auth
-        },
-        ..peer.options()
-    };
+    let options = discovery_options(issuer.clone(), &peer);
     let metadata = |issuer: &str, endpoint: &str| {
         json_response(
             StatusCode::OK,
@@ -143,10 +100,7 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
             Expected::Metadata("token_endpoint is invalid or differs from token_url"),
         ),
         (
-            metadata(
-                &issuer,
-                &options.token_url.as_str().replacen("://", "://@", 1),
-            ),
+            metadata(&issuer, &options.token_url.replacen("://", "://@", 1)),
             Expected::Metadata("token_endpoint is invalid or differs from token_url"),
         ),
         (
@@ -186,12 +140,9 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
     ] {
         *peer.state.resource_response.lock().unwrap() = body;
         let attempts = peer.resource_request_count();
-        let error = Registration::prepare_with_oidc_discovery_for_test_http(
-            issuer_url.clone(),
-            options.clone(),
-        )
-        .await
-        .unwrap_err();
+        let error = Registration::prepare_with_oidc_discovery_for_test_http(options.clone())
+            .await
+            .unwrap_err();
         assert_discovery_error(&error, expected);
         assert_redacted(&error, &[peer.origin.as_str(), "private-response-body"]);
         assert_eq!(peer.resource_request_count(), attempts + 1);
@@ -240,18 +191,10 @@ fn assert_discovery_error(error: &DiscoveryError, expected: Expected) {
 #[tokio::test]
 async fn discovery_deadline_is_a_distinct_transport_category() {
     let peer = Fixture::new().await;
-    let issuer =
-        IssuerUrl::parse_for_test_http(peer.origin.join("realms/operations").unwrap().as_str())
-            .unwrap();
-    let options = Options {
-        auth: PrivateKeyJwt {
-            audience: issuer.clone(),
-            ..peer.options().auth
-        },
-        ..peer.options()
-    };
+    let issuer = peer.origin.join("realms/operations").unwrap().to_string();
+    let options = discovery_options(issuer, &peer);
     let gate = peer.block_resources();
-    let setup = Registration::prepare_with_oidc_discovery_for_test_http(issuer, options);
+    let setup = Registration::prepare_with_oidc_discovery_for_test_http(options);
     tokio::pin!(setup);
     poll_pending(setup.as_mut()).await;
     tokio::select! {

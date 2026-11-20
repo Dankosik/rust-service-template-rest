@@ -16,7 +16,7 @@ use hyper_util::client::legacy::connect::{
 use parking_lot::Mutex;
 use tower::Service;
 
-use crate::{BuildError, Limits, Origin};
+use crate::{BuildError, Limits, policy::TargetOrigin};
 
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
 static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
@@ -188,7 +188,7 @@ fn platform_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
 
 pub(crate) fn build_transport(
     limits: &Limits,
-    origin: &Origin,
+    origin: &TargetOrigin,
     tls: rustls::ClientConfig,
     resolver: Resolver,
 ) -> Transport {
@@ -204,10 +204,10 @@ pub(crate) fn build_transport(
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
     let https = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
-    let https = if origin.is_https() {
-        https.https_only()
-    } else {
-        https.https_or_http()
+    let https = match origin {
+        TargetOrigin::Https(_) => https.https_only(),
+        #[cfg(feature = "test-support")]
+        TargetOrigin::TestHttp(_) => https.https_or_http(),
     };
     hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .pool_timer(hyper_util::rt::TokioTimer::new())

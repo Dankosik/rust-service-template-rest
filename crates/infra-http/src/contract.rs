@@ -23,14 +23,18 @@ use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
 
 mod components;
+mod document;
 mod outcomes;
 mod policy;
 
+pub(crate) use components::ComponentKind;
+use document::{StandardMethod, documented_methods};
+use outcomes::ResponseFault;
 // template:begin authn:http-contract-policy-reexports
 pub(crate) use policy::{Access, contract_path};
 // template:end authn:http-contract-policy-reexports
-pub(crate) use policy::{Policy, path_operations_mut};
-use policy::{StandardMethod, enforce_public, fixed_operations};
+use policy::enforce_public;
+pub(crate) use policy::{Policy, PolicyFault};
 
 #[macro_export]
 macro_rules! http_route {
@@ -40,7 +44,42 @@ macro_rules! http_route {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum FinalizeError {
+#[error(transparent)]
+pub struct FinalizeError(pub(crate) FinalizeKind);
+
+impl FinalizeError {
+    pub(crate) const fn new(kind: FinalizeKind) -> Self {
+        Self(kind)
+    }
+}
+
+// template:begin http-idempotency:http-store-finalization-from
+impl From<crate::idempotency::CompositionError> for FinalizeError {
+    fn from(error: crate::idempotency::CompositionError) -> Self {
+        Self(FinalizeKind::Idempotency(error))
+    }
+}
+// template:end http-idempotency:http-store-finalization-from
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PathItemField {
+    Ref,
+    Parameters,
+    Servers,
+}
+
+impl std::fmt::Display for PathItemField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ref => "$ref",
+            Self::Parameters => "parameters",
+            Self::Servers => "servers",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum FinalizeKind {
     #[error("application metadata must contain no registered paths")]
     ApplicationPaths,
     #[error("QUERY and additional operations require OpenAPI 3.2 application metadata")]
@@ -60,17 +99,17 @@ pub enum FinalizeError {
     #[error(
         "HTTP contract finalization failed: components.{kind}.{name} conflicts with the shared HTTP contract"
     )]
-    ConflictingComponent { kind: &'static str, name: String },
+    ConflictingComponent { kind: ComponentKind, name: String },
     #[error("HTTP contract composition defines {method} {path} more than once")]
     DuplicateOperation { path: String, method: String },
     #[error("HTTP contract composition cannot merge {path} with different path-level {field}")]
-    ConflictingPathItem { path: String, field: &'static str },
+    ConflictingPathItem { path: String, field: PathItemField },
     #[error("HTTP contract finalization failed: {method} {path} response {status}: {fault}")]
     InvalidResponse {
         method: String,
         path: String,
         status: String,
-        fault: &'static str,
+        fault: ResponseFault,
     },
     #[error(
         "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
@@ -82,7 +121,7 @@ pub enum FinalizeError {
     InvalidPolicy {
         path: String,
         method: String,
-        fault: &'static str,
+        fault: PolicyFault,
     },
 }
 
@@ -90,7 +129,7 @@ pub enum FinalizeError {
 pub enum Authentication {
     Public,
     // template:begin authn:http-assembly-verifier
-    Bearer(Box<infra_bearerauthn::Verifier>),
+    Bearer(infra_bearerauthn::Verifier),
     // template:end authn:http-assembly-verifier
 }
 
@@ -193,6 +232,7 @@ where
 
 // template:begin http-idempotency:http-mounted-operations
 pub(crate) use components::{merge_map, same_definition};
+pub(crate) use document::path_operations_mut;
 
 pub(crate) fn resolve_schema<'a>(
     schema: &'a utoipa::openapi::RefOr<utoipa::openapi::Schema>,
@@ -201,7 +241,7 @@ pub(crate) fn resolve_schema<'a>(
         utoipa::openapi::RefOr<utoipa::openapi::Schema>,
     >,
 ) -> Option<&'a utoipa::openapi::Schema> {
-    outcomes::resolve_when(schema, schemas, "#/components/schemas/", |reference| {
+    document::resolve_when(schema, schemas, "#/components/schemas/", |reference| {
         *reference == utoipa::openapi::Ref::new(&reference.ref_location)
     })
 }
@@ -239,7 +279,7 @@ impl<S: Clone + Send + Sync + 'static> std::fmt::Debug for HttpContract<S> {
 impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     pub fn application(metadata: OpenApi) -> Result<Self, FinalizeError> {
         if !metadata.paths.paths.is_empty() {
-            return Err(FinalizeError::ApplicationPaths);
+            return Err(FinalizeError::new(FinalizeKind::ApplicationPaths));
         }
         Ok(Self {
             routes: OpenApiRouter::with_openapi(metadata),
@@ -250,7 +290,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     pub fn with_components(mut self, incoming: Components) -> Result<Self, FinalizeError> {
         if !incoming.security_schemes.is_empty() {
-            return Err(FinalizeError::ApplicationMetadata);
+            return Err(FinalizeError::new(FinalizeKind::ApplicationMetadata));
         }
         components::merge(
             self.routes
@@ -268,7 +308,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     ) -> Result<Self, FinalizeError> {
         validate_single_native_path(&paths)?;
         let mut components = Components::default();
-        components::merge_map("schemas", &mut components.schemas, schemas)?;
+        components::merge_map(ComponentKind::Schemas, &mut components.schemas, schemas)?;
         let mut contract = Self::default().with_components(components)?;
         contract.routes = contract.routes.routes((Vec::new(), paths, router));
         normalize_root(&mut contract.routes.get_openapi_mut().paths)?;
@@ -307,7 +347,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             || !metadata.schema.is_empty()
             || metadata.self_uri.is_some()
         {
-            return Err(FinalizeError::ApplicationMetadata);
+            return Err(FinalizeError::new(FinalizeKind::ApplicationMetadata));
         }
         let mut contract =
             Self::default().with_components(metadata.components.unwrap_or_default())?;
@@ -328,13 +368,13 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         T: 'static,
     {
         if method != Method::CONNECT && MethodFilter::try_from(method.clone()).is_ok() {
-            return Err(FinalizeError::NativeMethod {
+            return Err(FinalizeError::new(FinalizeKind::NativeMethod {
                 method: method.to_string(),
-            });
+            }));
         }
         let path = if path.is_empty() { "/" } else { path };
         if !path.starts_with('/') {
-            return Err(FinalizeError::InvalidRegistration);
+            return Err(FinalizeError::new(FinalizeKind::InvalidRegistration));
         }
         let mut item = PathItem::default();
         if method.as_str() == "QUERY" {
@@ -384,7 +424,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     ) -> Result<Self, FinalizeError> {
         let mut contract = Self::feature_route(metadata, route)?;
         for (path, item) in &contract.routes.get_openapi().paths.paths {
-            for (method, _) in fixed_operations(item) {
+            for (method, _) in document::fixed_operations(item) {
                 contract.idempotency.0.push((path.as_str().into(), method));
             }
         }
@@ -399,7 +439,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     pub fn merge(mut self, mut other: Self) -> Result<Self, FinalizeError> {
         if other.application {
-            return Err(FinalizeError::ApplicationMetadata);
+            return Err(FinalizeError::new(FinalizeKind::ApplicationMetadata));
         }
         normalize_root(&mut self.routes.get_openapi_mut().paths)?;
         normalize_root(&mut other.routes.get_openapi_mut().paths)?;
@@ -426,7 +466,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     pub fn nest(self, prefix: &str, mut other: Self) -> Result<Self, FinalizeError> {
         if other.application {
-            return Err(FinalizeError::ApplicationMetadata);
+            return Err(FinalizeError::new(FinalizeKind::ApplicationMetadata));
         }
         normalize_root(&mut other.routes.get_openapi_mut().paths)?;
         let components = other.routes.get_openapi_mut().components.take();
@@ -500,7 +540,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         {
             use utoipa::openapi::OpenApiVersion;
             if self.application && document.openapi != OpenApiVersion::Version32 {
-                return Err(FinalizeError::OpenApi32Required);
+                return Err(FinalizeError::new(FinalizeKind::OpenApi32Required));
             }
             document.openapi = OpenApiVersion::Version32;
         }
@@ -565,9 +605,9 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         let routes = if self.idempotency.0.is_empty() {
             routes
         } else {
-            routes.layer(axum::Extension(
-                store.ok_or(FinalizeError::MissingIdempotencyStore)?,
-            ))
+            routes.layer(axum::Extension(store.ok_or_else(|| {
+                FinalizeError::new(FinalizeKind::MissingIdempotencyStore)
+            })?))
         };
         // template:end http-idempotency:http-build-bind-store
         Ok(Application(crate::harden::assemble(
@@ -622,17 +662,17 @@ impl Authentication {
         match self {
             Self::Public => {
                 if let Some((path, method)) = policy.first_protected() {
-                    return Err(FinalizeError::ProtectedOperation {
+                    return Err(FinalizeError::new(FinalizeKind::ProtectedOperation {
                         path: path.to_owned(),
                         method: method.to_owned(),
-                    });
+                    }));
                 }
                 Ok(layer_routes(routes, |router| {
                     router.route_layer(middleware::from_fn_with_state(policy, enforce_public))
                 }))
             }
             // template:begin authn:http-assembly-finalize
-            Self::Bearer(auth) => Ok(crate::authn::finalize(routes, policy, *auth)),
+            Self::Bearer(auth) => Ok(crate::authn::finalize(routes, policy, auth)),
             // template:end authn:http-assembly-finalize
         }
     }
@@ -653,27 +693,18 @@ where
 }
 
 fn validate_single_native_path(paths: &Paths) -> Result<MethodFilter, FinalizeError> {
-    let item = paths
-        .paths
-        .values()
-        .exactly_one()
-        .map_err(|_| FinalizeError::InvalidRegistration)?;
+    let invalid = || FinalizeError::new(FinalizeKind::InvalidRegistration);
+    let item = paths.paths.values().exactly_one().map_err(|_| invalid())?;
     if item.ref_path.is_some() || !item.additional_operations.is_empty() {
-        return Err(FinalizeError::InvalidRegistration);
+        return Err(invalid());
     }
     let method = documented_methods(item)
         .exactly_one()
-        .map_err(|_| FinalizeError::InvalidRegistration)?;
+        .map_err(|_| invalid())?;
     Method::from_bytes(method.as_bytes())
         .ok()
         .and_then(|method| MethodFilter::try_from(method).ok())
-        .ok_or(FinalizeError::InvalidRegistration)
-}
-
-fn documented_methods(item: &PathItem) -> impl Iterator<Item = &str> {
-    fixed_operations(item)
-        .map(|(method, _)| method)
-        .chain(item.additional_operations.keys().map(String::as_str))
+        .ok_or_else(invalid)
 }
 
 fn check_path_merge(
@@ -691,30 +722,30 @@ fn check_path_merge(
                 .and_then(|standard| standard.operation(existing))
                 .is_some()
     }) {
-        return Err(FinalizeError::DuplicateOperation {
+        return Err(FinalizeError::new(FinalizeKind::DuplicateOperation {
             path: path.to_owned(),
             method: method.to_owned(),
-        });
+        }));
     }
     let left = existing.parameters.as_deref().unwrap_or_default();
     let right = incoming.parameters.as_deref().unwrap_or_default();
     if existing.ref_path != incoming.ref_path {
-        return Err(FinalizeError::ConflictingPathItem {
+        return Err(FinalizeError::new(FinalizeKind::ConflictingPathItem {
             path: path.to_owned(),
-            field: "$ref",
-        });
+            field: PathItemField::Ref,
+        }));
     }
     if left.len() != right.len() || !left.iter().all(|parameter| right.contains(parameter)) {
-        return Err(FinalizeError::ConflictingPathItem {
+        return Err(FinalizeError::new(FinalizeKind::ConflictingPathItem {
             path: path.to_owned(),
-            field: "parameters",
-        });
+            field: PathItemField::Parameters,
+        }));
     }
     if existing.servers != incoming.servers {
-        return Err(FinalizeError::ConflictingPathItem {
+        return Err(FinalizeError::new(FinalizeKind::ConflictingPathItem {
             path: path.to_owned(),
-            field: "servers",
-        });
+            field: PathItemField::Servers,
+        }));
     }
     Ok(())
 }
@@ -842,7 +873,7 @@ mod tests {
                 .unwrap()
                 .into_openapi()
                 .err(),
-            Some(FinalizeError::OpenApi32Required)
+            Some(FinalizeError::new(FinalizeKind::OpenApi32Required))
         );
         let item = &published["paths"]["/api/_test/method"];
         assert_eq!(
@@ -1008,11 +1039,11 @@ mod tests {
             let contract = HttpContract::<()>::annotated(document, || async {}).unwrap();
             assert_eq!(
                 contract.into_openapi().map(|_| ()),
-                Err(FinalizeError::InvalidPolicy {
+                Err(FinalizeError::new(FinalizeKind::InvalidPolicy {
                     method: "POST".to_owned(),
                     path: "/ordinary".to_owned(),
-                    fault: "idempotency_requires_registration"
-                })
+                    fault: PolicyFault::IdempotencyRequiresRegistration,
+                }))
             );
         }
     }
@@ -1104,9 +1135,9 @@ mod tests {
                     || async {}
                 )
                 .unwrap_err(),
-            FinalizeError::NativeMethod {
+            FinalizeError::new(FinalizeKind::NativeMethod {
                 method: "POST".into()
-            }
+            })
         );
     }
 
@@ -1120,7 +1151,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             HttpContract::<()>::annotated(document, || async {}).unwrap_err(),
-            FinalizeError::InvalidRegistration
+            FinalizeError::new(FinalizeKind::InvalidRegistration)
         );
     }
 
@@ -1131,11 +1162,11 @@ mod tests {
         let root = HttpContract::<()>::application(metadata).unwrap();
         assert_eq!(
             HttpContract::default().merge(root.clone()).unwrap_err(),
-            FinalizeError::ApplicationMetadata
+            FinalizeError::new(FinalizeKind::ApplicationMetadata)
         );
         assert_eq!(
             HttpContract::default().nest("/v1", root).unwrap_err(),
-            FinalizeError::ApplicationMetadata
+            FinalizeError::new(FinalizeKind::ApplicationMetadata)
         );
         let schemes = serde_json::from_value(serde_json::json!({
             "securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer"}}
@@ -1145,7 +1176,7 @@ mod tests {
             HttpContract::<()>::default()
                 .with_components(schemes)
                 .unwrap_err(),
-            FinalizeError::ApplicationMetadata
+            FinalizeError::new(FinalizeKind::ApplicationMetadata)
         );
     }
 
@@ -1178,28 +1209,25 @@ mod tests {
     }
 
     fn protected() -> FinalizeError {
-        FinalizeError::ProtectedOperation {
+        FinalizeError::new(FinalizeKind::ProtectedOperation {
             path: "/_test/policy".to_owned(),
             method: "GET".to_owned(),
-        }
+        })
     }
 
-    fn invalid(fault: &'static str) -> FinalizeError {
-        FinalizeError::InvalidPolicy {
+    fn invalid(fault: PolicyFault) -> FinalizeError {
+        FinalizeError::new(FinalizeKind::InvalidPolicy {
             path: "/_test/policy".to_owned(),
             method: "GET".to_owned(),
             fault,
-        }
+        })
     }
 
     #[test]
     fn delegation_requires_a_boolean_opt_in_on_a_protected_operation() {
         for (value, fault) in [
-            (
-                serde_json::json!(true),
-                "delegation_requires_authentication",
-            ),
-            (serde_json::json!("true"), "invalid_bearer_delegation"),
+            (serde_json::json!(true), PolicyFault::PublicDelegation),
+            (serde_json::json!("true"), PolicyFault::InvalidDelegation),
         ] {
             let document = serde_json::from_value(serde_json::json!({
                 "openapi": "3.1.0", "info": {"title":"fixture","version":"1"},
@@ -1238,7 +1266,7 @@ mod tests {
                 None,
                 Some(serde_json::json!([{}])),
                 None,
-                Err(invalid("unsupported_requirement")),
+                Err(invalid(PolicyFault::UnsupportedRequirement)),
             ),
             (
                 None,
@@ -1258,25 +1286,25 @@ mod tests {
                     serde_json::json!([{"bearerAuth": ["read"]}, {"bearerAuth": ["admin", "read write"]}]),
                 ),
                 None,
-                Err(invalid("invalid_scope_token")),
+                Err(invalid(PolicyFault::InvalidScopeToken)),
             ),
             (
                 Some(serde_json::json!([{"bearerAuth": [""]}])),
                 None,
                 None,
-                Err(invalid("invalid_scope_token")),
+                Err(invalid(PolicyFault::InvalidScopeToken)),
             ),
             (
                 None,
                 Some(serde_json::json!([{"unknown": []}])),
                 None,
-                Err(invalid("unsupported_requirement")),
+                Err(invalid(PolicyFault::UnsupportedRequirement)),
             ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": []}, {}])),
                 None,
-                Err(invalid("unsupported_requirement")),
+                Err(invalid(PolicyFault::UnsupportedRequirement)),
             ),
         ] {
             let mut document = serde_json::json!({
@@ -1310,7 +1338,9 @@ mod tests {
             );
             let export = contract.into_openapi().map(|_| ());
             match &expected {
-                Err(FinalizeError::ProtectedOperation { .. }) => assert_eq!(export, Ok(())),
+                Err(FinalizeError(FinalizeKind::ProtectedOperation { .. })) => {
+                    assert_eq!(export, Ok(()));
+                }
                 _ => assert_eq!(export, expected, "{document}"),
             }
         }

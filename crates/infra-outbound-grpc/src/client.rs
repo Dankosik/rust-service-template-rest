@@ -8,7 +8,6 @@ use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use operation_context::{Deadline, OperationContext};
-use secrecy::SecretString;
 use shared_rules::error_chain::{self, DisplayErrorChain};
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -29,6 +28,7 @@ use crate::call::{
     ClientCustody, ClientGuards, ClientObservation, StatusHook, attach_client_response,
     client_deadline_status, client_stopped_status, guard_upload,
 };
+use crate::tls::ClientTlsMaterial;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
@@ -54,21 +54,6 @@ impl ClientSecurity<'static> {
             identity: None,
         })
     }
-}
-
-#[derive(Clone, Copy, derive_more::Debug, Default)]
-pub struct ClientTlsMaterial<'a> {
-    #[debug(skip)]
-    pub ca_certificate_pem: Option<&'a str>,
-    pub identity: Option<ClientIdentity<'a>>,
-}
-
-#[derive(Clone, Copy, derive_more::Debug)]
-pub struct ClientIdentity<'a> {
-    #[debug(skip)]
-    pub certificate_pem: &'a str,
-    #[debug(skip)]
-    pub private_key_pem: &'a SecretString,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,21 +366,21 @@ impl PreparedCall {
         &self.opening
     }
 
-    pub fn try_step<T>(
+    pub fn try_step(
         mut self,
-        step: impl FnOnce(&OperationContext, &mut http::HeaderMap) -> Result<T, tonic::Status>,
-    ) -> Result<(Self, T), tonic::Status> {
+        step: impl FnOnce(&OperationContext, &mut http::HeaderMap) -> Result<(), tonic::Status>,
+    ) -> Result<Self, tonic::Status> {
         match step(&self.opening, self.request.headers_mut()) {
-            Ok(value) => Ok((self, value)),
+            Ok(()) => Ok(self),
             Err(status) => Err(self.call.refuse(status)),
         }
     }
 
     pub async fn try_await<T>(
         self,
-        future: impl Future<Output = Result<T, tonic::Status>>,
+        step: impl AsyncFnOnce(&OperationContext) -> Result<T, tonic::Status>,
     ) -> Result<(Self, T), tonic::Status> {
-        match future.await {
+        match step(&self.opening).await {
             Ok(value) => Ok((self, value)),
             Err(status) => Err(self.call.refuse(status)),
         }

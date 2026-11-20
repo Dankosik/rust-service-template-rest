@@ -33,8 +33,8 @@ pub(super) async fn open<'a>(
         wait_order: infra_postgres::WaitOrder::NewestOnceStanding,
         notifications: postgres.notifications,
     };
-    let pool = retained.insert(infra_postgres::prepare_pool(&dsn, &options));
-    infra_postgres::admit_pool(pool).await?;
+    let pool = retained.insert(Pool::prepare(&dsn, &options));
+    pool.admit().await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
@@ -44,20 +44,13 @@ pub(super) async fn open<'a>(
         "postgres_pool_opened"
     );
     background.spawn_with_token("postgres_metrics", |stop| {
-        infra_postgres::record_metrics_periodically(
-            pool.clone(),
-            "postgres",
-            METRICS_MAINTENANCE_INTERVAL,
-            stop,
-        )
+        pool.clone()
+            .record_metrics_periodically("postgres", METRICS_MAINTENANCE_INTERVAL, stop)
     });
     if let Some(password_file) = dsn.password_file() {
         background.spawn_with_token("postgres_password_refresh", |stop| {
-            infra_postgres::refresh_password_periodically(
-                pool.clone(),
-                password_file.to_owned(),
-                stop,
-            )
+            pool.clone()
+                .refresh_password_periodically(password_file.to_owned(), stop)
         });
     }
     Ok(&*pool)

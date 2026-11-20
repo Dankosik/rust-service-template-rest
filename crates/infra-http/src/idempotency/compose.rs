@@ -25,7 +25,7 @@ use crate::problem::{
     Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
     sanitized_internal_error,
 };
-use crate::{DelegationCredential, FinalizeError, HttpContract, Principal};
+use crate::{DelegationCredential, FinalizeError, HttpContract, Principal, VerifiedPrincipal};
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const INVALID_KEY_PARAM_NAME: &str = const_format::formatcp!("header.{KEY_HEADER}");
@@ -34,86 +34,115 @@ const INVALID_KEY_PARAM_REASON: &str = const_format::formatcp!(
 );
 
 mod sealed {
-    pub trait FromCommandPart<S> {}
-    pub trait FromCommand<S> {}
-    pub trait CommandHandler<Args, S> {}
+    use crate::{DelegationCredential, Principal, Problem};
+
+    use super::{CommandInput, FreshCommand};
+
+    #[derive(Debug)]
+    pub enum ViaPart {}
+
+    #[derive(Debug)]
+    pub enum ViaCommand {}
+
+    #[derive(Debug)]
+    pub struct ExtractContext<'a, S> {
+        pub(super) principal: &'a Principal,
+        pub(super) delegation: Option<&'a DelegationCredential>,
+        pub(super) state: &'a S,
+    }
+
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` cannot be extracted as an idempotent command part",
+        note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+    )]
+    pub trait FromCommandPart<S>: Sized {
+        fn extract_part(
+            input: &mut CommandInput,
+            cx: &ExtractContext<'_, S>,
+        ) -> impl Future<Output = Result<Self, Problem>> + Send;
+    }
+
+    #[diagnostic::on_unimplemented(
+        message = "`{Self}` cannot be extracted by an idempotent command handler",
+        note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+    )]
+    pub trait FromCommand<S, M>: Sized {
+        fn extract(
+            input: CommandInput,
+            cx: &ExtractContext<'_, S>,
+        ) -> impl Future<Output = Result<Self, Problem>> + Send;
+    }
+
+    #[diagnostic::on_unimplemented(message = "`{Self}` is not a valid idempotent command handler")]
+    pub trait CommandHandler<Args, S>: Clone + Send + Sync + 'static {
+        type Command: FreshCommand + 'static;
+
+        fn call(
+            self,
+            input: CommandInput,
+            cx: &ExtractContext<'_, S>,
+        ) -> impl Future<Output = Result<Self::Command, Problem>> + Send;
+    }
 }
 
-pub trait FromCommandPart<S>: sealed::FromCommandPart<S> + Sized {
-    fn from_command_part(
-        input: &mut CommandInput,
-        principal: &Principal,
-        delegation: Option<&DelegationCredential>,
-        state: &S,
-    ) -> impl Future<Output = Result<Self, Problem>> + Send;
-}
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be extracted as an idempotent command part",
+    note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+)]
+pub trait FromCommandPart<S>: sealed::FromCommandPart<S> {}
 
-pub trait FromCommand<S>: sealed::FromCommand<S> + Sized {
-    fn from_command(
-        input: CommandInput,
-        principal: &Principal,
-        delegation: Option<&DelegationCredential>,
-        state: &S,
-    ) -> impl Future<Output = Result<Self, Problem>> + Send;
-}
+impl<S, T: sealed::FromCommandPart<S>> FromCommandPart<S> for T {}
 
-pub trait CommandHandler<Args, S>:
-    sealed::CommandHandler<Args, S> + Clone + Send + Sync + 'static
-{
-    type Command: FreshCommand + 'static;
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be extracted by an idempotent command handler",
+    note = "supported extractors are `State<T>`, `Principal`, `VerifiedPrincipal`, `Option<DelegationCredential>`, `Path<T>`, `Query<T>`, `Json<T>`, and `CommandInput` (last argument only)"
+)]
+pub trait FromCommand<S, M = sealed::ViaCommand>: sealed::FromCommand<S, M> {}
 
-    fn call(
-        self,
-        input: CommandInput,
-        principal: Principal,
-        delegation: Option<DelegationCredential>,
-        state: S,
-    ) -> impl Future<Output = Result<Self::Command, Problem>> + Send;
-}
+impl<S, M, T: sealed::FromCommand<S, M>> FromCommand<S, M> for T {}
+
+#[diagnostic::on_unimplemented(message = "`{Self}` is not a valid idempotent command handler")]
+pub trait CommandHandler<Args, S>: sealed::CommandHandler<Args, S> {}
+
+impl<Args, S, H: sealed::CommandHandler<Args, S>> CommandHandler<Args, S> for H {}
 
 impl<S, Sub> sealed::FromCommandPart<S> for State<Sub>
 where
     S: Send + Sync,
     Sub: FromRef<S> + Send,
 {
-}
-
-impl<S, Sub> FromCommandPart<S> for State<Sub>
-where
-    S: Send + Sync,
-    Sub: FromRef<S> + Send,
-{
-    fn from_command_part(
+    fn extract_part(
         _input: &mut CommandInput,
-        _principal: &Principal,
-        _delegation: Option<&DelegationCredential>,
-        state: &S,
+        cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
-        std::future::ready(Ok(Self(Sub::from_ref(state))))
+        std::future::ready(Ok(Self(Sub::from_ref(cx.state))))
     }
 }
 
-impl<S: Send + Sync> sealed::FromCommandPart<S> for Principal {}
-impl<S: Send + Sync> FromCommandPart<S> for Principal {
-    fn from_command_part(
+impl<S: Send + Sync> sealed::FromCommandPart<S> for Principal {
+    fn extract_part(
         _input: &mut CommandInput,
-        principal: &Self,
-        _delegation: Option<&DelegationCredential>,
-        _state: &S,
+        cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
-        std::future::ready(Ok(principal.clone()))
+        std::future::ready(Ok(cx.principal.clone()))
     }
 }
 
-impl<S: Send + Sync> sealed::FromCommandPart<S> for Option<DelegationCredential> {}
-impl<S: Send + Sync> FromCommandPart<S> for Option<DelegationCredential> {
-    fn from_command_part(
+impl<S: Send + Sync> sealed::FromCommandPart<S> for VerifiedPrincipal {
+    fn extract_part(
         _input: &mut CommandInput,
-        _principal: &Principal,
-        delegation: Option<&DelegationCredential>,
-        _state: &S,
+        cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
-        std::future::ready(Ok(delegation.cloned()))
+        std::future::ready(Ok(Self(cx.principal.clone())))
+    }
+}
+
+impl<S: Send + Sync> sealed::FromCommandPart<S> for Option<DelegationCredential> {
+    fn extract_part(
+        _input: &mut CommandInput,
+        cx: &sealed::ExtractContext<'_, S>,
+    ) -> impl Future<Output = Result<Self, Problem>> + Send {
+        std::future::ready(Ok(cx.delegation.cloned()))
     }
 }
 
@@ -122,18 +151,9 @@ where
     S: Send + Sync,
     T: DeserializeOwned + Send,
 {
-}
-
-impl<S, T> FromCommandPart<S> for Path<T>
-where
-    S: Send + Sync,
-    T: DeserializeOwned + Send,
-{
-    async fn from_command_part(
+    async fn extract_part(
         input: &mut CommandInput,
-        _principal: &Principal,
-        _delegation: Option<&DelegationCredential>,
-        _state: &S,
+        _cx: &sealed::ExtractContext<'_, S>,
     ) -> Result<Self, Problem> {
         input.path().await.map(Self)
     }
@@ -144,18 +164,9 @@ where
     S: Send + Sync,
     T: DeserializeOwned + Send,
 {
-}
-
-impl<S, T> FromCommandPart<S> for Query<T>
-where
-    S: Send + Sync,
-    T: DeserializeOwned + Send,
-{
-    fn from_command_part(
+    fn extract_part(
         input: &mut CommandInput,
-        _principal: &Principal,
-        _delegation: Option<&DelegationCredential>,
-        _state: &S,
+        _cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
         std::future::ready(input.query().map(Self))
     }
@@ -166,77 +177,37 @@ where
     S: Send + Sync,
     T: DeserializeOwned + Send,
 {
-}
-
-impl<S, T> FromCommandPart<S> for Json<T>
-where
-    S: Send + Sync,
-    T: DeserializeOwned + Send,
-{
-    fn from_command_part(
+    fn extract_part(
         input: &mut CommandInput,
-        _principal: &Principal,
-        _delegation: Option<&DelegationCredential>,
-        _state: &S,
+        _cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
         std::future::ready(input.json().map(Self))
     }
 }
 
-impl<S: Send + Sync> sealed::FromCommand<S> for CommandInput {}
-impl<S: Send + Sync> FromCommand<S> for CommandInput {
-    fn from_command(
+impl<S: Send + Sync> sealed::FromCommand<S, sealed::ViaCommand> for CommandInput {
+    fn extract(
         input: Self,
-        _principal: &Principal,
-        _delegation: Option<&DelegationCredential>,
-        _state: &S,
+        _cx: &sealed::ExtractContext<'_, S>,
     ) -> impl Future<Output = Result<Self, Problem>> + Send {
         std::future::ready(Ok(input))
     }
 }
 
-macro_rules! impl_from_command_from_part {
-    ($ty:ty $(; [$($gen:ident),*] where $($bound:tt)+)?) => {
-        impl<S $(, $($gen),*)?> sealed::FromCommand<S> for $ty
-        where
-            S: Send + Sync,
-            $($($bound)+)?
-        {}
-
-        impl<S $(, $($gen),*)?> FromCommand<S> for $ty
-        where
-            S: Send + Sync,
-            $($($bound)+)?
-        {
-            async fn from_command(
-                mut input: CommandInput,
-                principal: &Principal,
-                delegation: Option<&DelegationCredential>,
-                state: &S,
-            ) -> Result<Self, Problem> {
-                Self::from_command_part(&mut input, principal, delegation, state).await
-            }
-        }
-    };
+impl<S, T> sealed::FromCommand<S, sealed::ViaPart> for T
+where
+    S: Send + Sync,
+    T: sealed::FromCommandPart<S>,
+{
+    async fn extract(
+        mut input: CommandInput,
+        cx: &sealed::ExtractContext<'_, S>,
+    ) -> Result<Self, Problem> {
+        Self::extract_part(&mut input, cx).await
+    }
 }
-
-impl_from_command_from_part!(State<Sub>; [Sub] where Sub: FromRef<S> + Send);
-impl_from_command_from_part!(Principal);
-impl_from_command_from_part!(Option<DelegationCredential>);
-impl_from_command_from_part!(Path<T>; [T] where T: DeserializeOwned + Send);
-impl_from_command_from_part!(Query<T>; [T] where T: DeserializeOwned + Send);
-impl_from_command_from_part!(Json<T>; [T] where T: DeserializeOwned + Send);
 
 impl<F, Fut, C, S> sealed::CommandHandler<(), S> for F
-where
-    F: FnOnce() -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<C, Problem>> + Send,
-    C: FreshCommand + 'static,
-    S: Clone + Send + Sync + 'static,
-{
-}
-
-impl<F, Fut, C, S> CommandHandler<(), S> for F
 where
     F: FnOnce() -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<C, Problem>> + Send,
@@ -248,9 +219,7 @@ where
     async fn call(
         self,
         _input: CommandInput,
-        _principal: Principal,
-        _delegation: Option<DelegationCredential>,
-        _state: S,
+        _cx: &sealed::ExtractContext<'_, S>,
     ) -> Result<Self::Command, Problem> {
         self().await
     }
@@ -258,55 +227,29 @@ where
 
 macro_rules! impl_command_handler {
     ([$($ty:ident),*], $last:ident) => {
-        impl<F, Fut, C, S, $($ty,)* $last> sealed::CommandHandler<($($ty,)* $last,), S> for F
-        where
-            F: FnOnce($($ty,)* $last,) -> Fut + Clone + Send + Sync + 'static,
-            Fut: Future<Output = Result<C, Problem>> + Send,
-            C: FreshCommand + 'static,
-            S: Clone + Send + Sync + 'static,
-            $($ty: FromCommandPart<S> + Send,)*
-            $last: FromCommand<S> + Send,
-        {}
-
         #[allow(
             non_snake_case,
             unused_mut,
             reason = "generated extractor bindings follow tuple type parameter names"
         )]
-        impl<F, Fut, C, S, $($ty,)* $last> CommandHandler<($($ty,)* $last,), S> for F
+        impl<F, Fut, C, S, M, $($ty,)* $last> sealed::CommandHandler<(M, $($ty,)* $last), S> for F
         where
             F: FnOnce($($ty,)* $last,) -> Fut + Clone + Send + Sync + 'static,
             Fut: Future<Output = Result<C, Problem>> + Send,
             C: FreshCommand + 'static,
             S: Clone + Send + Sync + 'static,
             $($ty: FromCommandPart<S> + Send,)*
-            $last: FromCommand<S> + Send,
+            $last: FromCommand<S, M> + Send,
         {
             type Command = C;
 
             async fn call(
                 self,
                 mut input: CommandInput,
-                principal: Principal,
-                delegation: Option<DelegationCredential>,
-                state: S,
+                cx: &sealed::ExtractContext<'_, S>,
             ) -> Result<Self::Command, Problem> {
-                $(
-                    let $ty = $ty::from_command_part(
-                        &mut input,
-                        &principal,
-                        delegation.as_ref(),
-                        &state,
-                    )
-                    .await?;
-                )*
-                let $last = $last::from_command(
-                    input,
-                    &principal,
-                    delegation.as_ref(),
-                    &state,
-                )
-                .await?;
+                $(let $ty = $ty::extract_part(&mut input, cx).await?;)*
+                let $last = $last::extract(input, cx).await?;
                 self($($ty,)* $last,).await
             }
         }
@@ -353,7 +296,12 @@ where
             Ok(captured) => captured,
             Err(response) => return response,
         };
-        match prepare.call(input, principal, delegation, state).await {
+        let cx = sealed::ExtractContext {
+            principal: &principal,
+            delegation: delegation.as_ref(),
+            state: &state,
+        };
+        match prepare.call(input, &cx).await {
             Ok(command) => attempt.run(command).await,
             Err(problem) => {
                 attempt.route.record(Outcome::NotStored);
@@ -450,7 +398,7 @@ fn invalid_key(rules_link: HeaderValue) -> Response {
     ([(axum::http::header::LINK, rules_link)], problem).into_response()
 }
 
-pub(super) fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
+fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
     tracing::error!(
         operation = operation_id,
         failure,
@@ -528,16 +476,21 @@ mod tests {
         async fn zero() -> Result<DummyCommand, Problem> {
             Ok(DummyCommand)
         }
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "exercises the maximum 8-extractor command handler arity"
+        )]
         async fn all(
             State(sub): State<SubState>,
             principal: Principal,
+            VerifiedPrincipal(verified): VerifiedPrincipal,
             delegation: Option<DelegationCredential>,
             Path(id): Path<u32>,
             Query(Filter { mode }): Query<Filter>,
             Json(Payload { name }): Json<Payload>,
             input: CommandInput,
         ) -> Result<DummyCommand, Problem> {
-            let _ = (sub, principal, delegation, id, mode, name, input);
+            let _ = (sub, principal, verified, delegation, id, mode, name, input);
             Ok(DummyCommand)
         }
         async fn state_last(State(sub): State<SubState>) -> Result<DummyCommand, Problem> {
@@ -545,6 +498,12 @@ mod tests {
             Ok(DummyCommand)
         }
         async fn principal_last(principal: Principal) -> Result<DummyCommand, Problem> {
+            let _ = principal;
+            Ok(DummyCommand)
+        }
+        async fn verified_principal_last(
+            VerifiedPrincipal(principal): VerifiedPrincipal,
+        ) -> Result<DummyCommand, Problem> {
             let _ = principal;
             Ok(DummyCommand)
         }
@@ -571,6 +530,7 @@ mod tests {
         let _: HttpContract<AppState> = route(post_document(), all).unwrap();
         let _: HttpContract<AppState> = route(post_document(), state_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), principal_last).unwrap();
+        let _: HttpContract<AppState> = route(post_document(), verified_principal_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), delegation_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), path_last).unwrap();
         let _: HttpContract<AppState> = route(post_document(), query_last).unwrap();

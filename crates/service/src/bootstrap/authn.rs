@@ -73,7 +73,10 @@ pub(super) async fn prepare(
                 })?;
             let cache = cache
                 .map(|cache| {
-                    infra_bearerauthn::IntrospectionCacheOptions::try_new(cache.capacity, cache.ttl)
+                    infra_bearerauthn::IntrospectionCacheOptions::try_new(
+                        cache.capacity.get(),
+                        cache.ttl,
+                    )
                 })
                 .transpose()
                 .map_err(preparation_error(

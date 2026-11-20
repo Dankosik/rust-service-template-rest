@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
 use infra_postgres::maintenance::{
-    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx,
+    CleanupName, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL,
+    MaintenanceFailure, MaintenanceObserver, MaintenancePopulation, PopulationName,
+    PopulationSample, in_observation_tx,
 };
-use infra_postgres::{Tx, in_tx, observed, set_statement_timeout};
+use infra_postgres::{Tx, observed};
 use metrics::Unit;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -18,6 +19,8 @@ use crate::engine::{
 mod outbox;
 // template:end outbox:jobs-maintenance-outbox-module
 
+const JOBS_CLEANUP: CleanupName = CleanupName::new("jobs");
+const FAILED_JOBS_POPULATION: PopulationName = PopulationName::new("failed_jobs");
 const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
 pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
 const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
@@ -30,26 +33,19 @@ const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
-const JOBS_CLEANUP: Cleanup = Cleanup::new("jobs");
-const FAILED_JOBS_POPULATION: MaintenancePopulation =
-    MaintenancePopulation::observed("failed_jobs");
-
 pub(crate) async fn remove_expired(primary_group: &WorkerGroup) -> Result<u64, OperationError> {
     let mut pass = CleanupPass::start(JOBS_CLEANUP);
-    let mut removed = 0u64;
     loop {
         let batch = match Box::pin(delete_batch(primary_group)).await {
             Ok(batch) => batch,
             Err(error) => {
-                pass.failed();
+                pass.fail();
                 return Err(error);
             }
         };
         pass.committed(batch);
-        removed = removed.saturating_add(batch);
         if batch < u64::from(RETENTION_BATCH_ROWS) {
-            pass.completed();
-            return Ok(removed);
+            return Ok(pass.complete());
         }
     }
 }
@@ -78,11 +74,13 @@ where
 {
     let _turn = primary_group.statement_turn.lock().await;
     backstop(async {
-        in_tx(&primary_group.pool, async |tx| {
-            set_statement_timeout(tx, timeout).await?;
-            work(tx).await
-        })
-        .await
+        primary_group
+            .pool
+            .in_tx(async |tx| {
+                tx.set_statement_timeout(timeout).await?;
+                work(tx).await
+            })
+            .await
     })
     .await
 }
@@ -113,14 +111,7 @@ pub(crate) async fn run_sampling(
     gauges: SampleGauges,
     cancel: CancellationToken,
 ) {
-    let reset = std::mem::DropGuard::new(gauges, |gauges| {
-        gauges.reset();
-        // template:begin outbox:jobs-maintenance-outbox-reset
-        if outbox::is_registered(kinds) {
-            outbox::reset_metrics();
-        }
-        // template:end outbox:jobs-maintenance-outbox-reset
-    });
+    let reset = std::mem::DropGuard::new(gauges, |gauges| gauges.reset());
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
             run_kind_sampling(primary_group, kinds, &reset),
@@ -140,8 +131,8 @@ async fn run_kind_sampling(
     loop {
         ticker.tick().await;
         // template:begin outbox:jobs-maintenance-outbox-sampler
-        if outbox::is_registered(kinds) {
-            outbox::sample(primary_group).await;
+        if let Some(outbox) = &gauges.outbox {
+            outbox.sample(primary_group).await;
         }
         // template:end outbox:jobs-maintenance-outbox-sampler
         match sample_once(primary_group, kinds).await {
@@ -182,8 +173,8 @@ enum Population {
 impl Population {
     const fn maintenance_population(self) -> MaintenancePopulation {
         match self {
-            Self::ExpiredCompleted => MaintenancePopulation::cleanup(JOBS_CLEANUP),
-            Self::Failed => FAILED_JOBS_POPULATION,
+            Self::ExpiredCompleted => MaintenancePopulation::Cleanup(JOBS_CLEANUP),
+            Self::Failed => MaintenancePopulation::Retained(FAILED_JOBS_POPULATION),
         }
     }
 }
@@ -249,11 +240,6 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) -> SampleGauges {
     );
     let gauges = SampleGauges::new(kinds);
     gauges.reset();
-    // template:begin outbox:jobs-maintenance-outbox-init
-    if outbox::is_registered(kinds) {
-        outbox::init_metrics();
-    }
-    // template:end outbox:jobs-maintenance-outbox-init
     gauges
 }
 
@@ -447,6 +433,9 @@ impl KindGauges {
 pub(crate) struct SampleGauges {
     by_kind: foldhash::HashMap<&'static str, KindGauges>,
     observation_timestamp: metrics::Gauge,
+    // template:begin outbox:jobs-maintenance-outbox-gauges-field
+    outbox: Option<outbox::OutboxGauges>,
+    // template:end outbox:jobs-maintenance-outbox-gauges-field
 }
 
 impl SampleGauges {
@@ -457,6 +446,9 @@ impl SampleGauges {
                 .map(|&kind| (kind, KindGauges::new(kind)))
                 .collect(),
             observation_timestamp: metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC),
+            // template:begin outbox:jobs-maintenance-outbox-gauges-init
+            outbox: outbox::OutboxGauges::init_if_registered(kinds),
+            // template:end outbox:jobs-maintenance-outbox-gauges-init
         }
     }
 
@@ -474,6 +466,11 @@ impl SampleGauges {
             gauges.reset();
         }
         self.observation_timestamp.set(0.0);
+        // template:begin outbox:jobs-maintenance-outbox-gauges-reset
+        if let Some(outbox) = &self.outbox {
+            outbox.reset();
+        }
+        // template:end outbox:jobs-maintenance-outbox-gauges-reset
     }
 }
 

@@ -1,6 +1,6 @@
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::atomic::Ordering;
-use std::task::{Wake, Waker};
+use std::task::{Context, Wake, Waker};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
@@ -59,7 +59,6 @@ impl FullPipeline {
                 server: ServerEndpoint {
                     host: "duplex".into(),
                     port: 0,
-                    tls: false,
                     database_index: 0,
                 },
                 command_timeout: BUDGET,

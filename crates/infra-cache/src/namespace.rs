@@ -6,8 +6,8 @@ use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
 use tokio::time::Instant;
 
-use crate::connection::reply_data;
-use crate::error::{CommandError, ErrorType};
+use crate::error::{CommandError, Refusal};
+use crate::exchange::reply_data;
 use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, SuccessOutcome};
 use crate::{Cache, MutationError, OperationError, SetError};
 
@@ -165,7 +165,7 @@ impl CacheNamespace {
                 )
             },
             |value| match value {
-                Some(bytes) if bytes.len() > max_value_bytes => Err(ErrorType::ValueTooLarge),
+                Some(bytes) if bytes.len() > max_value_bytes => Err(Refusal::ValueTooLarge),
                 Some(_) => Ok(SuccessOutcome::Hit),
                 None => Ok(SuccessOutcome::Miss),
             },
@@ -223,7 +223,7 @@ impl CacheNamespace {
         parent: &OperationContext,
         operation: Operation,
         build_query: impl FnOnce(MultiplexedConnection) -> F,
-        outcome: impl FnOnce(&T) -> Result<SuccessOutcome, ErrorType>,
+        outcome: impl FnOnce(&T) -> Result<SuccessOutcome, Refusal>,
     ) -> Result<T, CommandError>
     where
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,

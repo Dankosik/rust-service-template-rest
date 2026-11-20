@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    BudgetedTx, SavepointEnd, SavepointError, Tx, TxError, TxMode, failure_cause, in_tx_with,
-    in_tx_with_deadline, is_transient, observed, sqlstate,
+    BudgetedTx, SavepointEnd, SavepointError, Tx, TxError, TxMode, failure_cause, is_transient,
+    observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgBindIterExt as _;
@@ -204,10 +204,11 @@ impl Store {
     {
         scope.validate_caller()?;
         attempted(
-            in_tx_with(&self.pool, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
+            self.pool
+                .in_tx_with(READ_COMMITTED, async |tx| {
+                    self.work_in_tx(tx, scope, fingerprint, work).await
+                })
+                .await,
         )
     }
 
@@ -224,10 +225,11 @@ impl Store {
     {
         scope.validate_caller()?;
         attempted(
-            in_tx_with_deadline(&self.pool, deadline, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
+            self.pool
+                .in_tx_with_deadline(deadline, READ_COMMITTED, async |tx| {
+                    self.work_in_tx(tx, scope, fingerprint, work).await
+                })
+                .await,
         )
     }
 
@@ -550,11 +552,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_caller_with_a_nul_is_refused_before_the_work_runs() {
-        let pool = infra_postgres::Pool::from(
-            sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap(),
-        );
+        let pool =
+            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
         let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
@@ -579,10 +578,7 @@ mod tests {
             std::assert_matches!(attempted, Err(AttemptError::Internal));
             assert!(!ran);
         }
-        assert_eq!(
-            infra_postgres::close(&pool, Duration::from_secs(1)).await,
-            infra_postgres::CloseOutcome::Complete
-        );
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]

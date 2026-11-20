@@ -3,39 +3,45 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata};
 
-use crate::metrics::static_counter;
-
-macro_rules! sdk_events {
-    ($($variant:ident => ($name:literal, $label:literal)),+ $(,)?) => {
-        #[derive(Clone, Copy, Enum)]
-        enum SdkEvent { $($variant),+ }
-
-        impl SdkEvent {
-            fn from_name(name: &str) -> Option<Self> {
-                match name {
-                    $($name => Some(Self::$variant),)+
-                    _ => None,
-                }
-            }
-
-            fn counter(self) -> metrics::Counter {
-                match self {
-                    $(Self::$variant => static_counter!(DIAGNOSTICS_METRIC, "event" => $label)),+
-                }
-            }
-        }
-    };
+#[derive(Clone, Copy, Enum)]
+enum SdkEvent {
+    SpanDroppingStarted,
+    SpansDropped,
+    PartialSuccess,
+    ResponseParseError,
+    StatusError,
+    NetworkError,
+    ResponseBodyTooLarge,
+    ExportError,
 }
 
-sdk_events! {
-    SpanDroppingStarted => ("BatchSpanProcessor.SpanDroppingStarted", "queue_dropping_started"),
-    SpansDropped => ("BatchSpanProcessor.SpansDropped", "queue_spans_dropped"),
-    PartialSuccess => ("HttpTraceClient.PartialSuccess", "partial_success"),
-    ResponseParseError => ("HttpTraceClient.ResponseParseError", "response_parse_error"),
-    StatusError => ("HttpClient.StatusError", "http_status_error"),
-    NetworkError => ("HttpClient.NetworkError", "network_error"),
-    ResponseBodyTooLarge => ("HttpClient.ResponseBodyTooLarge", "response_body_too_large"),
-    ExportError => ("BatchSpanProcessor.ExportError", "export_error"),
+impl SdkEvent {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "BatchSpanProcessor.SpanDroppingStarted" => Some(Self::SpanDroppingStarted),
+            "BatchSpanProcessor.SpansDropped" => Some(Self::SpansDropped),
+            "HttpTraceClient.PartialSuccess" => Some(Self::PartialSuccess),
+            "HttpTraceClient.ResponseParseError" => Some(Self::ResponseParseError),
+            "HttpClient.StatusError" => Some(Self::StatusError),
+            "HttpClient.NetworkError" => Some(Self::NetworkError),
+            "HttpClient.ResponseBodyTooLarge" => Some(Self::ResponseBodyTooLarge),
+            "BatchSpanProcessor.ExportError" => Some(Self::ExportError),
+            _ => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::SpanDroppingStarted => "queue_dropping_started",
+            Self::SpansDropped => "queue_spans_dropped",
+            Self::PartialSuccess => "partial_success",
+            Self::ResponseParseError => "response_parse_error",
+            Self::StatusError => "http_status_error",
+            Self::NetworkError => "network_error",
+            Self::ResponseBodyTooLarge => "response_body_too_large",
+            Self::ExportError => "export_error",
+        }
+    }
 }
 
 const DIAGNOSTICS_METRIC: &str = "telemetry_sdk_diagnostics_total";
@@ -179,7 +185,8 @@ pub(super) fn describe_metrics() {
 
 pub(super) fn publish() {
     for (event, count) in &COUNTS {
-        event.counter().absolute(count.load(Ordering::Relaxed));
+        metrics::counter!(DIAGNOSTICS_METRIC, "event" => event.label())
+            .absolute(count.load(Ordering::Relaxed));
     }
     if let Some(count) = DROPPED.get() {
         #[expect(

@@ -18,7 +18,7 @@ pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
 pub(crate) async fn check_startup(pool: &Pool) -> Result<(), StartupError> {
     let read = async {
-        let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
+        let mut connection = pool.acquire("check jobs startup").await?;
         observed!(
             "check jobs session",
             infra_postgres::session_properties(&mut connection),

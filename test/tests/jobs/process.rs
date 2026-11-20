@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use async_nats::jetstream::{self, stream};
 // template:end outbox:test-jobs-process-nats-imports-2
 use infra_jobs::{JobKind, enqueue};
-use infra_postgres::{Pool, TxError, in_tx};
+use infra_postgres::{Pool, TxError};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use integration_tests::poll_until;
 use nix::sys::signal::{Signal, kill};
@@ -550,14 +550,12 @@ async fn prepare(pool: &PgPool) {
 }
 
 async fn enqueue_committed(pool: &PgPool, action: ProbeAction) -> String {
-    let id = in_tx(
-        &Pool::from(pool.clone()),
-        async |tx| -> Result<_, TxError> {
+    let id = Pool::from_test_pool(pool.clone())
+        .in_tx(async |tx| -> Result<_, TxError> {
             Ok(enqueue(tx, &Probe { action }).await.expect("enqueue"))
-        },
-    )
-    .await
-    .expect("enqueue");
+        })
+        .await
+        .expect("enqueue");
     id.to_string()
 }
 
@@ -775,9 +773,8 @@ async fn outbox_age_reports_deferred_and_blocked_events_through_broker_refusal(p
         )
         .unwrap()
         .for_outbox(uuid::NonNilUuid::new(uuid::Uuid::from_u128(1)).unwrap());
-    in_tx(
-        &Pool::from(pool.clone()),
-        async |tx| -> Result<(), TxError> {
+    Pool::from_test_pool(pool.clone())
+        .in_tx(async |tx| -> Result<(), TxError> {
             for (version, name) in [(1, "first"), (2, "second")] {
                 let event = publication
                     .prepare(&domain_events::Event {
@@ -795,10 +792,9 @@ async fn outbox_age_reports_deferred_and_blocked_events_through_broker_refusal(p
                 );
             }
             Ok(())
-        },
-    )
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
     sqlx::query(
         "UPDATE background_jobs SET created_at = to_timestamp( \
             CASE WHEN predecessor_job_id IS NULL THEN $1 ELSE $2 END) \

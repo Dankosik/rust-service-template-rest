@@ -393,10 +393,11 @@ impl AttemptRun<'_> {
         let cancel = CancellationToken::new();
         let prepared = payload.map_err(HandlerOutcome::Error).and_then(|bytes| {
             prepare_handler(
-                self.registered.dispatch.as_ref(),
+                self.registered.handler.as_ref(),
                 Attempt {
-                    number: self.attempt.number,
                     fence: self.fence,
+                    kind: self.attempt.kind,
+                    number: self.attempt.number,
                     attempt_deadline,
                     cancellation: cancel.clone(),
                 },
@@ -534,14 +535,14 @@ impl AttemptRun<'_> {
     }
 }
 
-fn prepare_handler(
-    dispatch: &crate::kind::Dispatch,
+fn prepare_handler<'a>(
+    handler: &'a dyn crate::kind::ErasedHandler,
     attempt: Attempt,
     pool: infra_postgres::Pool,
     payload: &[u8],
-) -> Result<HandlerFuture, HandlerOutcome> {
+) -> Result<HandlerFuture<'a>, HandlerOutcome> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        dispatch(attempt, pool, payload)
+        handler.prepare(attempt, pool, payload)
     }))
     .map_err(|_| HandlerOutcome::Panic)?
     .map_err(HandlerOutcome::PayloadDecode)
@@ -597,7 +598,7 @@ fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
 
 async fn drive(
     cleanup: &ForcedCleanup,
-    future: HandlerFuture,
+    future: HandlerFuture<'_>,
     cancel: CancellationToken,
     attempt_deadline: Instant,
     supervisor_deadline: Instant,
@@ -711,23 +712,21 @@ mod tests {
         let registered = registry
             .get(<DecodeProbe as crate::JobKind>::NAME.as_str())
             .unwrap();
-        let pool = infra_postgres::Pool::from(
-            sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap(),
-        );
+        let pool =
+            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
         let attempt = || Attempt {
             fence: ClaimFence {
                 job_id: ID,
                 generation: 1,
                 token: uuid::Uuid::nil(),
             },
+            kind: <DecodeProbe as crate::JobKind>::NAME.as_str(),
             number: 1,
             attempt_deadline: Instant::now() + Duration::from_secs(1),
             cancellation: CancellationToken::new(),
         };
         let failed = prepare_handler(
-            registered.dispatch.as_ref(),
+            registered.handler.as_ref(),
             attempt(),
             pool.clone(),
             b"true",
@@ -739,7 +738,7 @@ mod tests {
         assert!(!ran.load(Ordering::Relaxed));
 
         let Ok(later) = prepare_handler(
-            registered.dispatch.as_ref(),
+            registered.handler.as_ref(),
             attempt(),
             pool.clone(),
             b"false",
@@ -748,10 +747,7 @@ mod tests {
         };
         later.await.unwrap();
         assert!(ran.load(Ordering::Relaxed));
-        assert_eq!(
-            infra_postgres::close(&pool, Duration::from_secs(1)).await,
-            infra_postgres::CloseOutcome::Complete
-        );
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]

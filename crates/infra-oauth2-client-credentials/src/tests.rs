@@ -35,6 +35,7 @@ use crate::{
     ExchangeTokens, IssuerUrl, OnBehalfOf, Options, PrivateKeyJwt, RefreshDriver, Registration,
     Rejection, ServiceHttpClient, ServiceTokenTarget, ServiceTokens, TokenUrl,
     credentials::acquisition_deadline,
+    test_support::{HttpOptions, prepare_http},
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -150,9 +151,9 @@ impl Fixture {
         }
     }
 
-    fn options(&self) -> Options {
-        Options {
-            token_url: TokenUrl::parse_for_test_http(self.endpoint.as_str()).unwrap(),
+    fn options(&self) -> HttpOptions {
+        HttpOptions {
+            token_url: self.endpoint.to_string(),
             client_id: "client:id".to_owned(),
             auth: PrivateKeyJwt {
                 private_key: SecretString::from(self.key.serialize_pem()),
@@ -174,7 +175,7 @@ impl Fixture {
 
     fn service_tokens_with(
         &self,
-        options: Options,
+        options: HttpOptions,
         scopes: &[&str],
         origin: http::Uri,
     ) -> ServiceTokens {
@@ -196,7 +197,7 @@ impl Fixture {
 
     fn exchange_tokens_with(
         &self,
-        options: Options,
+        options: HttpOptions,
         scopes: &[&str],
         audience: Option<&str>,
         capacity: NonZeroU32,
@@ -501,8 +502,8 @@ fn exchange_response(access_token: &str) -> serde_json::Value {
     })
 }
 
-fn prepare_registration(options: Options) -> Registration {
-    Registration::prepare_for_test_http(options).unwrap()
+fn prepare_registration(options: HttpOptions) -> Registration {
+    prepare_http(options).unwrap()
 }
 
 fn timeout_context(after: Duration) -> OperationContext {

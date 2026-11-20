@@ -7,7 +7,7 @@ use std::{
 
 use base64::Engine as _;
 use infra_jobs::{Engine, KindsBuilder};
-use infra_postgres::{Pool, TxError, in_tx};
+use infra_postgres::{Pool, TxError};
 use infra_webhooks::{
     outbound::{Dispatcher, Endpoint, JSON_CONTENT_TYPE, OutboundError, Producer},
     protocol::KeyRing,
@@ -71,14 +71,15 @@ fn dispatcher(endpoints: &[(&str, &str)], address: std::net::SocketAddr) -> Disp
 }
 
 async fn enqueue(pool: &Pool, outbound: &Producer, endpoint: &str, body: &[u8]) -> String {
-    let id = in_tx(pool, async |tx| -> Result<_, Step> {
-        outbound
-            .enqueue(tx, endpoint, body.to_vec(), "application/webhook+json")
-            .await
-            .map_err(Step::Delivery)
-    })
-    .await
-    .unwrap_or_else(|error| panic!("delivery commits: {error}"));
+    let id = pool
+        .in_tx(async |tx| -> Result<_, Step> {
+            outbound
+                .enqueue(tx, endpoint, body.to_vec(), "application/webhook+json")
+                .await
+                .map_err(Step::Delivery)
+        })
+        .await
+        .unwrap_or_else(|error| panic!("delivery commits: {error}"));
     id.to_string()
 }
 
@@ -184,24 +185,25 @@ async fn status_peer(
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     let configured = outbound(&["partner"]);
     let body = b"\0{\"event\":\"created\"}\xff";
-    let id = in_tx(&app_pool, async |tx| -> Result<_, Step> {
-        std::assert_matches!(
+    let id = app_pool
+        .in_tx(async |tx| -> Result<_, Step> {
+            std::assert_matches!(
+                configured
+                    .enqueue(tx, "partners", body.to_vec(), "application/webhook+json")
+                    .await,
+                Err(OutboundError::UnknownEndpoint)
+            );
             configured
-                .enqueue(tx, "partners", body.to_vec(), "application/webhook+json")
-                .await,
-            Err(OutboundError::UnknownEndpoint)
-        );
-        configured
-            .enqueue(tx, "partner", body.to_vec(), "application/webhook+json")
-            .await
-            .map_err(Step::Delivery)
-    })
-    .await
-    .unwrap()
-    .to_string();
+                .enqueue(tx, "partner", body.to_vec(), "application/webhook+json")
+                .await
+                .map_err(Step::Delivery)
+        })
+        .await
+        .unwrap()
+        .to_string();
     assert_eq!(job_count(&pool).await, 1);
     let payload: serde_json::Value =
         sqlx::query_scalar("SELECT payload_text::jsonb FROM background_jobs WHERE id::text = $1")
@@ -224,21 +226,22 @@ async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     let configured = outbound(&["partner"]);
-    let result = in_tx(&app_pool, async |tx| -> Result<(), Step> {
-        let _id = configured
-            .enqueue(
-                tx,
-                "partner",
-                b"{\"event\":\"rolled-back\"}".as_slice(),
-                JSON_CONTENT_TYPE,
-            )
-            .await
-            .map_err(Step::Delivery)?;
-        Err(Step::Rejected)
-    })
-    .await;
+    let result = app_pool
+        .in_tx(async |tx| -> Result<(), Step> {
+            let _id = configured
+                .enqueue(
+                    tx,
+                    "partner",
+                    b"{\"event\":\"rolled-back\"}".as_slice(),
+                    JSON_CONTENT_TYPE,
+                )
+                .await
+                .map_err(Step::Delivery)?;
+            Err(Step::Rejected)
+        })
+        .await;
     std::assert_matches!(&result, Err(Step::Rejected), "{result:?}");
     assert_eq!(job_count(&pool).await, 0);
     super::close_pools(&[&app_pool]).await;
@@ -246,7 +249,7 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn queued_delivery_finishes_on_headers_and_respects_the_receiver_retry_floor(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     for (head, expected_state, summary, floor_seconds) in [
         (
             "401 Unauthorized\r\nContent-Length: 0",
@@ -345,7 +348,7 @@ async fn queued_delivery_finishes_on_headers_and_respects_the_receiver_retry_flo
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener");
@@ -466,7 +469,7 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_routing(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     let body = b"\0{\"event\":\"legacy\"}\xff";
     let configured = outbound(&["partner", "oversized"]);
     let refused = enqueue(&app_pool, &configured, "oversized", body).await;
@@ -553,7 +556,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     let producer = outbound(&["removed"]);
     let id = enqueue(&app_pool, &producer, "removed", b"{\"event\":\"missing\"}").await;
     sqlx::query("UPDATE background_jobs SET attempts = 19 WHERE id::text = $1")
@@ -589,7 +592,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn an_undecodable_payload_is_retried_not_failed_permanently(pool: PgPool) {
-    let app_pool = Pool::from(pool.clone());
+    let app_pool = Pool::from_test_pool(pool.clone());
     let configured = outbound(&["partner"]);
     let id = enqueue(&app_pool, &configured, "partner", b"{}").await;
     sqlx::query("UPDATE background_jobs SET payload_text = $2 WHERE id::text = $1")

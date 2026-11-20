@@ -12,7 +12,6 @@ pub mod outbox;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
-const MIN_PAYLOAD_CAPACITY: usize = 256;
 
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,10 +30,6 @@ pub enum LivePayloadComparison {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
-    // template:begin outbox:jobs-outbox-enqueue-error
-    #[error("{} requires the dedicated outbox enqueue operation", outbox::KIND)]
-    OutboxKind,
-    // template:end outbox:jobs-outbox-enqueue-error
     #[error(
         "unique key must be 1 to {MAX_UNIQUE_KEY_BYTES} bytes of UTF-8 without control characters"
     )]
@@ -116,11 +111,6 @@ async fn enqueue_inner<K: JobKind>(
     delay: Duration,
     unique_key: Option<&str>,
 ) -> Result<Enqueued, EnqueueError> {
-    // template:begin outbox:jobs-outbox-enqueue-guard
-    if K::NAME == outbox::KIND {
-        return Err(EnqueueError::OutboxKind);
-    }
-    // template:end outbox:jobs-outbox-enqueue-guard
     let prepared = prepare(payload, delay, unique_key)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
@@ -199,9 +189,11 @@ pub async fn compare_live_payload<K: JobKind>(
 
 fn legacy_payload_matches<K: JobKind>(legacy: &str, expected: &str) -> Result<bool, EnqueueError> {
     let decoded = serde_json::from_str::<K>(legacy).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    let mut writer = PayloadWriter::default();
-    serde_json::to_writer(&mut writer, &decoded).map_err(EnqueueError::Serialize)?;
-    Ok(writer.total == expected.len() && writer.retained == expected.as_bytes())
+    match json_payload::to_vec_bounded(&decoded, MAX_PAYLOAD_BYTES) {
+        Ok(encoded) => Ok(encoded == expected.as_bytes()),
+        Err(json_payload::EncodeError::TooLarge { .. }) => Ok(false),
+        Err(json_payload::EncodeError::Serialize(error)) => Err(EnqueueError::Serialize(error)),
+    }
 }
 
 #[derive(Debug)]
@@ -209,35 +201,6 @@ struct Prepared<'a> {
     payload: String,
     unique_key: Option<&'a str>,
     delay_micros: i64,
-}
-
-#[derive(Default)]
-struct PayloadWriter {
-    retained: Vec<u8>,
-    total: usize,
-}
-
-impl Write for PayloadWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.total = checked_serialized_len(self.total, bytes.len())?;
-        let keep = bytes.len().min(MAX_PAYLOAD_BYTES - self.retained.len());
-        let needed = self.retained.len() + keep;
-        if needed > self.retained.capacity() {
-            let capacity = self
-                .retained
-                .capacity()
-                .saturating_mul(2)
-                .max(needed)
-                .clamp(MIN_PAYLOAD_CAPACITY, MAX_PAYLOAD_BYTES);
-            self.retained.reserve_exact(capacity - self.retained.len());
-        }
-        self.retained.extend_from_slice(&bytes[..keep]);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
@@ -266,14 +229,14 @@ fn prepare<'a, K: JobKind>(
 }
 
 fn encode_payload(payload: &impl serde::Serialize) -> Result<String, EnqueueError> {
-    let mut writer = PayloadWriter::default();
-    json_payload::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
-    if writer.total > MAX_PAYLOAD_BYTES {
-        return Err(EnqueueError::PayloadTooLarge {
-            bytes: writer.total,
-        });
-    }
-    String::from_utf8(writer.retained).map_err(|error| {
+    let encoded =
+        json_payload::to_vec_bounded(payload, MAX_PAYLOAD_BYTES).map_err(|error| match error {
+            json_payload::EncodeError::Serialize(error) => EnqueueError::Serialize(error),
+            json_payload::EncodeError::TooLarge { bytes } => {
+                EnqueueError::PayloadTooLarge { bytes }
+            }
+        })?;
+    String::from_utf8(encoded).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
             error,
@@ -288,11 +251,10 @@ fn is_valid_unique_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::io::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{EnqueueError, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter, prepare};
+    use super::{EnqueueError, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, prepare};
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
     use crate::{JobKind, KindName};
     use serde::ser::Error as _;
@@ -516,30 +478,5 @@ mod tests {
             }
             assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
         }
-    }
-
-    #[test]
-    fn serialization_retains_only_the_payload_limit_despite_large_size_hint() {
-        let mut writer = PayloadWriter::default();
-        serde_json::to_writer(&mut writer, &0).unwrap();
-        assert!(writer.retained.capacity() < MAX_PAYLOAD_BYTES);
-
-        let mut writer = PayloadWriter::default();
-        let payload = Streamed {
-            elements: MAX_PAYLOAD_BYTES,
-            failure: StreamFailure::None,
-            calls: AtomicUsize::new(0),
-        };
-        serde_json::to_writer(&mut writer, &payload).unwrap();
-        assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
-        assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
-        assert_eq!(writer.total, payload.elements * 9 + 1);
-
-        let chunk = vec![b'x'; MAX_PAYLOAD_BYTES * 4];
-        let mut writer = PayloadWriter::default();
-        writer.write_all(&chunk).unwrap();
-        assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
-        assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
-        assert_eq!(writer.total, chunk.len());
     }
 }

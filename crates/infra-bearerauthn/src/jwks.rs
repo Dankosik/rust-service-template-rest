@@ -387,17 +387,19 @@ fn has_only_encryption_operations(operations: &[KeyOperations]) -> bool {
 fn has_key_agreement_material(parameters: &AlgorithmParameters) -> bool {
     match parameters {
         AlgorithmParameters::EllipticCurve(ec) => {
-            let verifier = match ec.curve {
-                EllipticCurve::P256 => &signature::ECDSA_P256_SHA256_FIXED,
-                EllipticCurve::P384 => &signature::ECDSA_P384_SHA384_FIXED,
-                EllipticCurve::P521 => &signature::ECDSA_P521_SHA512_FIXED,
+            const MAX_EC_POINT_BYTES: usize = 1 + 66 * 2;
+            let (verifier, coord_len) = match ec.curve {
+                EllipticCurve::P256 => (&signature::ECDSA_P256_SHA256_FIXED, 32),
+                EllipticCurve::P384 => (&signature::ECDSA_P384_SHA384_FIXED, 48),
+                EllipticCurve::P521 => (&signature::ECDSA_P521_SHA512_FIXED, 66),
                 _ => return false,
             };
-            ec.x.len() == ec.y.len()
-                && jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y).is_ok_and(|key| {
-                    key.try_get_as_bytes()
-                        .is_ok_and(|point| ParsedPublicKey::new(verifier, point).is_ok())
-                })
+            let mut point = [0_u8; MAX_EC_POINT_BYTES];
+            point[0] = 0x04;
+            let (x_out, y_out) = point[1..=coord_len * 2].split_at_mut(coord_len);
+            URL_SAFE_NO_PAD.decode_slice(&ec.x, x_out) == Ok(coord_len)
+                && URL_SAFE_NO_PAD.decode_slice(&ec.y, y_out) == Ok(coord_len)
+                && ParsedPublicKey::new(verifier, &point[..=coord_len * 2]).is_ok()
         }
         AlgorithmParameters::Other(key)
             if key.fields.get("kty").and_then(serde_json::Value::as_str) == Some("OKP") =>

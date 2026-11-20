@@ -45,7 +45,7 @@ impl HistoryError {
 pub async fn verify_history(pool: &Pool) -> Result<(), HistoryError> {
     let mut stage = "acquire";
     let check = async {
-        let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
+        let mut conn = pool.acquire("check migration history").await?;
         stage = "read";
         read_history(&mut conn, &MIGRATOR.table_name).await
     };

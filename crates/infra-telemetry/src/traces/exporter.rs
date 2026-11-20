@@ -17,7 +17,7 @@ use secrecy::ExposeSecret;
 use shared_rules::uri::{authority_has_userinfo, has_whitespace_or_control};
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::{EndpointSource, TracingError, TracingOptions};
+use super::{EndpointSource, TracingErrorKind, TracingOptions};
 
 const OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE: &str = "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE";
 const OTEL_EXPORTER_OTLP_CLIENT_KEY: &str = "OTEL_EXPORTER_OTLP_CLIENT_KEY";
@@ -67,10 +67,10 @@ struct Setting<'a> {
 }
 
 impl Setting<'_> {
-    fn text(&self) -> Result<&str, TracingError> {
+    fn text(&self) -> Result<&str, TracingErrorKind> {
         self.raw
             .to_str()
-            .ok_or(TracingError::NonUnicode { name: self.name })
+            .ok_or(TracingErrorKind::NonUnicode { name: self.name })
     }
 }
 
@@ -125,17 +125,14 @@ struct Credential {
 
 impl CollectorConfig {
     pub(super) fn resolve(
-        options: &TracingOptions,
+        options: &TracingOptions<'_>,
         trust: &CollectorTrust,
         env: &impl Fn(&str) -> Option<OsString>,
-    ) -> Result<Option<Self>, TracingError> {
+    ) -> Result<Option<Self>, TracingErrorKind> {
         let standard = StandardEnv::from_env(env);
-        let typed_endpoint = typed_setting(options.otlp_endpoint.as_deref(), TYPED_ENDPOINT);
+        let typed_endpoint = typed_setting(options.otlp_endpoint, TYPED_ENDPOINT);
         let typed_headers = typed_setting(
-            options
-                .otlp_headers
-                .as_ref()
-                .map(ExposeSecret::expose_secret),
+            options.otlp_headers.map(ExposeSecret::expose_secret),
             TYPED_HEADERS,
         );
         let (endpoint, source, headers) = match (
@@ -144,10 +141,10 @@ impl CollectorConfig {
             standard.headers.as_ref(),
         ) {
             (Some(_), _, Some(headers)) => {
-                return Err(TracingError::AmbientCredential { name: headers.name });
+                return Err(TracingErrorKind::AmbientCredential { name: headers.name });
             }
             (None, Some(_), _) => {
-                return Err(TracingError::UnboundCredential {
+                return Err(TracingErrorKind::UnboundCredential {
                     name: TYPED_HEADERS,
                 });
             }
@@ -164,7 +161,7 @@ impl CollectorConfig {
         ];
         let Some(endpoint) = endpoint else {
             return match credentials.into_iter().flatten().next() {
-                Some(credential) => Err(TracingError::UnboundCredential {
+                Some(credential) => Err(TracingErrorKind::UnboundCredential {
                     name: credential.name,
                 }),
                 None => Ok(None),
@@ -186,7 +183,7 @@ fn verify_collector_security(
     standard: &StandardEnv,
     trust: &CollectorTrust,
     credentials: [Option<Credential>; 3],
-) -> Result<(), TracingError> {
+) -> Result<(), TracingErrorKind> {
     if url.scheme() != "https" {
         return match trust
             .certificate
@@ -199,7 +196,7 @@ fn verify_collector_security(
                     .next()
                     .map(|credential| credential.name)
             }) {
-            Some(name) => Err(TracingError::InsecureCollector { name }),
+            Some(name) => Err(TracingErrorKind::InsecureCollector { name }),
             None => Ok(()),
         };
     }
@@ -218,15 +215,15 @@ fn verify_standard_recipient(
     standard: &StandardEnv,
     selected_scope: SettingScope,
     destination: &reqwest::Url,
-) -> Result<(), TracingError> {
+) -> Result<(), TracingErrorKind> {
     let name = credential.name;
     let standard_endpoint = standard
         .endpoint()
-        .ok_or(TracingError::UnboundCredential { name })?;
+        .ok_or(TracingErrorKind::UnboundCredential { name })?;
     if standard_endpoint.scope != selected_scope
         && collector_url(standard_endpoint)? != *destination
     {
-        return Err(TracingError::UnboundCredential { name });
+        return Err(TracingErrorKind::UnboundCredential { name });
     }
     if credential.scope == SettingScope::Common
         && let Some(common_endpoint) = standard
@@ -235,15 +232,15 @@ fn verify_standard_recipient(
             .filter(|common| common.scope != standard_endpoint.scope)
         && collector_url(common_endpoint)? != *destination
     {
-        return Err(TracingError::UnboundCredential { name });
+        return Err(TracingErrorKind::UnboundCredential { name });
     }
     Ok(())
 }
 
-fn collector_url(setting: &Setting<'_>) -> Result<reqwest::Url, TracingError> {
+fn collector_url(setting: &Setting<'_>) -> Result<reqwest::Url, TracingErrorKind> {
     let name = setting.name;
     let raw = setting.text()?;
-    let invalid = || TracingError::InvalidEndpoint { name };
+    let invalid = || TracingErrorKind::InvalidEndpoint { name };
     let uri = raw.parse::<Uri>().map_err(|_| invalid())?;
     if !matches!(uri.scheme_str(), Some("http" | "https"))
         || uri
@@ -285,9 +282,9 @@ impl TrustFile {
         clippy::disallowed_types,
         reason = "the blocking exporter preparation task owns TLS file reads"
     )]
-    fn read(&self) -> Result<Zeroizing<Vec<u8>>, TracingError> {
+    fn read(&self) -> Result<Zeroizing<Vec<u8>>, TracingErrorKind> {
         let name = self.variable;
-        let read_error = |error: io::Error| TracingError::TrustRead {
+        let read_error = |error: io::Error| TracingErrorKind::TrustRead {
             name,
             kind: error.kind(),
         };
@@ -302,7 +299,7 @@ impl TrustFile {
         let file = options.open(&self.path).map_err(read_error)?;
         let metadata = file.metadata().map_err(read_error)?;
         if !metadata.is_file() {
-            return Err(TracingError::TrustFileType { name });
+            return Err(TracingErrorKind::TrustFileType { name });
         }
         let max_bytes = usize::try_from(TRUST_FILE_MAX_BYTES).unwrap_or(usize::MAX);
         let capacity = usize::try_from(metadata.len())
@@ -314,7 +311,7 @@ impl TrustFile {
             .read_to_end(&mut pem)
             .map_err(read_error)?;
         if pem.len() as u64 > TRUST_FILE_MAX_BYTES {
-            return Err(TracingError::TrustFileTooLarge {
+            return Err(TracingErrorKind::TrustFileTooLarge {
                 name,
                 max_bytes: TRUST_FILE_MAX_BYTES,
             });
@@ -322,14 +319,14 @@ impl TrustFile {
         Ok(pem)
     }
 
-    fn load_certificates(&self) -> Result<Vec<reqwest::Certificate>, TracingError> {
+    fn load_certificates(&self) -> Result<Vec<reqwest::Certificate>, TracingErrorKind> {
         let certificates = reqwest::Certificate::from_pem_bundle(&self.read()?).map_err(|_| {
-            TracingError::TrustPem {
+            TracingErrorKind::TrustPem {
                 name: self.variable,
             }
         })?;
         if certificates.is_empty() {
-            return Err(TracingError::TrustPem {
+            return Err(TracingErrorKind::TrustPem {
                 name: self.variable,
             });
         }
@@ -367,7 +364,7 @@ impl CollectorTrust {
         }
     }
 
-    fn load_client_identity(&self) -> Result<Option<reqwest::Identity>, TracingError> {
+    fn load_client_identity(&self) -> Result<Option<reqwest::Identity>, TracingErrorKind> {
         match (&self.client_certificate, &self.client_key) {
             (Some(certificate), Some(key)) => {
                 let key_pem = key.read()?;
@@ -384,13 +381,13 @@ impl CollectorTrust {
                 };
                 reqwest::Identity::from_pem(&pem)
                     .map(Some)
-                    .map_err(|_| TracingError::IdentityPem)
+                    .map_err(|_| TracingErrorKind::IdentityPem)
             }
-            (Some(present), None) => Err(TracingError::IncompleteIdentity {
+            (Some(present), None) => Err(TracingErrorKind::IncompleteIdentity {
                 present: present.variable,
                 missing: OTEL_EXPORTER_OTLP_CLIENT_KEY,
             }),
-            (None, Some(present)) => Err(TracingError::IncompleteIdentity {
+            (None, Some(present)) => Err(TracingErrorKind::IncompleteIdentity {
                 present: present.variable,
                 missing: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
             }),
@@ -405,7 +402,7 @@ pub(super) fn span_exporter(
     trust: &CollectorTrust,
     timeout: Duration,
     compression: Option<opentelemetry_otlp::Compression>,
-) -> Result<opentelemetry_otlp::SpanExporter, TracingError> {
+) -> Result<opentelemetry_otlp::SpanExporter, TracingErrorKind> {
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
@@ -416,7 +413,7 @@ pub(super) fn span_exporter(
         builder = builder.with_compression(compression);
     }
     builder = builder.with_http_client(collector_client(trust, timeout)?);
-    builder.build().map_err(|_| TracingError::ExporterBuild)
+    builder.build().map_err(|_| TracingErrorKind::ExporterBuild)
 }
 
 pub(super) fn compression(
@@ -449,7 +446,7 @@ pub(super) fn compression(
 fn collector_client(
     trust: &CollectorTrust,
     timeout: Duration,
-) -> Result<reqwest::blocking::Client, TracingError> {
+) -> Result<reqwest::blocking::Client, TracingErrorKind> {
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -461,7 +458,7 @@ fn collector_client(
     if let Some(identity) = trust.load_client_identity()? {
         builder = builder.identity(identity);
     }
-    builder.build().map_err(|_| TracingError::ClientBuild)
+    builder.build().map_err(|_| TracingErrorKind::ClientBuild)
 }
 
 pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duration {
@@ -474,14 +471,14 @@ pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duratio
     .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
-fn parse_headers(setting: &Setting<'_>) -> Result<HashMap<String, String>, TracingError> {
+fn parse_headers(setting: &Setting<'_>) -> Result<HashMap<String, String>, TracingErrorKind> {
     let raw = setting.text()?;
     let mut headers = HashMap::new();
     for (index, entry) in raw.split(',').enumerate() {
         if entry.trim().is_empty() {
             continue;
         }
-        let invalid = TracingError::InvalidHeader {
+        let invalid = TracingErrorKind::InvalidHeader {
             name: setting.name,
             position: index + 1,
         };

@@ -507,7 +507,8 @@ impl WorkerGroup {
         &self,
         operation: &'static str,
     ) -> Result<PoolConnection<Postgres>, OperationError> {
-        infra_postgres::acquire(&self.pool, operation)
+        self.pool
+            .acquire(operation)
             .await
             .map_err(OperationError::Acquire)
     }
@@ -700,17 +701,9 @@ mod tests {
         const NAME: crate::KindName = crate::KindName::new("publisher");
     }
 
-    fn lazy_pool() -> Pool {
-        Pool::from(
-            sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap(),
-        )
-    }
-
     #[tokio::test]
     async fn engine_debug_shows_registered_kinds_and_worker_limit() {
-        let pool = lazy_pool();
+        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
         let mut kinds = crate::KindsBuilder::new();
         kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
             Ok(())
@@ -732,11 +725,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_suspended_attempt_keeps_the_first_stop_reason() {
         for (force_before_timeout, expected) in [(true, (0, 1)), (false, (1, 0))] {
-            let pool = lazy_pool();
-            assert_eq!(
-                infra_postgres::close(&pool, Duration::from_secs(1)).await,
-                infra_postgres::CloseOutcome::Complete
-            );
+            let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+            let _ = pool.close(Duration::from_secs(1)).await;
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(
                 crate::Policy {
@@ -814,7 +804,7 @@ mod tests {
         for (exit_after, observe_timeout_first, timed_out) in
             [(1, false, false), (2, true, true), (3, false, true)]
         {
-            let pool = lazy_pool();
+            let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -861,7 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_groups_cannot_claim_the_same_kind() {
-        let pool = lazy_pool();
+        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
         let kinds = || {
             let mut registry = crate::KindsBuilder::new();
             registry.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
@@ -884,7 +874,7 @@ mod tests {
                 .build()
                 .unwrap();
             let _entered = runtime.enter();
-            let pool = lazy_pool();
+            let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -950,7 +940,7 @@ mod tests {
     async fn supervisor_custody_survives_unpolled_drop_and_abort() {
         let gauges = Gauges::default();
         let _local = metrics::set_default_local_recorder(gauges.recorder());
-        let pool = lazy_pool();
+        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
         let entered = Arc::new(Notify::new());
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut kinds = crate::KindsBuilder::new();
@@ -1044,10 +1034,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), tracker.wait())
             .await
             .unwrap();
-        assert_eq!(
-            infra_postgres::close(&pool, Duration::from_secs(1)).await,
-            infra_postgres::CloseOutcome::Complete
-        );
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]

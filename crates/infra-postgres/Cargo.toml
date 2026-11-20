@@ -13,6 +13,7 @@ workspace = true
 
 [features]
 hotpath = []
+test-support = []
 
 [dependencies]
 enum-map = { workspace = true, features = ["derive"] }

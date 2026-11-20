@@ -70,7 +70,7 @@ impl TrustRegistry {
         }
         callers.sort_keys();
         for keys in callers.values_mut() {
-            keys.sort_unstable_by(|left, right| left.kid.as_str().cmp(right.kid.as_str()));
+            keys.sort_unstable_by(|left, right| left.kid.cmp(&right.kid));
         }
         Ok(Self { callers })
     }

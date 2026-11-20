@@ -21,11 +21,10 @@ service-failure = { workspace = true }
 shared-rules = { workspace = true }
 infra-http-transport = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
-axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
+axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing"] }
 bytes = { workspace = true, features = ["std"] }
 derive-where = { workspace = true }
 mediatype = { workspace = true }
-pin-project-lite = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 # template:begin authn:http-authn-dependency
@@ -70,6 +69,9 @@ utoipa-axum = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
+# template:begin http-idempotency:http-idempotency-test-dependencies
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end http-idempotency:http-idempotency-test-dependencies
 # template:begin grpc:http-tls-test-dependencies
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }

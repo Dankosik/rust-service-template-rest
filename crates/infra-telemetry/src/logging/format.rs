@@ -201,16 +201,16 @@ fn offset(index: usize) -> u16 {
     u16::try_from(index).unwrap_or(u16::MAX)
 }
 
-struct Scratch {
+struct EventScratch {
     values: Bytes<SCRATCH_CAPACITY>,
     fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
     truncated: bool,
 }
 
-impl Scratch {
-    fn new(value_limit: usize) -> Self {
+impl EventScratch {
+    fn new() -> Self {
         Self {
-            values: Bytes::inline(value_limit),
+            values: Bytes::inline(MAX_RECORD_BYTES),
             fields: ArrayVec::new(),
             truncated: false,
         }
@@ -229,16 +229,11 @@ impl Scratch {
         self.truncated = true;
     }
 
-    fn push_json(
-        &mut self,
-        key: &'static str,
-        value: &(impl serde::Serialize + ?Sized),
-        max_fields: usize,
-    ) {
+    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
         if self.values.failed {
             return;
         }
-        if self.fields.len() == max_fields {
+        if self.fields.is_full() {
             self.stop();
             return;
         }
@@ -313,47 +308,40 @@ impl Scratch {
         line.limit = record_limit;
         line.append(tail);
     }
+}
 
-    fn compact_into(&self, cache: &mut SpanFields, dedup_field_count: usize) -> bool {
-        if self.values.failed {
-            return false;
+struct SpanScratch {
+    values: Bytes<SCRATCH_CAPACITY>,
+    fields: ArrayVec<Entry, MAX_SPAN_FIELDS>,
+}
+
+impl SpanScratch {
+    fn new() -> Self {
+        Self {
+            values: Bytes::inline(MAX_SPAN_BYTES),
+            fields: ArrayVec::new(),
         }
-        cache.values.rewind(0);
-        cache.fields.clear();
-        let (captured, unchanged) = self.fields.split_at(dedup_field_count);
-        let unique = captured.iter().enumerate().filter_map(|(index, field)| {
-            (!captured[index + 1..]
-                .iter()
-                .any(|next| next.key == field.key))
-            .then_some(field)
-        });
-        for field in unique.chain(unchanged) {
-            if cache.fields.len() == MAX_SPAN_FIELDS {
-                return false;
-            }
-            let start = cache.values.len();
-            cache.values.append(&self.values.buf[field.range()]);
-            cache.fields.push(Entry {
-                key: field.key,
-                start: offset(start),
-                end: offset(cache.values.len()),
-            });
-        }
-        !cache.values.failed
     }
 
-    fn merge_into(&mut self, cache: &mut SpanFields) -> bool {
-        let delta_field_count = self.fields.len();
-        self.values.limit = self.values.len() + cache.values.len();
-        for field in &cache.fields {
-            if !self.fields[..delta_field_count]
-                .iter()
-                .any(|delta| delta.key == field.key)
-            {
-                self.copy(*field, cache.values.as_slice());
-            }
+    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
+        if self.values.failed {
+            return;
         }
-        self.compact_into(cache, delta_field_count)
+        if self.fields.is_full() {
+            self.values.failed = true;
+            return;
+        }
+        let start = self.values.len();
+        self.values.append_json(value);
+        if self.values.failed {
+            self.values.buf.truncate(start);
+            return;
+        }
+        self.fields.push(Entry {
+            key,
+            start: offset(start),
+            end: offset(self.values.len()),
+        });
     }
 }
 
@@ -425,44 +413,82 @@ struct SpanFields {
     _slot: Permit,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Source {
-    Span,
-    Event,
-    BridgedEvent,
+impl SpanFields {
+    fn from_capture(slot: Permit, capture: &SpanScratch) -> Option<Self> {
+        let mut cache = Self {
+            values: Bytes::new(MAX_SPAN_BYTES, 0),
+            fields: SmallVec::new(),
+            _slot: slot,
+        };
+        cache.apply(capture).then_some(cache)
+    }
+
+    fn apply(&mut self, delta: &SpanScratch) -> bool {
+        if delta.values.failed {
+            return false;
+        }
+        let capacity = (delta.values.len() + self.values.len()).min(MAX_SPAN_BYTES);
+        let mut next_values = Bytes::new(MAX_SPAN_BYTES, capacity);
+        let mut next_fields = SmallVec::new();
+        let unique = delta
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| {
+                (!delta.fields[index + 1..]
+                    .iter()
+                    .any(|next| next.key == field.key))
+                .then_some((field.key, &delta.values.as_slice()[field.range()]))
+            });
+        let unchanged = self.fields.iter().filter_map(|field| {
+            (!delta.fields.iter().any(|next| next.key == field.key))
+                .then_some((field.key, &self.values.as_slice()[field.range()]))
+        });
+        for (key, value) in unique.chain(unchanged) {
+            if next_fields.len() == MAX_SPAN_FIELDS {
+                return false;
+            }
+            let start = next_values.len();
+            next_values.append(value);
+            if next_values.failed {
+                return false;
+            }
+            next_fields.push(Entry {
+                key,
+                start: offset(start),
+                end: offset(next_values.len()),
+            });
+        }
+        self.values = next_values;
+        self.fields = next_fields;
+        true
+    }
 }
 
-struct Capture<'a> {
-    scratch: &'a mut Scratch,
-    source: Source,
+struct EventCapture<'a> {
+    scratch: &'a mut EventScratch,
+    bridged: bool,
 }
 
-impl Capture<'_> {
+impl EventCapture<'_> {
     fn skips(&self, key: &str) -> bool {
-        self.source == Source::BridgedEvent && key.starts_with("log.")
+        self.bridged && key.starts_with("log.")
     }
 
     fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
-        if self.skips(key) {
-            return;
+        if !self.skips(key) {
+            self.scratch.push_json(key, value);
         }
-        let max_fields = if self.source == Source::Span {
-            MAX_SPAN_FIELDS
-        } else {
-            MAX_EVENT_FIELDS
-        };
-        self.scratch.push_json(key, value, max_fields);
     }
 
     fn push_truncating_str(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
-        if self.skips(key) {
-            return;
+        if !self.skips(key) {
+            self.scratch.push_truncating_str(key, text);
         }
-        self.scratch.push_truncating_str(key, text);
     }
 }
 
-impl Visit for Capture<'_> {
+impl Visit for EventCapture<'_> {
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.push_json(field.name(), &value);
     }
@@ -476,25 +502,42 @@ impl Visit for Capture<'_> {
         self.push_json(field.name(), &value);
     }
     fn record_str(&mut self, field: &Field, value: &str) {
-        if self.source != Source::Span {
-            self.push_truncating_str(field.name(), format_args!("{value}"));
-        } else if value.len() > self.scratch.values.room() {
-            self.scratch.stop();
+        self.push_truncating_str(field.name(), format_args!("{value}"));
+    }
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.push_truncating_str(field.name(), format_args!("{value:?}"));
+    }
+}
+
+struct SpanCapture<'a>(&'a mut SpanScratch);
+
+impl Visit for SpanCapture<'_> {
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if value.len() > self.0.values.room() {
+            self.0.values.failed = true;
         } else {
-            self.push_json(field.name(), value);
+            self.0.push_json(field.name(), value);
         }
     }
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         let name = field.name();
-        if self.source == Source::Span {
-            if name.starts_with("log.") {
-                return;
-            }
-            let name = name.trim_prefix("r#");
-            self.push_json(name, &format_args!("{value:?}"));
-        } else {
-            self.push_truncating_str(name, format_args!("{value:?}"));
+        if name.starts_with("log.") {
+            return;
         }
+        let name = name.trim_prefix("r#");
+        self.0.push_json(name, &format_args!("{value:?}"));
     }
 }
 
@@ -518,16 +561,16 @@ impl FormatLayer {
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
-        let mut scratch = Scratch::new(MAX_RECORD_BYTES);
+        let mut scratch = EventScratch::new();
         let mut line = Bytes::new(MAX_RECORD_BYTES, LINE_CAPACITY);
         let normalized = event.normalized_metadata();
-        let (metadata, source) = match &normalized {
-            Some(metadata) => (metadata, Source::BridgedEvent),
-            None => (event.metadata(), Source::Event),
+        let (metadata, bridged) = match &normalized {
+            Some(metadata) => (metadata, true),
+            None => (event.metadata(), false),
         };
-        event.record(&mut Capture {
+        event.record(&mut EventCapture {
             scratch: &mut scratch,
-            source,
+            bridged,
         });
         let event_field_count = scratch.fields.len();
         write_record_header(&mut line, metadata, self.format);
@@ -609,21 +652,13 @@ where
             self.output.record_drop(DropReason::SpanCapacity);
             return;
         };
-        let mut scratch = Scratch::new(MAX_SPAN_BYTES);
-        attrs.record(&mut Capture {
-            scratch: &mut scratch,
-            source: Source::Span,
-        });
-        scratch.push_json("name", attrs.metadata().name(), MAX_SPAN_FIELDS);
-        let mut cache = SpanFields {
-            values: Bytes::new(MAX_SPAN_BYTES, scratch.values.len()),
-            fields: SmallVec::new(),
-            _slot: slot,
-        };
-        if !scratch.compact_into(&mut cache, scratch.fields.len()) {
+        let mut scratch = SpanScratch::new();
+        attrs.record(&mut SpanCapture(&mut scratch));
+        scratch.push_json("name", attrs.metadata().name());
+        let Some(cache) = SpanFields::from_capture(slot, &scratch) else {
             self.output.record_drop(DropReason::SpanCapacity);
             return;
-        }
+        };
         let Some(span) = ctx.span(id) else {
             return;
         };
@@ -634,11 +669,8 @@ where
         let Some(_guard) = self.admit() else {
             return;
         };
-        let mut scratch = Scratch::new(MAX_SPAN_BYTES);
-        values.record(&mut Capture {
-            scratch: &mut scratch,
-            source: Source::Span,
-        });
+        let mut scratch = SpanScratch::new();
+        values.record(&mut SpanCapture(&mut scratch));
         let Some(span) = ctx.span(id) else {
             return;
         };
@@ -646,7 +678,7 @@ where
         let Some(cached) = extensions.get_mut::<SpanFields>() else {
             return;
         };
-        if !scratch.merge_into(cached) {
+        if !cached.apply(&scratch) {
             extensions.remove::<SpanFields>();
             drop(extensions);
             self.output.record_drop(DropReason::SpanCapacity);

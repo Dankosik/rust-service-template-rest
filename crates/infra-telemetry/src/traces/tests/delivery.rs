@@ -160,7 +160,8 @@ fn read_request(stream: &mut impl Read) -> Option<Request> {
 #[test]
 fn a_finished_span_reaches_an_anonymous_http_collector() {
     let collector = Collector::start(exchange);
-    let options = options(&format!("http://{}", collector.addr));
+    let endpoint = format!("http://{}", collector.addr);
+    let options = options(&endpoint);
     let handle = tracer_provider(&options, |_| None, &CollectorTrust::default())
         .expect("the provider builds");
     assert_eq!(
@@ -288,8 +289,9 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
             "usable PEM identity",
         ),
     ] {
+        let headers = SecretString::from(format!("authorization={HEADER_VALUE}"));
         let mut options = options(ENDPOINT);
-        options.otlp_headers = Some(SecretString::from(format!("authorization={HEADER_VALUE}")));
+        options.otlp_headers = Some(&headers);
         let error = tracer_provider(
             &options,
             env(&[(
@@ -371,7 +373,10 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
                     release.send(()).unwrap();
                     tokio::task::spawn_blocking(|| ()).await.unwrap();
                 }
-                std::assert_matches!(pending.await, Err(TracingError::PreparationTimeout));
+                std::assert_matches!(
+                    pending.await,
+                    Err(TracingError(TracingErrorKind::PreparationTimeout))
+                );
             }
         });
         if !result_ready {

@@ -9,10 +9,10 @@ use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
+use crate::byte_progress::ByteProgress;
 use crate::call::{CallContext, CallStop};
 use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
-use crate::put_body::ByteProgress;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
 #[derive(derive_more::Debug)]
@@ -97,14 +97,12 @@ type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 
 impl Resources {
     fn collection_buffer(&self, limit: usize) -> Result<Vec<u8>, Failure> {
-        if let Some(stopped) = self.context.stopped() {
-            return Err(Failure::stopped(stopped));
-        }
+        self.context.check_active()?;
         let Ok(unread) = usize::try_from(self.progress.remaining()) else {
-            return Err(LocalFailure::TooLarge.into());
+            return Err(Failure::too_large());
         };
         if unread > limit.min(isize::MAX as usize) {
-            return Err(LocalFailure::TooLarge.into());
+            return Err(Failure::too_large());
         }
         let mut buffer = Vec::new();
         buffer
@@ -182,7 +180,7 @@ impl State {
             State::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.fail_poll(Failure::stopped(stopped), None);
+            return self.fail_poll(Failure::not_applied_stop(stopped), None);
         }
         resources.waker = Some(context.waker().clone());
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
@@ -197,7 +195,7 @@ impl State {
                 Poll::Ready(item) => item,
                 Poll::Pending => None,
             };
-            return self.fail_poll(Failure::stopped(stopped), discarded);
+            return self.fail_poll(Failure::not_applied_stop(stopped), discarded);
         }
         match polled {
             Poll::Pending => (Poll::Pending, None),
@@ -235,10 +233,10 @@ fn terminate(shared: &Mutex<State>, termination: Termination) {
             return;
         };
         let outcome = match termination {
-            Termination::Stopped(stopped) => Outcome::Failure(Failure::stopped(stopped)),
+            Termination::Stopped(stopped) => Outcome::Failure(Failure::not_applied_stop(stopped)),
             Termination::Fallback(outcome) => {
                 resources.context.stopped().map_or(outcome, |stopped| {
-                    Outcome::Failure(Failure::stopped(stopped))
+                    Outcome::Failure(Failure::not_applied_stop(stopped))
                 })
             }
         };
@@ -277,7 +275,8 @@ impl Download {
         });
         let timer = tokio::spawn(async move {
             let stopped = context.wait_stopped().await;
-            if let Some(shared) = shared_on_exit.upgrade() {
+            let shared = std::mem::DropGuard::dismiss(shared_on_exit).upgrade();
+            if let Some(shared) = shared {
                 terminate(&shared, Termination::Stopped(stopped));
             }
         });

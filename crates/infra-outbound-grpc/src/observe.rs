@@ -3,12 +3,14 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use foldhash::HashMap;
-use infra_grpc_core::observe::{CallMetrics, StatusCounters, open_rpc_span};
+use infra_grpc_core::observe::{
+    CallMetrics, DIAGNOSTIC_BYTES, HANDLING_SECONDS_BUCKETS, StatusCounters, open_rpc_span,
+};
+use infra_grpc_core::protocol::{RpcName, split_method_path};
 use metrics::SharedString;
 use opentelemetry::Value;
 use opentelemetry::trace::SpanKind;
 use parking_lot::Mutex;
-use shared_rules::grpc::{DIAGNOSTIC_BYTES, HANDLING_SECONDS_BUCKETS, RpcName, split_method_path};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
@@ -252,7 +254,7 @@ fn describe_client_metrics() {
 
 #[cfg(test)]
 mod tests {
-    use shared_rules::grpc::status_code_names;
+    use infra_grpc_core::observe::status_code_names;
 
     use super::*;
 
@@ -405,12 +407,12 @@ mod tests {
             ),
             (Code::Unauthenticated, "UNAUTHENTICATED", "Unauthenticated"),
         ] {
-            let names = status_code_names(code as usize);
+            let names = status_code_names(code);
             assert_eq!(names.span, span);
             assert_eq!(names.metric, metric);
         }
         for raw in 0..17 {
-            let names = status_code_names(Code::from_i32(raw) as usize);
+            let names = status_code_names(Code::from_i32(raw));
             assert!(!names.span.is_empty() && !names.metric.is_empty());
         }
     }

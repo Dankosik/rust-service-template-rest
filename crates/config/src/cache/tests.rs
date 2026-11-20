@@ -40,7 +40,7 @@ fn only_a_nonblank_dsn_enables_the_cache() {
     assert_eq!(config.password_file, None);
     assert_eq!(config.root_ca_path, None);
     assert_eq!(config.command_timeout, Duration::from_secs(2));
-    assert_eq!(config.max_concurrency, 256);
+    assert_eq!(config.max_concurrency.get(), 256);
     assert!(config.client_certificate.is_none());
     assert!(!config.allow_plaintext && !config.allow_unauthenticated);
 }
@@ -161,7 +161,7 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
     assert!(cache.allow_plaintext && cache.allow_unauthenticated);
     assert_eq!(cache.dsn.expose_secret(), CACHE_DSN_ENV.1);
     assert_eq!(cache.command_timeout, Duration::from_millis(200));
-    assert_eq!(cache.max_concurrency, 2);
+    assert_eq!(cache.max_concurrency.get(), 2);
     assert_eq!(cache.max_key_bytes, ByteSize::kib(3));
     assert_eq!(cache.max_value_bytes, ByteSize::kib(17));
     assert!(!format!("{cfg:?}").contains("hunter2"));

@@ -15,7 +15,7 @@ mod commit_proxy;
 mod effect {
     use domain_events::{Event, EventPayload};
     use infra_messaging::HandlerError;
-    use infra_postgres::{Isolation, Pool, Tx, TxError, TxOptions, in_tx_with};
+    use infra_postgres::{Isolation, Pool, Tx, TxError, TxOptions};
     use serde::{Deserialize, Serialize};
     use time::format_description::well_known::Rfc3339;
     use tokio_util::sync::CancellationToken;
@@ -78,8 +78,7 @@ mod effect {
         pool: &Pool,
         event: &Event<Increment>,
     ) -> Result<Applied, EffectError> {
-        in_tx_with(
-            pool,
+        pool.in_tx_with(
             TxOptions {
                 isolation: Isolation::ReadCommitted,
                 read_only: false,
@@ -167,8 +166,8 @@ mod effect {
 
 use domain_events::Event;
 use effect::{Applied, EffectError, Increment};
-use infra_postgres::{Dsn, Isolation, Pool, TxError, TxOptions, in_tx_with};
-use integration_tests::{close_pools, dsn_for};
+use infra_postgres::{CloseOutcome, Dsn, Isolation, Pool, TxError, TxOptions};
+use integration_tests::dsn_for;
 use sqlx::PgPool;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -217,7 +216,7 @@ async fn durable_receipt_survives_restart_and_rejects_changed_meaning(pool: PgPo
         effect::attempt(&first, &original).await.unwrap(),
         Applied::First
     );
-    close_pools(&[&first]).await;
+    assert_eq!(first.close(WAIT).await, CloseOutcome::Complete);
     let restarted = pool_at(&dsn).await;
     let mut equivalent = original.clone();
     equivalent.payload = serde_json::from_str(r#"{ "delta": 7, "counter_id": "orders" }"#).unwrap();
@@ -272,7 +271,7 @@ async fn durable_receipt_survives_restart_and_rejects_changed_meaning(pool: PgPo
         serde_json::from_str::<Increment>(r#"{"counter_id":"orders","delta":7,"ignored":true}"#)
             .is_err()
     );
-    close_pools(&[&restarted]).await;
+    assert_eq!(restarted.close(WAIT).await, CloseOutcome::Complete);
 }
 
 #[sqlx::test]
@@ -290,18 +289,18 @@ async fn failed_mutation_and_caller_rollback_leave_no_receipt(pool: PgPool) {
         Err(EffectError::Query(_))
     );
     let rolled_back = event("rollback", -1);
-    let result = in_tx_with(
-        &business,
-        TxOptions {
-            isolation: Isolation::ReadCommitted,
-            read_only: false,
-        },
-        async |tx| {
-            effect::apply(tx, &rolled_back).await?;
-            Err::<(), _>(EffectError::Unresolved)
-        },
-    )
-    .await;
+    let result = business
+        .in_tx_with(
+            TxOptions {
+                isolation: Isolation::ReadCommitted,
+                read_only: false,
+            },
+            async |tx| {
+                effect::apply(tx, &rolled_back).await?;
+                Err::<(), _>(EffectError::Unresolved)
+            },
+        )
+        .await;
     std::assert_matches!(result, Err(EffectError::Unresolved));
     assert_eq!(value(&pool).await, i64::MAX);
     let ids: Vec<String> =
@@ -315,7 +314,7 @@ async fn failed_mutation_and_caller_rollback_leave_no_receipt(pool: PgPool) {
         Applied::First
     );
     assert_eq!(value(&pool).await, i64::MAX - 1);
-    close_pools(&[&business]).await;
+    assert_eq!(business.close(WAIT).await, CloseOutcome::Complete);
 }
 
 async fn waiting_for_arbitration(pool: &PgPool) {
@@ -355,24 +354,24 @@ async fn concurrent_identity_waits_for_commit_or_rollback_before_deciding(pool: 
         let (inserted, reached) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         let first = tokio::spawn(async move {
-            in_tx_with(
-                &first_pool,
-                TxOptions {
-                    isolation: Isolation::ReadCommitted,
-                    read_only: false,
-                },
-                async |tx| {
-                    let result = effect::apply(tx, &first_event).await?;
-                    inserted.send(()).unwrap();
-                    released.await.unwrap();
-                    if commit {
-                        Ok(result)
-                    } else {
-                        Err(EffectError::Unresolved)
-                    }
-                },
-            )
-            .await
+            first_pool
+                .in_tx_with(
+                    TxOptions {
+                        isolation: Isolation::ReadCommitted,
+                        read_only: false,
+                    },
+                    async |tx| {
+                        let result = effect::apply(tx, &first_event).await?;
+                        inserted.send(()).unwrap();
+                        released.await.unwrap();
+                        if commit {
+                            Ok(result)
+                        } else {
+                            Err(EffectError::Unresolved)
+                        }
+                    },
+                )
+                .await
         });
         timeout(WAIT, reached).await.unwrap().unwrap();
         let second_pool = business.clone();
@@ -391,7 +390,7 @@ async fn concurrent_identity_waits_for_commit_or_rollback_before_deciding(pool: 
         );
     }
     assert_eq!(value(&pool).await, 6);
-    close_pools(&[&business]).await;
+    assert_eq!(business.close(WAIT).await, CloseOutcome::Complete);
 }
 
 #[sqlx::test]
@@ -442,7 +441,7 @@ async fn unknown_commit_is_unresolved_until_later_same_identity_arbitration(pool
                 Applied::First
             }
         );
-        close_pools(&[&business]).await;
+        assert_eq!(business.close(WAIT).await, CloseOutcome::Complete);
         proxy.shutdown().await;
     }
     assert_eq!(value(&pool).await, 10);
@@ -458,20 +457,20 @@ async fn cancelled_arbitration_is_retryable_and_later_delivery_can_apply(pool: P
     let (inserted, reached) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     let first = tokio::spawn(async move {
-        in_tx_with(
-            &first_pool,
-            TxOptions {
-                isolation: Isolation::ReadCommitted,
-                read_only: false,
-            },
-            async |tx| {
-                effect::apply(tx, &first_event).await?;
-                inserted.send(()).unwrap();
-                released.await.unwrap();
-                Err::<(), _>(EffectError::Unresolved)
-            },
-        )
-        .await
+        first_pool
+            .in_tx_with(
+                TxOptions {
+                    isolation: Isolation::ReadCommitted,
+                    read_only: false,
+                },
+                async |tx| {
+                    effect::apply(tx, &first_event).await?;
+                    inserted.send(()).unwrap();
+                    released.await.unwrap();
+                    Err::<(), _>(EffectError::Unresolved)
+                },
+            )
+            .await
     });
     timeout(WAIT, reached).await.unwrap().unwrap();
     let cancel = CancellationToken::new();
@@ -498,5 +497,5 @@ async fn cancelled_arbitration_is_retryable_and_later_delivery_can_apply(pool: P
         Applied::First
     );
     assert_eq!(value(&pool).await, 2);
-    close_pools(&[&business]).await;
+    assert_eq!(business.close(WAIT).await, CloseOutcome::Complete);
 }

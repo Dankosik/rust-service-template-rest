@@ -1,47 +1,63 @@
+use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use enum_map::{Enum, EnumMap};
 use metrics::Unit;
 
-use super::LOG_TARGET;
-use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, Cleanup, is_valid_label};
+use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, CleanupName};
+use super::{LOG_TARGET, is_valid_label};
 use crate::observed;
 use crate::pool::Pool;
-use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
+use crate::transaction::{Isolation, Tx, TxError, TxOptions};
 
 pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 
 const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PopulationKind {
-    Cleanup(Cleanup),
-    Observed(&'static str),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PopulationName(&'static str);
+
+impl PopulationName {
+    /// ```compile_fail
+    /// const _: infra_postgres::maintenance::PopulationName =
+    ///     infra_postgres::maintenance::PopulationName::new("Not-Valid");
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        assert!(is_valid_label(name), "invalid population name");
+        Self(name)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl AsRef<str> for PopulationName {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
+impl fmt::Display for PopulationName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MaintenancePopulation(PopulationKind);
+pub enum MaintenancePopulation {
+    Cleanup(CleanupName),
+    Retained(PopulationName),
+}
 
 impl MaintenancePopulation {
     #[must_use]
-    pub const fn cleanup(cleanup: Cleanup) -> Self {
-        Self(PopulationKind::Cleanup(cleanup))
-    }
-
-    #[must_use]
-    pub const fn observed(label: &'static str) -> Self {
-        assert!(
-            is_valid_label(label),
-            "population label must be non-empty ASCII snake_case"
-        );
-        Self(PopulationKind::Observed(label))
-    }
-
-    #[must_use]
     pub const fn label(self) -> &'static str {
-        match self.0 {
-            PopulationKind::Cleanup(cleanup) => cleanup.label(),
-            PopulationKind::Observed(label) => label,
+        match self {
+            Self::Cleanup(cleanup) => cleanup.as_str(),
+            Self::Retained(population) => population.as_str(),
         }
     }
 }
@@ -56,19 +72,19 @@ pub struct PopulationSample {
 pub enum MaintenanceFailure {
     #[error("maintenance observation permit timed out")]
     Permit,
-    #[error("maintenance observation acquire failed")]
+    #[error("postgres connection acquire failed")]
     Acquire,
-    #[error("maintenance observation begin failed")]
+    #[error("postgres transaction begin failed")]
     Begin,
-    #[error("maintenance observation statement failed")]
+    #[error("postgres observation statement failed")]
     Statement,
-    #[error("maintenance observation commit failed")]
+    #[error("postgres transaction commit failed")]
     CommitFailed,
-    #[error("maintenance observation commit outcome unknown")]
+    #[error("postgres transaction commit outcome unknown")]
     CommitUnknown,
     #[error("maintenance observation timed out")]
     TimedOut,
-    #[error("maintenance observation clock invalid")]
+    #[error("maintenance observation clock check failed")]
     ClockInvalid,
 }
 
@@ -236,8 +252,8 @@ impl MaintenanceObserver {
         for counter in this.observations.values() {
             counter.increment(0);
         }
-        if let PopulationKind::Cleanup(cleanup) = population.0 {
-            metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
+        if let MaintenancePopulation::Cleanup(cleanup) = population {
+            metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.as_str())
                 .increment(0);
         }
         this
@@ -425,8 +441,7 @@ pub async fn in_observation_tx<F>(
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<PopulationSample, sqlx::Error>,
 {
-    in_tx_with(
-        pool,
+    pool.in_tx_with(
         TxOptions {
             isolation: Isolation::ReadCommitted,
             read_only: true,

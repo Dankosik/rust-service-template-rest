@@ -9,7 +9,7 @@ use infra_http_transport::{Drained, Server};
 use infra_jobs::Started;
 // template:end jobs:worker-shutdown-jobs-imports
 // template:begin messaging:worker-shutdown-messaging-imports
-use infra_messaging::CloseOutcome;
+use infra_messaging::{CloseOutcome, MessagingStartup};
 // template:end messaging:worker-shutdown-messaging-imports
 // template:begin jobs:worker-shutdown-postgres-imports
 use infra_postgres::Pool;
@@ -21,9 +21,6 @@ use service_config::{ShutdownTail, WorkerHttpConfig};
 use tokio::time::Instant;
 
 use crate::background::Background;
-// template:begin messaging:worker-shutdown-broker-import
-use crate::resources::BrokerResource;
-// template:end messaging:worker-shutdown-broker-import
 use crate::resources::{Dependencies, Listeners, Resources, Telemetry, Work};
 use crate::signals::Signals;
 
@@ -175,7 +172,7 @@ async fn finish_background(
     mut outcome: Outcome,
     abort_deadline: Instant,
 ) -> Outcome {
-    if !background.tracker.is_empty() {
+    if !background.is_empty() {
         outcome = Outcome::Degraded;
         background.abort();
         tracing::warn!("background join expired; abort requested");
@@ -446,24 +443,15 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) -> Outcome 
 }
 
 async fn join_background(background: &Background, budget: Duration) -> Outcome {
-    background.cancel.cancel();
-    background.tracker.close();
-    if tokio::time::timeout(budget, background.tracker.wait())
-        .await
-        .is_err()
-        || background.failure().is_some()
-    {
-        Outcome::Degraded
-    } else {
+    if background.join_within(budget).await {
         Outcome::Graceful
+    } else {
+        Outcome::Degraded
     }
 }
 
 async fn wait_for_background_abort(background: &Background, deadline: Instant) {
-    if tokio::time::timeout_at(deadline, background.tracker.wait())
-        .await
-        .is_ok()
-    {
+    if background.wait_until(deadline).await {
         tracing::warn!("background_abort_acknowledged");
     } else {
         tracing::warn!("background_completion_unconfirmed");
@@ -472,7 +460,7 @@ async fn wait_for_background_abort(background: &Background, deadline: Instant) {
 
 // template:begin jobs:worker-shutdown-close-pool
 async fn close_pool(pool: &Pool, budget: Duration) -> Outcome {
-    match infra_postgres::close(pool, budget).await {
+    match pool.close(budget).await {
         infra_postgres::CloseOutcome::Complete => {
             tracing::info!("postgres_pool_closed");
             Outcome::Graceful
@@ -486,12 +474,9 @@ async fn close_pool(pool: &Pool, budget: Duration) -> Outcome {
 // template:end jobs:worker-shutdown-close-pool
 
 // template:begin messaging:worker-shutdown-close-messaging-fn
-async fn close_messaging(broker: BrokerResource, deadline: Instant) -> Outcome {
+async fn close_messaging(broker: MessagingStartup, deadline: Instant) -> Outcome {
     let cancel = tokio_util::sync::CancellationToken::new();
-    let closed = match broker {
-        BrokerResource::Starting(startup) => startup.close(deadline, &cancel).await,
-        BrokerResource::Admitted(messaging) => messaging.close(deadline, &cancel).await,
-    };
+    let closed = broker.close(deadline, &cancel).await;
     match closed {
         CloseOutcome::Complete => {
             tracing::info!("messaging_closed");
@@ -516,9 +501,7 @@ async fn close_dependencies(dependencies: Dependencies, deadline: Instant) -> Ou
     } = dependencies;
     let pool_close = async {
         // template:begin jobs:worker-shutdown-close-jobs
-        use crate::resources::PoolResource;
-
-        if let Some(PoolResource::Starting(pool) | PoolResource::Admitted(pool)) = pool {
+        if let Some(pool) = pool {
             return close_pool(&pool, deadline.saturating_duration_since(Instant::now())).await;
         }
         // template:end jobs:worker-shutdown-close-jobs
@@ -644,15 +627,15 @@ mod tests {
 
     #[tokio::test]
     async fn cooperative_background_completion_is_graceful() {
-        let background = Background::new();
+        let mut background = Background::new();
         background.spawn("waits", CancellationToken::cancelled_owned);
         assert_eq!(
             join_background(&background, BACKGROUND_JOIN).await,
             Outcome::Graceful
         );
-        assert!(background.cancel.is_cancelled());
-        assert!(background.tracker.is_closed());
-        assert!(background.tracker.is_empty());
+        assert!(background.is_cancelled());
+        assert!(background.is_closed());
+        assert!(background.is_empty());
         assert!(
             background.failure().is_none(),
             "a task that ends at its cancellation is not a failure"
@@ -661,16 +644,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_that_cancels_itself_and_returns_is_reported_by_name() {
-        let background = Background::new();
+        let mut background = Background::new();
+        let mut failures = background.failure_observer();
         background.spawn("waits", CancellationToken::cancelled_owned);
         background.spawn("returns", |cancel| async move { cancel.cancel() });
         assert_eq!(
-            tokio::time::timeout(BACKGROUND_JOIN, background.wait_for_failure())
-                .await
-                .unwrap(),
+            tokio::time::timeout(
+                BACKGROUND_JOIN,
+                crate::background::wait_for_failure(&mut failures),
+            )
+            .await
+            .unwrap(),
             "returns"
         );
-        assert!(!background.cancel.is_cancelled());
+        assert!(!background.is_cancelled());
         assert_eq!(
             join_background(&background, BACKGROUND_JOIN).await,
             Outcome::Degraded
@@ -679,13 +666,13 @@ mod tests {
 
     #[tokio::test]
     async fn panic_after_cancellation_degrades_common_shutdown() {
-        let background = Background::new();
+        let mut background = Background::new();
         background.spawn("cleanup_panics", |cancel| async move {
             cancel.cancelled().await;
             panic!("cleanup defect");
         });
-        let tracker = background.tracker.clone();
-        let failures = background.subscribe_failures();
+        let tracker = background.tracker();
+        let failures = background.failure_observer();
         let config = worker_config(&[]).unwrap();
         let http = config.http();
         let mut signals = Signals::install().unwrap();
@@ -708,14 +695,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn ignored_cancellation_is_aborted_and_acknowledged_before_shutdown_returns() {
-        let background = Background::new();
+        let mut background = Background::new();
         let (ended, observed_end) = tokio::sync::oneshot::channel::<()>();
         background.spawn("ignores_stop", |_cancel| async move {
             let _held = ended;
             std::future::pending::<()>().await;
         });
-        let tracker = background.tracker.clone();
-        let failures = background.subscribe_failures();
+        let tracker = background.tracker();
+        let failures = background.failure_observer();
         let config = worker_config(&[]).unwrap();
         let http = config.http();
         let mut signals = Signals::install().unwrap();

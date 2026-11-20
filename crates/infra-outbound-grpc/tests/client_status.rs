@@ -335,7 +335,7 @@ fn check_opening_refusals(refusing: &mut Client) {
     drop(abandoned);
     let status = PreparedCall::prepare(refusing, unary_request())
         .unwrap()
-        .try_step(|_, _| Err::<(), _>(tonic::Status::unavailable("credentials unavailable")))
+        .try_step(|_, _| Err(tonic::Status::unavailable("credentials unavailable")))
         .unwrap_err();
     assert_eq!(status.code(), tonic::Code::Unavailable);
 }

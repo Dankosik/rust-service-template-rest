@@ -31,7 +31,7 @@ pub(super) fn install_metrics() -> Result<Metrics, BootstrapError> {
     )?)
 }
 
-pub(super) fn tracing_options(config: &Config) -> TracingOptions {
+pub(super) fn tracing_options(config: &Config) -> TracingOptions<'_> {
     let otel = &config.observability().otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => ResolvedSampler::AlwaysOn,
@@ -42,14 +42,14 @@ pub(super) fn tracing_options(config: &Config) -> TracingOptions {
         }
     };
     TracingOptions {
-        service_name: otel.service_name.clone(),
-        service_version: config.app().version.clone(),
-        vcs_revision: config.app().commit.clone(),
-        instance_id: config.app().instance_id.clone(),
-        deployment_environment: config.app().env.clone(),
+        service_name: &otel.service_name,
+        service_version: &config.app().version,
+        vcs_revision: &config.app().commit,
+        instance_id: config.app().instance_id.as_deref(),
+        deployment_environment: &config.app().env,
         sampler,
-        otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: otel.exporter.otlp_headers.clone(),
+        otlp_endpoint: otel.exporter.otlp_endpoint.as_deref(),
+        otlp_headers: otel.exporter.otlp_headers.as_ref(),
     }
 }
 
@@ -90,10 +90,12 @@ mod tests {
                 ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", "0.5"),
             ])
         };
-        let options = tracing_options(&for_sampler("always_on"));
+        let config = for_sampler("always_on");
+        let options = tracing_options(&config);
         std::assert_matches!(options.sampler, ResolvedSampler::AlwaysOn);
 
-        let options = tracing_options(&for_sampler("traceidratio"));
+        let config = for_sampler("traceidratio");
+        let options = tracing_options(&config);
         std::assert_matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON
         );
     }

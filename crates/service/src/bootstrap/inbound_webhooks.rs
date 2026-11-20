@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use infra_postgres::Pool;
+use infra_webhooks::inbound::Verifiers;
 use infra_webhooks::inbound::route::WebhookState;
-use infra_webhooks::inbound::{Receiver, Verifier};
 use infra_webhooks::protocol::{EndpointKeyOwners, KeyRing, SigningKey};
 use secrecy::ExposeSecret;
 use service_config::{Config, InboundWebhookKey};
@@ -18,7 +16,7 @@ pub(super) fn prepare(
         return Ok(WebhookState::inert());
     }
     let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksWithoutPostgres)?;
-    let mut bindings = Vec::with_capacity(webhooks.len());
+    let mut verifiers = Verifiers::new();
     let mut owners = EndpointKeyOwners::default();
     for (endpoint_id, endpoint) in webhooks {
         let active = signing_key(endpoint_id, &endpoint.active_key)?;
@@ -29,10 +27,9 @@ pub(super) fn prepare(
             .transpose()?;
         let keys = KeyRing::new(active, previous);
         owners.register(endpoint_id, &keys)?;
-        let verifier: Arc<dyn Verifier> = Arc::new(keys);
-        bindings.push((endpoint_id.clone(), verifier));
+        verifiers.bind(endpoint_id.as_str(), keys);
     }
-    Ok(WebhookState::active(Receiver::new(pool.clone(), bindings)))
+    Ok(WebhookState::active(verifiers.into_receiver(pool.clone())))
 }
 
 fn signing_key(endpoint: &str, key: &InboundWebhookKey) -> Result<SigningKey, BootstrapError> {
@@ -69,20 +66,7 @@ mod tests {
                 ("APP__INBOUND_WEBHOOKS__SECRETS__B", second_key),
             ])
         };
-        let dsn =
-            infra_postgres::Dsn::admit("postgres://app:test@127.0.0.1:1/app?sslmode=verify-full")
-                .unwrap();
-        let pool = infra_postgres::prepare_pool(
-            &dsn,
-            &infra_postgres::PoolOptions {
-                max_connections: std::num::NonZeroU32::MIN,
-                application_name: "inbound-webhooks-test",
-                default_isolation: infra_postgres::Isolation::ReadCommitted,
-                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
-                wait_order: infra_postgres::WaitOrder::Arrival,
-                notifications: false,
-            },
-        );
+        let pool = Pool::connect_lazy_for_test("postgres://127.0.0.1:1/app").unwrap();
         let independent = config_for("AgICAgICAgICAgICAgICAgICAgICAgIC");
         assert!(prepare(&independent, Some(&pool)).is_ok());
         let overlap = config_for("whsec_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB");

@@ -31,7 +31,6 @@ mod telemetry;
 mod inbound_webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
 
-use std::ffi::OsString;
 use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
@@ -43,8 +42,8 @@ use health::{BoxedProbe, PreparedReadiness, Readiness, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions};
 use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options};
 use infra_telemetry::{
-    LoggerGuard, LoggingFormat, LoggingOptions, Metrics, TracerProviderHandle, diagnostics_router,
-    install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
+    LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
+    install_subscriber, install_tracer_provider, runtime_metrics,
 };
 use service_config::{BuildInfo, Config, LoadOptions, LogFormat};
 use tokio::time::Instant;
@@ -52,7 +51,7 @@ use tokio_util::sync::CancellationToken;
 
 use self::background::{Background, BackgroundFailure, wait_for_failure};
 pub use self::background::{BackgroundFailureReporter, BackgroundRegistration};
-use self::shutdown::{Dependencies, Outcome, Serving};
+use self::shutdown::{Dependencies, Outcome, ReadinessState, Serving, Telemetry};
 use self::signals::Signals;
 use crate::{RegistrationError, ServiceRegistration};
 
@@ -183,21 +182,8 @@ fn fail_to_stderr(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-pub(super) fn run_registered<I>(args: I, registration: ServiceRegistration) -> ExitCode
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let options = match LoadOptions::try_parse_from(args) {
-        Ok(options) => options,
-        Err(error) => {
-            return if error.print().is_ok() {
-                ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
-            } else {
-                ExitCode::FAILURE
-            };
-        }
-    };
-    let config = match service_config::load(&options, BUILD_INFO, shutdown::TAIL) {
+pub(super) fn run_registered(options: &LoadOptions, registration: ServiceRegistration) -> ExitCode {
+    let config = match service_config::load(options, BUILD_INFO, shutdown::TAIL) {
         Ok(config) => config,
         Err(err) => return fail_to_stderr(&err),
     };
@@ -209,17 +195,28 @@ where
         Ok(runtime) => runtime,
         Err(err) => return fail_to_stderr(format!("build tokio runtime: {err}")),
     };
+    let signals = {
+        let _entered = runtime.enter();
+        Signals::install()
+    };
+    let mut signals = match signals {
+        Ok(signals) => signals,
+        Err(err) => {
+            runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+            return fail_to_stderr(BootstrapError::Signals(err));
+        }
+    };
 
     let mut exit = RuntimeExit::default();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        runtime.block_on(serve(config, registration, &mut exit))
+        runtime.block_on(serve(config, registration, &mut signals, &mut exit))
     }))
     .unwrap_or(Err(BootstrapError::Panicked));
     let remaining = exit.deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline| {
         RUNTIME_SHUTDOWN_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
     });
     runtime.shutdown_timeout(remaining);
-    drop(exit.signals);
+    drop(signals);
 
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
@@ -237,14 +234,13 @@ where
 #[derive(Default)]
 struct RuntimeExit {
     logger_installed: bool,
-    signals: Option<Signals>,
     deadline: Option<Instant>,
 }
 
-#[derive(Default)]
-struct TelemetryHandles {
-    tracer_provider: Option<TracerProviderHandle>,
-    logger: Option<LoggerGuard>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupOutcome {
+    Admitted,
+    Stopped,
 }
 
 #[allow(
@@ -254,18 +250,16 @@ struct TelemetryHandles {
 async fn serve(
     config: Config,
     registration: ServiceRegistration,
+    signals: &mut Signals,
     exit: &mut RuntimeExit,
 ) -> Result<Outcome, BootstrapError> {
-    let signals = exit
-        .signals
-        .insert(Signals::install().map_err(BootstrapError::Signals)?);
     let config = Box::new(config);
     let http_config = config.http().clone();
     let mut background = Background::new(CancellationToken::new());
     let mut background_failures = background.failure_observer();
     let mut dependencies = Dependencies::default();
     let mut serving = Serving::default();
-    let mut telemetry = TelemetryHandles::default();
+    let mut telemetry = Telemetry::default();
 
     let failure = AssertUnwindSafe(async {
         let startup = async {
@@ -294,8 +288,9 @@ async fn serve(
             started = startup => started.map(Some),
         };
         drop(config);
-        finish_startup(startup_result, signals, &mut background, &mut serving)?;
-        if !serving.admitted {
+        if finish_startup(startup_result, signals, &mut background, &mut serving)?
+            == StartupOutcome::Stopped
+        {
             return Ok(());
         }
         tokio::select! {
@@ -324,8 +319,7 @@ async fn serve(
         serving,
         background,
         dependencies,
-        tracer_provider: telemetry.tracer_provider,
-        logger: telemetry.logger,
+        telemetry,
     })
     .await;
     match failure {
@@ -337,7 +331,7 @@ async fn serve(
 async fn install_telemetry(
     config: &Config,
     background: &mut Background,
-    handles: &mut TelemetryHandles,
+    handles: &mut Telemetry,
     logger_installed: &mut bool,
 ) -> Result<Metrics, BootstrapError> {
     let provider = handles
@@ -390,7 +384,7 @@ fn finish_startup(
     signals: &mut Signals,
     background: &mut Background,
     serving: &mut Serving,
-) -> Result<(), BootstrapError> {
+) -> Result<StartupOutcome, BootstrapError> {
     if let Some(error) = pending_failure(background, serving) {
         return Err(error);
     }
@@ -398,11 +392,12 @@ fn finish_startup(
         && !signals.take_pending()?
     {
         let refresher = prepared.activate()?;
-        serving.admitted = true;
+        serving.readiness.mark_admitted();
         background.spawn_with_token("readiness", |stop| refresher.refresh_until(stop));
         tracing::info!("service_ready");
+        return Ok(StartupOutcome::Admitted);
     }
-    Ok(())
+    Ok(StartupOutcome::Stopped)
 }
 
 fn pending_failure(background: &Background, serving: &Serving) -> Option<BootstrapError> {
@@ -410,10 +405,10 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
         return Some(failure.into());
     }
     for (name, server) in [
-        (HTTP_ACCEPT_TASK, serving.http_server.as_ref()),
-        (DIAGNOSTICS_ACCEPT_TASK, serving.diagnostics_server.as_ref()),
+        (HTTP_ACCEPT_TASK, serving.traffic.http.as_ref()),
+        (DIAGNOSTICS_ACCEPT_TASK, serving.diagnostics.as_ref()),
         // template:begin grpc:bootstrap-pending-grpc
-        (GRPC_ACCEPT_TASK, serving.grpc_server.as_ref()),
+        (GRPC_ACCEPT_TASK, serving.traffic.grpc.as_ref()),
         // template:end grpc:bootstrap-pending-grpc
     ] {
         if let Some(server) = server
@@ -487,10 +482,12 @@ async fn start(
         )
         .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
     );
-    let readiness_control = serving.readiness.insert(readiness.control());
+    let readiness_control = readiness.control();
+    let readiness_reader = readiness_control.reader();
+    serving.readiness = ReadinessState::Prepared(readiness_control);
 
     let state = crate::AppState {
-        readiness: readiness_control.reader(),
+        readiness: readiness_reader.clone(),
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
@@ -526,7 +523,7 @@ async fn start(
     // template:end grpc:bootstrap-grpc-prepare-finish
     let auth = Authentication::Public;
     // template:begin authn:bootstrap-http-bearer-authentication
-    let auth = bearer.map_or(auth, |verifier| Authentication::Bearer(Box::new(verifier)));
+    let auth = bearer.map_or(auth, Authentication::Bearer);
     // template:end authn:bootstrap-http-bearer-authentication
     let app = http_application(
         state,
@@ -551,13 +548,7 @@ async fn start(
     )?;
     let mut prepared_readiness = readiness.prepare().await?;
 
-    listeners.serve(
-        app,
-        metrics,
-        readiness_control.reader(),
-        background,
-        serving,
-    )?;
+    listeners.serve(app, metrics, readiness_reader, background, serving)?;
 
     prepared_readiness.ensure_fresh().await?;
     Ok(prepared_readiness)
@@ -629,7 +620,8 @@ impl BoundListeners {
         #[cfg(feature = "hotpath")]
         hotpath::tokio_runtime!();
         let http_server = serving
-            .http_server
+            .traffic
+            .http
             .insert(app.serve(self.http, self.http_options));
         background.watch_server(HTTP_ACCEPT_TASK, http_server);
         tracing::info!(addr = %http_server.local_addr(), "http listener bound");
@@ -638,7 +630,7 @@ impl BoundListeners {
             let diagnostics = diagnostics_router(metrics.clone(), move || readiness.is_ready())
                 .merge(infra_http::liveness_router());
             let diagnostics_server = serving
-                .diagnostics_server
+                .diagnostics
                 .insert(listener.serve(diagnostics, self.http_options));
             background.watch_server(DIAGNOSTICS_ACCEPT_TASK, diagnostics_server);
             tracing::info!(
@@ -651,7 +643,8 @@ impl BoundListeners {
         if let Some((listener, grpc)) = self.grpc {
             let grpc_server =
                 serving
-                    .grpc_server
+                    .traffic
+                    .grpc
                     .insert(grpc.app.serve(listener, grpc.options, grpc.tls)?);
             background.watch_server(GRPC_ACCEPT_TASK, grpc_server);
             tracing::info!(addr = %grpc_server.local_addr(), "grpc listener bound");
@@ -812,7 +805,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let address = serving.http_server.as_ref().unwrap().local_addr();
+        let address = serving.traffic.http.as_ref().unwrap().local_addr();
         let status = tokio::time::timeout(Duration::from_secs(2), async {
             let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
             stream
@@ -846,9 +839,9 @@ mod tests {
                 panicked: false
             }))
         );
-        assert!(!serving.admitted);
+        assert!(!serving.readiness.is_admitted());
         std::assert_matches!(
-            serving.readiness.as_ref().unwrap().reader().verdict(),
+            serving.readiness.control().unwrap().reader().verdict(),
             Err(health::NotReady::NotEvaluated)
         );
         background.cancel();
@@ -880,10 +873,10 @@ mod tests {
         )
         .await;
         std::assert_matches!(result, Err(BootstrapError::Server(_)));
-        assert!(!serving.admitted);
-        assert!(serving.http_server.is_none());
+        assert!(!serving.readiness.is_admitted());
+        assert!(serving.traffic.http.is_none());
         std::assert_matches!(
-            serving.readiness.as_ref().unwrap().reader().verdict(),
+            serving.readiness.control().unwrap().reader().verdict(),
             Err(health::NotReady::NotEvaluated)
         );
         let mut signals = Signals::install().unwrap();
@@ -896,8 +889,7 @@ mod tests {
                 serving,
                 background,
                 dependencies,
-                tracer_provider: None,
-                logger: None,
+                telemetry: Telemetry::default(),
             }),
         )
         .await
@@ -1116,7 +1108,7 @@ mod tests {
                 source.downcast_ref::<infra_outbound_grpc::ClientError>(),
                 Some(infra_outbound_grpc::ClientError::DestinationSecurityMismatch)
             );
-            assert!(serving.grpc_server.is_none() && serving.http_server.is_none());
+            assert!(serving.traffic.grpc.is_none() && serving.traffic.http.is_none());
         }
     }
 
@@ -1171,14 +1163,17 @@ mod tests {
         .await
         .unwrap();
         let mut signals = Signals::install().unwrap();
-        finish_startup(
-            Ok(Some(prepared)),
-            &mut signals,
-            &mut background,
-            &mut serving,
-        )
-        .unwrap();
-        let address = serving.grpc_server.as_ref().unwrap().local_addr();
+        assert_eq!(
+            finish_startup(
+                Ok(Some(prepared)),
+                &mut signals,
+                &mut background,
+                &mut serving,
+            )
+            .unwrap(),
+            StartupOutcome::Admitted
+        );
+        let address = serving.traffic.grpc.as_ref().unwrap().local_addr();
         let origin = format!("https://{address}");
         let resource = infra_outbound_grpc::Client::builder(
             &origin,
@@ -1222,8 +1217,7 @@ mod tests {
                 serving,
                 background,
                 dependencies,
-                tracer_provider: None,
-                logger: None,
+                telemetry: Telemetry::default(),
             }),
         )
         .await

@@ -61,12 +61,13 @@ fn defaults_are_inert() {
 fn an_active_provider_needs_bucket_and_credentials() {
     let admitted = admit(railway(), false).unwrap().unwrap();
     assert_eq!(admitted.bucket, "results-jdhhd8oe18xi");
-    assert_eq!(
+    assert_matches!(
         admitted.provider,
         ObjectStorageProvider::Railway {
-            endpoint: "https://t3.storageapi.dev".to_owned(),
+            endpoint,
             region: None,
-        }
+            ..
+        } if endpoint == "https://t3.storageapi.dev"
     );
     for (mutate, key) in [
         (
@@ -148,12 +149,13 @@ fn providers_accept_only_their_own_keys() {
     );
     other.region = Some("eu-central-1".to_owned());
     assert_eq!(key_of(other, false), "object_storage.expected_bucket_owner");
-    assert_eq!(
+    assert_matches!(
         admit(amazon(), false).unwrap().unwrap().provider,
         ObjectStorageProvider::AmazonS3 {
-            region: "eu-central-1".to_owned(),
-            expected_bucket_owner: "123456789012".to_owned(),
-        }
+            region,
+            expected_bucket_owner,
+            credentials: ObjectStorageAmazonCredentials::AccessKey(_),
+        } if region == "eu-central-1" && expected_bucket_owner == "123456789012"
     );
 
     let mut r2 = railway();
@@ -161,11 +163,10 @@ fn providers_accept_only_their_own_keys() {
     r2.region = Some("eu-central-1".to_owned());
     assert_eq!(key_of(r2.clone(), false), "object_storage.region");
     r2.region = Some("auto".to_owned());
-    assert_eq!(
+    assert_matches!(
         admit(r2.clone(), false).unwrap().unwrap().provider,
-        ObjectStorageProvider::CloudflareR2 {
-            endpoint: "https://t3.storageapi.dev".to_owned(),
-        }
+        ObjectStorageProvider::CloudflareR2 { endpoint, .. }
+            if endpoint == "https://t3.storageapi.dev"
     );
     r2.expected_bucket_owner = Some("123456789012".to_owned());
     let errors = admit(r2, false).unwrap_err();
@@ -219,8 +220,11 @@ fn workload_identity_is_amazon_only_and_takes_no_access_key() {
     );
     input.secret_access_key = None;
     assert_matches!(
-        admit(input, false).unwrap().unwrap().credentials,
-        ObjectStorageCredentials::WorkloadIdentity
+        admit(input, false).unwrap().unwrap().provider,
+        ObjectStorageProvider::AmazonS3 {
+            credentials: ObjectStorageAmazonCredentials::WorkloadIdentity,
+            ..
+        }
     );
 
     let mut other = railway();
@@ -335,25 +339,22 @@ fn object_storage_environment_maps_railway_bucket_variables() {
         ("APP__OBJECT_STORAGE__OPERATION_TIMEOUT", "10s"),
     ]);
     let storage = cfg.object_storage().unwrap();
-    assert_eq!(
-        storage.provider,
-        crate::ObjectStorageProvider::Railway {
-            endpoint: "https://t3.storageapi.dev".to_owned(),
-            region: Some("auto".to_owned()),
-        }
-    );
-    assert_eq!(storage.bucket, "results-jdhhd8oe18xi");
-    let crate::ObjectStorageCredentials::AccessKey {
-        access_key_id,
-        secret_access_key,
-    } = &storage.credentials
+    let crate::ObjectStorageProvider::Railway {
+        endpoint,
+        region,
+        credentials,
+    } = &storage.provider
     else {
-        panic!("expected access key credentials");
+        panic!("expected railway provider");
     };
-    assert_eq!(access_key_id, "tid_example");
-    assert_eq!(secret_access_key.expose_secret(), "hunter2");
+    assert_eq!(endpoint, "https://t3.storageapi.dev");
+    assert_eq!(region.as_deref(), Some("auto"));
+    assert_eq!(storage.bucket, "results-jdhhd8oe18xi");
+    assert_eq!(credentials.access_key_id, "tid_example");
+    assert_eq!(credentials.secret_access_key.expose_secret(), "hunter2");
+    assert_eq!(storage.provider.credentials_label(), "access_key");
     assert_eq!(storage.max_object_bytes.as_u64(), 2 * 1024 * 1024);
-    assert_eq!(storage.max_concurrency, 32);
+    assert_eq!(storage.max_concurrency.get(), 32);
     assert_eq!(storage.operation_timeout, Duration::from_secs(10));
     assert!(!format!("{cfg:?}").contains("hunter2"));
 }
@@ -368,8 +369,19 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__CREDENTIALS", "workload_identity"),
     ]);
     assert_matches!(
-        amazon.object_storage().unwrap().credentials,
-        crate::ObjectStorageCredentials::WorkloadIdentity
+        amazon.object_storage().unwrap().provider,
+        crate::ObjectStorageProvider::AmazonS3 {
+            credentials: crate::ObjectStorageAmazonCredentials::WorkloadIdentity,
+            ..
+        }
+    );
+    assert_eq!(
+        amazon
+            .object_storage()
+            .unwrap()
+            .provider
+            .credentials_label(),
+        "workload_identity"
     );
 
     let generic = load_env(&[
@@ -383,13 +395,14 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "example"),
         ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
     ]);
-    assert_eq!(
-        generic.object_storage().unwrap().provider,
+    assert_matches!(
+        &generic.object_storage().unwrap().provider,
         crate::ObjectStorageProvider::S3Compatible {
-            endpoint: "https://ceph.internal.example:8443".to_owned(),
+            endpoint,
             region: None,
             path_style: true,
-        }
+            ..
+        } if endpoint == "https://ceph.internal.example:8443"
     );
 }
 
@@ -419,8 +432,11 @@ fn object_storage_credentials_selector_in_a_file_is_public() {
     )
     .unwrap();
     assert_matches!(
-        cfg.object_storage().unwrap().credentials,
-        crate::ObjectStorageCredentials::WorkloadIdentity
+        cfg.object_storage().unwrap().provider,
+        crate::ObjectStorageProvider::AmazonS3 {
+            credentials: crate::ObjectStorageAmazonCredentials::WorkloadIdentity,
+            ..
+        }
     );
 }
 

@@ -5,16 +5,18 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, header::ALLOW};
 use axum::middleware::Next;
 use axum::response::Response;
-use enum_map::{Enum, EnumMap};
+use enum_map::EnumMap;
 use foldhash::{HashMap, HashMapExt as _};
 use itertools::Itertools as _;
-use utoipa::openapi::path::{Operation, PathItem};
+use utoipa::openapi::path::Operation;
 use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr};
 
-use super::{FinalizeError, documented_methods};
+use super::document::{StandardMethod, documented_methods};
+use super::{FinalizeError, FinalizeKind};
 // template:begin http-idempotency:http-policy-idempotency-import
-use super::{IdempotentOperations, outcomes};
+use super::IdempotentOperations;
+use super::document::resolve;
 // template:end http-idempotency:http-policy-idempotency-import
 use crate::problem::sanitized_internal_error;
 
@@ -26,109 +28,6 @@ pub(crate) enum Access {
         crate::authn::ProtectedAccess,
         // template:end authn:http-contract-protected-scopes
     ),
-}
-
-#[derive(Clone, Copy, Debug, Enum, Eq, PartialEq)]
-pub(super) enum StandardMethod {
-    Get,
-    Put,
-    Post,
-    Delete,
-    Options,
-    Head,
-    Patch,
-    Trace,
-    Query,
-}
-
-impl StandardMethod {
-    pub(super) const ALL: [Self; 9] = [
-        Self::Get,
-        Self::Put,
-        Self::Post,
-        Self::Delete,
-        Self::Options,
-        Self::Head,
-        Self::Patch,
-        Self::Trace,
-        Self::Query,
-    ];
-
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Put => "PUT",
-            Self::Post => "POST",
-            Self::Delete => "DELETE",
-            Self::Options => "OPTIONS",
-            Self::Head => "HEAD",
-            Self::Patch => "PATCH",
-            Self::Trace => "TRACE",
-            Self::Query => "QUERY",
-        }
-    }
-
-    pub(super) fn parse(method: &str) -> Option<Self> {
-        match method {
-            "GET" => Some(Self::Get),
-            "PUT" => Some(Self::Put),
-            "POST" => Some(Self::Post),
-            "DELETE" => Some(Self::Delete),
-            "OPTIONS" => Some(Self::Options),
-            "HEAD" => Some(Self::Head),
-            "PATCH" => Some(Self::Patch),
-            "TRACE" => Some(Self::Trace),
-            "QUERY" => Some(Self::Query),
-            _ => None,
-        }
-    }
-
-    pub(super) const fn operation(self, item: &PathItem) -> Option<&Operation> {
-        match self {
-            Self::Get => item.get.as_ref(),
-            Self::Put => item.put.as_ref(),
-            Self::Post => item.post.as_ref(),
-            Self::Delete => item.delete.as_ref(),
-            Self::Options => item.options.as_ref(),
-            Self::Head => item.head.as_ref(),
-            Self::Patch => item.patch.as_ref(),
-            Self::Trace => item.trace.as_ref(),
-            Self::Query => item.query.as_ref(),
-        }
-    }
-}
-
-pub(super) fn fixed_operations(
-    item: &PathItem,
-) -> impl Iterator<Item = (&'static str, &Operation)> {
-    StandardMethod::ALL
-        .into_iter()
-        .filter_map(move |method| method.operation(item).map(|op| (method.as_str(), op)))
-}
-
-pub(crate) fn path_operations_mut<'a>(
-    item: &'a mut PathItem,
-) -> impl Iterator<Item = (&'a str, &'a mut Operation)> {
-    [
-        (StandardMethod::Get, &mut item.get),
-        (StandardMethod::Put, &mut item.put),
-        (StandardMethod::Post, &mut item.post),
-        (StandardMethod::Delete, &mut item.delete),
-        (StandardMethod::Options, &mut item.options),
-        (StandardMethod::Head, &mut item.head),
-        (StandardMethod::Patch, &mut item.patch),
-        (StandardMethod::Trace, &mut item.trace),
-        (StandardMethod::Query, &mut item.query),
-    ]
-    .into_iter()
-    .filter_map(|(method, op)| -> Option<(&'a str, &'a mut Operation)> {
-        op.as_mut().map(|op| (method.as_str(), op))
-    })
-    .chain(
-        item.additional_operations
-            .iter_mut()
-            .map(|(method, op)| (method.as_str(), op)),
-    )
 }
 
 #[derive(Clone)]
@@ -185,7 +84,7 @@ impl Policy {
                     .join(",");
                 Some(
                     HeaderValue::from_str(&methods)
-                        .map_err(|_| FinalizeError::InvalidRegistration)?,
+                        .map_err(|_| FinalizeError::new(FinalizeKind::InvalidRegistration))?,
                 )
             } else {
                 None
@@ -208,11 +107,11 @@ impl Policy {
             let mut additional = Vec::with_capacity(item.additional_operations.len());
             for (method, operation) in &item.additional_operations {
                 if StandardMethod::parse(method).is_some() {
-                    return Err(FinalizeError::InvalidPolicy {
+                    return Err(FinalizeError::new(FinalizeKind::InvalidPolicy {
                         path: path.to_owned(),
                         method: method.clone(),
-                        fault: "fixed_method_in_additional_operations",
-                    });
+                        fault: PolicyFault::FixedMethodInAdditionalOperations,
+                    }));
                 }
                 additional.push((
                     method.as_str().into(),
@@ -318,20 +217,21 @@ fn compile_operation(
     idempotent: &IdempotentOperations,
     // template:end http-idempotency:http-compile-operation-mounts
 ) -> Result<Access, FinalizeError> {
-    let invalid = |fault| FinalizeError::InvalidPolicy {
-        path: path.to_owned(),
-        method: method.to_owned(),
-        fault,
+    let invalid = |fault| {
+        FinalizeError::new(FinalizeKind::InvalidPolicy {
+            path: path.to_owned(),
+            method: method.to_owned(),
+            fault,
+        })
     };
-    let access =
-        Access::from_operation(document, operation).map_err(|fault| invalid(fault.as_str()))?;
+    let access = Access::from_operation(document, operation).map_err(invalid)?;
     // template:begin http-idempotency:http-contract-idempotency-policy
     let is_idempotent = idempotent.contains(path, method);
     if is_idempotent && matches!(access, Access::Public) {
-        return Err(invalid("idempotency_requires_authentication"));
+        return Err(invalid(PolicyFault::IdempotencyRequiresAuthentication));
     }
     if !is_idempotent && declares_idempotency(document, path, operation) {
-        return Err(invalid("idempotency_requires_registration"));
+        return Err(invalid(PolicyFault::IdempotencyRequiresRegistration));
     }
     // template:end http-idempotency:http-contract-idempotency-policy
     Ok(access)
@@ -352,48 +252,47 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
         .into_iter()
         .flatten()
         .chain(operation.parameters.iter().flatten())
-        .filter_map(|value| outcomes::resolve(value, parameters, "#/components/parameters/"))
+        .filter_map(|value| resolve(value, parameters, "#/components/parameters/"))
         .any(|parameter| {
             parameter.parameter_in == ParameterIn::Header
                 && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         });
     key || operation.responses.responses.iter().any(|(status, value)| {
         status.starts_with('2')
-            && outcomes::resolve(value, responses, "#/components/responses/").is_some_and(
-                |response| {
-                    response
-                        .headers
-                        .keys()
-                        .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER))
-                },
-            )
+            && resolve(value, responses, "#/components/responses/").is_some_and(|response| {
+                response
+                    .headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER))
+            })
     })
 }
 // template:end http-idempotency:http-unmounted-reserved-declarations
 
 const BEARER_SCHEME: &str = "bearerAuth";
 
-#[derive(Clone, Copy, Debug)]
-enum PolicyFault {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum PolicyFault {
+    #[error("fixed_method_in_additional_operations")]
+    FixedMethodInAdditionalOperations,
+    #[error("invalid_bearer_delegation")]
     InvalidDelegation,
+    #[error("invalid_scope_token")]
     InvalidScopeToken,
+    #[error("delegation_requires_authentication")]
     PublicDelegation,
+    #[error("missing_bearer_scheme")]
     MissingBearerScheme,
+    #[error("unsupported_requirement")]
     UnsupportedRequirement,
+    #[error("unreadable_requirement")]
     UnreadableRequirement,
-}
-
-impl PolicyFault {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidDelegation => "invalid_bearer_delegation",
-            Self::InvalidScopeToken => "invalid_scope_token",
-            Self::PublicDelegation => "delegation_requires_authentication",
-            Self::MissingBearerScheme => "missing_bearer_scheme",
-            Self::UnsupportedRequirement => "unsupported_requirement",
-            Self::UnreadableRequirement => "unreadable_requirement",
-        }
-    }
+    // template:begin http-idempotency:http-policy-idempotency-faults
+    #[error("idempotency_requires_authentication")]
+    IdempotencyRequiresAuthentication,
+    #[error("idempotency_requires_registration")]
+    IdempotencyRequiresRegistration,
+    // template:end http-idempotency:http-policy-idempotency-faults
 }
 
 impl Access {

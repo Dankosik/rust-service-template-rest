@@ -5,7 +5,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::{BuildError, Client, Origin};
+use infra_outbound_http::Client;
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -17,10 +17,10 @@ use tokio::{
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokenTarget, Options, PreparationError,
     ServiceTokenTarget, TransportBuildFailure,
-    assertion::Signer,
-    options::{Scheme, ValidatedOptions, validate_options},
+    assertion::{Signer, SignerConfig},
+    options::{ValidatedRegistration, validate_options},
     token::Token,
-    token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
+    token_endpoint::{self, FETCH_TIMEOUT, TokenEndpoint},
 };
 
 mod exchange;
@@ -175,35 +175,36 @@ struct CachedFailure {
 
 impl Registration {
     pub fn prepare(options: Options) -> Result<Self, PreparationError> {
-        let validated = validate_options(options, Scheme::Https, Scheme::Https)?;
-        let token_http = Origin::parse_https(&validated.endpoint().origin().ascii_serialization())
-            .map_err(BuildError::from)
-            .and_then(|origin| Client::try_new(origin, TOKEN_LIMITS))
+        let validated = validate_options(options)?;
+        let token_http = token_endpoint::build_https_client(&validated.token_url)
             .map_err(TransportBuildFailure::token_url)?;
         Self::build(validated, token_http).map_err(PreparationError::from)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn prepare_for_test_http(options: Options) -> Result<Self, ConfigurationError> {
-        let validated = validate_options(options, Scheme::Http, Scheme::Https)?;
-        let token_http = Client::try_new_for_test_http(
-            &validated.endpoint().origin().ascii_serialization(),
-            TOKEN_LIMITS,
-        )
-        .map_err(|_| ConfigurationError {
-            key: "token_url",
-            reason: "requires an HTTP loopback IP address",
-        })?;
-        Self::build(validated, token_http)
-    }
-
     pub(crate) fn build(
-        validated: ValidatedOptions,
+        validated: ValidatedRegistration,
         token_http: Client,
     ) -> Result<Self, ConfigurationError> {
-        let (options, endpoint, permits) = validated.into_parts();
-        let signer = Signer::try_new(options, SystemTime::now())?;
-        let endpoint = TokenEndpoint::new(endpoint, token_http, signer, permits)?;
+        let ValidatedRegistration {
+            token_url,
+            client_id,
+            private_key,
+            key_id,
+            algorithm,
+            audience,
+            permits,
+        } = validated;
+        let signer = Signer::try_new(
+            SignerConfig {
+                client_id,
+                private_key,
+                key_id,
+                algorithm,
+                audience,
+            },
+            SystemTime::now(),
+        )?;
+        let endpoint = TokenEndpoint::new(token_url, token_http, signer, permits)?;
         let (lifetime, closed) = watch::channel(());
         Ok(Self {
             shared: Arc::new(RegistrationState { endpoint, closed }),

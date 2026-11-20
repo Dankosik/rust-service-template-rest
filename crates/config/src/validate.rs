@@ -84,7 +84,7 @@ impl Violations {
         rejected
     }
 
-    pub(crate) fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
+    fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
         match admitted {
             Ok(value) if self.0.is_empty() => Ok(value),
             Ok(_) | Err(_) => Err(ValidationErrors(self.0)),
@@ -101,6 +101,10 @@ pub(crate) fn admit_with<T>(
 }
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "only optional profiles call validate_with in unit tests"
+)]
 pub(crate) fn validate_with(
     validate: impl FnOnce(&mut Violations),
 ) -> Result<(), ValidationErrors> {

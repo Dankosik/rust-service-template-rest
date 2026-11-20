@@ -13,7 +13,7 @@ mod dead_letter;
 pub(crate) use dead_letter::{DeadLetterReason, dead_letter_bounds, dead_letter_headers};
 pub use dead_letter::{DeadLetterRecord, dead_letter_id, restore_dead_letter};
 
-pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
+pub const HEADER_LIMIT_BYTES: usize = shared_rules::messaging::HEADER_LIMIT_BYTES;
 pub const MESSAGE_ID: &str = "Message-Id";
 pub const EVENT_TYPE: &str = "Event-Type";
 pub const EVENT_SCHEMA: &str = "Event-Schema";

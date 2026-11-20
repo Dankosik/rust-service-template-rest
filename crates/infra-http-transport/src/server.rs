@@ -128,9 +128,36 @@ struct ConnectionShutdown {
     force: CancellationToken,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransportScheme {
+    Http,
+    Https,
+}
+
+impl TransportScheme {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_tls(self) -> bool {
+        matches!(self, Self::Https)
+    }
+}
+
+impl std::fmt::Display for TransportScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConnectionInfo {
-    scheme: &'static str,
+    scheme: TransportScheme,
     state: Arc<ConnectionState>,
 }
 
@@ -147,7 +174,7 @@ impl ConnectionInfo {
     }
 
     #[must_use]
-    pub const fn scheme(&self) -> &'static str {
+    pub const fn scheme(&self) -> TransportScheme {
         self.scheme
     }
 
@@ -212,7 +239,7 @@ fn serve_plaintext(
         limits,
         driver,
         delegated,
-        "http",
+        TransportScheme::Http,
         |stream, _| async move { Some(stream) },
     )
 }
@@ -242,7 +269,7 @@ fn serve_tls(
         limits,
         driver,
         delegated,
-        "https",
+        TransportScheme::Https,
         move |stream, peer| accept_tls(acceptor.clone(), stream, peer, handshake_timeout, protocol),
     )
 }
@@ -411,12 +438,12 @@ impl Drop for Server {
 #[derive(Clone, Debug, Default)]
 struct ListenerExecutor {
     tasks: TaskTracker,
-    force: Arc<CancellationToken>,
+    force: CancellationToken,
 }
 
 impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
     fn execute(&self, future: F) {
-        let force = Arc::clone(&self.force);
+        let force = self.force.clone();
         let task = self.tasks.track_future(async move {
             force.run_until_cancelled(future).await;
         });
@@ -556,7 +583,7 @@ struct ConnectionContext {
     driver: ConnectionDriver,
     max_connection_age: Option<Duration>,
     shutdown: ConnectionShutdown,
-    scheme: &'static str,
+    scheme: TransportScheme,
 }
 
 fn serve_listener<F, Fut, IO>(
@@ -565,7 +592,7 @@ fn serve_listener<F, Fut, IO>(
     limits: ConnectionLimits,
     driver: ConnectionDriver,
     delegated: ListenerExecutor,
-    scheme: &'static str,
+    scheme: TransportScheme,
     prepare_io: F,
 ) -> Server
 where

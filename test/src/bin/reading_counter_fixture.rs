@@ -57,7 +57,7 @@ async fn open_pool() -> Result<Pool, FixtureError> {
         None,
         SslPolicy::AllowLocalDevelopment,
     )?;
-    Ok(infra_postgres::connect(
+    Ok(Pool::connect(
         &dsn,
         &PoolOptions {
             max_connections: const { NonZeroU32::new(2).expect("2 is nonzero") },
@@ -161,7 +161,7 @@ async fn command(Command::Accept(args): Command) -> Result<bool, FixtureError> {
         return Ok(false);
     };
     let result = accept(&pool, args).await;
-    let closed = infra_postgres::close(&pool, Duration::from_secs(5)).await;
+    let closed = pool.close(Duration::from_secs(5)).await;
     if closed == infra_postgres::CloseOutcome::TimedOut {
         return Err("fixture pool close timed out".into());
     }

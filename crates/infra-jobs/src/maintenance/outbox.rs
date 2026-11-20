@@ -1,9 +1,8 @@
 use super::{
     Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, WorkerGroup, in_maintenance_tx,
-    observe_failure, observe_recovery,
+    observe_failure, observe_recovery, observed,
 };
 use crate::outbox::KIND;
-use infra_postgres::observed;
 use metrics::Unit;
 
 const OLDEST_UNCONFIRMED: &str = "jobs_outbox_oldest_unconfirmed_age_seconds";
@@ -12,52 +11,65 @@ const OBSERVED_AT: &str = "jobs_outbox_observation_timestamp_seconds";
 const LAST_ATTEMPT_SUCCESS: &str = "jobs_outbox_last_attempt_success";
 const ORDERED_SAMPLE_CAP: i64 = 1_000;
 
-pub(super) fn is_registered(kinds: &[&str]) -> bool {
-    kinds.contains(&KIND.as_str())
+pub(super) struct OutboxGauges {
+    oldest_unconfirmed: metrics::Gauge,
+    oldest_blocked: metrics::Gauge,
+    observed_at: metrics::Gauge,
+    last_attempt_success: metrics::Gauge,
 }
 
-pub(super) fn init_metrics() {
-    metrics::describe_gauge!(
-        OLDEST_UNCONFIRMED,
-        Unit::Seconds,
-        "Age since creation of the oldest retained outbox job without recorded completion."
-    );
-    metrics::describe_gauge!(
-        OLDEST_BLOCKED,
-        Unit::Seconds,
-        "Age since creation of the oldest outbox event blocked by an unfinished predecessor. NaN indicates no blocker was found within a capped sample."
-    );
-    metrics::describe_gauge!(
-        OBSERVED_AT,
-        Unit::Seconds,
-        "Database Unix timestamp of the last successful outbox observation."
-    );
-    metrics::describe_gauge!(
-        LAST_ATTEMPT_SUCCESS,
-        "Whether the most recent outbox observation succeeded."
-    );
-    reset_metrics();
-}
-
-pub(super) fn reset_metrics() {
-    metrics::gauge!(OLDEST_UNCONFIRMED).set(f64::NAN);
-    metrics::gauge!(OLDEST_BLOCKED).set(f64::NAN);
-    metrics::gauge!(OBSERVED_AT).set(0.0);
-    metrics::gauge!(LAST_ATTEMPT_SUCCESS).set(0.0);
-}
-
-pub(super) async fn sample(primary_group: &WorkerGroup) {
-    match read(primary_group).await {
-        Ok(sample) => {
-            metrics::gauge!(OLDEST_UNCONFIRMED).set(sample.oldest_unconfirmed_age);
-            metrics::gauge!(OLDEST_BLOCKED).set(sample.oldest_blocked_age);
-            metrics::gauge!(OBSERVED_AT).set(sample.observed_at);
-            metrics::gauge!(LAST_ATTEMPT_SUCCESS).set(1.0);
-            observe_recovery(primary_group, Operation::SampleOutbox);
+impl OutboxGauges {
+    pub(super) fn init_if_registered(kinds: &[&str]) -> Option<Self> {
+        if !kinds.contains(&KIND) {
+            return None;
         }
-        Err(error) => {
-            metrics::gauge!(LAST_ATTEMPT_SUCCESS).set(0.0);
-            observe_failure(primary_group, Operation::SampleOutbox, &error);
+        metrics::describe_gauge!(
+            OLDEST_UNCONFIRMED,
+            Unit::Seconds,
+            "Age since creation of the oldest retained outbox job without recorded completion."
+        );
+        metrics::describe_gauge!(
+            OLDEST_BLOCKED,
+            Unit::Seconds,
+            "Age since creation of the oldest outbox event blocked by an unfinished predecessor. NaN indicates no blocker was found within a capped sample."
+        );
+        metrics::describe_gauge!(
+            OBSERVED_AT,
+            Unit::Seconds,
+            "Database Unix timestamp of the last successful outbox observation."
+        );
+        metrics::describe_gauge!(
+            LAST_ATTEMPT_SUCCESS,
+            "Whether the most recent outbox observation succeeded."
+        );
+        Some(Self {
+            oldest_unconfirmed: metrics::gauge!(OLDEST_UNCONFIRMED),
+            oldest_blocked: metrics::gauge!(OLDEST_BLOCKED),
+            observed_at: metrics::gauge!(OBSERVED_AT),
+            last_attempt_success: metrics::gauge!(LAST_ATTEMPT_SUCCESS),
+        })
+    }
+
+    pub(super) fn reset(&self) {
+        self.oldest_unconfirmed.set(f64::NAN);
+        self.oldest_blocked.set(f64::NAN);
+        self.observed_at.set(0.0);
+        self.last_attempt_success.set(0.0);
+    }
+
+    pub(super) async fn sample(&self, primary_group: &WorkerGroup) {
+        match read(primary_group).await {
+            Ok(sample) => {
+                self.oldest_unconfirmed.set(sample.oldest_unconfirmed_age);
+                self.oldest_blocked.set(sample.oldest_blocked_age);
+                self.observed_at.set(sample.observed_at);
+                self.last_attempt_success.set(1.0);
+                observe_recovery(primary_group, Operation::SampleOutbox);
+            }
+            Err(error) => {
+                self.last_attempt_success.set(0.0);
+                observe_failure(primary_group, Operation::SampleOutbox, &error);
+            }
         }
     }
 }

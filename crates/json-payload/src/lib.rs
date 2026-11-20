@@ -1,8 +1,39 @@
-use std::{cell::Cell, fmt::Display, io::Write};
+use std::{
+    cell::Cell,
+    fmt::{self, Display},
+    io::{self, Write},
+};
 
 use serde::{Serialize, Serializer, ser};
 
 const NON_FINITE: &str = "non-finite float in JSON payload";
+const MIN_BOUNDED_CAPACITY: usize = 128;
+
+#[derive(Debug)]
+pub enum EncodeError {
+    Serialize(serde_json::Error),
+    TooLarge { bytes: usize },
+}
+
+impl Display for EncodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialize(error) => error.fmt(formatter),
+            Self::TooLarge { bytes } => {
+                write!(formatter, "serialized JSON payload is {bytes} bytes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialize(error) => Some(error),
+            Self::TooLarge { .. } => None,
+        }
+    }
+}
 
 pub fn to_writer<W: Write, T: Serialize + ?Sized>(
     writer: W,
@@ -17,6 +48,63 @@ pub fn to_writer<W: Write, T: Serialize + ?Sized>(
         return Err(ser::Error::custom(NON_FINITE));
     }
     result
+}
+
+pub fn to_vec_bounded<T: Serialize + ?Sized>(
+    value: &T,
+    max_bytes: usize,
+) -> Result<Vec<u8>, EncodeError> {
+    let mut writer = BoundedWriter::new(max_bytes);
+    to_writer(&mut writer, value).map_err(EncodeError::Serialize)?;
+    if writer.total_bytes > max_bytes {
+        return Err(EncodeError::TooLarge {
+            bytes: writer.total_bytes,
+        });
+    }
+    Ok(writer.bytes)
+}
+
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+    limit: usize,
+}
+
+impl BoundedWriter {
+    const fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            total_bytes: 0,
+            limit,
+        }
+    }
+}
+
+impl Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(buf.len())
+            .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+        let retained = buf.len().min(self.limit - self.bytes.len());
+        let needed = self.bytes.len() + retained;
+        if needed > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(MIN_BOUNDED_CAPACITY)
+                .max(needed)
+                .min(self.limit);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(&buf[..retained]);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 struct FiniteSerializer<'a, S> {
@@ -331,11 +419,18 @@ struct_compound!(SerializeStructVariant);
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, fmt, io::Cursor};
+    use std::{
+        cell::Cell,
+        fmt,
+        io::{Cursor, Write as _},
+    };
 
-    use serde::{Serialize, Serializer, ser::SerializeMap, ser::SerializeSeq};
+    use serde::{
+        Serialize, Serializer,
+        ser::{self, SerializeMap, SerializeSeq},
+    };
 
-    use super::to_writer;
+    use super::{BoundedWriter, EncodeError, to_vec_bounded, to_writer};
 
     #[derive(Serialize)]
     struct Newtype<T>(T);
@@ -588,5 +683,117 @@ mod tests {
             assert_json_bytes(&Some(Newtype(HumanReadable))),
             br#""human""#
         );
+    }
+
+    #[derive(Clone, Copy)]
+    enum StreamFailure {
+        None,
+        Custom,
+        NonFinite,
+    }
+
+    struct Streamed {
+        elements: usize,
+        size_hint: Option<usize>,
+        failure: StreamFailure,
+        calls: Cell<usize>,
+    }
+
+    impl Serialize for Streamed {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.calls.set(self.calls.get() + 1);
+            let mut seq = serializer.serialize_seq(self.size_hint)?;
+            for _ in 0..self.elements {
+                seq.serialize_element(&0_u8)?;
+            }
+            match self.failure {
+                StreamFailure::None => seq.end(),
+                StreamFailure::Custom => Err(ser::Error::custom("late refusal")),
+                StreamFailure::NonFinite => {
+                    seq.serialize_element(&f64::NAN)?;
+                    seq.end()
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_writer_discards_excess_output_without_reserving_beyond_limit() {
+        let payload = Streamed {
+            elements: 16_384,
+            size_hint: Some(usize::MAX),
+            failure: StreamFailure::None,
+            calls: Cell::new(0),
+        };
+        for limit in [0, 1, 31, 256] {
+            let mut writer = BoundedWriter::new(limit);
+            assert_eq!(writer.bytes.capacity(), 0);
+            to_writer(&mut writer, &payload).expect("streamed zeros serialize");
+            assert_eq!(writer.total_bytes, 32_769);
+            assert_eq!(writer.bytes.len(), limit);
+            assert!(writer.bytes.capacity() <= limit);
+        }
+
+        let mut writer = BoundedWriter::new(1_024);
+        to_writer(&mut writer, "x").expect("small string serializes");
+        assert_eq!(writer.bytes, br#""x""#);
+        assert!(writer.bytes.capacity() < 1_024);
+
+        let chunk = vec![b'x'; 65_536];
+        writer
+            .write_all(&chunk)
+            .expect("oversized chunk is counted without retaining");
+        assert_eq!(writer.total_bytes, 65_539);
+        assert_eq!(writer.bytes.len(), 1_024);
+        assert!(writer.bytes.capacity() <= 1_024);
+
+        let mut overflow = BoundedWriter::new(8);
+        overflow.total_bytes = usize::MAX;
+        assert!(overflow.write(&[0]).is_err());
+    }
+
+    #[test]
+    fn to_vec_bounded_enforces_limit_and_prefers_late_serialization_errors() {
+        let small = Streamed {
+            elements: 1,
+            size_hint: Some(usize::MAX),
+            failure: StreamFailure::None,
+            calls: Cell::new(0),
+        };
+        assert_eq!(to_vec_bounded(&small, 3).unwrap(), b"[0]");
+        assert_eq!(small.calls.get(), 1);
+        std::assert_matches!(
+            to_vec_bounded(&small, 2),
+            Err(EncodeError::TooLarge { bytes: 3 })
+        );
+
+        for failure in [
+            StreamFailure::None,
+            StreamFailure::Custom,
+            StreamFailure::NonFinite,
+        ] {
+            let payload = Streamed {
+                elements: 64,
+                size_hint: Some(usize::MAX),
+                failure,
+                calls: Cell::new(0),
+            };
+            let err = to_vec_bounded(&payload, 16).unwrap_err();
+            match failure {
+                StreamFailure::Custom => {
+                    let EncodeError::Serialize(error) = err else {
+                        panic!("late serialization error must precede TooLarge");
+                    };
+                    assert_eq!(error.to_string(), "late refusal");
+                }
+                StreamFailure::NonFinite => {
+                    std::assert_matches!(err, EncodeError::Serialize(_));
+                }
+                StreamFailure::None => {
+                    std::assert_matches!(err, EncodeError::TooLarge { bytes: 129 });
+                }
+            }
+            assert_eq!(payload.calls.get(), 1);
+        }
     }
 }

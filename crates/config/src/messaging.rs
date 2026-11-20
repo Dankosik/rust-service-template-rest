@@ -1,5 +1,5 @@
-use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::path::{Path, PathBuf};
 
 use bytesize::{ByteSize, KIB, MIB};
 use secrecy::SecretString;
@@ -7,14 +7,14 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::app::local_development_only;
-use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictString};
+use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount};
 use crate::validate::{
     Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
 };
 
-const DELIVERY_OVERHEAD_BYTES: u64 = 8 * KIB;
-const MAX_RESIDENT_DELIVERY_MIB: u64 = 64;
-const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * MIB;
+const DELIVERY_OVERHEAD_BYTES: u64 = shared_rules::messaging::HEADER_LIMIT_BYTES as u64;
+const MAX_RESIDENT_DELIVERY_BYTES: u64 = shared_rules::messaging::PUBLICATION_WINDOW_BYTES as u64;
+const MAX_RESIDENT_DELIVERY_MIB: u64 = MAX_RESIDENT_DELIVERY_BYTES / MIB;
 
 const PRODUCER_ACTIVE: &str = "a producer is active";
 const CONSUMER_ACTIVE: &str = "a consumer is active";
@@ -82,20 +82,26 @@ pub(crate) struct MessagingInput {
     consumer_concurrency: NonZeroU32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessagingTransportSecurity {
+    Tls,
+    TlsFirst,
+    AllowPlaintext,
+}
+
 #[derive(Clone, derive_more::Debug)]
 pub struct MessagingConfig {
     #[debug("{} servers", urls.len())]
     pub urls: Vec<String>,
     pub credentials: Option<MessagingCredentials>,
     pub root_ca_path: Option<PathBuf>,
-    pub plaintext_admitted: bool,
-    pub tls_first: bool,
+    pub security: MessagingTransportSecurity,
     pub source_stream: Option<String>,
-    pub max_payload_bytes: ByteSize,
+    pub max_payload_bytes: usize,
     pub consumer_durable: Option<String>,
     pub consumer_filter_subject: Option<String>,
     pub dlq_subject: Option<String>,
-    pub consumer_concurrency: NonZeroU32,
+    pub consumer_concurrency: NonZeroUsize,
 }
 
 impl MessagingInput {
@@ -125,9 +131,15 @@ impl MessagingInput {
                 .allow_unauthenticated
                 .then_some(MessagingCredentials::Unauthenticated)),
         };
-        let plaintext_admitted = self.allow_plaintext || self.trusted_network;
-        validate_urls(&self.urls, self.tls_first, plaintext_admitted, v);
-        v.check(
+        let security = if self.tls_first {
+            MessagingTransportSecurity::TlsFirst
+        } else if self.allow_plaintext || self.trusted_network {
+            MessagingTransportSecurity::AllowPlaintext
+        } else {
+            MessagingTransportSecurity::Tls
+        };
+        validate_urls(&self.urls, security, v);
+        let delivery_bounds = v.record(
             int_range(
                 "messaging.max_payload_bytes",
                 self.max_payload_bytes.as_u64(),
@@ -135,45 +147,71 @@ impl MessagingInput {
             )
             .and_then(|()| {
                 validate_resident_delivery_bound(self.max_payload_bytes, self.consumer_concurrency)
+            })
+            .and_then(|()| {
+                let max_payload_bytes =
+                    usize::try_from(self.max_payload_bytes.as_u64()).map_err(|_| {
+                        ValidationError::new(
+                            "messaging.max_payload_bytes",
+                            "cannot fit this platform",
+                        )
+                    })?;
+                let consumer_concurrency = NonZeroUsize::try_from(self.consumer_concurrency)
+                    .map_err(|_| {
+                        ValidationError::new(
+                            "messaging.consumer_concurrency",
+                            "cannot fit this platform",
+                        )
+                    })?;
+                Ok((max_payload_bytes, consumer_concurrency))
             }),
         );
+        let (max_payload_bytes, consumer_concurrency) = delivery_bounds?;
         Ok(MessagingConfig {
             urls: self.urls,
             credentials: credentials?,
             root_ca_path: self.root_ca_path,
-            plaintext_admitted,
-            tls_first: self.tls_first,
+            security,
             source_stream: self.source_stream,
-            max_payload_bytes: self.max_payload_bytes,
+            max_payload_bytes,
             consumer_durable: self.consumer_durable,
             consumer_filter_subject: self.consumer_filter_subject,
             dlq_subject: self.dlq_subject,
-            consumer_concurrency: self.consumer_concurrency,
+            consumer_concurrency,
         })
     }
 }
 
 impl MessagingConfig {
-    pub fn producer_source_stream(&self) -> Result<&str, ValidationError> {
+    pub fn admit_producer(&self) -> Result<AdmittedMessaging<'_>, ValidationError> {
         if self.urls.is_empty() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
-        if self.credentials.is_none() {
-            return Err(ValidationError::new(
+        let credentials = self.credentials.as_ref().ok_or_else(|| {
+            ValidationError::new(
                 "messaging.credentials",
                 "one of messaging.credentials or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
-            ));
-        }
-        required(
+            )
+        })?;
+        let source_stream = required(
             "messaging.source_stream",
             self.source_stream.as_deref(),
             PRODUCER_ACTIVE,
-        )
+        )?;
+        Ok(AdmittedMessaging {
+            urls: &self.urls,
+            credentials,
+            root_ca_path: self.root_ca_path.as_deref(),
+            security: self.security,
+            source_stream,
+            max_payload_bytes: self.max_payload_bytes,
+        })
     }
 
-    pub fn consumer_keys(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
-        Ok(ConsumerKeys {
-            source_stream: self.producer_source_stream()?,
+    pub fn admit_consumer(&self) -> Result<AdmittedMessagingConsumer<'_>, ValidationError> {
+        let messaging = self.admit_producer()?;
+        Ok(AdmittedMessagingConsumer {
+            messaging,
             durable: required(
                 "messaging.consumer_durable",
                 self.consumer_durable.as_deref(),
@@ -189,6 +227,7 @@ impl MessagingConfig {
                 self.dlq_subject.as_deref(),
                 CONSUMER_ACTIVE,
             )?,
+            concurrency: self.consumer_concurrency,
         })
     }
 }
@@ -217,7 +256,7 @@ enum BrokerScheme {
     Tls,
 }
 
-fn validate_urls(urls: &[String], tls_first: bool, plaintext_admitted: bool, v: &mut Violations) {
+fn validate_urls(urls: &[String], security: MessagingTransportSecurity, v: &mut Violations) {
     let mut plaintext = false;
     let mut all_valid = true;
     for (index, raw) in urls.iter().enumerate() {
@@ -233,16 +272,20 @@ fn validate_urls(urls: &[String], tls_first: bool, plaintext_admitted: bool, v: 
     if !all_valid || !plaintext {
         return;
     }
-    if tls_first {
-        v.reject(ValidationError::new(
-            "messaging.tls_first",
-            "requires every configured URL to use tls://",
-        ));
-    } else if !plaintext_admitted {
-        v.reject(ValidationError::new(
-            "messaging.allow_plaintext",
-            "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
-        ));
+    match security {
+        MessagingTransportSecurity::TlsFirst => {
+            v.reject(ValidationError::new(
+                "messaging.tls_first",
+                "requires every configured URL to use tls://",
+            ));
+        }
+        MessagingTransportSecurity::Tls => {
+            v.reject(ValidationError::new(
+                "messaging.allow_plaintext",
+                "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
+            ));
+        }
+        MessagingTransportSecurity::AllowPlaintext => {}
     }
 }
 
@@ -282,12 +325,24 @@ pub enum MessagingCredentials {
     Unauthenticated,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ConsumerKeys<'a> {
+#[derive(Clone, Copy, derive_more::Debug)]
+pub struct AdmittedMessaging<'a> {
+    #[debug("{} servers", urls.len())]
+    pub urls: &'a [String],
+    pub credentials: &'a MessagingCredentials,
+    pub root_ca_path: Option<&'a Path>,
+    pub security: MessagingTransportSecurity,
     pub source_stream: &'a str,
+    pub max_payload_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AdmittedMessagingConsumer<'a> {
+    pub messaging: AdmittedMessaging<'a>,
     pub durable: &'a str,
     pub filter_subject: &'a str,
     pub dlq_subject: &'a str,
+    pub concurrency: NonZeroUsize,
 }
 
 struct UrlList;
@@ -297,12 +352,11 @@ impl<'de> serde_with::DeserializeAs<'de, Vec<String>> for UrlList {
     where
         D: serde::Deserializer<'de>,
     {
-        #[serde_with::serde_as]
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Input {
-            Text(#[serde_as(as = "StrictString")] String),
-            List(#[serde_as(as = "Vec<StrictString>")] Vec<String>),
+            Text(String),
+            List(Vec<String>),
         }
 
         let input = Input::deserialize(deserializer).map_err(|_| {

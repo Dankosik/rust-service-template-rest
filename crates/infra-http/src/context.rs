@@ -225,7 +225,13 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestDeadline {
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(extension::<Self>(parts))
+        std::future::ready(
+            parts
+                .extensions
+                .get::<RequestContext>()
+                .and_then(RequestContext::deadline)
+                .ok_or_else(missing_extension::<Self>),
+        )
     }
 }
 // template:end request-budget:http-request-deadline
@@ -308,9 +314,6 @@ pub(crate) async fn enforce_request_budget(
     // template:begin object-storage:http-opening-put-outcomes
     let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
-    // template:begin request-budget:http-request-deadline-value
-    let request_deadline = RequestDeadline::from_deadline(deadline, budget);
-    // template:end request-budget:http-request-deadline-value
     let context = RequestContext {
         operation: OperationContext::new(
             Some(deadline),
@@ -318,17 +321,12 @@ pub(crate) async fn enforce_request_budget(
         ),
         tracking: track_request.then(Arc::default),
         // template:begin request-budget:http-request-deadline-field-init
-        deadline: request_deadline,
+        deadline: RequestDeadline::from_deadline(deadline, budget),
         // template:end request-budget:http-request-deadline-field-init
     };
     let version = request.version();
     request.extensions_mut().insert(context.operation.clone());
     request.extensions_mut().insert(context.clone());
-    // template:begin request-budget:http-request-deadline-projection
-    if let Some(deadline) = request_deadline {
-        request.extensions_mut().insert(deadline);
-    }
-    // template:end request-budget:http-request-deadline-projection
     let stop = |reason| {
         context.operation.cancel();
         context.stopped_response(reason, version)

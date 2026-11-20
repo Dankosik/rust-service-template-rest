@@ -25,30 +25,54 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
-#[debug("IssuerUrl([REDACTED])")]
-pub struct IssuerUrl {
+#[derive(Clone, Eq, PartialEq)]
+struct HttpsUrl {
     exact: String,
     url: Url,
 }
 
-impl IssuerUrl {
-    pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
-        parse_issuer_url(raw, "issuer", Scheme::Https)
+impl HttpsUrl {
+    fn parse(raw: &str, key: &'static str, allow_query: bool) -> Result<Self, ConfigurationError> {
+        let url = parse_provider_url(raw, key, Some(("https", "must use HTTPS")), allow_query)?;
+        Ok(Self {
+            exact: raw.to_owned(),
+            url,
+        })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn parse_for_test_http(raw: &str) -> Result<Self, ConfigurationError> {
-        parse_issuer_url(raw, "issuer", Scheme::Http)
+    fn as_str(&self) -> &str {
+        &self.exact
+    }
+
+    const fn url(&self) -> &Url {
+        &self.url
+    }
+
+    fn into_parts(self) -> (String, Url) {
+        (self.exact, self.url)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("IssuerUrl([REDACTED])")]
+pub struct IssuerUrl(HttpsUrl);
+
+impl IssuerUrl {
+    pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
+        HttpsUrl::parse(raw, "issuer", false).map(Self)
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.exact
+        self.0.as_str()
     }
 
     pub(crate) const fn url(&self) -> &Url {
-        &self.url
+        self.0.url()
+    }
+
+    pub(crate) fn into_parts(self) -> (String, Url) {
+        self.0.into_parts()
     }
 }
 
@@ -68,28 +92,24 @@ impl FromStr for IssuerUrl {
 
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("TokenUrl([REDACTED])")]
-pub struct TokenUrl {
-    exact: String,
-    url: Url,
-}
+pub struct TokenUrl(HttpsUrl);
 
 impl TokenUrl {
     pub fn parse(raw: &str) -> Result<Self, ConfigurationError> {
-        parse_token_url(raw, Scheme::Https)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn parse_for_test_http(raw: &str) -> Result<Self, ConfigurationError> {
-        parse_token_url(raw, Scheme::Http)
+        HttpsUrl::parse(raw, "token_url", true).map(Self)
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.exact
+        self.0.as_str()
     }
 
     pub(crate) const fn url(&self) -> &Url {
-        &self.url
+        self.0.url()
+    }
+
+    pub(crate) fn into_url(self) -> Url {
+        self.0.url
     }
 }
 
@@ -187,20 +207,41 @@ fn scope_parameter(
     Ok((!joined.is_empty()).then_some(joined))
 }
 
-pub(crate) struct ValidatedOptions {
-    pub(crate) options: Options,
-    permits: usize,
+pub(crate) struct RawRegistration {
+    pub(crate) token_url: Url,
+    pub(crate) client_id: String,
+    pub(crate) private_key: SecretString,
+    pub(crate) key_id: String,
+    pub(crate) algorithm: Algorithm,
+    pub(crate) audience_exact: String,
+    pub(crate) audience_url: Url,
+    pub(crate) provider_concurrency: NonZeroU32,
 }
 
-impl ValidatedOptions {
-    pub(crate) fn endpoint(&self) -> &Url {
-        self.options.token_url.url()
+impl From<Options> for RawRegistration {
+    fn from(options: Options) -> Self {
+        let (audience_exact, audience_url) = options.auth.audience.into_parts();
+        Self {
+            token_url: options.token_url.into_url(),
+            client_id: options.client_id,
+            private_key: options.auth.private_key,
+            key_id: options.auth.key_id,
+            algorithm: options.auth.algorithm,
+            audience_exact,
+            audience_url,
+            provider_concurrency: options.provider_concurrency,
+        }
     }
+}
 
-    pub(crate) fn into_parts(self) -> (Options, Url, usize) {
-        let endpoint = self.options.token_url.url.clone();
-        (self.options, endpoint, self.permits)
-    }
+pub(crate) struct ValidatedRegistration {
+    pub(crate) token_url: Url,
+    pub(crate) client_id: String,
+    pub(crate) private_key: SecretString,
+    pub(crate) key_id: String,
+    pub(crate) algorithm: Algorithm,
+    pub(crate) audience: String,
+    pub(crate) permits: usize,
 }
 
 fn validate_provider_concurrency(value: NonZeroU32) -> Result<usize, ConfigurationError> {
@@ -213,35 +254,10 @@ fn validate_provider_concurrency(value: NonZeroU32) -> Result<usize, Configurati
         })
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum Scheme {
-    Https,
-    #[cfg(any(test, feature = "test-support"))]
-    Http,
-}
-
-impl Scheme {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Https => "https",
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Http => "http",
-        }
-    }
-
-    const fn mismatch_reason(self) -> &'static str {
-        match self {
-            Self::Https => "must use HTTPS",
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Http => "must use loopback HTTP",
-        }
-    }
-}
-
 fn parse_provider_url(
     raw: &str,
     key: &'static str,
-    scheme: Option<Scheme>,
+    required_scheme: Option<(&'static str, &'static str)>,
     allow_query: bool,
 ) -> Result<Url, ConfigurationError> {
     let error = |reason| Err(ConfigurationError { key, reason });
@@ -261,10 +277,10 @@ fn parse_provider_url(
     if !syntax_valid.get() {
         return error("must be a valid HTTPS URL");
     }
-    if let Some(expected) = scheme
-        && url.scheme() != expected.as_str()
+    if let Some((expected, reason)) = required_scheme
+        && url.scheme() != expected
     {
-        return error(expected.mismatch_reason());
+        return error(reason);
     }
     if url.host().is_none() {
         return error("must have a host");
@@ -281,68 +297,54 @@ fn parse_provider_url(
     Ok(url)
 }
 
-fn parse_issuer_url(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn parse_http_url(
     raw: &str,
     key: &'static str,
-    scheme: Scheme,
-) -> Result<IssuerUrl, ConfigurationError> {
-    let url = parse_provider_url(raw, key, Some(scheme), false)?;
-    Ok(IssuerUrl {
-        exact: raw.to_owned(),
-        url,
-    })
-}
-
-fn parse_token_url(raw: &str, scheme: Scheme) -> Result<TokenUrl, ConfigurationError> {
-    let url = parse_provider_url(raw, "token_url", Some(scheme), true)?;
-    Ok(TokenUrl {
-        exact: raw.to_owned(),
-        url,
-    })
+    allow_query: bool,
+) -> Result<Url, ConfigurationError> {
+    parse_provider_url(
+        raw,
+        key,
+        Some(("http", "must use loopback HTTP")),
+        allow_query,
+    )
 }
 
 pub(crate) fn parse_discovered_token_endpoint(raw: &str) -> Option<Url> {
     parse_provider_url(raw, "token_endpoint", None, true).ok()
 }
 
-pub(crate) fn check_url_scheme(
-    url: &Url,
-    key: &'static str,
-    scheme: Scheme,
-) -> Result<(), ConfigurationError> {
-    if url.scheme() != scheme.as_str() {
-        return Err(ConfigurationError {
-            key,
-            reason: scheme.mismatch_reason(),
-        });
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_options(
     options: Options,
-    endpoint_scheme: Scheme,
-    audience_scheme: Scheme,
-) -> Result<ValidatedOptions, ConfigurationError> {
-    let permits = validate_provider_concurrency(options.provider_concurrency)?;
+) -> Result<ValidatedRegistration, ConfigurationError> {
+    validate_registration(options.into())
+}
+
+pub(crate) fn validate_registration(
+    raw: RawRegistration,
+) -> Result<ValidatedRegistration, ConfigurationError> {
+    let permits = validate_provider_concurrency(raw.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    if options.client_id.trim().is_empty() {
+    if raw.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
-    if options.auth.key_id.trim().is_empty() {
+    if raw.key_id.trim().is_empty() {
         return error("key_id", "must be nonempty");
     }
-    check_url_scheme(
-        options.auth.audience.url(),
-        "assertion_audience",
-        audience_scheme,
-    )?;
-    if options.auth.private_key.expose_secret().trim().is_empty() {
+    if raw.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
-    check_url_scheme(options.token_url.url(), "token_url", endpoint_scheme)?;
-    if options.auth.audience.url() == options.token_url.url() {
+    if raw.audience_url == raw.token_url {
         return error("assertion_audience", "must differ from the token endpoint");
     }
-    Ok(ValidatedOptions { options, permits })
+    Ok(ValidatedRegistration {
+        token_url: raw.token_url,
+        client_id: raw.client_id,
+        private_key: raw.private_key,
+        key_id: raw.key_id,
+        algorithm: raw.algorithm,
+        audience: raw.audience_exact,
+        permits,
+    })
 }

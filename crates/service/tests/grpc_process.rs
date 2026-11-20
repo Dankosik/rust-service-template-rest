@@ -979,13 +979,13 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
         .runtime
         .block_on(infra_telemetry::install_tracer_provider(
             &infra_telemetry::TracingOptions {
-                service_name: "grpc-process-client".to_owned(),
-                service_version: "test".to_owned(),
-                vcs_revision: "test".to_owned(),
-                instance_id: Some("grpc-client-fixture".to_owned()),
-                deployment_environment: "test".to_owned(),
+                service_name: "grpc-process-client",
+                service_version: "test",
+                vcs_revision: "test",
+                instance_id: Some("grpc-client-fixture"),
+                deployment_environment: "test",
                 sampler: infra_telemetry::ResolvedSampler::AlwaysOn,
-                otlp_endpoint: Some(client_collector.endpoint.clone()),
+                otlp_endpoint: Some(&client_collector.endpoint),
                 otlp_headers: None,
             },
         ))

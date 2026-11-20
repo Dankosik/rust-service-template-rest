@@ -2,12 +2,12 @@ use metrics_util::debugging::DebuggingRecorder;
 
 use super::*;
 
+const TEST_CLEANUP: CleanupName = CleanupName::new("jobs");
 const RUNS_METRIC: &str = "test_cleanup_runs_total";
-const JOBS: Cleanup = Cleanup::new("jobs");
 
 #[tokio::test(start_paused = true)]
 async fn the_first_scheduled_pass_starts_at_once_and_the_next_waits_the_interval() {
-    let mut schedule = CleanupSchedule::new(JOBS);
+    let mut schedule = CleanupSchedule::new(TEST_CLEANUP);
     schedule.next().await;
     let started = tokio::time::Instant::now();
     schedule.next().await;
@@ -24,7 +24,7 @@ async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer(
     let mut attempts = 0;
 
     run_scheduled_cleanup(
-        JOBS,
+        TEST_CLEANUP,
         RUNS_METRIC,
         &cancel,
         || {
@@ -45,31 +45,42 @@ async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer(
     );
 }
 
-#[tokio::test]
-async fn scheduled_cleanup_borrowing_local_state_stays_send_for_spawn() {
-    fn assert_send<F: Future + Send>(future: F) -> F {
-        future
+#[tokio::test(start_paused = true)]
+async fn scheduled_cleanup_with_borrowing_closures_is_send_for_spawned_owners() {
+    struct Owner {
+        label: String,
     }
 
-    async fn run(state: String, cancel: CancellationToken) {
-        run_scheduled_cleanup(
-            JOBS,
-            RUNS_METRIC,
-            &cancel,
-            || async {
-                let _ = (&state, &cancel);
-                Ok::<_, ()>(PassEnd::Cancelled)
-            },
-            || async {
-                let _ = &state;
-                Err(MaintenanceFailure::Statement)
-            },
-        )
-        .await;
-        drop((state, cancel));
+    impl Owner {
+        async fn pass(&self, cancel: &CancellationToken) -> Result<PassEnd, ()> {
+            tokio::task::yield_now().await;
+            assert_ne!(self.label, "");
+            cancel.cancel();
+            Ok(PassEnd::Cancelled)
+        }
+
+        async fn sample(&self) -> Result<PopulationSample, MaintenanceFailure> {
+            tokio::task::yield_now().await;
+            assert_ne!(self.label, "");
+            Err(MaintenanceFailure::Statement)
+        }
     }
 
+    let owner = Owner {
+        label: String::from("spawned"),
+    };
     let cancel = CancellationToken::new();
     cancel.cancel();
-    assert_send(run("local".to_owned(), cancel)).await;
+    tokio::spawn(async move {
+        run_scheduled_cleanup(
+            TEST_CLEANUP,
+            RUNS_METRIC,
+            &cancel,
+            || owner.pass(&cancel),
+            || owner.sample(),
+        )
+        .await;
+    })
+    .await
+    .unwrap();
 }

@@ -7,6 +7,9 @@ mod options;
 mod token;
 mod token_endpoint;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 #[cfg(test)]
 mod tests;
 

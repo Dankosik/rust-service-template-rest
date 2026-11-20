@@ -25,4 +25,5 @@ tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+infra-postgres = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

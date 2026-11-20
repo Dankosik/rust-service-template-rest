@@ -1,13 +1,9 @@
-use std::panic::AssertUnwindSafe;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 
 use bytes::Bytes;
 use http::HeaderMap;
-use http_body::{Body, Frame, SizeHint};
-use infra_grpc_core::watched::{
-    FramePoll, MaybeWatched, TerminableBody, WatchedPoll, register_waker,
-};
+use http_body::Body;
+use infra_grpc_core::watched::{FramePoll, PanicOutcome, StreamHooks, WatchedBody};
 use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -31,14 +27,8 @@ pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
-pub(crate) fn check_open(context: &OperationContext) -> Result<(), axum::response::Response> {
-    context
-        .check()
-        .map_err(|reason| stopped_status(reason).into_http())
+pub(crate) fn check_open(context: &OperationContext) -> Result<(), tonic::Status> {
+    context.check().map_err(stopped_status)
 }
 
 const MIN_HEADERS_FOR_STATUS_PROJECTION: usize = 32;
@@ -125,182 +115,100 @@ impl LocalStatus {
     }
 }
 
-struct ActiveStream<B> {
-    body: B,
-    call: Call,
+struct ServerGuards {
     _permit: Option<OwnedSemaphorePermit>,
     _cancel_on_drop: Option<DropGuard>,
+}
+
+struct ServerHooks {
+    call: Call,
+    permit: Option<OwnedSemaphorePermit>,
+    cancel_on_drop: Option<DropGuard>,
     deadline: Option<Deadline>,
     fallback: Option<opentelemetry::Context>,
-    waker: Option<Waker>,
 }
 
-enum ServerState<B> {
-    Active(ActiveStream<B>),
-    PendingTrailers(HeaderMap),
-    Closed,
-}
+impl<E> StreamHooks<E> for ServerHooks {
+    type Stop = LocalStatus;
+    type Outcome = ServerOutcome;
+    type Guards = ServerGuards;
 
-struct StreamFinalizer<B> {
-    active: ActiveStream<B>,
-    outcome: ServerOutcome,
-}
-
-impl<B> StreamFinalizer<B> {
-    fn emit(self) {
-        if let Some(failure) = self.outcome.failure {
-            self.active.call.record_failure(failure);
-        }
-        self.active.call.finish(self.outcome.code);
-    }
-}
-
-impl<B> ServerState<B> {
-    fn is_expired(&self) -> bool {
-        let Self::Active(active) = self else {
-            return false;
-        };
-        active.deadline.is_some_and(Deadline::expired)
+    fn stopped(&self) -> Option<LocalStatus> {
+        self.deadline
+            .is_some_and(Deadline::expired)
+            .then(|| LocalStatus::failure(FixedFailure::Deadline))
     }
 
-    fn transition(&mut self, next: Self, outcome: ServerOutcome) -> Option<StreamFinalizer<B>> {
-        match std::mem::replace(self, next) {
-            Self::Active(active) => Some(StreamFinalizer { active, outcome }),
-            other => {
-                *self = other;
-                None
-            }
-        }
+    fn in_scope<R>(&self, poll: impl FnOnce() -> R) -> R {
+        let _entered = self.call.span().enter();
+        let _attached = self.fallback.clone().map(opentelemetry::Context::attach);
+        poll()
     }
 
-    fn stage_status_trailers(&mut self, status: LocalStatus) -> Option<StreamFinalizer<B>> {
-        if !matches!(self, Self::Active(_)) {
-            return None;
-        }
-        let mut trailers = HeaderMap::new();
-        let outcome = status.write_headers(&mut trailers);
-        self.transition(Self::PendingTrailers(trailers), outcome)
-    }
-}
-
-impl<B: Body> ServerState<B> {
-    fn cut_off(
-        &mut self,
-        status: LocalStatus,
-    ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
-        let finalizer = self.stage_status_trailers(status);
-        (self.pop_terminal(), finalizer)
+    fn on_panic(&self) -> PanicOutcome<LocalStatus, ServerOutcome> {
+        PanicOutcome::Stop(LocalStatus::failure(FixedFailure::Internal))
     }
 
-    fn close_if_terminal(&mut self, polled: &FramePoll<B::Error>) -> Option<StreamFinalizer<B>> {
-        let outcome = match polled {
+    fn write_stop(&mut self, stop: LocalStatus, trailers: &mut HeaderMap) -> ServerOutcome {
+        stop.write_headers(trailers)
+    }
+
+    fn terminal_outcome(&self, polled: &FramePoll<E>) -> Option<ServerOutcome> {
+        match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
-                ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown)
+                Some(ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown))
             }
-            Poll::Ready(Some(Err(_)) | None) => ServerOutcome::unknown(),
-            Poll::Pending => return None,
-        };
-        self.transition(Self::Closed, outcome)
-    }
-
-    fn pop_terminal(&mut self) -> FramePoll<B::Error> {
-        match std::mem::replace(self, Self::Closed) {
-            Self::PendingTrailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-            stage => {
-                *self = stage;
-                Poll::Ready(None)
-            }
+            Poll::Ready(Some(Err(_)) | None) => Some(ServerOutcome::unknown()),
+            Poll::Pending => None,
         }
     }
-}
 
-impl<B> ServerState<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-{
-    fn poll_next(
-        &mut self,
-        cx: &mut Context<'_>,
-        watched: bool,
-    ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
-        let Self::Active(active) = self else {
-            return (self.pop_terminal(), None);
-        };
-        if active.deadline.is_some_and(Deadline::expired) {
-            return self.cut_off(LocalStatus::failure(FixedFailure::Deadline));
-        }
-        if watched {
-            register_waker(&mut active.waker, cx.waker());
-        }
-        let inner = {
-            let _entered = active.call.span().enter();
-            let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                Pin::new(&mut active.body).poll_frame(cx)
-            }))
-        };
-        match inner {
-            Ok(_) if self.is_expired() => {
-                self.cut_off(LocalStatus::failure(FixedFailure::Deadline))
-            }
-            Ok(polled) => {
-                let finalizer = self.close_if_terminal(&polled);
-                (polled, finalizer)
-            }
-            Err(_panic) => self.cut_off(LocalStatus::failure(FixedFailure::Internal)),
-        }
-    }
-}
-
-impl<B> TerminableBody for ServerState<B>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
-    type Error = B::Error;
-    type Stop = LocalStatus;
-    type Finalizer = StreamFinalizer<B>;
-
-    fn poll_watched(
-        &mut self,
-        cx: &mut Context<'_>,
-        watched: bool,
-    ) -> (WatchedPoll<B::Error>, Option<StreamFinalizer<B>>) {
-        let (polled, finalizer) = self.poll_next(cx, watched);
-        (Ok(polled), finalizer)
-    }
-
-    fn terminate(&mut self, stop: LocalStatus) -> Option<(Option<Waker>, StreamFinalizer<B>)> {
-        let mut finalizer = self.stage_status_trailers(stop)?;
-        let waker = finalizer.active.waker.take();
-        Some((waker, finalizer))
-    }
-
-    fn take_for_drop(&mut self) -> Self {
-        std::mem::replace(self, Self::Closed)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        matches!(self, Self::Closed)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        match self {
-            Self::Active(active) => active.body.size_hint(),
-            Self::PendingTrailers(_) | Self::Closed => SizeHint::with_exact(0),
-        }
+    fn empty_outcome(&self) -> ServerOutcome {
+        ServerOutcome::unknown()
     }
 
     fn watcher_lost() -> LocalStatus {
         LocalStatus::failure(FixedFailure::Internal)
     }
 
-    fn finish(finalizer: StreamFinalizer<B>) {
-        finalizer.emit();
+    fn emit(self, outcome: ServerOutcome) -> ServerGuards {
+        if let Some(failure) = outcome.failure {
+            self.call.record_failure(failure);
+        }
+        self.call.finish(outcome.code);
+        ServerGuards {
+            _permit: self.permit,
+            _cancel_on_drop: self.cancel_on_drop,
+        }
     }
 }
 
-type ResponseBody<B> = MaybeWatched<ServerState<B>>;
+enum ServerStop {
+    Drain {
+        deadline: Option<Deadline>,
+        drain: CancellationToken,
+    },
+    Deadline(Deadline),
+}
+
+async fn wait_server_stop(stop: ServerStop) -> LocalStatus {
+    match stop {
+        ServerStop::Drain { deadline, drain } => {
+            let context = OperationContext::new(deadline, drain);
+            match context.wait_stopped().await {
+                Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
+                Stopped::Cancelled => LocalStatus::drained(),
+            }
+        }
+        ServerStop::Deadline(deadline) => {
+            deadline.wait().await;
+            LocalStatus::failure(FixedFailure::Deadline)
+        }
+    }
+}
+
+type ResponseBody<B> = WatchedBody<B, ServerHooks>;
 
 fn start_response_body<B>(
     body: B,
@@ -308,60 +216,29 @@ fn start_response_body<B>(
     fallback: Option<opentelemetry::Context>,
     custody: ServerCustody,
     initial: Option<ServerOutcome>,
-) -> ResponseBody<B>
+) -> Option<ResponseBody<B>>
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
-    let body_ended = body.is_end_stream();
-    let mut state = ServerState::Active(ActiveStream {
-        body,
+    let end_on_drain = custody.end_on_drain;
+    let hooks = ServerHooks {
         call,
-        _permit: custody.permit,
-        _cancel_on_drop: custody.cancel_on_drop,
+        permit: custody.permit,
+        cancel_on_drop: custody.cancel_on_drop,
         deadline: custody.deadline,
         fallback,
-        waker: None,
-    });
-    let finalizer = if let Some(outcome) = initial {
-        state.transition(ServerState::Closed, outcome)
-    } else if state.is_expired() {
-        state.stage_status_trailers(LocalStatus::failure(FixedFailure::Deadline))
-    } else if body_ended {
-        state.transition(ServerState::Closed, ServerOutcome::unknown())
-    } else {
-        None
     };
-    if let Some(finalizer) = finalizer {
-        finalizer.emit();
-        return MaybeWatched::local(state);
-    }
-    if let Some(drain) = custody.end_on_drain {
-        let context = OperationContext::new(custody.deadline, drain);
-        MaybeWatched::watched(state, async move {
-            match context.wait_stopped().await {
-                Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
-                Stopped::Cancelled => LocalStatus::drained(),
+    WatchedBody::start(body, hooks, initial, move |hooks| {
+        let stop = if let Some(drain) = end_on_drain {
+            ServerStop::Drain {
+                deadline: hooks.deadline,
+                drain,
             }
-        })
-    } else if let Some(deadline) = custody.deadline {
-        MaybeWatched::watched(state, async move {
-            deadline.wait().await;
-            LocalStatus::failure(FixedFailure::Deadline)
-        })
-    } else {
-        MaybeWatched::local(state)
-    }
-}
-
-fn into_axum_body<B>(body: ResponseBody<B>) -> axum::body::Body
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-    B::Error: Into<axum::BoxError>,
-{
-    match body {
-        MaybeWatched::Local(ServerState::Closed) => axum::body::Body::empty(),
-        other => axum::body::Body::new(other),
-    }
+        } else {
+            ServerStop::Deadline(hooks.deadline?)
+        };
+        Some(wait_server_stop(stop))
+    })
 }
 
 pub(crate) fn wrap_response(
@@ -379,16 +256,22 @@ pub(crate) fn wrap_response(
     } else {
         ServerOutcome::from_response(&response)
     };
-    response.map(|body| into_axum_body(start_response_body(body, call, fallback, custody, initial)))
+    response.map(|body| {
+        start_response_body(body, call, fallback, custody, initial)
+            .map_or_else(axum::body::Body::empty, axum::body::Body::new)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Waker};
     use std::time::Duration;
 
+    use http_body::Frame;
     use http_body_util::BodyExt as _;
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
@@ -476,8 +359,11 @@ mod tests {
 
     fn server_call() -> Call {
         let path = "/test.Service/Stream";
-        let methods =
-            crate::services::Methods::new([(path.into(), crate::services::CallType::BidiStream)]);
+        let methods = crate::services::Methods::new([(
+            path.into(),
+            crate::services::CallType::BidiStream,
+            false,
+        )]);
         Call::start(methods.resolve(path), path)
     }
 
@@ -485,7 +371,8 @@ mod tests {
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        let body = start_response_body(body, server_call(), None, custody, None);
+        let body = start_response_body(body, server_call(), None, custody, None)
+            .expect("expected a response with a stop watcher");
         assert!(
             body.is_watching(),
             "expected a response with a stop watcher"
@@ -501,13 +388,16 @@ mod tests {
         let frames = futures_util::stream::iter([Err::<Frame<Bytes>, _>(
             tonic::Status::unavailable("body read failed"),
         )]);
-        let mut body = into_axum_body(start_response_body(
-            http_body_util::StreamBody::new(frames),
-            server_call(),
-            None,
-            ServerCustody::default(),
-            None,
-        ));
+        let mut body = axum::body::Body::new(
+            start_response_body(
+                http_body_util::StreamBody::new(frames),
+                server_call(),
+                None,
+                ServerCustody::default(),
+                None,
+            )
+            .unwrap(),
+        );
         let error = body
             .frame()
             .await
@@ -829,13 +719,16 @@ mod tests {
             server_call,
         );
         assert!(call.span().is_disabled());
-        let mut body = into_axum_body(start_response_body(
-            ContextBody(Arc::clone(&seen)),
-            call,
-            Some(fallback),
-            ServerCustody::default(),
-            None,
-        ));
+        let mut body = axum::body::Body::new(
+            start_response_body(
+                ContextBody(Arc::clone(&seen)),
+                call,
+                Some(fallback),
+                ServerCustody::default(),
+                None,
+            )
+            .unwrap(),
+        );
         let ambient = opentelemetry::Context::current()
             .span()
             .span_context()

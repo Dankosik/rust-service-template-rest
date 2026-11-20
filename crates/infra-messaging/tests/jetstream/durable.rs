@@ -13,7 +13,7 @@ fn handle<T: EventPayload + serde::de::DeserializeOwned + 'static>(
     route: &Route<T>,
 ) {
     registry.declare(route).unwrap();
-    registry.register(route, |_, _| async { Ok(()) }).unwrap();
+    registry.register(route, accept).unwrap();
 }
 
 fn assert_durable_refusal(logged: &Logged, operation: &str, error_type: &str) {
@@ -44,11 +44,11 @@ fn operator_metadata_matches_the_deployment_contract_vector() {
 async fn concurrent_replicas_admit_the_same_new_durable() {
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("fixture source stream is admitted");
     let v2 = Route::<ExampleV2>::new(fixture.subject.clone());
@@ -56,7 +56,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
     handle(&mut current, &fixture.route);
     let old = current.clone();
     let publication = current.declare_publication(&v2, 1024).unwrap();
-    current.register(&v2, |_, _| async { Ok(()) }).unwrap();
+    current.register(&v2, accept).unwrap();
     let mut reordered = Registry::default();
     handle(&mut reordered, &v2);
     handle(&mut reordered, &fixture.route);
@@ -121,28 +121,24 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
     let mut other_options = consumer_options(&fixture);
     other_options.filter_subject.clone_from(&other_subject);
     let (first, second) = tokio::try_join!(
-        Box::pin(Messaging::connect(
+        Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
             deadline(),
             cancel.clone(),
-        )),
-        Box::pin(Messaging::connect(
+        ),
+        Messaging::connect(
             options(&fixture, Some(other_options), 1024),
             deadline(),
             cancel.clone(),
-        )),
+        ),
     )
     .unwrap();
     let mut registered = fixture.registry.clone();
-    registered
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .unwrap();
+    registered.register(&fixture.route, accept).unwrap();
     let mut other_registry = Registry::default();
     let route = Route::<ExampleEvent>::new(other_subject.clone());
     other_registry.declare(&route).unwrap();
-    other_registry
-        .register(&route, |_, _| async { Ok(()) })
-        .unwrap();
+    other_registry.register(&route, accept).unwrap();
     let (left, right) = tokio::join!(
         first.consumer(registered, deadline(), &cancel),
         second.consumer(other_registry, deadline(), &cancel),
@@ -169,9 +165,7 @@ async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage
     ] {
         let fixture = Fixture::create(Topology::StreamsOnly).await;
         let mut registered = fixture.registry.clone();
-        registered
-            .register(&fixture.route, |_, _| async { Ok(()) })
-            .unwrap();
+        registered.register(&fixture.route, accept).unwrap();
         let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
         if memory_storage {
             source
@@ -196,11 +190,11 @@ async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage
             fixture.jetstream.update_stream(config).await.unwrap();
         }
         let cancel = CancellationToken::new();
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
             deadline(),
             cancel.clone(),
-        ))
+        )
         .await
         .unwrap();
         let (_guard, logged) = capture_logs();
@@ -240,17 +234,15 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
     ] {
         let fixture = Fixture::create(Topology::WithDurable).await;
         let cancel = CancellationToken::new();
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
             deadline(),
             cancel.clone(),
-        ))
+        )
         .await
         .unwrap();
         let mut registered = fixture.registry.clone();
-        registered
-            .register(&fixture.route, |_, _| async { Ok(()) })
-            .unwrap();
+        registered.register(&fixture.route, accept).unwrap();
         let before = durable(&fixture).await.cached_info().clone();
         let admitted = messaging
             .consumer(registered.clone(), deadline(), &cancel)
@@ -315,11 +307,11 @@ impl EventPayload for PublishedElsewhere {
 async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("fixture source stream is admitted");
     let elsewhere = Route::<PublishedElsewhere>::new("elsewhere.published");
@@ -330,7 +322,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
 
     let mut publishes_elsewhere = routes.clone();
     publishes_elsewhere
-        .register(&fixture.route, |_, _| async { Ok(()) })
+        .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     messaging
         .consumer(publishes_elsewhere, deadline(), &cancel)
@@ -339,7 +331,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
 
     let mut handles_elsewhere = routes;
     handles_elsewhere
-        .register(&elsewhere, |_, _| async { Ok(()) })
+        .register(&elsewhere, accept)
         .expect("fixture handler is registered");
     let refused = messaging
         .consumer(handles_elsewhere, deadline(), &cancel)
@@ -359,16 +351,16 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
 async fn durable_deleted_between_pulls_stops_the_consumer() {
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("fixture source stream is admitted");
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, |_, _| async { Ok(()) })
+        .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     let consumer = messaging
         .consumer(registry, deadline(), &cancel)
@@ -395,17 +387,15 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
 async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("source stream is admitted");
     let mut registered = fixture.registry.clone();
-    registered
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .unwrap();
+    registered.register(&fixture.route, accept).unwrap();
     let mut handle = messaging
         .consumer(registered, deadline(), &cancel)
         .await
@@ -445,7 +435,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
     );
     let (relay, pull) = AckDroppingRelay::intercept_second_pull(pull_subject.clone()).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(
             &fixture,
             vec![relay.url.clone()],
@@ -454,7 +444,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
         ),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .unwrap();
     for id in ["before-replacement", "pending-after-replacement"] {
@@ -470,7 +460,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
     registered
         .register(&fixture.route, {
             let calls = Arc::clone(&calls);
-            move |_, _| {
+            move |_: Event<ExampleEvent>, _: OperationContext| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Ok(()) }
             }
@@ -544,7 +534,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
     })
     .await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(
             &fixture,
             vec![relay.url.clone()],
@@ -553,16 +543,19 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         ),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .unwrap();
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut registered = fixture.registry.clone();
     registered
-        .register(&fixture.route, move |event, _| {
-            observed_tx.send(event.id).unwrap();
-            async { Ok(()) }
-        })
+        .register(
+            &fixture.route,
+            move |event: Event<ExampleEvent>, _: OperationContext| {
+                observed_tx.send(event.id).unwrap();
+                async { Ok(()) }
+            },
+        )
         .unwrap();
     let consumer = messaging
         .consumer(registered, deadline(), &cancel)
@@ -629,7 +622,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
         })
         .await;
         let cancel = CancellationToken::new();
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             options_with_servers(
                 &fixture,
                 vec![relay.url.clone()],
@@ -641,7 +634,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
             ),
             deadline(),
             cancel.clone(),
-        ))
+        )
         .await
         .unwrap();
         let started = [CancellationToken::new(), CancellationToken::new()];
@@ -651,7 +644,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
             .register(&fixture.route, {
                 let started = started.clone();
                 let settle = settle.clone();
-                move |event, _| {
+                move |event: Event<ExampleEvent>, _: OperationContext| {
                     let slot = usize::from(event.id == "drain-release-slot");
                     started[slot].cancel();
                     let settle = settle[slot].clone();

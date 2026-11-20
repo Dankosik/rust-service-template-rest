@@ -1,7 +1,8 @@
 use http::HeaderMap;
 
-pub(crate) use infra_grpc_core::protocol::{STATUS_HEADERS, grpc_timeout, header_status_code};
-pub(crate) use shared_rules::grpc::split_method_path;
+pub(crate) use infra_grpc_core::protocol::{
+    STATUS_HEADERS, grpc_timeout, header_status_code, split_method_path,
+};
 
 pub(crate) fn method_path(service: &str, method: &str) -> String {
     format!("/{service}/{method}")

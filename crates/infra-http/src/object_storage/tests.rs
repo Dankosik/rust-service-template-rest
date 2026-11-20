@@ -10,7 +10,7 @@ use axum::response::IntoResponse as _;
 use axum::routing::{MethodRouter, get, put};
 use axum_test::TestServer;
 use futures_util::stream;
-use infra_object_storage::{CredentialSource, ObjectStorageOptions, Provider, PutOptions};
+use infra_object_storage::{AccessKey, ObjectStorageOptions, Provider, PutOptions};
 use operation_context::Stopped;
 use tokio::sync::{Notify, oneshot, watch};
 use tower::ServiceExt as _;
@@ -111,12 +111,12 @@ fn file_route(
                 .origin()
                 .ascii_serialization(),
             region: None,
+            credentials: AccessKey {
+                access_key_id: "example".to_owned(),
+                secret_access_key: "example".into(),
+            },
         },
         bucket: "file-bucket".to_owned(),
-        credentials: CredentialSource::AccessKey {
-            access_key_id: "example".to_owned(),
-            secret_access_key: "example".into(),
-        },
         max_object_bytes: 1024,
         max_concurrency: 2,
         operation_timeout: Duration::from_mins(2),

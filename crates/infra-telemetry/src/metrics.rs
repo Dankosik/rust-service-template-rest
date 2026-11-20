@@ -13,23 +13,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 
-macro_rules! static_counter {
-    ($name:expr, $($label:literal => $value:literal),+ $(,)?) => {{
-        static LABELS: &[::metrics::Label] = &[
-            $(::metrics::Label::from_static_parts($label, $value)),+
-        ];
-        static KEY: ::metrics::Key = ::metrics::Key::from_static_parts($name, LABELS);
-        static METADATA: ::metrics::Metadata<'static> = ::metrics::Metadata::new(
-            module_path!(),
-            ::metrics::Level::INFO,
-            Some(module_path!()),
-        );
-        ::metrics::with_recorder(|recorder| recorder.register_counter(&KEY, &METADATA))
-    }};
-}
-
-pub(crate) use static_counter;
-
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -135,11 +118,28 @@ impl Progress {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MetricsError {
+#[error(transparent)]
+pub struct MetricsError(MetricsErrorKind);
+
+#[derive(Debug, thiserror::Error)]
+enum MetricsErrorKind {
     #[error("install metrics recorder: {0}")]
-    Install(#[from] BuildError),
+    Install(#[source] BuildError),
     #[error("configure histogram buckets for {metric}: {source}")]
     HistogramBuckets { metric: String, source: BuildError },
+}
+
+impl MetricsError {
+    fn install(source: BuildError) -> Self {
+        Self(MetricsErrorKind::Install(source))
+    }
+
+    fn histogram_buckets(metric: &str, source: BuildError) -> Self {
+        Self(MetricsErrorKind::HistogramBuckets {
+            metric: metric.to_owned(),
+            source,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -151,21 +151,22 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
-        let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
+        let mut builder = PrometheusBuilder::new()
+            .set_buckets(DEFAULT_BUCKETS)
+            .map_err(MetricsError::install)?;
         for &(name, buckets) in histograms {
             builder = builder
                 .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
-                .map_err(|source| MetricsError::HistogramBuckets {
-                    metric: name.to_owned(),
-                    source,
-                })?;
+                .map_err(|source| MetricsError::histogram_buckets(name, source))?;
         }
         let handle = builder
             .set_buckets_for_metric(
                 Matcher::Full(SCHEDULER_LAG_METRIC.to_owned()),
                 SCHEDULER_LAG_BUCKETS,
-            )?
-            .install_recorder()?;
+            )
+            .map_err(MetricsError::install)?
+            .install_recorder()
+            .map_err(MetricsError::install)?;
         let process = metrics_process::Collector::default();
         process.describe();
         crate::traces::describe_metrics();

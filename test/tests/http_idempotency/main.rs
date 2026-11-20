@@ -426,7 +426,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(Pool::from(pool.clone()), RETENTION).unwrap();
+    let store = Store::new(Pool::from_test_pool(pool.clone()), RETENTION).unwrap();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refusal = TerminalRefusal::capture(
         StatusCode::CONFLICT,
@@ -500,7 +500,7 @@ async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn disabling_terminal_writes_still_replays_live_refusals(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(Pool::from(pool.clone()), RETENTION).unwrap();
+    let store = Store::new(Pool::from_test_pool(pool.clone()), RETENTION).unwrap();
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refusal = TerminalRefusal::capture(
@@ -1049,9 +1049,7 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     ] {
         assert!(scrape.contains(line), "{line} missing from {scrape}");
     }
-    let held = infra_postgres::acquire(&store_pool, "hold cleanup admission")
-        .await
-        .unwrap();
+    let held = store_pool.acquire("hold cleanup admission").await.unwrap();
     let never_polled = store.remove_expired();
     drop(never_polled);
     let mut first = Box::pin(store.remove_expired());
@@ -1175,7 +1173,8 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
                 })
                 .collect()
         };
-        let admission = infra_postgres::acquire(&store_pool, "hold sampler admission")
+        let admission = store_pool
+            .acquire("hold sampler admission")
             .await
             .expect("the sole slot");
         let cancel = CancellationToken::new();

@@ -2,6 +2,7 @@ mod processing;
 pub mod route;
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -11,9 +12,7 @@ use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, JobKind, KindName, enqueue};
-use infra_postgres::{
-    Isolation, Pool, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
-};
+use infra_postgres::{Isolation, Pool, TxError, TxOptions, failure_cause, observed, sqlstate};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use smallvec::SmallVec;
@@ -39,7 +38,7 @@ pub enum ReceiptOutcome {
 pub enum ReceiveError {
     #[error("inbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    #[error("inbound webhook delivery was rejected: {}", .0.reason())]
+    #[error("inbound webhook delivery was rejected: {0}")]
     Rejected(Rejection),
     #[error("inbound webhook receipt storage is unavailable")]
     Unavailable,
@@ -92,6 +91,20 @@ impl fmt::Debug for Rejection {
     }
 }
 
+impl fmt::Display for Rejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for Rejection {}
+
+impl Hash for Rejection {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.reason().hash(state);
+    }
+}
+
 const PAYLOAD_TOO_LARGE: Rejection = Rejection(RejectionKind::PayloadTooLarge);
 
 impl From<ProtocolError> for Rejection {
@@ -125,6 +138,17 @@ pub trait Verifier: Send + Sync + 'static {
     ) -> Result<MessageId, Rejection>;
 }
 
+impl<V: Verifier> Verifier for Arc<V> {
+    fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+        now: SystemTime,
+    ) -> Result<MessageId, Rejection> {
+        (**self).authenticate(headers, body, now)
+    }
+}
+
 impl Verifier for KeyRing {
     fn authenticate(
         &self,
@@ -136,24 +160,47 @@ impl Verifier for KeyRing {
     }
 }
 
+#[derive(Default)]
+pub struct Verifiers {
+    bindings: HashMap<Arc<str>, Arc<dyn Verifier>>,
+}
+
+impl Verifiers {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bind(&mut self, endpoint_id: impl Into<Arc<str>>, verifier: impl Verifier) -> &mut Self {
+        self.bindings.insert(endpoint_id.into(), Arc::new(verifier));
+        self
+    }
+
+    #[must_use]
+    pub fn into_receiver(self, pool: Pool) -> Receiver {
+        Receiver {
+            pool,
+            endpoints: Arc::new(self.bindings),
+        }
+    }
+}
+
+impl fmt::Debug for Verifiers {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Verifiers")
+            .field("binding_count", &self.bindings.len())
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct Receiver {
     pool: Pool,
-    endpoints: Arc<HashMap<String, Arc<dyn Verifier>>>,
+    endpoints: Arc<HashMap<Arc<str>, Arc<dyn Verifier>>>,
 }
 
 impl Receiver {
-    #[must_use]
-    pub fn new(
-        pool: Pool,
-        endpoints: impl IntoIterator<Item = (String, Arc<dyn Verifier>)>,
-    ) -> Self {
-        Self {
-            pool,
-            endpoints: Arc::new(endpoints.into_iter().collect()),
-        }
-    }
-
     pub async fn receive(
         &self,
         endpoint_id: &str,
@@ -219,8 +266,7 @@ async fn receive_for_endpoint(
     let admitted = admit(verifier, headers, body, now)
         .map_err(|rejection| rejected(endpoint_id, rejection))?;
     let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-    Box::pin(in_tx_with_deadline(
-        pool,
+    Box::pin(pool.in_tx_with_deadline(
         deadline,
         READ_COMMITTED,
         async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
@@ -423,13 +469,12 @@ mod tests {
                 panic!("an oversized body never reaches the verifier")
             }
         }
-        let pool = Pool::from(
-            sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://127.0.0.1:1/unreachable")
-                .expect("a lazy pool opens no connection"),
-        );
-        let verifier: Arc<dyn Verifier> = Arc::new(MustNotAuthenticate);
-        let receiver = Receiver::new(pool, [("provider".to_owned(), verifier)]);
+        let pool = Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unreachable")
+            .expect("a lazy pool opens no connection");
+        let mut verifiers = Verifiers::new();
+        verifiers.bind("provider", Arc::new(MustNotAuthenticate));
+        assert_eq!(format!("{verifiers:?}"), "Verifiers { binding_count: 1 }");
+        let receiver = verifiers.into_receiver(pool);
         let outcome = receiver
             .receive(
                 "provider",
@@ -475,10 +520,28 @@ mod tests {
     }
 
     #[test]
-    fn rejection_equality_and_debug_preserve_reason_spelling() {
+    fn rejection_equality_hash_display_error_and_debug_preserve_reason_spelling() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let hash = |rejection: Rejection| {
+            let mut hasher = DefaultHasher::new();
+            rejection.hash(&mut hasher);
+            hasher.finish()
+        };
+
         let protocol = Rejection::from(ProtocolError::InvalidSignature);
         let custom = Rejection::new("invalid_signature");
         assert_eq!(protocol, custom);
+        assert_eq!(hash(protocol), hash(custom));
+        assert_eq!(protocol.to_string(), "invalid_signature");
+        assert_eq!(custom.to_string(), "invalid_signature");
+        let error: &dyn std::error::Error = &protocol;
+        assert_eq!(error.to_string(), "invalid_signature");
+        assert!(std::error::Error::source(&ReceiveError::Rejected(protocol)).is_none());
+        assert_eq!(
+            ReceiveError::Rejected(protocol).to_string(),
+            "inbound webhook delivery was rejected: invalid_signature"
+        );
         assert_eq!(format!("{protocol:?}"), r#"Rejection("invalid_signature")"#);
         assert_eq!(format!("{custom:?}"), r#"Rejection("invalid_signature")"#);
         assert_eq!(PAYLOAD_TOO_LARGE, Rejection::new("payload_too_large"));

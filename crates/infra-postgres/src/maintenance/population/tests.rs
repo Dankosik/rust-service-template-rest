@@ -4,6 +4,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use super::*;
 use crate::test_metrics::{self, Series};
 
+const TEST_CLEANUP: CleanupName = CleanupName::new("jobs");
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
 struct TestMetrics {
@@ -62,13 +63,11 @@ impl TestMetrics {
     }
 }
 
-const JOBS_POPULATION: MaintenancePopulation = MaintenancePopulation::cleanup(Cleanup::new("jobs"));
-
 #[tokio::test(start_paused = true)]
 async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
     let metrics = TestMetrics::new();
     let _recording = metrics::set_default_local_recorder(&metrics.recorder);
-    let mut observer = MaintenanceObserver::start(JOBS_POPULATION);
+    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(TEST_CLEANUP));
     let observed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the test clock is after the epoch")
@@ -94,7 +93,7 @@ async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
 fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
     let metrics = TestMetrics::new();
     metrics::with_local_recorder(&metrics.recorder, || {
-        let mut observer = MaintenanceObserver::start(JOBS_POPULATION);
+        let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(TEST_CLEANUP));
         assert!(metrics.gauge("present").is_nan());
         assert!(metrics.gauge("oldest_timestamp_seconds").is_nan());
         assert_eq!(metrics.gauge("last_success_timestamp_seconds"), 0.0);
@@ -161,7 +160,8 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
     ] {
         let metrics = TestMetrics::new();
         metrics::with_local_recorder(&metrics.recorder, || {
-            let mut observer = MaintenanceObserver::start(JOBS_POPULATION);
+            let mut observer =
+                MaintenanceObserver::start(MaintenancePopulation::Cleanup(TEST_CLEANUP));
             let base = tokio::time::Instant::now();
             let original = MaintenanceClock {
                 wall: Some(1000.0),

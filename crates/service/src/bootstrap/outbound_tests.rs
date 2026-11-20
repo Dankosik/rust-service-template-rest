@@ -6,7 +6,8 @@ use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
 use infra_oauth2_client_credentials::{
-    Algorithm, IssuerUrl, Options, PrivateKeyJwt, Registration, ServiceTokenTarget, TokenUrl,
+    Algorithm, IssuerUrl, PrivateKeyJwt, ServiceTokenTarget,
+    test_support::{HttpOptions, prepare_http},
 };
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,7 +34,7 @@ enum Resource {
 async fn resource(Extension(resource): Extension<Resource>, context: RequestContext) -> StatusCode {
     let resource_unavailable = match resource {
         Resource::Http(client) => {
-            let request = Request::get(client.origin().uri("/value").unwrap())
+            let request = Request::get(client.uri("/value").unwrap())
                 .body(infra_outbound_http::Bytes::new())
                 .unwrap();
             matches!(
@@ -42,7 +43,9 @@ async fn resource(Extension(resource): Extension<Resource>, context: RequestCont
                     .execute(request)
                     .await,
                 Err(infra_oauth2_client_credentials::Error::Resource(
-                    infra_outbound_http::Error::Transport { .. }
+                    infra_outbound_http::ExchangeError::BeforeResponse(
+                        infra_outbound_http::Error::Transport { .. }
+                    )
                 ))
             )
         }
@@ -122,7 +125,7 @@ async fn serve_token_peer(
             async move {
                 let (response, receive) = oneshot::channel();
                 requests.send(response).await.unwrap();
-                axum::Json(receive.await.unwrap())
+                infra_http::extract::Json(receive.await.unwrap())
             }
         }),
     );
@@ -146,9 +149,9 @@ async fn assert_resource_unavailable(address: SocketAddr) {
     assert!(status.starts_with("HTTP/1.1 502 "), "{status}");
 }
 
-fn token_options(peer_addr: SocketAddr) -> Options {
-    Options {
-        token_url: TokenUrl::parse_for_test_http(&format!("http://{peer_addr}/token")).unwrap(),
+fn token_options(peer_addr: SocketAddr) -> HttpOptions {
+    HttpOptions {
+        token_url: format!("http://{peer_addr}/token"),
         client_id: "service".to_owned(),
         auth: PrivateKeyJwt {
             private_key: tls_test_support::new_issuer().key().serialize_pem().into(),
@@ -175,9 +178,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let peer = tokio::spawn(serve_token_peer(token_peer, requests, stop_peer.clone()));
         let (installed, lifetime) = oneshot::channel();
         let registration = crate::ServiceRegistration::for_http_resource(move |_, background| {
-            let registration = Arc::new(Registration::prepare_for_test_http(token_options(
-                peer_addr,
-            ))?);
+            let registration = Arc::new(prepare_http(token_options(peer_addr))?);
             let lifetime = Arc::downgrade(&registration);
             let tokens = background.service_tokens(
                 registration,
@@ -208,16 +209,19 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         .await
         .unwrap();
         let mut signals = Signals::install().unwrap();
-        finish_startup(
-            Ok(Some(prepared)),
-            &mut signals,
-            &mut background,
-            &mut serving,
-        )
-        .unwrap();
+        assert_eq!(
+            finish_startup(
+                Ok(Some(prepared)),
+                &mut signals,
+                &mut background,
+                &mut serving,
+            )
+            .unwrap(),
+            StartupOutcome::Admitted
+        );
         let (registration, retained_client) = lifetime.await.unwrap();
         assert!(registration.upgrade().is_some());
-        let address = serving.http_server.as_ref().unwrap().local_addr();
+        let address = serving.traffic.http.as_ref().unwrap().local_addr();
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(assert_resource_unavailable(address), async {
                 tokens
@@ -250,8 +254,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
             serving,
             background,
             dependencies,
-            tracer_provider: None,
-            logger: None,
+            telemetry: shutdown::Telemetry::default(),
         })
         .await;
         assert_eq!(outcome, Outcome::Graceful);

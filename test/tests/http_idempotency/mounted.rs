@@ -27,7 +27,7 @@ use infra_http::idempotency::{
 };
 use infra_http::{
     Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract,
-    Principal, Problem, REQUEST_ID_HEADER, VerifiedPrincipal,
+    Principal, Problem, REQUEST_ID_HEADER, VerifiedDelegation, VerifiedPrincipal,
 };
 use infra_idempotency_store::Store;
 use infra_postgres::Pool;
@@ -133,9 +133,9 @@ enum CreateError {
 impl From<CreateError> for Rollback<TerminalProblem> {
     fn from(error: CreateError) -> Self {
         match error {
-            CreateError::Reserved => Self::refuse(
-                Problem::new(Code::UnprocessableContent).detail("the widget name is reserved"),
-            ),
+            CreateError::Reserved => Problem::new(Code::UnprocessableContent)
+                .detail("the widget name is reserved")
+                .into(),
             CreateError::Store(error)
                 if error.as_database_error().is_some_and(|db| {
                     db.is_unique_violation() && db.constraint() == Some("widgets_unique_name")
@@ -232,7 +232,7 @@ async fn create_widget(
 )]
 async fn replace_widget(
     State(state): State<WidgetState>,
-    principal: Principal,
+    VerifiedPrincipal(principal): VerifiedPrincipal,
     delegation: Option<DelegationCredential>,
     Path(_id): Path<i64>,
     Json(input): Json<NewWidget>,
@@ -262,9 +262,6 @@ impl FreshCommand for CreateWidget {
 
     async fn execute(self, tx: &mut Tx<'_>) -> Result<Self::Success, Rollback<Self::Terminal>> {
         let widget = self.widgets.create(tx, &self.input).await?;
-        if widget.color == "invalid-refusal" {
-            return Err(Rollback::refuse(StatusCode::NOT_MODIFIED));
-        }
         Ok(created_response(widget))
     }
 
@@ -624,7 +621,7 @@ impl Mounted {
                     readiness: readiness_reader(),
                     widgets,
                 },
-                Authentication::Bearer(Box::new(provider.verifier())),
+                Authentication::Bearer(provider.verifier()),
                 &options(budget),
                 store,
             )
@@ -963,7 +960,7 @@ async fn authorized_without_idempotency(
 )]
 async fn scoped_alternatives(
     State(calls): State<Arc<Mutex<Vec<DelegationCredential>>>>,
-    Extension(credential): Extension<DelegationCredential>,
+    VerifiedDelegation(credential): VerifiedDelegation,
     headers: axum::http::HeaderMap,
 ) -> &'static str {
     assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
@@ -1008,7 +1005,7 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
         .unwrap()
         .build(
             readiness_reader(),
-            Authentication::Bearer(Box::new(provider.verifier())),
+            Authentication::Bearer(provider.verifier()),
             &options(BUDGET),
         )
         .unwrap();
@@ -1074,7 +1071,7 @@ fn timeout_router(
     let mut options = options(timeout);
     options.max_in_flight = Some(NonZeroU32::MIN);
     contract
-        .build((), Authentication::Bearer(Box::new(verifier)), &options)
+        .build((), Authentication::Bearer(verifier), &options)
         .unwrap()
 }
 
@@ -1165,7 +1162,7 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
         .unwrap()
         .build(
             readiness_reader(),
-            Authentication::Bearer(Box::new(provider.verifier())),
+            Authentication::Bearer(provider.verifier()),
             &options(BUDGET),
         )
         .unwrap();
@@ -1262,7 +1259,7 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
         .unwrap()
         .build(
             readiness_reader(),
-            Authentication::Bearer(Box::new(provider.verifier())),
+            Authentication::Bearer(provider.verifier()),
             &options(BUDGET),
         )
         .unwrap();
@@ -1671,7 +1668,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         .verify_fixture_authorization(authorization.as_bytes())
         .await
         .unwrap();
-    let pool = Pool::from(PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool"));
+    let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool");
     let store = Store::new(pool, RETENTION).unwrap();
     let contract = HttpContract::application(bearer_document())
         .unwrap()
@@ -1688,7 +1685,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
                     hold: Arc::default(),
                 }),
             },
-            Authentication::Bearer(Box::new(verifier)),
+            Authentication::Bearer(verifier),
             &HardenOptions {
                 max_body_bytes: MAX_BODY_BYTES,
                 request_timeout: BUDGET,
@@ -1826,26 +1823,6 @@ async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn an_invalid_refusal_rolls_back_the_post(pool: PgPool) {
-    let mounted = Mounted::on(&pool, BUDGET).await;
-    let input = json!({"name": "wrong-status", "color": "invalid-refusal"});
-    let first = mounted.create(ALICE, "k-304", &input, "req-invalid").await;
-    let body = problem(
-        &first,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal_error",
-        "req-invalid",
-    );
-    assert_eq!(body["detail"], "request failed");
-    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
-    assert_eq!(
-        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
-        0
-    );
-    mounted.finish().await;
-}
-
-#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: PgPool) {
     let recorder = DebuggingRecorder::new();
     let captured = CapturedMetrics::new(&recorder);
@@ -1861,8 +1838,14 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
             "unprocessable_content",
         );
         assert_eq!(body["detail"], "the widget name is reserved");
+        assert!(response.maybe_header("idempotent-replayed").is_none());
     }
     assert_eq!(outcomes(&captured), counts(&[("not_stored", 2)]));
+    assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM http_idempotency_records").await,
+        0
+    );
 
     let huge = json!({"name": "x".repeat(STORED_BODY_BOUND), "color": "red"});
     let unstorable = mounted.create(ALICE, "k-3", &huge, "req-huge").await;
@@ -1998,9 +1981,11 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         until_free(|| mounted.create(ALICE, "k-handler", &input, "req-recovered")).await;
     created(&stored, "req-recovered");
     let mut connections = Vec::new();
-    for _ in 0..mounted.store_pool.max_connections() {
+    for _ in 0..mounted.store_pool.as_sqlx().options().get_max_connections() {
         connections.push(
-            infra_postgres::acquire(&mounted.store_pool, "hold every idempotency connection")
+            mounted
+                .store_pool
+                .acquire("hold every idempotency connection")
                 .await
                 .unwrap(),
         );
@@ -2172,9 +2157,9 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
         .await
         .unwrap();
 
-    infra_postgres::acquire(&mounted.store_pool, "set statement_timeout")
-        .await
-        .unwrap()
+    mounted
+        .store_pool
+        .as_sqlx()
         .execute("SET statement_timeout = '150ms'")
         .await
         .unwrap();
@@ -2193,9 +2178,9 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
         150
     );
 
-    infra_postgres::acquire(&mounted.store_pool, "set statement_timeout")
-        .await
-        .unwrap()
+    mounted
+        .store_pool
+        .as_sqlx()
         .execute("SET statement_timeout = '8s'")
         .await
         .unwrap();

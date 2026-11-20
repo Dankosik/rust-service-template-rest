@@ -13,26 +13,28 @@ const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-pub async fn refresh_password_periodically(
-    pool: Pool,
-    password_file: PathBuf,
-    cancel: CancellationToken,
-) {
-    metrics::describe_counter!(
-        REFRESHES_METRIC,
-        "Completed periodic password-file reads and future connection-options installations; not database authentication."
-    );
-    let _ = cancel
-        .run_until_cancelled(async {
-            let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut refresh = Refresh::default();
-            loop {
-                ticker.tick().await;
-                refresh.step(&pool, &password_file).await;
-            }
-        })
-        .await;
+impl Pool {
+    pub async fn refresh_password_periodically(
+        self,
+        password_file: PathBuf,
+        cancel: CancellationToken,
+    ) {
+        metrics::describe_counter!(
+            REFRESHES_METRIC,
+            "Completed periodic password-file reads and future connection-options installations; not database authentication."
+        );
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut refresh = Refresh::default();
+                loop {
+                    ticker.tick().await;
+                    refresh.step(&self, &password_file).await;
+                }
+            })
+            .await;
+    }
 }
 
 #[derive(Default)]
@@ -165,7 +167,8 @@ mod tests {
             crate::SslPolicy::VerifyFull,
         )
         .unwrap();
-        let pool = Pool::from(PgPoolOptions::new().connect_lazy_with(dsn.connect_options()));
+        let pool =
+            Pool::from_test_pool(PgPoolOptions::new().connect_lazy_with(dsn.connect_options()));
         assert_eq!(password(&pool).as_deref(), Some("first"));
         assert!(!format!("{:?}", pool.connect_options()).contains("first"));
         assert!(

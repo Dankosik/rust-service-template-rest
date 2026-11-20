@@ -74,7 +74,7 @@ pub async fn template_pool(
     max_connections: u32,
     isolation: Isolation,
 ) -> Pool {
-    infra_postgres::connect(
+    Pool::connect(
         dsn,
         &PoolOptions {
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
@@ -91,10 +91,7 @@ pub async fn template_pool(
 
 pub async fn close_pools(pools: &[&Pool]) {
     for pool in pools {
-        assert_eq!(
-            infra_postgres::close(pool, CLOSE_BUDGET).await,
-            CloseOutcome::Complete
-        );
+        assert_eq!(pool.close(CLOSE_BUDGET).await, CloseOutcome::Complete);
     }
 }
 

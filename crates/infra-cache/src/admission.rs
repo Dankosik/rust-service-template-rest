@@ -6,7 +6,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use secrecy::ExposeSecret;
 
 use crate::credentials::{PasswordFile, read_regular_file, read_secret_file};
-use crate::dial::Tls;
+use crate::dial::{Tls, Transport};
 use crate::{CacheOptions, ClientCertificate, ServerEndpoint, StartError};
 
 const MAX_PEM_CHAIN_BYTES: usize = 1024 * 1024;
@@ -14,9 +14,14 @@ const MAX_PRIVATE_KEY_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Admitted {
     pub(crate) server: ServerEndpoint,
-    pub(crate) tls: Option<Tls>,
+    pub(crate) transport: Transport,
     pub(crate) settings: redis::RedisConnectionInfo,
     pub(crate) password_file: Option<PasswordFile>,
+}
+
+enum AdmittedAddress {
+    Plaintext(ServerEndpoint),
+    Tls(ServerEndpoint),
 }
 
 pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
@@ -36,7 +41,7 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
     if info.redis_settings().db() < 0 {
         return Err(StartError::InvalidDsn);
     }
-    let server = admit_address(
+    let address = admit_address(
         &info,
         allow_plaintext,
         root_ca_path.is_some(),
@@ -44,19 +49,21 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
     )?;
     let password_file =
         admit_password(info.redis_settings(), password_file, allow_unauthenticated)?;
-    let tls = if server.tls {
-        let roots = root_ca_path.as_deref().map(read_root_ca).transpose()?;
-        let identity = client_certificate
-            .as_ref()
-            .map(read_client_certificate)
-            .transpose()?;
-        Some(Tls {
-            connector: tls_connector(roots, identity)?,
-            server_name: ServerName::try_from(server.host.clone())
-                .map_err(|_| StartError::InvalidDsn)?,
-        })
-    } else {
-        None
+    let (server, transport) = match address {
+        AdmittedAddress::Plaintext(server) => (server, Transport::Plaintext),
+        AdmittedAddress::Tls(server) => {
+            let roots = root_ca_path.as_deref().map(read_root_ca).transpose()?;
+            let identity = client_certificate
+                .as_ref()
+                .map(read_client_certificate)
+                .transpose()?;
+            let transport = Transport::Tls(Tls {
+                connector: tls_connector(roots, identity)?,
+                server_name: ServerName::try_from(server.host.clone())
+                    .map_err(|_| StartError::InvalidDsn)?,
+            });
+            (server, transport)
+        }
     };
     let settings = info
         .redis_settings()
@@ -64,7 +71,7 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
         .set_protocol(redis::ProtocolVersion::RESP3);
     Ok(Admitted {
         server,
-        tls,
+        transport,
         settings,
         password_file,
     })
@@ -75,7 +82,7 @@ fn admit_address(
     allow_plaintext: bool,
     has_root_ca: bool,
     has_client_certificate: bool,
-) -> Result<ServerEndpoint, StartError> {
+) -> Result<AdmittedAddress, StartError> {
     match info.addr() {
         redis::ConnectionAddr::Tcp(host, port) => {
             if !allow_plaintext {
@@ -87,12 +94,11 @@ fn admit_address(
             if has_client_certificate {
                 return Err(StartError::ClientCertificateRequiresTls);
             }
-            Ok(ServerEndpoint {
+            Ok(AdmittedAddress::Plaintext(ServerEndpoint {
                 host: host.clone(),
                 port: *port,
                 database_index: info.redis_settings().db(),
-                tls: false,
-            })
+            }))
         }
         redis::ConnectionAddr::TcpTls { insecure: true, .. } => Err(StartError::InsecureTlsRefused),
         redis::ConnectionAddr::TcpTls {
@@ -100,12 +106,11 @@ fn admit_address(
             port,
             insecure: false,
             ..
-        } => Ok(ServerEndpoint {
+        } => Ok(AdmittedAddress::Tls(ServerEndpoint {
             host: host.clone(),
             port: *port,
             database_index: info.redis_settings().db(),
-            tls: true,
-        }),
+        })),
         _ => Err(StartError::UnsupportedAddress),
     }
 }

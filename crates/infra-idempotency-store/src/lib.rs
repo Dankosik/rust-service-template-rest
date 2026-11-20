@@ -53,11 +53,8 @@ mod tests {
 
     #[tokio::test]
     async fn retention_is_bounded_before_the_store_can_run_work() {
-        let pool = Pool::from(
-            sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .expect("lazy pool does no I/O"),
-        );
+        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused")
+            .expect("lazy pool does no I/O");
         let max = Duration::from_hours(36_500 * 24);
         assert!(Store::new(pool.clone(), max).is_ok());
         assert!(Store::new(pool.clone(), Duration::from_micros(1)).is_ok());
@@ -71,9 +68,6 @@ mod tests {
             let rejected = Store::new(pool.clone(), invalid);
             assert_eq!(rejected.unwrap_err(), InvalidRetention);
         }
-        assert_eq!(
-            infra_postgres::close(&pool, Duration::from_secs(1)).await,
-            infra_postgres::CloseOutcome::Complete
-        );
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 }

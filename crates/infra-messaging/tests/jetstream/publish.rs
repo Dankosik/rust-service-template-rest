@@ -5,13 +5,9 @@ use infra_messaging::{EnvelopeError, PublishRejection};
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
     let fixture = Fixture::create_with_source_limit(Topology::StreamsOnly, 1).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
-        options(&fixture, None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect("fixture source stream is admitted");
+    let messaging = Messaging::connect(options(&fixture, None, 1024), deadline(), cancel.clone())
+        .await
+        .expect("fixture source stream is admitted");
     let original = event("event-publication");
     let prepared = fixture
         .publication
@@ -70,11 +66,11 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
         .prepare(&event("event-receiving-limit"))
         .expect("event fits the preparing resource");
     let receiving_limit = prepared.payload().len() - 1;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, None, receiving_limit),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("smaller receiving resource is admitted");
     let (_capture, logged) = capture_logs();
@@ -98,11 +94,11 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     assert_eq!(source.info().await.unwrap().state.messages, 0);
     close(messaging).await;
 
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, None, receiving_limit + 1),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .unwrap();
     messaging
@@ -139,11 +135,11 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     })
     .await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, max_payload_bytes),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .unwrap();
     let prepared = fixture.publication.prepare(&event("event-window")).unwrap();
@@ -198,11 +194,11 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("fixture source stream is admitted through the transparent relay");
     let prepared = fixture
@@ -242,13 +238,9 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     close(messaging).await;
     relay.join().await;
 
-    let retry = Box::pin(Messaging::connect(
-        options(&fixture, None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect("direct retry producer is admitted after relay shutdown");
+    let retry = Messaging::connect(options(&fixture, None, 1024), deadline(), cancel.clone())
+        .await
+        .expect("direct retry producer is admitted after relay shutdown");
     let acknowledgment = retry
         .producer()
         .publish(&context(deadline(), &cancel), &prepared)
