@@ -7,15 +7,10 @@ async fn each_grant_sends_its_own_request_type_and_authorization() {
     let service = fixture.service_client();
     let delegated = fixture.exchange_client();
     let context = OperationContext::with_timeout(Duration::from_secs(10));
-    service
-        .with_context(&context)
-        .execute(fixture.request())
-        .await
-        .unwrap();
+    service.execute(&context, fixture.request()).await.unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     delegated
-        .with_context(&context)
-        .execute(fixture.request(), &subject("alice"))
+        .execute(&context, fixture.request(), &subject("alice"))
         .await
         .unwrap();
     assert_eq!(
@@ -97,8 +92,7 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         let client = fixture.service_client();
         let budget = Duration::from_secs(2);
         let context = OperationContext::with_timeout(budget);
-        let client = client.with_context(&context);
-        let mut exchange = Box::pin(client.execute(fixture.request()));
+        let mut exchange = Box::pin(client.execute(&context, fixture.request()));
         fixture.drive_until_token_received(exchange.as_mut()).await;
         if deadline_expires {
             advance(budget).await;
@@ -192,10 +186,9 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
         .http(
             Client::try_new_for_test_http(
                 fixture.origin.as_str(),
-                infra_outbound_http::Limits {
-                    operation_timeout: Duration::from_secs(3),
-                    ..TOKEN_LIMITS
-                },
+                TOKEN_LIMITS
+                    .with_operation_timeout(Duration::from_secs(3))
+                    .unwrap(),
             )
             .unwrap(),
         )
@@ -457,10 +450,7 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
         .http(
             Client::try_new_for_test_http(
                 fixture.origin.as_str(),
-                infra_outbound_http::Limits {
-                    response_body_bytes: 8,
-                    ..TOKEN_LIMITS
-                },
+                TOKEN_LIMITS.with_response_body_bytes(8).unwrap(),
             )
             .unwrap(),
         )

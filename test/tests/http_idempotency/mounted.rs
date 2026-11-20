@@ -23,7 +23,8 @@ use infra_bearerauthn::{
 use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
-    CommandInput, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalProblem, Tx,
+    CommandInput, CreatedText, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback,
+    TerminalProblem, Tx,
 };
 use infra_http::{
     Application, Authentication, Code, DelegationCredential, HardenOptions, HttpContract,
@@ -233,11 +234,10 @@ async fn create_widget(
 async fn replace_widget(
     State(state): State<WidgetState>,
     VerifiedPrincipal(principal): VerifiedPrincipal,
-    delegation: Option<DelegationCredential>,
+    VerifiedDelegation(_delegation): VerifiedDelegation,
     Path(_id): Path<i64>,
     Json(input): Json<NewWidget>,
 ) -> Result<CreateWidget, Problem> {
-    assert!(delegation.is_some());
     if !may_create(&principal) {
         return Err(forbidden());
     }
@@ -293,10 +293,7 @@ fn created_response(widget: Widget) -> CreatedWidget {
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
     headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
-    CreatedWidget {
-        body: widget,
-        headers,
-    }
+    CreatedWidget::with_headers(widget, headers)
 }
 
 fn may_create(principal: &Principal) -> bool {
@@ -1048,6 +1045,72 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
             assert_eq!(response.header(axum::http::header::ALLOW), "GET,HEAD");
         }
     }
+    provider.stop().await;
+}
+
+struct MissingDelegationCommand;
+
+impl FreshCommand for MissingDelegationCommand {
+    type Success = CreatedText;
+    type Terminal = std::convert::Infallible;
+
+    fn execute(
+        self,
+        _: &mut Tx<'_>,
+    ) -> impl Future<Output = Result<Self::Success, Rollback>> + Send {
+        std::future::poll_fn(|_| unreachable!("missing delegation fails before execution"))
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/_test/missing-delegation",
+    operation_id = "missingDelegation",
+    security(("bearerAuth" = [])),
+    extensions(("x-security-decision" = json!({
+        "exposure": "protected",
+        "rationale": "test-only idempotent route verifying fail-closed VerifiedDelegation extraction"
+    }))),
+    responses(ProtectedOperationProblemResponses)
+)]
+async fn missing_delegation(_: VerifiedDelegation) -> Result<MissingDelegationCommand, Problem> {
+    Ok(MissingDelegationCommand)
+}
+
+#[tokio::test]
+async fn idempotent_verified_delegation_without_route_opt_in_is_a_sanitized_internal_failure() {
+    let provider = Provider::start().await;
+    let pool =
+        Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool does no I/O");
+    let store = Store::new(pool, RETENTION).expect("retention fits PostgreSQL");
+    let app = HttpContract::application(bearer_document())
+        .unwrap()
+        .merge(
+            infra_http::idempotent_route!(
+                missing_delegation,
+                docs = "https://docs.example/widgets#retry"
+            )
+            .expect("missing delegation fixture composes"),
+        )
+        .unwrap()
+        .build_with_idempotency_store(
+            (),
+            Authentication::Bearer(provider.verifier()),
+            &options(BUDGET),
+            store,
+        )
+        .unwrap();
+    let server = TestServer::new(app.into_make_service());
+    let response = server
+        .post("/_test/missing-delegation")
+        .authorization(format!("Bearer {ALICE}"))
+        .add_header(KEY, "\"missing-delegation\"")
+        .await;
+    problem_body(
+        &response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+    );
     provider.stop().await;
 }
 

@@ -100,11 +100,7 @@ async fn authenticate(
     };
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => {
-            policy
-                .unregistered_response(Some(path), request.method())
-                .await
-        }
+        None => policy.unregistered_response(Some(path), request.method()),
         Some(Access::Protected(required)) => {
             authenticate_protected(verifier, required, request, next).await
         }

@@ -19,23 +19,11 @@ pub struct ServiceHttpClient {
     resource: Client,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ServiceRequestClient<'a> {
-    client: &'a ServiceHttpClient,
-    context: &'a OperationContext,
-}
-
 #[derive(Clone, derive_more::Debug)]
 #[debug("ExchangeHttpClient([REDACTED])")]
 pub struct ExchangeHttpClient {
     tokens: ExchangeTokens,
     resource: Client,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ExchangeRequestClient<'a> {
-    client: &'a ExchangeHttpClient,
-    context: &'a OperationContext,
 }
 
 impl ServiceTokens {
@@ -77,17 +65,6 @@ impl ServiceHttpClient {
         self.resource.uri(path_and_query)
     }
 
-    #[must_use]
-    pub const fn with_context<'a>(
-        &'a self,
-        context: &'a OperationContext,
-    ) -> ServiceRequestClient<'a> {
-        ServiceRequestClient {
-            client: self,
-            context,
-        }
-    }
-
     pub async fn execute(
         &self,
         context: &OperationContext,
@@ -100,26 +77,6 @@ impl ServiceHttpClient {
             Grant::Service(&self.tokens),
         )
         .await
-    }
-}
-
-impl ServiceRequestClient<'_> {
-    #[must_use]
-    pub fn host(&self) -> &str {
-        self.client.host()
-    }
-
-    #[must_use]
-    pub const fn port(&self) -> u16 {
-        self.client.port()
-    }
-
-    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
-        self.client.uri(path_and_query)
-    }
-
-    pub async fn execute(&self, request: Request<Bytes>) -> Result<Response<Bytes>, Error> {
-        self.client.execute(self.context, request).await
     }
 }
 
@@ -138,17 +95,6 @@ impl ExchangeHttpClient {
         self.resource.uri(path_and_query)
     }
 
-    #[must_use]
-    pub const fn with_context<'a>(
-        &'a self,
-        context: &'a OperationContext,
-    ) -> ExchangeRequestClient<'a> {
-        ExchangeRequestClient {
-            client: self,
-            context,
-        }
-    }
-
     pub async fn execute(
         &self,
         context: &OperationContext,
@@ -162,30 +108,6 @@ impl ExchangeHttpClient {
             Grant::Exchange(&self.tokens, subject),
         )
         .await
-    }
-}
-
-impl ExchangeRequestClient<'_> {
-    #[must_use]
-    pub fn host(&self) -> &str {
-        self.client.host()
-    }
-
-    #[must_use]
-    pub const fn port(&self) -> u16 {
-        self.client.port()
-    }
-
-    pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
-        self.client.uri(path_and_query)
-    }
-
-    pub async fn execute(
-        &self,
-        request: Request<Bytes>,
-        subject: &OnBehalfOf,
-    ) -> Result<Response<Bytes>, Error> {
-        self.client.execute(self.context, request, subject).await
     }
 }
 

@@ -85,7 +85,7 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
     );
     let oversized_unavailable = format!(
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        TOKEN_LIMITS.response_body_bytes + 1,
+        TOKEN_LIMITS.response_body_bytes() + 1,
     );
     for (body, expected) in [
         (
@@ -133,7 +133,7 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         (
             response(
                 StatusCode::OK,
-                &vec![b' '; TOKEN_LIMITS.response_body_bytes + 1],
+                &vec![b' '; TOKEN_LIMITS.response_body_bytes() + 1],
             ),
             Expected::ResponseLimit,
         ),
@@ -251,8 +251,9 @@ async fn preflight_reports_a_safe_category_when_connection_closes_before_headers
 fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
     const PRIVATE_DETAIL: &str = "sensitive-provider-detail";
     let source = || Box::new(std::io::Error::other(PRIVATE_DETAIL));
-    let build_failure = PreparationError::from(TransportBuildFailure::token_url(
-        infra_outbound_http::BuildError::Tls { source: source() },
+    let build_failure = PreparationError::from(TransportBuildFailure::new(
+        "token_url",
+        infra_outbound_http::TlsError::for_test(source()),
     ));
     assert!(
         build_failure
@@ -270,7 +271,7 @@ fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
         PRIVATE_DETAIL
     );
     let issuer_failure = DiscoveryError::from(TransportBuildFailure::issuer(
-        infra_outbound_http::BuildError::Tls { source: source() },
+        infra_outbound_http::TlsError::for_test(source()),
     ));
     assert!(issuer_failure.to_string().contains("for issuer"));
     assert_redacted(&issuer_failure, &[PRIVATE_DETAIL]);

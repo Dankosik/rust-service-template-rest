@@ -10,7 +10,7 @@ use operation_context::OperationContext;
 use tls_test_support::TlsMaterial;
 
 use crate::{
-    DispatchError, Error, ExchangeError, Limits, TransportErrorKind, UrlTemplate, test_support::*,
+    DispatchError, Error, ExchangeError, TransportErrorKind, UrlTemplate, test_support::*,
 };
 
 const REQUEST_SENTINELS: [&str; 6] = [
@@ -27,10 +27,7 @@ async fn exercise_completed_attempts() {
     let client = fixture_client_with_limits(
         "127.0.0.1:0".parse().expect("unused address"),
         &material,
-        Limits {
-            response_body_bytes: 2,
-            ..limits()
-        },
+        limits().with_response_body_bytes(2).expect("valid limit"),
     );
     let context = default_context();
     let unpolled = client.execute(&context, request());
@@ -111,10 +108,7 @@ async fn exercise_completed_attempts() {
         fixture_client_with_limits(
             address,
             &material,
-            Limits {
-                response_body_bytes: 2,
-                ..limits()
-            },
+            limits().with_response_body_bytes(2).expect("valid limit"),
         )
         .execute(&default_context(), request)
         .await,
@@ -484,10 +478,7 @@ async fn exercise_transport_failures() -> Vec<String> {
     let overflow = fixture_client_with_limits(
         address,
         &material,
-        Limits {
-            response_header_count: 1,
-            ..limits()
-        },
+        limits().with_response_header_count(1).expect("valid limit"),
     )
     .execute(&default_context(), sensitive_request())
     .await;

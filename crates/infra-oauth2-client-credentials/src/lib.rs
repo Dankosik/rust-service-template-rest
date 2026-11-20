@@ -26,9 +26,7 @@ pub use error::{
     AcquisitionError, ConfigurationError, DiscoveryError, DiscoveryTransportError, Error,
     PreparationError, Rejection, TransportBuildFailure, TransportFailure,
 };
-pub use http_client::{
-    ExchangeHttpClient, ExchangeRequestClient, ServiceHttpClient, ServiceRequestClient,
-};
+pub use http_client::{ExchangeHttpClient, ServiceHttpClient};
 pub use options::{
     Algorithm, ExchangeTokenTarget, IssuerUrl, Options, PrivateKeyJwt, ServiceTokenTarget, TokenUrl,
 };

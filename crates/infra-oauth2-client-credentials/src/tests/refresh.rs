@@ -230,9 +230,8 @@ async fn dropping_registration_stops_a_bound_http_call_during_token_acquisition(
         registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
     let client = credentials.http(fixture.resource_client()).unwrap();
     let context = OperationContext::unbounded();
-    let client = client.with_context(&context);
     let _gate = fixture.block_tokens();
-    let mut call = Box::pin(client.execute(fixture.request()));
+    let mut call = Box::pin(client.execute(&context, fixture.request()));
     tokio::select! {
         () = fixture.token_received() => {}
         result = &mut call => panic!("token must be gated: {result:?}"),
@@ -386,11 +385,7 @@ async fn assert_closed_service_calls(
         ),
         (cancelled, AcquisitionError::Cancelled),
     ] {
-        let error = client
-            .with_context(&context)
-            .execute(request())
-            .await
-            .unwrap_err();
+        let error = client.execute(&context, request()).await.unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
     }
 }
@@ -414,8 +409,7 @@ async fn assert_closed_exchange_calls(
         (cancelled, AcquisitionError::Cancelled),
     ] {
         let error = client
-            .with_context(&context)
-            .execute(request(), subject_token)
+            .execute(&context, request(), subject_token)
             .await
             .unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);

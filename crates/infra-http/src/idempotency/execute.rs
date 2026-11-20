@@ -10,7 +10,6 @@ use infra_idempotency_store::{
     AttemptError, Attempted, RequestFingerprint, ScopeKey, Store, WriteOutcome,
 };
 use infra_postgres::{SqlError, failure_cause, sqlstate};
-use metrics::{Key, Label, Level, Metadata};
 use tokio::time::Instant;
 
 use super::stored::{ReplayError, ReplaySuccess, TerminalProblem, response_from_record};
@@ -47,32 +46,21 @@ pub(super) enum Outcome {
 }
 
 impl Outcome {
-    fn key(self) -> &'static Key {
-        macro_rules! outcomes {
-            ($($variant:ident => $label:literal),* $(,)?) => {
-                match self {
-                    $(Self::$variant => {
-                        static LABELS: [Label; 1] = [Label::from_static_parts("outcome", $label)];
-                        static KEY: Key = Key::from_static_parts(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, &LABELS);
-                        &KEY
-                    },)*
-                }
-            };
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidKey => "invalid_key",
+            Self::Unavailable => "unavailable",
+            Self::InProgress => "in_progress",
+            Self::KeyMismatch => "key_mismatch",
+            Self::Replayed => "replayed",
+            Self::Integrity => "integrity",
+            Self::Internal => "internal",
+            Self::Executed => "executed",
+            Self::TerminalRefusal => "terminal_refusal",
+            Self::Unstorable => "unstorable",
+            Self::NotStored => "not_stored",
+            Self::Abandoned => "abandoned",
         }
-        outcomes!(
-            InvalidKey => "invalid_key",
-            Unavailable => "unavailable",
-            InProgress => "in_progress",
-            KeyMismatch => "key_mismatch",
-            Replayed => "replayed",
-            Integrity => "integrity",
-            Internal => "internal",
-            Executed => "executed",
-            TerminalRefusal => "terminal_refusal",
-            Unstorable => "unstorable",
-            NotStored => "not_stored",
-            Abandoned => "abandoned",
-        )
     }
 }
 
@@ -98,13 +86,9 @@ impl RouteState {
     }
 
     pub(super) fn record(&self, outcome: Outcome) {
-        static METADATA: Metadata<'static> =
-            Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
         self.outcomes[outcome]
             .get_or_init(|| {
-                metrics::with_recorder(|recorder| {
-                    recorder.register_counter(outcome.key(), &METADATA)
-                })
+                metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => outcome.as_str())
             })
             .increment(1);
     }
@@ -168,12 +152,8 @@ impl Attempt {
                         Err(Rollback::Terminal(problem)) => {
                             Ok(WriteOutcome::TerminalRefusal(problem.capture_terminal()?))
                         }
-                        Err(Rollback::Refused(problem)) => {
-                            Err(AttemptRollback::Command(Rollback::Refused(problem)))
-                        }
-                        Err(Rollback::Database(error)) => {
-                            Err(AttemptRollback::Command(Rollback::Database(error)))
-                        }
+                        Err(Rollback::Refused(problem)) => Err(AttemptRollback::Refused(problem)),
+                        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
                     },
                 );
                 let result = tokio::time::timeout_at(attempt_end, attempt)
@@ -286,7 +266,8 @@ impl Answer {
 }
 
 enum AttemptRollback {
-    Command(Rollback<Infallible>),
+    Refused(Box<Problem>),
+    Database(SqlError),
     Unstorable(ReplayError),
 }
 
@@ -304,10 +285,10 @@ fn map_attempted(
     let operation_id = &route.operation_id;
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
-        Ok(Attempted::RolledBack(AttemptRollback::Command(Rollback::Refused(problem)))) => {
+        Ok(Attempted::RolledBack(AttemptRollback::Refused(problem))) => {
             Answer::operation_response((*problem).into_response(), Outcome::NotStored)
         }
-        Ok(Attempted::RolledBack(AttemptRollback::Command(Rollback::Database(error)))) => {
+        Ok(Attempted::RolledBack(AttemptRollback::Database(error))) => {
             let class = AttemptError::classify_sql(&error);
             tracing::warn!(
                 operation = operation_id,
@@ -317,9 +298,6 @@ fn map_attempted(
                 "http_idempotency_command_failed"
             );
             attempt_failure(class, scope, operation_id)
-        }
-        Ok(Attempted::RolledBack(AttemptRollback::Command(Rollback::Terminal(never)))) => {
-            match never {}
         }
         Ok(Attempted::RolledBack(AttemptRollback::Unstorable(error))) => {
             tracing::warn!(
@@ -493,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn a_problem_refusal_answers_without_replay_header() {
         let route = route_state();
-        let rollback = AttemptRollback::Command(Rollback::from(
+        let rollback = AttemptRollback::Refused(Box::new(
             Problem::new(Code::UnprocessableContent).detail("rejected"),
         ));
         let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), &route);
