@@ -21,8 +21,8 @@ use infra_jobs::{Engine, EnqueueError, Kinds};
 use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
-    ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingError, MessagingOptions,
-    Registry, Route, TransportSecurity,
+    ConsumerOptions, EnvelopeError, EventHandler, HandlerError, Messaging, MessagingError,
+    MessagingOptions, Registry, Route, TransportSecurity,
 };
 use infra_postgres::{Isolation, PgPool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
@@ -125,7 +125,11 @@ impl Fixture {
             .expect("fixture publication route is valid");
         if with_consumer {
             let mut handled = registry.clone();
-            handled.register(&route, |_, _| async { Ok(()) }).unwrap();
+            handled
+                .register(&route, |_: Event<Created>, _: OperationContext| async {
+                    Ok(())
+                })
+                .unwrap();
             jetstream
                 .get_stream(&stream)
                 .await
@@ -157,12 +161,13 @@ impl Fixture {
         }
     }
 
-    fn connect_producer(&self) -> impl Future<Output = Result<Messaging, MessagingError>> {
-        Box::pin(Messaging::connect(
+    async fn connect_producer(&self) -> Result<Messaging, MessagingError> {
+        Messaging::connect(
             messaging_options(self),
             Instant::now() + WAIT,
             CancellationToken::new(),
-        ))
+        )
+        .await
     }
 
     async fn remove_source(&self) {
@@ -879,11 +884,11 @@ async fn race_ordered_enqueues(
 async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(pool: PgPool) {
     let fixture = Fixture::create().await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
-    let first_messaging = Box::pin(Messaging::connect(
+    let first_messaging = Messaging::connect(
         messaging_options_with_servers(&fixture, vec![relay.url.clone()]),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    ))
+    )
     .await
     .expect("producer-only messaging admits through the transparent relay");
     let jobs = template_pool(&pool, 3).await;
@@ -1024,14 +1029,14 @@ async fn outbox_retries_after_a_route_changing_stream_update(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_intent(pool: PgPool) {
     let fixture = Fixture::create().await;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         MessagingOptions {
             max_payload_bytes: 64,
             ..messaging_options(&fixture)
         },
         Instant::now() + WAIT,
         CancellationToken::new(),
-    ))
+    )
     .await
     .expect("producer-only messaging admits before the controlled outage");
     let jobs = template_pool(&pool, 3).await;
@@ -1439,11 +1444,11 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(pool: PgPool) {
     let fixture = Fixture::create_with_consumer(true).await;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         consumer_options(&fixture, &fixture.durable),
         Instant::now() + WAIT,
         CancellationToken::new(),
-    ))
+    )
     .await
     .expect("messaging consumer topology admits");
     let effects = template_pool(&pool, 3).await;
@@ -1530,31 +1535,48 @@ async fn create_effect_store(pool: &PgPool) {
 }
 
 fn effect_registry(fixture: &Fixture, pool: &PgPool, invoked: &Arc<AtomicUsize>) -> Registry {
-    let effect_pool = pool.clone();
-    let invoked = Arc::clone(invoked);
+    struct EffectHandler {
+        pool: PgPool,
+        invoked: Arc<AtomicUsize>,
+    }
+
+    impl EventHandler<Created> for EffectHandler {
+        async fn handle(
+            &self,
+            event: Event<Created>,
+            _context: OperationContext,
+        ) -> Result<(), HandlerError> {
+            in_tx(&self.pool, async |tx| -> Result<(), Step> {
+                let inserted = sqlx::query(
+                    "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                )
+                .bind(&event.id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                if inserted == 1 {
+                    sqlx::query("UPDATE messaging_business SET applied = applied + 1")
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| HandlerError::Retryable)?;
+            self.invoked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, move |event, _| {
-            let pool = effect_pool.clone();
-            let invoked = Arc::clone(&invoked);
-            async move {
-                in_tx(&pool, async |tx| -> Result<(), Step> {
-                    let inserted = sqlx::query(
-                    "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                ).bind(&event.id).execute(&mut *tx).await?.rows_affected();
-                    if inserted == 1 {
-                        sqlx::query("UPDATE messaging_business SET applied = applied + 1")
-                            .execute(&mut *tx)
-                            .await?;
-                    }
-                    Ok(())
-                })
-                .await
-                .map_err(|_| HandlerError::Retryable)?;
-                invoked.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        })
+        .register(
+            &fixture.route,
+            EffectHandler {
+                pool: pool.clone(),
+                invoked: Arc::clone(invoked),
+            },
+        )
         .expect("durably idempotent handler registers");
     registry
 }
@@ -1578,23 +1600,26 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     let reject_once = AtomicBool::new(true);
     let (accepted, mut recovered) = tokio::sync::mpsc::channel(1);
     second_registry
-        .register(&fixture.route, move |event, _| {
-            std::future::ready(if reject_once.swap(false, Ordering::Relaxed) {
-                Err(HandlerError::Permanent)
-            } else {
-                accepted.try_send(event.id).unwrap();
-                Ok(())
-            })
-        })
+        .register(
+            &fixture.route,
+            move |event: Event<Created>, _: OperationContext| {
+                std::future::ready(if reject_once.swap(false, Ordering::Relaxed) {
+                    Err(HandlerError::Permanent)
+                } else {
+                    accepted.try_send(event.id).unwrap();
+                    Ok(())
+                })
+            },
+        )
         .unwrap();
 
     let cancel = CancellationToken::new();
     let subscribe = async |durable: &str, registry: Registry| {
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             consumer_options(&fixture, durable),
             Instant::now() + WAIT,
             cancel.clone(),
-        ))
+        )
         .await
         .unwrap();
         let worker = messaging
@@ -1697,13 +1722,9 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
         AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, dropped).await;
     let mut options = consumer_options(&fixture, &fixture.durable);
     options.servers = vec![relay.url.clone()];
-    let messaging = Box::pin(Messaging::connect(
-        options,
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .expect("consumer connects through the settlement relay");
+    let messaging = Messaging::connect(options, Instant::now() + WAIT, CancellationToken::new())
+        .await
+        .expect("consumer connects through the settlement relay");
     let effects = template_pool(&pool, 3).await;
     create_effect_store(&effects).await;
     let invoked = Arc::new(AtomicUsize::new(0));

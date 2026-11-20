@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::fmt;
-use std::io::{self, Write};
 
 use async_nats::Subject;
 use bytes::Bytes;
@@ -124,13 +123,14 @@ impl PreparedEvent {
         max_payload_bytes: usize,
         make_identity: impl FnOnce() -> EventIdentity,
     ) -> Result<Self, EnvelopeError> {
-        let mut payload = PayloadWriter::new(max_payload_bytes);
-        json_payload::to_writer(&mut payload, &event.payload)
-            .map_err(|_| EnvelopeError::Serialization)?;
-        if payload.total_bytes > max_payload_bytes {
-            return Err(EnvelopeError::PayloadTooLarge);
-        }
-        if !payload_depth_allowed(&payload.bytes) {
+        let payload =
+            json_payload::to_vec_bounded(&event.payload, max_payload_bytes).map_err(|error| {
+                match error {
+                    json_payload::EncodeError::Serialize(_) => EnvelopeError::Serialization,
+                    json_payload::EncodeError::TooLarge { .. } => EnvelopeError::PayloadTooLarge,
+                }
+            })?;
+        if !payload_depth_allowed(&payload) {
             return Err(EnvelopeError::PayloadStructure);
         }
         let occurred_at = event.occurred_at;
@@ -143,7 +143,7 @@ impl PreparedEvent {
             event_type: Cow::Borrowed(key.event_type),
             schema_version: key.schema_version,
             occurred_at,
-            payload: payload.bytes.into(),
+            payload: payload.into(),
         })
     }
 
@@ -287,49 +287,6 @@ pub(crate) fn payload_depth_allowed(mut bytes: &[u8]) -> bool {
     true
 }
 
-struct PayloadWriter {
-    bytes: Vec<u8>,
-    total_bytes: usize,
-    limit: usize,
-}
-
-impl PayloadWriter {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            total_bytes: 0,
-            limit,
-        }
-    }
-}
-
-impl Write for PayloadWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(buf.len())
-            .ok_or_else(|| io::Error::other("serialized event length overflow"))?;
-        let retained = buf.len().min(self.limit - self.bytes.len());
-        let needed = self.bytes.len() + retained;
-        if needed > self.bytes.capacity() {
-            let capacity = self
-                .bytes
-                .capacity()
-                .saturating_mul(2)
-                .max(128)
-                .max(needed)
-                .min(self.limit);
-            self.bytes.reserve_exact(capacity - self.bytes.len());
-        }
-        self.bytes.extend_from_slice(&buf[..retained]);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -339,7 +296,7 @@ mod tests {
     use serde::{Serialize, Serializer};
     use time::UtcDateTime;
 
-    use super::{PayloadWriter, PreparedEvent};
+    use super::PreparedEvent;
     use crate::{EnvelopeError, Registry, Route};
 
     fn prepare<T: EventPayload + Serialize + 'static>(
@@ -670,32 +627,6 @@ mod tests {
             .expect("small output ignores the untrusted size hint");
         assert_eq!(prepared.payload().as_ref(), b"[0]");
         assert_eq!(event.payload.calls.get(), 1);
-    }
-
-    #[test]
-    fn serialization_discards_excess_output_without_reserving_its_size() {
-        let payload = StreamingPayload {
-            calls: Cell::new(0),
-            elements: 16_384,
-            fail_at_end: false,
-        };
-        for limit in [0, 1, 31, 256] {
-            let mut writer = PayloadWriter::new(limit);
-            assert_eq!(writer.bytes.capacity(), 0);
-            serde_json::to_writer(&mut writer, &payload).expect("streamed zeros serialize");
-            assert_eq!(writer.total_bytes, 32_769);
-            assert_eq!(writer.bytes.len(), limit);
-            assert!(writer.bytes.capacity() <= limit);
-        }
-        let mut writer = PayloadWriter::new(1_024);
-        serde_json::to_writer(&mut writer, "x").expect("small string serializes");
-        assert_eq!(writer.bytes, b"\"x\"");
-        assert!(writer.bytes.capacity() < 1_024);
-        serde_json::to_writer(&mut writer, &"x".repeat(65_536))
-            .expect("a single large fragment is consumed without retaining it all");
-        assert_eq!(writer.total_bytes, 65_541);
-        assert_eq!(writer.bytes.len(), 1_024);
-        assert!(writer.bytes.capacity() <= 1_024);
     }
 
     // template:begin outbox:messaging-outbox-preparation-tests

@@ -6,11 +6,12 @@
 use std::time::Duration;
 
 use async_nats::jetstream::{self, stream};
-use domain_events::EventPayload;
+use domain_events::{Event, EventPayload};
 use futures_util::StreamExt as _;
 use infra_messaging::{
     ConsumerOptions, Messaging, MessagingOptions, Registry, Route, TransportSecurity,
 };
+use operation_context::OperationContext;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -133,7 +134,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     .await;
 
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         MessagingOptions {
             connection_name: "infra-messaging-idle-test".to_owned(),
             servers: vec![url],
@@ -152,14 +153,16 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
         },
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .expect("idle fixture stream is admitted");
     let route = Route::<IdleEvent>::new(subject);
     let mut registry = Registry::default();
     registry.declare(&route).expect("route is valid");
     registry
-        .register(&route, |_, _| async { Ok(()) })
+        .register(&route, |_: Event<IdleEvent>, _: OperationContext| async {
+            Ok(())
+        })
         .expect("handler is registered");
     let consumer = messaging
         .consumer(registry, deadline(), &cancel)

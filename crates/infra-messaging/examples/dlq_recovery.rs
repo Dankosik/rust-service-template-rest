@@ -219,15 +219,10 @@ struct Grant {
     operation: String,
 }
 
-enum Publisher {
-    Starting(Box<MessagingStartup>),
-    Admitted(Messaging),
-}
-
 #[derive(Default)]
 struct Resources {
     native: Option<(async_nats::Client, watch::Receiver<bool>)>,
-    publisher: Option<Publisher>,
+    publisher: Option<MessagingStartup>,
 }
 
 impl Resources {
@@ -271,8 +266,7 @@ impl Resources {
     async fn close(self, deadline: Instant) -> bool {
         let cancel = CancellationToken::new();
         let publisher_close = match self.publisher {
-            Some(Publisher::Starting(startup)) => startup.close(deadline, &cancel).await,
-            Some(Publisher::Admitted(messaging)) => messaging.close(deadline, &cancel).await,
+            Some(startup) => startup.close(deadline, &cancel).await,
             None => CloseOutcome::Complete,
         };
         let mut complete = publisher_close == CloseOutcome::Complete;
@@ -557,19 +551,13 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             CancellationToken::new(),
         )
         .map_err(|_| "publisher_configuration")?;
-        let Publisher::Starting(startup) = resources
-            .publisher
-            .insert(Publisher::Starting(Box::new(startup)))
-        else {
-            return Err("publisher_configuration");
-        };
+        let startup = resources.publisher.insert(startup);
         let Ok(messaging) = startup.admit().await else {
             state.publication = publication_after_rejection;
             finish(&state_path, &state)?;
             return Ok(());
         };
         let producer = messaging.producer();
-        resources.publisher = Some(Publisher::Admitted(messaging));
         state.publication = Publication::Ambiguous;
         state.ack = None;
         save(&state_path, &state, Persist::Replace)?;

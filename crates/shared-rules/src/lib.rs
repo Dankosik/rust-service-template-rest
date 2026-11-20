@@ -26,6 +26,12 @@ pub mod hyper {
     pub const HTTP1_MIN_READ_BUFFER_BYTES: u16 = 8 * 1024;
 }
 pub mod jitter;
+// template:begin messaging:shared-rules-messaging
+pub mod messaging {
+    pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
+    pub const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
+}
+// template:end messaging:shared-rules-messaging
 // template:begin oidc-jwt:jwks-freshness-policy
 pub mod oidc_jwt {
     use std::time::Duration;

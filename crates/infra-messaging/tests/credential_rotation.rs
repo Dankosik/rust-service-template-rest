@@ -193,7 +193,7 @@ async fn rotation_scenario(
     old.publish_file(&path).await;
     let cancel = CancellationToken::new();
     *client = Some(
-        Box::pin(Messaging::connect(
+        Messaging::connect(
             MessagingOptions {
                 connection_name: "synthetic-credential-rotation".to_owned(),
                 servers: vec![url.to_owned()],
@@ -206,7 +206,7 @@ async fn rotation_scenario(
             },
             deadline(),
             cancel.clone(),
-        ))
+        )
         .await
         .unwrap(),
     );

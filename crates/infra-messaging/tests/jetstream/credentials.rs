@@ -221,7 +221,7 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
 
     let mut missing = options(&fixture, None, 1024);
     missing.credentials = Some(Credentials::File(dir.path().join("absent.creds")));
-    let refused = Box::pin(Messaging::connect(missing, deadline(), cancel.clone()))
+    let refused = Messaging::connect(missing, deadline(), cancel.clone())
         .await
         .expect_err("a missing credentials file refuses the connection");
     std::assert_matches!(
@@ -234,7 +234,7 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
     std::fs::write(&malformed_path, "not credentials").expect("fixture file is written");
     let mut malformed = options(&fixture, None, 1024);
     malformed.credentials = Some(Credentials::File(malformed_path));
-    let refused = Box::pin(Messaging::connect(malformed, deadline(), cancel.clone()))
+    let refused = Messaging::connect(malformed, deadline(), cancel.clone())
         .await
         .expect_err("a malformed credentials file refuses the connection");
     std::assert_matches!(

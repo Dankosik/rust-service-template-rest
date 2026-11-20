@@ -4,7 +4,7 @@ use infra_http_transport::Server;
 use infra_jobs::Started;
 // template:end jobs:worker-resources-jobs-import
 // template:begin messaging:worker-resources-messaging-import
-use infra_messaging::{ConsumerHandle, Messaging, MessagingStartup};
+use infra_messaging::{ConsumerHandle, MessagingStartup};
 // template:end messaging:worker-resources-messaging-import
 // template:begin jobs:worker-resources-postgres-import
 use infra_postgres::PgPool;
@@ -33,7 +33,7 @@ pub(crate) struct Dependencies {
     pub(crate) pool: Option<PgPool>,
     // template:end jobs:worker-shutdown-resources-pool
     // template:begin messaging:worker-shutdown-resources-messaging-broker
-    pub(crate) broker: Option<BrokerResource>,
+    pub(crate) broker: Option<MessagingStartup>,
     // template:end messaging:worker-shutdown-resources-messaging-broker
 }
 
@@ -56,10 +56,3 @@ pub(crate) struct Resources {
     pub(crate) listeners: Listeners,
     pub(crate) readiness: Option<ReadinessControl>,
 }
-
-// template:begin messaging:worker-resources-broker
-pub(crate) enum BrokerResource {
-    Starting(Box<MessagingStartup>),
-    Admitted(Messaging),
-}
-// template:end messaging:worker-resources-broker

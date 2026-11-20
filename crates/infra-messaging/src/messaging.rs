@@ -20,7 +20,8 @@ use crate::topology::report_refusal_failure;
 use crate::topology::{TopologyAdmission, admit_topology};
 use crate::wire::HEADER_LIMIT_BYTES;
 
-pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PUBLICATION_WINDOW_BYTES: usize =
+    shared_rules::messaging::PUBLICATION_WINDOW_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportSecurity {
@@ -70,19 +71,25 @@ pub struct OutboxProducer(pub(crate) Producer);
 
 #[derive(Debug)]
 pub struct MessagingStartup {
+    phase: StartupPhase,
+}
+
+#[derive(Debug)]
+struct StartupConfig {
     options: MessagingOptions,
     publication_permits: usize,
     envelope_limit_bytes: usize,
     deadline: Instant,
     cancel: CancellationToken,
-    phase: StartupPhase,
 }
 
 #[derive(Debug)]
 enum StartupPhase {
-    Prepared,
-    Connected(NativeConnection),
-    Admitted,
+    Starting {
+        config: Box<StartupConfig>,
+        connection: Option<NativeConnection>,
+    },
+    Admitted(Messaging),
 }
 
 #[derive(Debug)]
@@ -134,7 +141,7 @@ impl Messaging {
         cancel: CancellationToken,
     ) -> Result<Self, MessagingError> {
         let mut startup = Self::prepare(options, deadline, cancel.clone())?;
-        match Box::pin(startup.admit()).await {
+        match startup.admit().await {
             Ok(messaging) => Ok(messaging),
             Err(error) => {
                 let outcome = startup.close(deadline, &cancel).await;
@@ -168,12 +175,16 @@ impl Messaging {
             return Err(MessagingError::Bounds);
         }
         Ok(MessagingStartup {
-            options,
-            publication_permits,
-            envelope_limit_bytes,
-            deadline,
-            cancel,
-            phase: StartupPhase::Prepared,
+            phase: StartupPhase::Starting {
+                config: Box::new(StartupConfig {
+                    options,
+                    publication_permits,
+                    envelope_limit_bytes,
+                    deadline,
+                    cancel,
+                }),
+                connection: None,
+            },
         })
     }
 
@@ -240,68 +251,85 @@ impl Messaging {
 
 impl MessagingStartup {
     pub async fn admit(&mut self) -> Result<Messaging, MessagingError> {
-        let options = &self.options;
-        let deadline = self.deadline;
-        let cancel = &self.cancel;
+        Box::pin(self.admit_inner()).await
+    }
+
+    async fn admit_inner(&mut self) -> Result<Messaging, MessagingError> {
         crate::producer::describe_metrics();
         crate::probe::describe_metrics();
         crate::connection::describe_metrics();
         crate::consumer::describe_metrics();
         crate::credentials::describe_metrics();
-        let connection = match &mut self.phase {
-            StartupPhase::Admitted => {
-                return Err(MessagingError::Configuration(
-                    "messaging is already admitted",
-                ));
-            }
-            StartupPhase::Connected(connection) => connection.clone(),
-            phase @ StartupPhase::Prepared => {
-                let connection = NativeConnection::open(options, deadline, cancel).await?;
-                *phase = StartupPhase::Connected(connection.clone());
-                connection
+        let StartupPhase::Starting { config, connection } = &mut self.phase else {
+            return Err(MessagingError::Configuration(
+                "messaging is already admitted",
+            ));
+        };
+        let connection = match connection {
+            Some(existing) => existing.clone(),
+            slot @ None => {
+                let opened =
+                    NativeConnection::open(&config.options, config.deadline, &config.cancel)
+                        .await?;
+                *slot = Some(opened.clone());
+                opened
             }
         };
         let client = &connection.client;
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
-            .max_ack_inflight(self.publication_permits)
+            .max_ack_inflight(config.publication_permits)
             .backpressure_on_inflight(false)
             .build(client.clone());
         let topology = admit_topology(
-            options,
-            self.envelope_limit_bytes,
+            &config.options,
+            config.envelope_limit_bytes,
             client,
             &jetstream,
-            deadline,
-            cancel,
+            config.deadline,
+            &config.cancel,
         )
         .await?;
         let messaging = Messaging {
             shared: Arc::new(Shared {
                 jetstream,
-                source_stream: options.source_stream.clone(),
-                max_payload_bytes: options.max_payload_bytes,
-                envelope_limit_bytes: self.envelope_limit_bytes,
+                source_stream: config.options.source_stream.clone(),
+                max_payload_bytes: config.options.max_payload_bytes,
+                envelope_limit_bytes: config.envelope_limit_bytes,
                 draining: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
                 publish_metrics: PublishMetrics::register(),
                 publish_work_metrics: PublishWorkMetrics::register(
-                    self.publication_permits,
-                    &options.connection_name,
+                    config.publication_permits,
+                    &config.options.connection_name,
                 ),
                 connection,
             }),
             topology,
         };
-        self.phase = StartupPhase::Admitted;
+        self.phase = StartupPhase::Admitted(messaging.clone());
         Ok(messaging)
+    }
+
+    #[must_use]
+    pub const fn admitted(&self) -> Option<&Messaging> {
+        match &self.phase {
+            StartupPhase::Admitted(messaging) => Some(messaging),
+            StartupPhase::Starting { .. } => None,
+        }
     }
 
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         match self.phase {
-            StartupPhase::Connected(connection) => connection.close(deadline, cancel).await,
-            StartupPhase::Prepared | StartupPhase::Admitted => CloseOutcome::Complete,
+            StartupPhase::Starting {
+                connection: Some(connection),
+                ..
+            } => connection.close(deadline, cancel).await,
+            StartupPhase::Starting {
+                connection: None, ..
+            } => CloseOutcome::Complete,
+            StartupPhase::Admitted(messaging) => messaging.close(deadline, cancel).await,
         }
     }
 }
@@ -343,7 +371,8 @@ mod tests {
                 CancellationToken::new(),
             );
             if accepted {
-                assert!(result.is_ok());
+                let startup = result.expect("valid bounds are prepared");
+                assert!(startup.admitted().is_none());
             } else {
                 std::assert_matches!(result, Err(MessagingError::Bounds));
             }

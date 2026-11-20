@@ -553,11 +553,11 @@ async fn close_waits_for_the_terminal_connection_event() {
         control_failed: Arc::clone(&control_failed),
     });
     let _subscriber = tracing::subscriber::set_default(subscriber);
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, None, 1024),
         deadline(),
         CancellationToken::new(),
-    ))
+    )
     .await
     .expect("fixture source stream is admitted");
     let (done_tx, done_rx) = oneshot::channel();
@@ -651,17 +651,61 @@ async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
 }
 
 #[tokio::test]
+async fn admitted_startup_retains_messaging_until_closed() {
+    let fixture = Fixture::create(Topology::StreamsOnly).await;
+    let cancel = CancellationToken::new();
+    let mut startup = Messaging::prepare(options(&fixture, None, 1024), deadline(), cancel.clone())
+        .expect("valid options prepare");
+    assert!(startup.admitted().is_none());
+
+    let messaging = startup
+        .admit()
+        .await
+        .expect("fixture source stream is admitted");
+    assert!(startup.admitted().is_some());
+    std::assert_matches!(
+        startup.admit().await,
+        Err(infra_messaging::MessagingError::Configuration(
+            "messaging is already admitted"
+        ))
+    );
+    let producer = messaging.producer();
+    let probe = messaging.probe();
+    probe.check().await.expect("admitted connection is ready");
+
+    assert_eq!(
+        startup.close(deadline(), &CancellationToken::new()).await,
+        infra_messaging::CloseOutcome::Complete
+    );
+    assert!(
+        probe.check().await.is_err(),
+        "closing an admitted startup must drain and close its Messaging connection"
+    );
+    let prepared = fixture
+        .publication
+        .prepare(&event("after-startup-close"))
+        .unwrap();
+    assert_eq!(
+        producer
+            .publish(&context(deadline(), &cancel), &prepared)
+            .await,
+        Err(infra_messaging::PublishRejection::Unavailable.into())
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn cancelled_close_returns_before_native_termination_and_termination_remains_owned() {
     use std::task::Poll;
 
     for cancel_at_entry in [false, true] {
         let fixture = Fixture::create(Topology::StreamsOnly).await;
         let (_capture, logged) = capture_logs();
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             options(&fixture, None, 1024),
             deadline(),
             CancellationToken::new(),
-        ))
+        )
         .await
         .unwrap();
         let cancel = CancellationToken::new();
@@ -720,7 +764,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let relay = OutageRelay::start().await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(
             &fixture,
             vec![relay.url.clone()],
@@ -729,16 +773,19 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         ),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .unwrap();
     let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut registered = fixture.registry.clone();
     registered
-        .register(&fixture.route, move |event, _| {
-            observed_tx.send(event.id).unwrap();
-            async { Ok(()) }
-        })
+        .register(
+            &fixture.route,
+            move |event: Event<ExampleEvent>, _: OperationContext| {
+                observed_tx.send(event.id).unwrap();
+                async { Ok(()) }
+            },
+        )
         .unwrap();
     let mut handle = messaging
         .consumer(registered, deadline(), &cancel)
@@ -845,17 +892,15 @@ async fn save_ack_floor_before_restart() {
     let receipt = std::env::var("NATS_CURSOR_RECEIPT").unwrap();
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
         deadline(),
         cancel.clone(),
-    ))
+    )
     .await
     .unwrap();
     let mut registry = fixture.registry.clone();
-    registry
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .unwrap();
+    registry.register(&fixture.route, accept).unwrap();
     let mut handle = messaging
         .consumer(registry, deadline(), &cancel)
         .await
