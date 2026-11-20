@@ -18,8 +18,6 @@ use parking_lot::Mutex;
 use secrecy::SecretString;
 use uuid::Uuid;
 
-use crate::metrics::static_counter;
-
 const TRACE_EXPORT_SDK_RESULT_SPANS_METRIC: &str =
     "telemetry_trace_exporter_sdk_result_spans_total";
 
@@ -34,21 +32,21 @@ pub enum ResolvedSampler {
 }
 
 #[derive(derive_more::Debug)]
-pub struct TracingOptions {
-    pub service_name: String,
+pub struct TracingOptions<'a> {
+    pub service_name: &'a str,
     #[debug(skip)]
-    pub service_version: String,
+    pub service_version: &'a str,
     #[debug(skip)]
-    pub vcs_revision: String,
+    pub vcs_revision: &'a str,
     #[debug(skip)]
-    pub instance_id: Option<String>,
+    pub instance_id: Option<&'a str>,
     #[debug(skip)]
-    pub deployment_environment: String,
+    pub deployment_environment: &'a str,
     pub sampler: ResolvedSampler,
     #[debug(skip)]
-    pub otlp_endpoint: Option<String>,
+    pub otlp_endpoint: Option<&'a str>,
     #[debug(skip)]
-    pub otlp_headers: Option<SecretString>,
+    pub otlp_headers: Option<&'a SecretString>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +119,11 @@ impl ExporterState {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TracingError {
+#[error(transparent)]
+pub struct TracingError(TracingErrorKind);
+
+#[derive(Debug, thiserror::Error)]
+enum TracingErrorKind {
     #[error(
         "ambient OpenTelemetry header variable {name} is present while a typed \
          OTLP endpoint selects the collector; unset it or configure the \
@@ -187,7 +189,7 @@ const EXPORTER_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
 pub async fn install_tracer_provider(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
 ) -> Result<TracerProviderHandle, TracingError> {
     let trust = CollectorTrust::from_env(|name| std::env::var_os(name));
     let handle = prepare_tracer_provider(options, |name| std::env::var_os(name), trust).await?;
@@ -197,11 +199,11 @@ pub async fn install_tracer_provider(
 }
 
 async fn prepare_tracer_provider(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
     env: impl Fn(&str) -> Option<OsString>,
     trust: CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let collector = CollectorConfig::resolve(options, &trust, &env)?;
+    let collector = CollectorConfig::resolve(options, &trust, &env).map_err(TracingError)?;
 
     let builder = SdkTracerProvider::builder()
         .with_resource(resource(options))
@@ -231,10 +233,10 @@ async fn prepare_tracer_provider(
         )
     });
     let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
-        Ok(result) if tokio::time::Instant::now() < deadline => {
-            result.map_err(|_| TracingError::ClientThread)??
-        }
-        _ => return Err(TracingError::PreparationTimeout),
+        Ok(result) if tokio::time::Instant::now() < deadline => result
+            .map_err(|_| TracingError(TracingErrorKind::ClientThread))?
+            .map_err(TracingError)?,
+        _ => return Err(TracingError(TracingErrorKind::PreparationTimeout)),
     };
     let provider = builder
         .with_span_processor(
@@ -419,23 +421,11 @@ impl SdkFailure {
         }
     }
 
-    fn counter(self) -> metrics::Counter {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Timeout => static_counter!(
-                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                "outcome" => "error",
-                "error_type" => "timeout",
-            ),
-            Self::AlreadyShutdown => static_counter!(
-                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                "outcome" => "error",
-                "error_type" => "already_shutdown",
-            ),
-            Self::Internal => static_counter!(
-                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                "outcome" => "error",
-                "error_type" => "internal_failure",
-            ),
+            Self::Timeout => "timeout",
+            Self::AlreadyShutdown => "already_shutdown",
+            Self::Internal => "internal_failure",
         }
     }
 }
@@ -464,11 +454,15 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
         let started = std::time::Instant::now();
         let result = self.inner.export(batch).await;
         let counter = match &result {
-            Ok(()) => static_counter!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok"),
+            Ok(()) => metrics::counter!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok"),
             Err(error) => {
                 let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
                 DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
-                failure.counter()
+                metrics::counter!(
+                    TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+                    "outcome" => "error",
+                    "error_type" => failure.label(),
+                )
             }
         };
         counter.increment(spans);
@@ -497,24 +491,28 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     }
 }
 
-fn resource(options: &TracingOptions) -> Resource {
+fn resource(options: &TracingOptions<'_>) -> Resource {
     static PROCESS_INSTANCE_ID: OnceLock<Uuid> = OnceLock::new();
     let instance_id = options
         .instance_id
-        .as_ref()
         .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(|| PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string());
+        .map_or_else(
+            || PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string(),
+            str::to_owned,
+        );
     let attributes = [
-        KeyValue::new(attribute::SERVICE_NAME, options.service_name.clone()),
-        KeyValue::new(attribute::SERVICE_VERSION, options.service_version.clone()),
+        KeyValue::new(attribute::SERVICE_NAME, options.service_name.to_owned()),
+        KeyValue::new(
+            attribute::SERVICE_VERSION,
+            options.service_version.to_owned(),
+        ),
         KeyValue::new(
             attribute::VCS_REF_HEAD_REVISION,
-            options.vcs_revision.clone(),
+            options.vcs_revision.to_owned(),
         ),
         KeyValue::new(
             attribute::DEPLOYMENT_ENVIRONMENT_NAME,
-            options.deployment_environment.clone(),
+            options.deployment_environment.to_owned(),
         ),
         KeyValue::new(attribute::SERVICE_INSTANCE_ID, instance_id),
     ];

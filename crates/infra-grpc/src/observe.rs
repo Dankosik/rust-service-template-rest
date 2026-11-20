@@ -3,9 +3,11 @@ use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use enum_map::EnumMap;
-use infra_grpc_core::observe::{Call as CoreCall, CallMetrics, StatusCounters, open_rpc_span};
+use infra_grpc_core::observe::{
+    Call as CoreCall, CallMetrics, HANDLING_SECONDS_BUCKETS, StatusCounters, open_rpc_span,
+};
+use infra_grpc_core::protocol::RpcName;
 use opentelemetry::trace::SpanKind;
-use shared_rules::grpc::{HANDLING_SECONDS_BUCKETS, RpcName};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::set_parent_or_fallback;

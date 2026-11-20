@@ -274,39 +274,34 @@ fn record_statement_error(
     .record(started.elapsed());
 }
 
-macro_rules! transaction_outcomes {
-    ($($variant:ident => $label:literal),* $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-        pub(crate) enum TransactionOutcome { $($variant),* }
-
-        impl TransactionOutcome {
-            pub(crate) const fn label(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $label,)*
-                }
-            }
-
-            fn duration_histogram(self) -> metrics::Histogram {
-                match self {
-                    $(Self::$variant => metrics::histogram!(
-                        TRANSACTION_DURATION_METRIC,
-                        "outcome" => $label
-                    ),)*
-                }
-            }
-        }
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+pub(crate) enum TransactionOutcome {
+    Committed,
+    RolledBack,
+    AcquireFailed,
+    BeginFailed,
+    CommitFailed,
+    CommitUnknown,
+    Cancelled,
 }
 
-transaction_outcomes!(
-    Committed => "committed",
-    RolledBack => "rolled_back",
-    AcquireFailed => "acquire_failed",
-    BeginFailed => "begin_failed",
-    CommitFailed => "commit_failed",
-    CommitUnknown => "commit_unknown",
-    Cancelled => "cancelled",
-);
+impl TransactionOutcome {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::RolledBack => "rolled_back",
+            Self::AcquireFailed => "acquire_failed",
+            Self::BeginFailed => "begin_failed",
+            Self::CommitFailed => "commit_failed",
+            Self::CommitUnknown => "commit_unknown",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn duration_histogram(self) -> metrics::Histogram {
+        metrics::histogram!(TRANSACTION_DURATION_METRIC, "outcome" => self.label())
+    }
+}
 
 impl TransactionOutcome {
     const fn of(error: &TxError) -> Self {

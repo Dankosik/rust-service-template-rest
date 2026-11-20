@@ -53,7 +53,7 @@ pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
     });
 }
 
-fn tracing_options(config: &WorkerConfig, identity: &str) -> TracingOptions {
+fn tracing_options<'a>(config: &'a WorkerConfig, identity: &'a str) -> TracingOptions<'a> {
     let otel = &config.observability().otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => infra_telemetry::ResolvedSampler::AlwaysOn,
@@ -64,14 +64,14 @@ fn tracing_options(config: &WorkerConfig, identity: &str) -> TracingOptions {
         }
     };
     TracingOptions {
-        service_name: identity.to_owned(),
-        service_version: config.app().version.clone(),
-        vcs_revision: config.app().commit.clone(),
-        instance_id: config.app().instance_id.clone(),
-        deployment_environment: config.app().env.clone(),
+        service_name: identity,
+        service_version: &config.app().version,
+        vcs_revision: &config.app().commit,
+        instance_id: config.app().instance_id.as_deref(),
+        deployment_environment: &config.app().env,
         sampler,
-        otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: otel.exporter.otlp_headers.clone(),
+        otlp_endpoint: otel.exporter.otlp_endpoint.as_deref(),
+        otlp_headers: otel.exporter.otlp_headers.as_ref(),
     }
 }
 
