@@ -245,15 +245,14 @@ impl IntoResponse for Problem {
 impl Problem {
     fn encode_body(&self) -> Option<Body> {
         let mut writer = BytesMut::with_capacity(128).writer();
-        if let Ok(()) = serde_json::to_writer(&mut writer, self) {
-            Some(Body::from(writer.into_inner().freeze()))
-        } else {
+        if serde_json::to_writer(&mut writer, self).is_err() {
             tracing::error!(
                 code = self.code.as_str(),
                 "http_problem_serialization_failed"
             );
-            None
+            return None;
         }
+        Some(Body::from(writer.into_inner().freeze()))
     }
 
     fn attach_to(self, mut response: Response) -> Response {
