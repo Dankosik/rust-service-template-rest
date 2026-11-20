@@ -1025,10 +1025,13 @@ mod tests {
     // template:begin oidc-introspection:authn-provider-post-form-tls-test
     #[tokio::test]
     async fn introspection_fixture_transport_uses_trusted_private_tls_for_form_posts() {
+        use operation_context::OperationContext;
         use tracing::instrument::WithSubscriber as _;
 
+        use super::StopProbe;
         use crate::test_metrics::Diagnostics;
 
+        let context = OperationContext::unbounded();
         let response = http_ok("application/json", r#"{"active":false}"#);
         let (address, root, server) = tls_server(response, false).await;
         let body = fixture_client(address, &root)
@@ -1037,7 +1040,7 @@ mod tests {
                 "a:b",
                 "c d",
                 &[("token", "opaque")],
-                &|| None,
+                StopProbe::Context(&context),
             )
             .await
             .unwrap();
@@ -1060,7 +1063,7 @@ mod tests {
                         "fixture",
                         "secret",
                         &[("token", "opaque")],
-                        &|| None,
+                        StopProbe::Context(&context),
                     )
                     .with_subscriber(dispatch.clone())
                     .await,
