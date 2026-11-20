@@ -21,17 +21,17 @@ const MEDIA_TYPE_REFERENCE_PREFIX: &str = "#/components/mediaTypes/";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum ResponseFault {
     #[error("shared response could not be resolved")]
-    UnresolvedSharedResponse,
+    SharedResponse,
     #[error("existing response must resolve within the service document")]
-    UnresolvedExistingResponse,
+    ExistingResponse,
     #[error("existing media type must resolve within the service document")]
-    UnresolvedExistingMediaType,
+    ExistingMediaType,
     #[error("shared media type could not be resolved")]
-    UnresolvedSharedMediaType,
+    SharedMediaType,
     #[error("existing header must resolve within the service document")]
-    UnresolvedExistingHeader,
+    ExistingHeader,
     #[error("shared header could not be resolved")]
-    UnresolvedSharedHeader,
+    SharedHeader,
 }
 
 pub(super) fn compose(
@@ -173,10 +173,10 @@ fn merge_response(
         Entry::Occupied(slot) => slot.into_mut(),
     };
     let Some(common) = resolve(&common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
-        return Err(ResponseFault::UnresolvedSharedResponse);
+        return Err(ResponseFault::SharedResponse);
     };
     let mut merged = resolve(slot, &components.responses, RESPONSE_REFERENCE_PREFIX)
-        .ok_or(ResponseFault::UnresolvedExistingResponse)?
+        .ok_or(ResponseFault::ExistingResponse)?
         .clone();
     if let RefOr::Ref(reference) = slot {
         if !reference.description.is_empty() {
@@ -207,14 +207,14 @@ fn merge_response_content(
             continue;
         }
         let mut existing = resolve(slot, &components.media_types, MEDIA_TYPE_REFERENCE_PREFIX)
-            .ok_or(ResponseFault::UnresolvedExistingMediaType)?
+            .ok_or(ResponseFault::ExistingMediaType)?
             .clone();
         let other = resolve(
             content,
             &components.media_types,
             MEDIA_TYPE_REFERENCE_PREFIX,
         )
-        .ok_or(ResponseFault::UnresolvedSharedMediaType)?;
+        .ok_or(ResponseFault::SharedMediaType)?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         *slot = RefOr::T(existing);
     }
@@ -239,10 +239,10 @@ fn merge_response_headers(
             continue;
         }
         let mut existing = resolve(slot, &components.headers, "#/components/headers/")
-            .ok_or(ResponseFault::UnresolvedExistingHeader)?
+            .ok_or(ResponseFault::ExistingHeader)?
             .clone();
         let other = resolve(header, &components.headers, "#/components/headers/")
-            .ok_or(ResponseFault::UnresolvedSharedHeader)?;
+            .ok_or(ResponseFault::SharedHeader)?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         if let Some(description) = &other.description {
             append_description(existing.description.get_or_insert_default(), description);

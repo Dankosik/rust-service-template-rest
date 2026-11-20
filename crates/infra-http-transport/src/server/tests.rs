@@ -275,7 +275,7 @@ async fn accept_panic_after_stop_is_still_observed() {
         options().connections,
         driver,
         delegated,
-        "http",
+        TransportScheme::Http,
         move |stream, _| {
             let _ = &marker;
             async move { Some(stream) }

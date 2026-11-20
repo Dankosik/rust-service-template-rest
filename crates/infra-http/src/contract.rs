@@ -1339,7 +1339,7 @@ mod tests {
             let export = contract.into_openapi().map(|_| ());
             match &expected {
                 Err(FinalizeError(FinalizeKind::ProtectedOperation { .. })) => {
-                    assert_eq!(export, Ok(()))
+                    assert_eq!(export, Ok(()));
                 }
                 _ => assert_eq!(export, expected, "{document}"),
             }

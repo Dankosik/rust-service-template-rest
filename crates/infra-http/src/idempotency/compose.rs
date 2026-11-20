@@ -476,6 +476,10 @@ mod tests {
         async fn zero() -> Result<DummyCommand, Problem> {
             Ok(DummyCommand)
         }
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "exercises the maximum 8-extractor command handler arity"
+        )]
         async fn all(
             State(sub): State<SubState>,
             principal: Principal,
