@@ -60,6 +60,7 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "crates/service/examples/runtime_progress.rs", "crates/service/tests/runtime_progress.rs",
         "build/docker/runtime-progress.Dockerfile", "template/runtime_progress.py",
         "crates/service/**", "crates/infra-http-transport/**", "crates/infra-grpc/**",
+        "crates/infra-grpc-core/**",
         "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
     ),
     "repo_lint": (

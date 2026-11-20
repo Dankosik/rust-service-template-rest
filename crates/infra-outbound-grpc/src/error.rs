@@ -1,11 +1,17 @@
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
-pub enum TlsMaterialError {
+pub enum ClientTlsError {
     #[error("gRPC TLS certificate chain is invalid")]
     InvalidCertificate(#[source] Option<rustls::Error>),
     #[error("gRPC TLS private key is invalid")]
     InvalidPrivateKey,
     #[error("gRPC TLS CA certificate is invalid")]
     InvalidCaCertificate(#[source] Option<rustls::Error>),
+    #[error("gRPC client TLS private key does not match the certificate")]
+    IdentityMismatch(#[source] rustls::Error),
+    #[error("gRPC client TLS identity installation failed")]
+    IdentitySetup(#[source] rustls::Error),
+    #[error("gRPC client TLS platform verifier setup failed")]
+    VerifierSetup,
 }
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -23,13 +29,5 @@ pub enum ClientError {
     ServiceTokenOriginMismatch,
     // template:end service-auth:grpc-service-token-client-errors
     #[error(transparent)]
-    Tls(#[from] TlsMaterialError),
-    #[error("gRPC client TLS private key does not match the certificate")]
-    ClientIdentityMismatch(#[source] rustls::Error),
-    #[error("gRPC client TLS identity installation failed")]
-    ClientIdentitySetup(#[source] rustls::Error),
-    #[error("gRPC client TLS platform verifier setup failed")]
-    ClientVerifierSetup,
-    #[error("gRPC client TLS protocol version selection failed")]
-    ClientProtocolSetup(#[source] rustls::Error),
+    Tls(#[from] ClientTlsError),
 }

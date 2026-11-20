@@ -14,7 +14,7 @@ use grpc_contracts::example::v1::{
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
     echo_service_server::{EchoService, EchoServiceServer},
 };
-use infra_grpc::Services;
+use infra_grpc::{RequestExt as _, Services};
 use infra_object_storage::{
     CredentialSource, ObjectKey, ObjectStorage, ObjectStorageOptions, Provider, PutBody, PutOptions,
 };
@@ -343,7 +343,7 @@ impl Echo {
     }
 
     async fn upload(&self, request: &Request<UnaryRequest>) -> Result<String, Status> {
-        let context = infra_grpc::request_operation(request)?;
+        let context = request.operation()?;
         self.counts.upload_started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.upload_active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts
@@ -540,14 +540,19 @@ fn register(
         manager.manage(cancel, reporter).await
     });
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-    services.add(EchoServiceServer::new(Echo {
+    #[allow(
+        unused_mut,
+        unused_variables,
+        reason = "the bearer profile registers scope requirements on the handle"
+    )]
+    let mut echo = services.add(EchoServiceServer::new(Echo {
         cpu,
         storage,
         counts,
     }))?;
     // template:begin grpc-authn:runtime-progress-scope-requirements
     for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-        services.require_scopes(&format!("/example.v1.EchoService/{method}"), &[])?;
+        echo.require_scopes(method, &[])?;
     }
     // template:end grpc-authn:runtime-progress-scope-requirements
     Ok(())
