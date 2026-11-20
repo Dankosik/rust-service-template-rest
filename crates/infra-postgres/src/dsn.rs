@@ -47,26 +47,26 @@ impl fmt::Display for QueryParameter {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AmbientVar {
-    PgSslRootCert,
-    PgSslCert,
-    PgSslKey,
-    PgOptions,
+    SslRootCert,
+    SslCert,
+    SslKey,
+    Options,
 }
 
 impl AmbientVar {
     const ALL: [Self; 4] = [
-        Self::PgSslRootCert,
-        Self::PgSslCert,
-        Self::PgSslKey,
-        Self::PgOptions,
+        Self::SslRootCert,
+        Self::SslCert,
+        Self::SslKey,
+        Self::Options,
     ];
 
     const fn as_str(self) -> &'static str {
         match self {
-            Self::PgSslRootCert => "PGSSLROOTCERT",
-            Self::PgSslCert => "PGSSLCERT",
-            Self::PgSslKey => "PGSSLKEY",
-            Self::PgOptions => "PGOPTIONS",
+            Self::SslRootCert => "PGSSLROOTCERT",
+            Self::SslCert => "PGSSLCERT",
+            Self::SslKey => "PGSSLKEY",
+            Self::Options => "PGOPTIONS",
         }
     }
 }
@@ -589,10 +589,10 @@ mod tests {
     #[test]
     fn only_a_variable_the_url_cannot_override_refuses_the_dsn() {
         for (name, var) in [
-            ("PGSSLROOTCERT", AmbientVar::PgSslRootCert),
-            ("PGSSLCERT", AmbientVar::PgSslCert),
-            ("PGSSLKEY", AmbientVar::PgSslKey),
-            ("PGOPTIONS", AmbientVar::PgOptions),
+            ("PGSSLROOTCERT", AmbientVar::SslRootCert),
+            ("PGSSLCERT", AmbientVar::SslCert),
+            ("PGSSLKEY", AmbientVar::SslKey),
+            ("PGOPTIONS", AmbientVar::Options),
         ] {
             let err =
                 Dsn::admit_with_environment(VALID, |candidate| candidate == name).unwrap_err();

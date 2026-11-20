@@ -363,21 +363,21 @@ impl Pool {
         queue: Queue,
         caller_deadline: Option<Instant>,
     ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-        let (deadline, budget) = match caller_deadline {
-            Some(deadline) => (deadline, deadline.saturating_duration_since(Instant::now())),
-            None => {
-                let budget = self.inner.options().get_acquire_timeout();
-                (Instant::now() + budget, budget)
-            }
+        let (deadline, budget) = if let Some(deadline) = caller_deadline {
+            (deadline, deadline.saturating_duration_since(Instant::now()))
+        } else {
+            let budget = self.inner.options().get_acquire_timeout();
+            (Instant::now() + budget, budget)
         };
         observe_acquisition(operation, budget, async {
             let _slot = take_slot(self.policy.slots.as_ref(), deadline, queue).await?;
-            match caller_deadline {
-                Some(deadline) => self.acquire_until_deadline(deadline).await,
-                None => match timeout_at(deadline, self.inner.acquire()).await {
+            if let Some(deadline) = caller_deadline {
+                self.acquire_until_deadline(deadline).await
+            } else {
+                match timeout_at(deadline, self.inner.acquire()).await {
                     Ok(result) => result,
                     Err(_elapsed) => Err(sqlx::Error::PoolTimedOut),
-                },
+                }
             }
         })
         .await
