@@ -60,9 +60,10 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
     handle(&mut reordered, &v2);
     handle(&mut reordered, &fixture.route);
 
+    let admit_context = context(deadline(), &cancel);
     let (first, second) = tokio::join!(
-        messaging.consumer(current, &context(deadline(), &cancel)),
-        messaging.consumer(reordered, &context(deadline(), &cancel)),
+        messaging.consumer(current, &admit_context),
+        messaging.consumer(reordered, &admit_context),
     );
     let admitted = first.expect("the first replica admits the durable");
     second.expect("the second replica admits the same durable");
@@ -119,14 +120,15 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
     fixture.jetstream.update_stream(config).await.unwrap();
     let mut other_options = consumer_options(&fixture);
     other_options.filter_subject.clone_from(&other_subject);
+    let connect_context = context(deadline(), &cancel);
     let (first, second) = tokio::try_join!(
         Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
-            &context(deadline(), &cancel),
+            &connect_context,
         ),
         Messaging::connect(
             options(&fixture, Some(other_options), 1024),
-            &context(deadline(), &cancel),
+            &connect_context,
         ),
     )
     .unwrap();
@@ -135,9 +137,10 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
     let mut other_registry = Registry::default();
     let route = Route::<ExampleEvent>::new(other_subject.clone());
     other_registry.declare(&route).unwrap().handle(accept);
+    let admit_context = context(deadline(), &cancel);
     let (left, right) = tokio::join!(
-        first.consumer(registered, &context(deadline(), &cancel)),
-        second.consumer(other_registry, &context(deadline(), &cancel)),
+        first.consumer(registered, &admit_context),
+        second.consumer(other_registry, &admit_context),
     );
     let filter = match (left, right) {
         (Ok(_), Err(infra_messaging::MessagingError::Topology)) => fixture.subject.as_str(),
