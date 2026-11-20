@@ -43,7 +43,7 @@ pub(super) async fn install_observability(
     Ok((metrics, exporter_state))
 }
 
-pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
+pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &mut Background) {
     background.spawn("metrics_upkeep", |cancel| metrics.clone().upkeep(cancel));
     background.spawn("runtime_progress", |cancel| {
         metrics.clone().runtime_progress(cancel)

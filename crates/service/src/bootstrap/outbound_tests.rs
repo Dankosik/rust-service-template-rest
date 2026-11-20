@@ -209,16 +209,19 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         .await
         .unwrap();
         let mut signals = Signals::install().unwrap();
-        finish_startup(
-            Ok(Some(prepared)),
-            &mut signals,
-            &mut background,
-            &mut serving,
-        )
-        .unwrap();
+        assert_eq!(
+            finish_startup(
+                Ok(Some(prepared)),
+                &mut signals,
+                &mut background,
+                &mut serving,
+            )
+            .unwrap(),
+            StartupOutcome::Admitted
+        );
         let (registration, retained_client) = lifetime.await.unwrap();
         assert!(registration.upgrade().is_some());
-        let address = serving.http_server.as_ref().unwrap().local_addr();
+        let address = serving.traffic.http.as_ref().unwrap().local_addr();
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(assert_resource_unavailable(address), async {
                 tokens
@@ -251,8 +254,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
             serving,
             background,
             dependencies,
-            tracer_provider: None,
-            logger: None,
+            telemetry: shutdown::Telemetry::default(),
         })
         .await;
         assert_eq!(outcome, Outcome::Graceful);

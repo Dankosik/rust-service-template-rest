@@ -1,14 +1,12 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use health::BoxedProbe;
-use infra_postgres::{Dsn, DsnError, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
+use infra_postgres::{Dsn, DsnError, PgPool, PoolOptions, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
 use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
-use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 const CREDENTIAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,13 +35,13 @@ pub(super) fn required_pool_config(
 pub(super) async fn admit_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
-    background: &Background,
-    resources: &mut Resources,
-) -> Result<(), WorkerError> {
+    background: &mut Background,
+    retained: &mut Option<PgPool>,
+) -> Result<PgPool, WorkerError> {
     let dsn = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
     let local_development = config.app().is_local_development();
-    let pool = open_pool(config, postgres, background, resources, move || {
+    let pool = open_pool(config, postgres, background, retained, move || {
         Dsn::admit_for_environment(
             dsn.expose_secret(),
             password_file.as_deref(),
@@ -52,15 +50,14 @@ pub(super) async fn admit_pool(
     })
     .await?;
     migrate::verify_history(&pool).await?;
-    resources.dependencies.pool = Some(PoolResource::Admitted(pool));
-    Ok(())
+    Ok(pool)
 }
 
 async fn open_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
-    background: &Background,
-    resources: &mut Resources,
+    background: &mut Background,
+    retained: &mut Option<PgPool>,
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<PgPool, WorkerError> {
     let dsn = prepare_dsn(prepare).await?;
@@ -70,9 +67,13 @@ async fn open_pool(
         postgres.max_connections,
         &application_name,
     );
-    let pool =
-        infra_postgres::prepare_pool_with_notifications(&dsn, &options, postgres.notifications);
-    resources.dependencies.pool = Some(PoolResource::Starting(pool.clone()));
+    let pool = retained
+        .insert(infra_postgres::prepare_pool_with_notifications(
+            &dsn,
+            &options,
+            postgres.notifications,
+        ))
+        .clone();
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
@@ -99,7 +100,7 @@ async fn prepare_dsn(
     }
 }
 
-fn spawn_pool_tasks(pool: &PgPool, dsn: &Dsn, background: &Background) {
+fn spawn_pool_tasks(pool: &PgPool, dsn: &Dsn, background: &mut Background) {
     background.spawn("postgres_pool_metrics", |cancel| {
         infra_postgres::record_metrics_periodically(
             pool.clone(),
@@ -139,18 +140,6 @@ fn application_name(service_name: &str) -> String {
     format!("{prefix}{IDENTITY_SUFFIX}")
 }
 
-pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
-    match resources.dependencies.pool.as_ref() {
-        Some(PoolResource::Admitted(pool)) => Ok(pool.clone()),
-        Some(PoolResource::Starting(_)) | None => Err(WorkerError::PostgresDisabled),
-    }
-}
-
-pub(super) fn probe(resources: &Resources) -> Option<BoxedProbe> {
-    let pool = admitted_pool(resources).ok()?;
-    Some(BoxedProbe::new(PostgresProbe::writable_primary(pool)))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -159,10 +148,9 @@ mod tests {
     use infra_postgres::Dsn;
     use service_config::WorkerConfig;
 
-    use super::{application_name, open_pool, probe};
+    use super::{application_name, open_pool};
     use crate::background::Background;
     use crate::bootstrap::{WorkerError, worker_identity};
-    use crate::resources::Resources;
 
     const DSN: &str = "postgres://worker:fixture@127.0.0.1:5432/example?sslmode=verify-full";
     const WAIT: Duration = Duration::from_secs(5);
@@ -192,17 +180,22 @@ mod tests {
                 .unwrap();
             let (began, started) = mpsc::channel();
             let (release, wait) = mpsc::channel();
-            let mut resources = Resources::default();
-            let background = Background::new();
+            let mut retained = None;
+            let mut background = Background::new();
             let dsn = Dsn::admit(DSN).unwrap();
             runtime.block_on(async {
-                let admission =
-                    open_pool(&config, postgres, &background, &mut resources, move || {
+                let admission = open_pool(
+                    &config,
+                    postgres,
+                    &mut background,
+                    &mut retained,
+                    move || {
                         began.send(()).unwrap();
                         wait.recv_timeout(WAIT)
                             .expect("release after stop or expiry");
                         Ok(dsn)
-                    });
+                    },
+                );
                 tokio::pin!(admission);
                 assert!(futures_util::poll!(&mut admission).is_pending());
                 started.recv_timeout(WAIT).expect("preparation started");
@@ -226,14 +219,13 @@ mod tests {
                     }
                 }
             });
-            assert!(resources.dependencies.pool.is_none());
+            assert!(retained.is_none());
             if !result_ready {
                 release.send(()).unwrap();
             }
             drop(runtime);
-            assert!(resources.dependencies.pool.is_none());
-            assert!(probe(&resources).is_none());
-            assert!(background.tracker.is_empty());
+            assert!(retained.is_none());
+            assert!(background.is_empty());
         }
     }
 
@@ -241,9 +233,9 @@ mod tests {
     async fn failed_preparation_task_withholds_its_panic_payload() {
         let config = config();
         let postgres = config.postgres().unwrap();
-        let mut resources = Resources::default();
-        let background = Background::new();
-        let error = open_pool(&config, postgres, &background, &mut resources, || {
+        let mut retained = None;
+        let mut background = Background::new();
+        let error = open_pool(&config, postgres, &mut background, &mut retained, || {
             panic!("synthetic preparation payload")
         })
         .await
@@ -253,7 +245,7 @@ mod tests {
             "postgres credential preparation task failed"
         );
         assert!(std::error::Error::source(&error).is_none());
-        assert!(resources.dependencies.pool.is_none());
+        assert!(retained.is_none());
     }
 
     #[test]

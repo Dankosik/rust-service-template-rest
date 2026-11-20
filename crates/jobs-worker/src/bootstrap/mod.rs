@@ -17,13 +17,14 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use futures_util::FutureExt;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 use health::{PreparedReadiness, Readiness};
 use infra_telemetry::install_panic_hook;
 use service_config::WorkerConfig;
 
-use crate::background::Background;
+use crate::background::{Background, wait_for_failure};
 use crate::resources::{Listeners, Resources};
 use crate::shutdown;
 use crate::signals::{SignalError, Signals};
@@ -137,14 +138,16 @@ pub(crate) async fn serve(
     signals: &mut Signals,
     deadline: &mut Option<Instant>,
 ) -> Result<shutdown::Outcome, WorkerError> {
-    let background = Background::new();
+    let mut background = Background::new();
+    let mut background_failures = background.failure_observer();
     let mut resources = Resources::default();
     let ended = Box::pin(
         AssertUnwindSafe(run_worker(
             &config,
             register,
             signals,
-            &background,
+            &mut background,
+            &mut background_failures,
             &mut resources,
         ))
         .catch_unwind(),
@@ -153,7 +156,9 @@ pub(crate) async fn serve(
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
     let ended = match ended {
         Ended::Failure(_) => ended,
-        Ended::Signal => pending_failure(&resources, &background).map_or(ended, Ended::Failure),
+        Ended::Signal => {
+            pending_failure(&resources, &background_failures).map_or(ended, Ended::Failure)
+        }
     };
     let deadline = *deadline.insert(shutdown::stop_deadline(
         signals.first_stop(),
@@ -197,11 +202,21 @@ async fn run_worker(
     config: &WorkerConfig,
     register: Register<'_>,
     signals: &mut Signals,
-    background: &Background,
+    background: &mut Background,
+    background_failures: &mut watch::Receiver<Option<&'static str>>,
     resources: &mut Resources,
 ) -> Ended {
-    match start_worker(config, register, signals, background, resources).await {
-        Ok(()) => wait_for_stop(resources, background, signals).await,
+    match start_worker(
+        config,
+        register,
+        signals,
+        background,
+        background_failures,
+        resources,
+    )
+    .await
+    {
+        Ok(()) => wait_for_stop(resources, background_failures, signals).await,
         Err(ended) => ended,
     }
 }
@@ -210,18 +225,20 @@ async fn start_worker(
     config: &WorkerConfig,
     register: Register<'_>,
     signals: &mut Signals,
-    background: &Background,
+    background: &mut Background,
+    background_failures: &mut watch::Receiver<Option<&'static str>>,
     resources: &mut Resources,
 ) -> Result<(), Ended> {
     let prepared = tokio::select! {
         biased;
         result = signals.wait() => Err(signal_ended(result)),
-        task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
+        task = wait_for_failure(background_failures) => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
         result = prepare(config, register, background, resources) => result.map_err(Ended::Failure),
     };
-    let prepared = prepared
-        .map_err(|ended| pending_failure(resources, background).map_or(ended, Ended::Failure))?;
-    check_pending_end(resources, background, signals)?;
+    let prepared = prepared.map_err(|ended| {
+        pending_failure(resources, background_failures).map_or(ended, Ended::Failure)
+    })?;
+    check_pending_end(resources, background_failures, signals)?;
     // template:begin jobs:worker-bootstrap-start-admitted-jobs
     if let Some(engine) = prepared.engine {
         jobs::start_engine(engine, resources, background);
@@ -229,11 +246,18 @@ async fn start_worker(
     // template:end jobs:worker-bootstrap-start-admitted-jobs
     // template:begin messaging:worker-bootstrap-start-admitted-consumer
     if let Some(consumer) = prepared.consumer {
-        check_pending_end(resources, background, signals)?;
+        check_pending_end(resources, background_failures, signals)?;
         messaging::start_consumer(consumer, resources, background);
     }
     // template:end messaging:worker-bootstrap-start-admitted-consumer
-    activate_readiness(prepared.readiness, resources, background, signals).await?;
+    activate_readiness(
+        prepared.readiness,
+        resources,
+        background,
+        background_failures,
+        signals,
+    )
+    .await?;
     tracing::info!("jobs_worker_ready");
     Ok(())
 }
@@ -241,15 +265,16 @@ async fn start_worker(
 async fn activate_readiness(
     mut readiness: PreparedReadiness,
     resources: &Resources,
-    background: &Background,
+    background: &mut Background,
+    background_failures: &mut watch::Receiver<Option<&'static str>>,
     signals: &mut Signals,
 ) -> Result<(), Ended> {
     let freshness = tokio::select! {
         biased;
-        ended = wait_for_stop(resources, background, signals) => return Err(ended),
+        ended = wait_for_stop(resources, background_failures, signals) => return Err(ended),
         result = readiness.ensure_fresh() => result,
     };
-    check_pending_end(resources, background, signals)?;
+    check_pending_end(resources, background_failures, signals)?;
     let refresher = freshness
         .and_then(|()| readiness.activate())
         .map_err(|error| Ended::Failure(WorkerError::Admission(error)))?;
@@ -268,10 +293,10 @@ fn signal_ended(result: Result<(), SignalError>) -> Ended {
 
 fn check_pending_end(
     resources: &Resources,
-    background: &Background,
+    background_failures: &watch::Receiver<Option<&'static str>>,
     signals: &mut Signals,
 ) -> Result<(), Ended> {
-    if let Some(error) = pending_failure(resources, background) {
+    if let Some(error) = pending_failure(resources, background_failures) {
         return Err(Ended::Failure(error));
     }
     match signals.take_pending() {
@@ -281,8 +306,11 @@ fn check_pending_end(
     }
 }
 
-fn pending_failure(resources: &Resources, background: &Background) -> Option<WorkerError> {
-    if let Some(task) = background.failure() {
+fn pending_failure(
+    resources: &Resources,
+    background_failures: &watch::Receiver<Option<&'static str>>,
+) -> Option<WorkerError> {
+    if let Some(task) = *background_failures.borrow() {
         return Some(WorkerError::BackgroundStopped(task));
     }
     let Listeners {
@@ -320,7 +348,7 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
 async fn prepare(
     config: &WorkerConfig,
     register: Register<'_>,
-    background: &Background,
+    background: &mut Background,
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability().otel.service_name);
@@ -343,6 +371,7 @@ async fn prepare(
         &exporter_state,
     );
     telemetry::spawn_metrics_tasks(&metrics, background);
+    let mut probes = Vec::new();
     // template:begin jobs:worker-bootstrap-pool-config
     let postgres = postgres::required_pool_config(config, capabilities.jobs.is_some())?;
     // template:end jobs:worker-bootstrap-pool-config
@@ -352,33 +381,63 @@ async fn prepare(
     }
     // template:end outbox:worker-bootstrap-outbox-pool-inputs
     // template:begin jobs:worker-bootstrap-admit-pool-call
-    if let Some(postgres) = postgres {
-        postgres::admit_pool(config, postgres, background, resources).await?;
-    }
-    // template:end jobs:worker-bootstrap-admit-pool-call
-    // template:begin messaging:worker-bootstrap-messaging-connect
-    let consumer = match capabilities.messaging.take() {
-        Some(plan) => {
-            Box::pin(messaging::connect_messaging(
-                plan,
-                &background.cancel,
-                resources,
-            ))
-            .await?
+    let pool = match postgres {
+        Some(postgres) => {
+            let pool = postgres::admit_pool(
+                config,
+                postgres,
+                background,
+                &mut resources.dependencies.pool,
+            )
+            .await?;
+            probes.push(health::BoxedProbe::new(
+                infra_postgres::PostgresProbe::writable_primary(pool.clone()),
+            ));
+            Some(pool)
         }
         None => None,
     };
-    // template:end messaging:worker-bootstrap-messaging-connect
+    // template:end jobs:worker-bootstrap-admit-pool-call
+    // template:begin messaging:worker-bootstrap-messaging-connect
+    #[allow(
+        unused_variables,
+        reason = "only the outbox profile passes the admitted broker into jobs::build_engine"
+    )]
+    let (messaging, consumer) = match capabilities.messaging.take() {
+        Some(plan) => {
+            let (messaging, consumer) = Box::pin(messaging::connect_messaging(
+                plan,
+                // template:end messaging:worker-bootstrap-messaging-connect
+                // template:begin outbox:worker-bootstrap-messaging-pool-arg
+                pool.as_ref(),
+                // template:end outbox:worker-bootstrap-messaging-pool-arg
+                // template:begin messaging:worker-bootstrap-messaging-connect-finish
+                background.cancel(),
+                &mut resources.dependencies.broker,
+            ))
+            .await?;
+            probes.push(health::BoxedProbe::new(messaging.probe()));
+            if let Some(consumer) = &consumer {
+                probes.push(health::BoxedProbe::new(consumer.probe()));
+            }
+            (Some(messaging), consumer)
+        }
+        None => (None, None),
+    };
+    // template:end messaging:worker-bootstrap-messaging-connect-finish
     // template:begin jobs:worker-bootstrap-build-engines
-    let engine = jobs::build_engine(config, capabilities.jobs.take(), resources).await?;
-    // template:end jobs:worker-bootstrap-build-engines
-    #[allow(unused_mut, reason = "the messaging profile adds the durable probe")]
-    let mut probes = listeners::readiness_probes(resources);
-    // template:begin messaging:worker-bootstrap-durable-readiness
-    if let Some(consumer) = &consumer {
-        probes.push(health::BoxedProbe::new(consumer.probe()));
-    }
-    // template:end messaging:worker-bootstrap-durable-readiness
+    let engine = jobs::build_engine(
+        config,
+        capabilities.jobs.take(),
+        pool.as_ref(),
+        // template:end jobs:worker-bootstrap-build-engines
+        // template:begin outbox:worker-bootstrap-build-engines-messaging-arg
+        messaging.as_ref(),
+        // template:end outbox:worker-bootstrap-build-engines-messaging-arg
+        // template:begin jobs:worker-bootstrap-build-engines-finish
+    )
+    .await?;
+    // template:end jobs:worker-bootstrap-build-engines-finish
     Ok(Prepared {
         readiness: prepare_readiness(config, &metrics, background, resources, probes).await?,
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
@@ -407,7 +466,7 @@ fn raise_open_file_limit(connection_caps: u64) {
 async fn prepare_readiness(
     config: &WorkerConfig,
     metrics: &infra_telemetry::Metrics,
-    background: &Background,
+    background: &mut Background,
     resources: &mut Resources,
     probes: Vec<health::BoxedProbe>,
 ) -> Result<PreparedReadiness, WorkerError> {
@@ -429,7 +488,7 @@ struct RetainedCapabilities {
 fn register_capabilities(
     config: &WorkerConfig,
     register: Register<'_>,
-    background: &Background,
+    background: &mut Background,
 ) -> Result<RetainedCapabilities, WorkerError> {
     let mut registration = Registration::new(config, background);
     register(&mut registration)?;
@@ -481,16 +540,16 @@ fn register_capabilities(
 
 async fn wait_for_stop(
     resources: &Resources,
-    background: &Background,
+    background_failures: &mut watch::Receiver<Option<&'static str>>,
     signals: &mut Signals,
 ) -> Ended {
     tokio::select! {
         biased;
         result = signals.wait() => {
-            pending_failure(resources, background)
+            pending_failure(resources, background_failures)
                 .map_or_else(|| signal_ended(result), Ended::Failure)
         },
-        task = background.wait_for_failure() => Ended::Failure(WorkerError::BackgroundStopped(task)),
+        task = wait_for_failure(background_failures) => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
         error = jobs::engine_failure(resources) => Ended::Failure(error),
         // template:end jobs:worker-bootstrap-wait-jobs-failure
@@ -514,7 +573,7 @@ mod tests {
 
     #[cfg(unix)]
     async fn prepare_worker_and_check_http(
-        background: &super::Background,
+        background: &mut super::Background,
         resources: &mut super::Resources,
     ) -> super::PreparedReadiness {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -609,9 +668,10 @@ mod tests {
                 let mut signals = super::Signals::install().unwrap();
                 let mut terminate_seen = signal(SignalKind::terminate()).unwrap();
                 let mut interrupt_seen = signal(SignalKind::interrupt()).unwrap();
-                let background = super::Background::new();
+                let mut background = super::Background::new();
+                let mut background_failures = background.failure_observer();
                 let mut resources = super::Resources::default();
-                let prepared = prepare_worker_and_check_http(&background, &mut resources).await;
+                let prepared = prepare_worker_and_check_http(&mut background, &mut resources).await;
                 let process = std::process::id().to_string();
                 for signal in ["-TERM", "-INT"] {
                     assert!(
@@ -630,7 +690,13 @@ mod tests {
                 .unwrap();
                 let ended = tokio::time::timeout(
                     Duration::from_secs(2),
-                    super::activate_readiness(prepared, &resources, &background, &mut signals),
+                    super::activate_readiness(
+                        prepared,
+                        &resources,
+                        &mut background,
+                        &mut background_failures,
+                        &mut signals,
+                    ),
                 )
                 .await
                 .unwrap();
@@ -651,9 +717,7 @@ mod tests {
                     first_stop,
                     "the second stop must not restart the deadline"
                 );
-                background.cancel.cancel();
-                background.tracker.close();
-                background.tracker.wait().await;
+                background.close_and_wait().await;
                 resources
                     .listeners
                     .health

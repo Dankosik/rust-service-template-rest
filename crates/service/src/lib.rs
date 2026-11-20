@@ -39,6 +39,11 @@ pub struct ServiceRegistration {
 
 impl ServiceRegistration {
     #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
     pub fn for_http_resource<C>(
         prepare: impl FnOnce(
             &service_config::Config,
@@ -49,7 +54,7 @@ impl ServiceRegistration {
     where
         C: Clone + Send + Sync + 'static,
     {
-        Self::default().with_http_resource(prepare)
+        Self::new().with_http_resource(prepare)
     }
 
     #[must_use]
@@ -92,7 +97,7 @@ pub fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    run_with(args, ServiceRegistration::default())
+    run_with(args, ServiceRegistration::new())
 }
 
 // template:begin grpc:service-run-with-grpc
@@ -108,7 +113,7 @@ pub fn run_with_grpc<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
-    run_with(args, ServiceRegistration::default().with_grpc(register))
+    run_with(args, ServiceRegistration::new().with_grpc(register))
 }
 // template:end grpc:service-run-with-grpc
 
@@ -116,7 +121,16 @@ pub fn run_with<I>(args: I, registration: ServiceRegistration) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
-    bootstrap::run_registered(args, registration)
+    match service_config::LoadOptions::try_parse_from(args) {
+        Ok(options) => bootstrap::run_registered(&options, registration),
+        Err(error) => {
+            if error.print().is_ok() {
+                ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ pub struct Registration<'a> {
     // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints
     inbound_webhook_endpoints: &'a std::collections::BTreeSet<String>,
     // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints
-    background: &'a background::Background,
+    background: &'a mut background::Background,
 }
 
 // template:begin outbox:worker-postgres-messages-factory
@@ -52,7 +52,7 @@ impl<'a> Registration<'a> {
     )]
     fn new(
         config: &'a service_config::WorkerConfig,
-        background: &'a background::Background,
+        background: &'a mut background::Background,
     ) -> Self {
         Self {
             // template:begin jobs:worker-bootstrap-register-jobs
@@ -93,18 +93,18 @@ impl<'a> Registration<'a> {
 
     // template:begin webhooks:worker-outbound-webhooks-accessor
     #[must_use]
-    pub fn outbound_webhooks(&self) -> &service_config::WebhooksConfig {
+    pub fn outbound_webhooks(&self) -> &'a service_config::WebhooksConfig {
         self.outbound_webhooks
     }
     // template:end webhooks:worker-outbound-webhooks-accessor
 
     // template:begin inbound-webhooks:worker-inbound-webhook-endpoints-accessor
-    pub fn inbound_webhook_endpoints(&self) -> impl Iterator<Item = &str> {
+    pub fn inbound_webhook_endpoints(&self) -> impl Iterator<Item = &'a str> + use<'a> {
         self.inbound_webhook_endpoints.iter().map(String::as_str)
     }
     // template:end inbound-webhooks:worker-inbound-webhook-endpoints-accessor
 
-    pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
+    pub fn spawn<F>(&mut self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -113,7 +113,7 @@ impl<'a> Registration<'a> {
 
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
-        self.background.cancel.child_token()
+        self.background.child_token()
     }
 }
 

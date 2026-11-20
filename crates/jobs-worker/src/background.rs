@@ -1,14 +1,16 @@
-use parking_lot::Mutex;
+use std::time::Duration;
+
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 pub(crate) struct Background {
-    pub(crate) cancel: CancellationToken,
-    pub(crate) tracker: TaskTracker,
+    cancel: CancellationToken,
+    tracker: TaskTracker,
     first_failure: watch::Sender<Option<&'static str>>,
-    aborts: Mutex<Vec<AbortHandle>>,
+    aborts: Vec<AbortHandle>,
 }
 
 impl Background {
@@ -17,12 +19,31 @@ impl Background {
             cancel: CancellationToken::new(),
             tracker: TaskTracker::new(),
             first_failure: watch::Sender::new(None),
-            aborts: Mutex::default(),
+            aborts: Vec::new(),
         }
     }
 
-    pub(crate) fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
-    where
+    // template:begin messaging:worker-background-cancel
+    pub(crate) fn cancel(&self) -> &CancellationToken {
+        &self.cancel
+    }
+    // template:end messaging:worker-background-cancel
+
+    pub(crate) fn child_token(&self) -> CancellationToken {
+        self.cancel.child_token()
+    }
+
+    // template:begin jobs:worker-background-start-engine
+    pub(crate) fn start_engine(&self, engine: infra_jobs::Engine) -> infra_jobs::Started {
+        engine.start(&self.tracker, &self.cancel)
+    }
+    // template:end jobs:worker-background-start-engine
+
+    pub(crate) fn spawn<F>(
+        &mut self,
+        name: &'static str,
+        start: impl FnOnce(CancellationToken) -> F,
+    ) where
         F: Future<Output = ()> + Send + 'static,
     {
         let owner_cancel = self.cancel.clone();
@@ -48,32 +69,74 @@ impl Background {
                 task.await;
             })
             .abort_handle();
-        self.aborts.lock().push(abort);
+        self.aborts.push(abort);
     }
 
     pub(crate) fn failure(&self) -> Option<&'static str> {
         *self.first_failure.borrow()
     }
 
+    pub(crate) fn failure_observer(&self) -> watch::Receiver<Option<&'static str>> {
+        self.first_failure.subscribe()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.tracker.is_empty()
+    }
+
+    pub(crate) async fn join_within(&self, budget: Duration) -> bool {
+        self.cancel.cancel();
+        self.tracker.close();
+        tokio::time::timeout(budget, self.tracker.wait())
+            .await
+            .is_ok()
+            && self.failure().is_none()
+    }
+
     pub(crate) fn abort(&self) {
-        for task in self.aborts.lock().iter() {
+        for task in &self.aborts {
             task.abort();
         }
     }
 
-    pub(crate) fn subscribe_failures(&self) -> watch::Receiver<Option<&'static str>> {
-        self.first_failure.subscribe()
+    pub(crate) async fn wait_until(&self, deadline: Instant) -> bool {
+        tokio::time::timeout_at(deadline, self.tracker.wait())
+            .await
+            .is_ok()
     }
 
-    pub(crate) async fn wait_for_failure(&self) -> &'static str {
-        let mut failures = self.subscribe_failures();
-        if let Ok(seen) = failures.wait_for(Option::is_some).await
-            && let Some(name) = *seen
-        {
-            return name;
-        }
-        std::future::pending().await
+    #[cfg(test)]
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tracker.is_closed()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracker(&self) -> TaskTracker {
+        self.tracker.clone()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) async fn close_and_wait(&self) {
+        self.cancel.cancel();
+        self.tracker.close();
+        self.tracker.wait().await;
+    }
+}
+
+pub(crate) async fn wait_for_failure(
+    failures: &mut watch::Receiver<Option<&'static str>>,
+) -> &'static str {
+    if let Ok(seen) = failures.wait_for(Option::is_some).await
+        && let Some(name) = *seen
+    {
+        return name;
+    }
+    std::future::pending().await
 }
 
 fn record_first(failures: &watch::Sender<Option<&'static str>>, name: &'static str) {
@@ -90,14 +153,15 @@ fn record_first(failures: &watch::Sender<Option<&'static str>>, name: &'static s
 mod tests {
     use std::time::Duration;
 
-    use super::Background;
+    use super::{Background, wait_for_failure};
 
     #[tokio::test]
     async fn a_task_that_panics_is_reported_by_name() {
-        let background = Background::new();
+        let mut background = Background::new();
+        let mut failures = background.failure_observer();
         background.spawn("panics", |_cancel| async { panic!("task defect") });
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(3), background.wait_for_failure())
+            tokio::time::timeout(Duration::from_secs(3), wait_for_failure(&mut failures))
                 .await
                 .unwrap(),
             "panics"

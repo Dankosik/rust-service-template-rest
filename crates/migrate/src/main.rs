@@ -107,9 +107,9 @@ enum Failure {
     #[error(transparent)]
     Dsn(#[from] DsnError),
     #[error("build tokio runtime: {0}")]
-    Runtime(std::io::Error),
+    Runtime(#[source] std::io::Error),
     #[error("install stop signal handlers: {0}")]
-    Signals(std::io::Error),
+    Signals(#[source] std::io::Error),
     #[error("{0}")]
     Setup(String),
     #[error(transparent)]
