@@ -29,7 +29,7 @@ use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, KindsBuilder};
 use infra_webhooks::inbound::{
-    Consumer as WebhookConsumer, Consumers, Incoming, Receiver, Verifier,
+    Consumer as WebhookConsumer, Consumers, Incoming, Receiver, Verifiers,
 };
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
@@ -1779,14 +1779,12 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
 
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-fixture
 fn webhook_receiver(pool: PgPool) -> Receiver {
-    Receiver::new(
-        pool,
-        [(
-            WEBHOOK_ENDPOINT.to_owned(),
-            Arc::new(KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key"))
-                as Arc<dyn Verifier>,
-        )],
-    )
+    let mut verifiers = Verifiers::new();
+    verifiers.bind(
+        WEBHOOK_ENDPOINT,
+        KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key"),
+    );
+    verifiers.into_receiver(pool)
 }
 
 fn admission_deadline() -> Instant {

@@ -7,6 +7,7 @@ use infra_jobs::{Engine, JobError, KindsBuilder};
 use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, ReceiptOutcome, ReceiveError, Receiver, Rejection, Verifier,
+    Verifiers,
 };
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{dsn_for, poll_until};
@@ -22,13 +23,9 @@ const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
 const POLL: Duration = Duration::from_millis(20);
 
 fn receiver(pool: PgPool) -> Receiver {
-    Receiver::new(
-        pool,
-        [(
-            ENDPOINT.to_owned(),
-            Arc::new(KeyRing::from_encoded(KEY, None).expect("key")) as Arc<dyn Verifier>,
-        )],
-    )
+    let mut verifiers = Verifiers::new();
+    verifiers.bind(ENDPOINT, KeyRing::from_encoded(KEY, None).expect("key"));
+    verifiers.into_receiver(pool)
 }
 
 fn admission_deadline() -> tokio::time::Instant {
@@ -853,13 +850,9 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
     let held = writer.acquire().await.expect("occupy the only permit");
     let calls = Arc::new(AtomicUsize::new(0));
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
-    let receiver = Receiver::new(
-        writer.clone(),
-        [(
-            ENDPOINT.to_owned(),
-            Arc::new(CountedVerifier(Arc::clone(&calls), keys.clone())) as Arc<dyn Verifier>,
-        )],
-    );
+    let mut verifiers = Verifiers::new();
+    verifiers.bind(ENDPOINT, CountedVerifier(Arc::clone(&calls), keys.clone()));
+    let receiver = verifiers.into_receiver(writer.clone());
     let request_with = |body| {
         let mut request = http::Request::post("/webhooks/partner%2Fa%3F%23")
             .body(body)
@@ -949,16 +942,11 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) {
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
-    let receiver = Receiver::new(
-        pool.clone(),
-        [
-            (
-                "partner".to_owned(),
-                Arc::new(keys.clone()) as Arc<dyn Verifier>,
-            ),
-            ("Partner".to_owned(), Arc::new(keys.clone())),
-        ],
-    );
+    let mut verifiers = Verifiers::new();
+    verifiers
+        .bind("partner", keys.clone())
+        .bind("Partner", keys.clone());
+    let receiver = verifiers.into_receiver(pool.clone());
     for (endpoint, message) in [
         ("partner", b"id\x80".as_slice()),
         ("partner", b"id\xff".as_slice()),
@@ -1017,16 +1005,11 @@ impl Verifier for TokenVerifier {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(pool: PgPool) {
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
-    let receiver = Receiver::new(
-        pool.clone(),
-        [
-            (
-                "standard".to_owned(),
-                Arc::new(keys.clone()) as Arc<dyn Verifier>,
-            ),
-            ("provider".to_owned(), Arc::new(TokenVerifier)),
-        ],
-    );
+    let mut verifiers = Verifiers::new();
+    verifiers
+        .bind("standard", keys.clone())
+        .bind("provider", TokenVerifier);
+    let receiver = verifiers.into_receiver(pool.clone());
     let provider_headers = |token: &'static str, delivery: &str| {
         let mut headers = HeaderMap::new();
         headers.insert("x-provider-token", HeaderValue::from_static(token));
