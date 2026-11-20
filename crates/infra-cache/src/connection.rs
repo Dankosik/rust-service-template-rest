@@ -215,7 +215,10 @@ impl Link {
         });
         let supervisor = shared
             .tasks
-            .spawn(supervise(shared.clone(), admitted, command_timeout))
+            .spawn(supervise(
+                std::mem::DropGuard::new((shared.clone(), admitted), close_supervisor),
+                command_timeout,
+            ))
             .abort_handle();
         Self {
             server,
@@ -449,18 +452,21 @@ async fn ping_generation(generation: &Generation, command_timeout: Duration) -> 
     }
 }
 
-async fn supervise(shared: Arc<Shared>, admitted: Admitted, command_timeout: Duration) {
-    let guard = std::mem::DropGuard::new((shared, admitted), |(shared, admitted)| {
-        if std::thread::panicking() {
-            tracing::error!(
-                server.address = %admitted.server.host,
-                server.port = admitted.server.port,
-                "cache_supervisor_panicked"
-            );
-        }
-        shared.close();
-    });
-    let (shared, admitted) = &*guard;
+type SupervisorGuard = std::mem::DropGuard<(Arc<Shared>, Admitted), fn((Arc<Shared>, Admitted))>;
+
+fn close_supervisor((shared, admitted): (Arc<Shared>, Admitted)) {
+    if std::thread::panicking() {
+        tracing::error!(
+            server.address = %admitted.server.host,
+            server.port = admitted.server.port,
+            "cache_supervisor_panicked"
+        );
+    }
+    shared.close();
+}
+
+async fn supervise(exit: SupervisorGuard, command_timeout: Duration) {
+    let (shared, admitted) = &*exit;
     let server = &admitted.server;
     let mut backoff = setup_backoff();
     let mut next_attempt = Instant::now();
