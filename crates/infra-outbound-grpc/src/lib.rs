@@ -8,12 +8,16 @@ mod service_auth;
 // template:end service-auth:outbound-grpc-service-auth-module
 mod tls;
 
+pub mod transport {
+    pub use crate::client::{PreparedCall, bind_context};
+}
+
 pub use client::{
-    Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
+    Client, ClientBuilder, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
+    WithContext,
 };
-pub use error::{ClientError, TlsMaterialError};
+pub use error::{ClientError, ClientTlsError};
 pub use observe::HISTOGRAMS;
-pub use protocol::grpc_timeout;
 // template:begin service-auth:outbound-grpc-service-auth-exports
 pub use service_auth::ServiceTokenClient;
 // template:end service-auth:outbound-grpc-service-auth-exports

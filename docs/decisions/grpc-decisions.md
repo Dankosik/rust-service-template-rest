@@ -1,7 +1,8 @@
 # Native gRPC decisions
 
-`crates/infra-grpc`, `crates/infra-outbound-grpc`, `crates/grpc-contracts`,
-`crates/config`, and `Cargo.toml` own the supported API, limits, metric names,
+`crates/infra-grpc`, `crates/infra-grpc-core`, `crates/infra-outbound-grpc`,
+`crates/grpc-contracts`, `crates/config`, and `Cargo.toml` own the supported API,
+limits, metric names,
 and dependency pins (with the client status hook in
 [the tonic patch](../../vendor/tonic/PATCHES.md)). This
 record keeps only rejected alternatives, protocol constraints, measurements, and

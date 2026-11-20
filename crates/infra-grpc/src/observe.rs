@@ -2,18 +2,15 @@ use std::mem::DropGuard;
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::services::{CallType, Method};
 use enum_map::EnumMap;
-use opentelemetry::trace::{SpanKind, Status as SpanStatus};
-use shared_rules::grpc::{
-    ERROR_TYPE_ATTR, FALLBACK_SPAN_NAME, HANDLING_SECONDS_BUCKETS, RPC_METHOD_ATTR,
-    RPC_METHOD_ORIGINAL_ATTR, RPC_METHOD_OTHER, RPC_STATUS_CODE_ATTR, RPC_SYSTEM_GRPC,
-    RPC_SYSTEM_NAME_ATTR, RpcName, STATUS_CODE_COUNT, diagnostic_rpc_method_original,
-    status_code_names,
-};
+use infra_grpc_core::observe::{Call as CoreCall, CallMetrics, StatusCounters, open_rpc_span};
+use opentelemetry::trace::SpanKind;
+use shared_rules::grpc::{HANDLING_SECONDS_BUCKETS, RpcName};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
-use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
+use tracing_opentelemetry_instrumentation_sdk::set_parent_or_fallback;
+
+use crate::services::{CallType, Method};
 
 const SERVER_STARTED_METRIC: &str = "grpc_server_started_total";
 const SERVER_HANDLED_METRIC: &str = "grpc_server_handled_total";
@@ -46,7 +43,7 @@ pub(crate) struct MethodMetrics {
     base_labels: Box<[metrics::Label]>,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
-    handled: [OnceLock<metrics::Counter>; STATUS_CODE_COUNT],
+    handled: StatusCounters,
     failed: EnumMap<service_failure::Code, OnceLock<metrics::Counter>>,
 }
 
@@ -67,25 +64,9 @@ impl MethodMetrics {
             started: metrics::counter!(SERVER_STARTED_METRIC, labels.clone()),
             handling_seconds: metrics::histogram!(SERVER_HANDLING_METRIC, labels.clone()),
             base_labels: labels.into_boxed_slice(),
-            handled: std::array::from_fn(|_| OnceLock::new()),
+            handled: StatusCounters::new(),
             failed: EnumMap::default(),
         }
-    }
-
-    fn span_name(&self) -> &str {
-        self.rpc_method.as_deref().unwrap_or(FALLBACK_SPAN_NAME)
-    }
-
-    fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
-        let metric_code = status_code_names(code as usize).metric;
-        self.handling_seconds.record(elapsed);
-        self.handled[code as usize]
-            .get_or_init(|| {
-                let mut labels = self.base_labels.to_vec();
-                labels.push(metrics::Label::new("grpc_code", metric_code));
-                metrics::counter!(SERVER_HANDLED_METRIC, labels)
-            })
-            .increment(1);
     }
 
     fn record_failure(&self, failure: service_failure::Code) {
@@ -99,29 +80,20 @@ impl MethodMetrics {
     }
 }
 
-struct CallInner {
-    metrics: Arc<MethodMetrics>,
-    span: tracing::Span,
-    started_at: Instant,
-}
+impl CallMetrics for MethodMetrics {
+    const IS_SERVER: bool = true;
 
-impl CallInner {
-    fn emit(&self, code: tonic::Code) {
-        let span_code = status_code_names(code as usize).span;
-        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
-        if otel_http::grpc::status_is_error(code as u16, true) {
-            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
-            self.span.set_status(SpanStatus::error(""));
-        }
-        self.metrics.record_handled(code, self.started_at.elapsed());
-    }
-
-    fn cancel(self) {
-        self.emit(tonic::Code::Cancelled);
+    fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
+        self.handling_seconds.record(elapsed);
+        self.handled.increment(code, |metric_code| {
+            let mut labels = self.base_labels.to_vec();
+            labels.push(metrics::Label::new("grpc_code", metric_code));
+            metrics::counter!(SERVER_HANDLED_METRIC, labels)
+        });
     }
 }
 
-pub(crate) struct Call(DropGuard<CallInner, fn(CallInner)>);
+pub(crate) struct Call(CoreCall<MethodMetrics>);
 
 impl Call {
     pub(crate) fn start(method: &Method, path: &str) -> Self {
@@ -131,37 +103,32 @@ impl Call {
                 .metrics
                 .get_or_init(|| Arc::new(MethodMetrics::build(path, method.call_type))),
         );
-        let span = open_server_span(path, &metrics);
+        let span = open_rpc_span(&SpanKind::Server, metrics.rpc_method.as_ref(), path);
         metrics.started.increment(1);
-        Self(DropGuard::new(
-            CallInner {
-                metrics,
-                span,
-                started_at,
-            },
-            CallInner::cancel,
-        ))
+        Self(CoreCall::start(metrics, span, started_at))
     }
 
     pub(crate) fn span(&self) -> &tracing::Span {
-        &self.0.span
+        self.0.span()
     }
 
     // template:begin authn:grpc-observe-scope-refusal
     pub(crate) fn record_insufficient_scope(&self) {
         self.0
-            .span
+            .span()
             .set_attribute("authz.reason", "insufficient_scope");
     }
     // template:end authn:grpc-observe-scope-refusal
 
     pub(crate) fn record_failure(&self, failure: service_failure::Code) {
-        self.0.span.set_attribute("failure.code", failure.as_str());
-        self.0.metrics.record_failure(failure);
+        self.0
+            .span()
+            .set_attribute("failure.code", failure.as_str());
+        self.0.metrics().record_failure(failure);
     }
 
     pub(crate) fn finish(self, code: tonic::Code) {
-        DropGuard::dismiss(self.0).emit(code);
+        self.0.finish(code);
     }
 }
 
@@ -175,27 +142,6 @@ pub(crate) fn attach_parent_or_fallback(
         opentelemetry::Context::new()
     };
     set_parent_or_fallback(span, parent)
-}
-
-fn open_server_span(path: &str, metrics: &MethodMetrics) -> tracing::Span {
-    let span = otel_trace_span!(
-        "GRPC request",
-        otel.name = metrics.span_name(),
-        otel.kind = ?SpanKind::Server,
-    );
-    if span.is_disabled() {
-        return span;
-    }
-    span.set_attribute(RPC_SYSTEM_NAME_ATTR, RPC_SYSTEM_GRPC);
-    if let Some(method) = &metrics.rpc_method {
-        span.set_attribute(RPC_METHOD_ATTR, Arc::clone(method));
-    } else {
-        span.set_attribute(RPC_METHOD_ATTR, RPC_METHOD_OTHER);
-        if let Some(raw) = diagnostic_rpc_method_original(path) {
-            span.set_attribute(RPC_METHOD_ORIGINAL_ATTR, raw.to_owned());
-        }
-    }
-    span
 }
 
 pub(crate) fn record_shed() {

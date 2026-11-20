@@ -1,20 +1,19 @@
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
-use futures_util::FutureExt as _;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
+use infra_grpc_core::watched::{
+    FramePoll, MaybeWatched, TerminableBody, WatchedPoll, register_waker,
+};
 use operation_context::{Deadline, OperationContext, Stopped};
-use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::{CancellationToken, DropGuard};
-use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::header_status_code;
+use crate::protocol::{STATUS_HEADERS, header_status_code};
 use crate::status::FixedFailure;
 
 #[derive(Default)]
@@ -42,11 +41,6 @@ pub(crate) fn check_open(context: &OperationContext) -> Result<(), axum::respons
         .map_err(|reason| stopped_status(reason).into_http())
 }
 
-const STATUS_HEADERS: [http::HeaderName; 3] = [
-    tonic::Status::GRPC_STATUS,
-    tonic::Status::GRPC_MESSAGE,
-    tonic::Status::GRPC_STATUS_DETAILS,
-];
 const MIN_HEADERS_FOR_STATUS_PROJECTION: usize = 32;
 
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
@@ -101,8 +95,6 @@ impl ServerOutcome {
             .or_else(|| Self::from_headers(response.headers()))
     }
 }
-
-type FramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
 
 struct LocalStatus {
     status: tonic::Status,
@@ -261,11 +253,115 @@ where
     }
 }
 
-struct WatchedBody<B> {
-    state: Arc<Mutex<ServerState<B>>>,
-    stop_watcher: Option<AbortOnDropHandle<()>>,
-    #[cfg(test)]
-    stop_watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
+impl<B> TerminableBody for ServerState<B>
+where
+    B: Body<Data = Bytes> + Unpin + Send + 'static,
+{
+    type Error = B::Error;
+    type Stop = LocalStatus;
+    type Finalizer = StreamFinalizer<B>;
+
+    fn poll_watched(
+        &mut self,
+        cx: &mut Context<'_>,
+        watched: bool,
+    ) -> (WatchedPoll<B::Error>, Option<StreamFinalizer<B>>) {
+        let (polled, finalizer) = self.poll_next(cx, watched);
+        (Ok(polled), finalizer)
+    }
+
+    fn terminate(&mut self, stop: LocalStatus) -> Option<(Option<Waker>, StreamFinalizer<B>)> {
+        let mut finalizer = self.stage_status_trailers(stop)?;
+        let waker = finalizer.active.waker.take();
+        Some((waker, finalizer))
+    }
+
+    fn take_for_drop(&mut self) -> Self {
+        std::mem::replace(self, Self::Closed)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Active(active) => active.body.size_hint(),
+            Self::PendingTrailers(_) | Self::Closed => SizeHint::with_exact(0),
+        }
+    }
+
+    fn watcher_lost() -> LocalStatus {
+        LocalStatus::failure(FixedFailure::Internal)
+    }
+
+    fn finish(finalizer: StreamFinalizer<B>) {
+        finalizer.emit();
+    }
+}
+
+type ResponseBody<B> = MaybeWatched<ServerState<B>>;
+
+fn start_response_body<B>(
+    body: B,
+    call: Call,
+    fallback: Option<opentelemetry::Context>,
+    custody: ServerCustody,
+    initial: Option<ServerOutcome>,
+) -> ResponseBody<B>
+where
+    B: Body<Data = Bytes> + Unpin + Send + 'static,
+{
+    let body_ended = body.is_end_stream();
+    let mut state = ServerState::Active(ActiveStream {
+        body,
+        call,
+        _permit: custody.permit,
+        _cancel_on_drop: custody.cancel_on_drop,
+        deadline: custody.deadline,
+        fallback,
+        waker: None,
+    });
+    let finalizer = if let Some(outcome) = initial {
+        state.transition(ServerState::Closed, outcome)
+    } else if state.is_expired() {
+        state.stage_status_trailers(LocalStatus::failure(FixedFailure::Deadline))
+    } else if body_ended {
+        state.transition(ServerState::Closed, ServerOutcome::unknown())
+    } else {
+        None
+    };
+    if let Some(finalizer) = finalizer {
+        finalizer.emit();
+        return MaybeWatched::local(state);
+    }
+    if let Some(drain) = custody.end_on_drain {
+        let context = OperationContext::new(custody.deadline, drain);
+        MaybeWatched::watched(state, async move {
+            match context.wait_stopped().await {
+                Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
+                Stopped::Cancelled => LocalStatus::drained(),
+            }
+        })
+    } else if let Some(deadline) = custody.deadline {
+        MaybeWatched::watched(state, async move {
+            deadline.wait().await;
+            LocalStatus::failure(FixedFailure::Deadline)
+        })
+    } else {
+        MaybeWatched::local(state)
+    }
+}
+
+fn into_axum_body<B>(body: ResponseBody<B>) -> axum::body::Body
+where
+    B: Body<Data = Bytes> + Unpin + Send + 'static,
+    B::Error: Into<axum::BoxError>,
+{
+    match body {
+        MaybeWatched::Local(ServerState::Closed) => axum::body::Body::empty(),
+        other => axum::body::Body::new(other),
+    }
 }
 
 pub(crate) fn wrap_response(
@@ -283,220 +379,24 @@ pub(crate) fn wrap_response(
     } else {
         ServerOutcome::from_response(&response)
     };
-    response.map(|body| ResponseBody::start(body, call, fallback, custody, initial).into_body())
-}
-
-enum ResponseBody<B> {
-    Local(ServerState<B>),
-    Watched(WatchedBody<B>),
-}
-
-impl<B> ResponseBody<B>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
-    fn start(
-        body: B,
-        call: Call,
-        fallback: Option<opentelemetry::Context>,
-        custody: ServerCustody,
-        initial: Option<ServerOutcome>,
-    ) -> Self {
-        let body_ended = body.is_end_stream();
-        let mut state = ServerState::Active(ActiveStream {
-            body,
-            call,
-            _permit: custody.permit,
-            _cancel_on_drop: custody.cancel_on_drop,
-            deadline: custody.deadline,
-            fallback,
-            waker: None,
-        });
-        let finalizer = if let Some(outcome) = initial {
-            state.transition(ServerState::Closed, outcome)
-        } else if state.is_expired() {
-            state.stage_status_trailers(LocalStatus::failure(FixedFailure::Deadline))
-        } else if body_ended {
-            state.transition(ServerState::Closed, ServerOutcome::unknown())
-        } else {
-            None
-        };
-        if let Some(finalizer) = finalizer {
-            finalizer.emit();
-            return Self::Local(state);
-        }
-        if let Some(drain) = custody.end_on_drain {
-            let context = OperationContext::new(custody.deadline, drain);
-            Self::Watched(WatchedBody::new(state, async move {
-                match context.wait_stopped().await {
-                    Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
-                    Stopped::Cancelled => LocalStatus::drained(),
-                }
-            }))
-        } else if let Some(deadline) = custody.deadline {
-            Self::Watched(WatchedBody::new(state, async move {
-                deadline.wait().await;
-                LocalStatus::failure(FixedFailure::Deadline)
-            }))
-        } else {
-            Self::Local(state)
-        }
-    }
-
-    fn into_body(self) -> axum::body::Body
-    where
-        B::Error: Into<axum::BoxError>,
-    {
-        match self {
-            Self::Local(ServerState::Closed) => axum::body::Body::empty(),
-            Self::Local(state) => axum::body::Body::new(state),
-            Self::Watched(body) => axum::body::Body::new(body),
-        }
-    }
-}
-
-impl<B> WatchedBody<B>
-where
-    B: Send + 'static,
-{
-    fn new(
-        state: ServerState<B>,
-        stopped: impl Future<Output = LocalStatus> + Send + 'static,
-    ) -> Self {
-        let state = Arc::new(Mutex::new(state));
-        let weak = Arc::downgrade(&state);
-        #[cfg(test)]
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let watcher = tokio::spawn(async move {
-            #[cfg(test)]
-            let _done_tx = done_tx;
-            let result = AssertUnwindSafe(async {
-                let status = stopped.await;
-                if let Some(state) = weak.upgrade() {
-                    terminate_stream(&state, status);
-                }
-            })
-            .catch_unwind()
-            .await;
-            if result.is_err()
-                && let Some(state) = weak.upgrade()
-            {
-                terminate_stream(&state, LocalStatus::failure(FixedFailure::Internal));
-            }
-        });
-        Self {
-            state,
-            stop_watcher: Some(AbortOnDropHandle::new(watcher)),
-            #[cfg(test)]
-            stop_watcher_done: Some(done_rx),
-        }
-    }
-
-    fn poll_stop_watcher(&mut self, cx: &mut Context<'_>) {
-        if let Some(stop_watcher) = &mut self.stop_watcher
-            && let Poll::Ready(joined) = Future::poll(Pin::new(stop_watcher), cx)
-        {
-            self.stop_watcher = None;
-            if joined.is_err() {
-                terminate_stream(&self.state, LocalStatus::failure(FixedFailure::Internal));
-            }
-        }
-    }
-}
-
-fn terminate_stream<B>(state: &Mutex<ServerState<B>>, status: LocalStatus) {
-    let finalizer = state.lock().stage_status_trailers(status);
-    if let Some(mut finalizer) = finalizer {
-        if let Some(waker) = finalizer.active.waker.take() {
-            waker.wake();
-        }
-        finalizer.emit();
-    }
-}
-
-fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
-    match slot {
-        Some(existing) => existing.clone_from(waker),
-        None => *slot = Some(waker.clone()),
-    }
-}
-
-impl<B> Body for ServerState<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
-        let (polled, finalizer) = self.poll_next(cx, false);
-        if let Some(finalizer) = finalizer {
-            finalizer.emit();
-        }
-        polled
-    }
-
-    fn is_end_stream(&self) -> bool {
-        matches!(self, Self::Closed)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        match self {
-            Self::Active(active) => active.body.size_hint(),
-            Self::PendingTrailers(_) | Self::Closed => SizeHint::with_exact(0),
-        }
-    }
-}
-
-impl<B> Body for WatchedBody<B>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
-        let this = self.get_mut();
-        this.poll_stop_watcher(cx);
-        let (polled, finalizer) = this.state.lock().poll_next(cx, true);
-        if let Some(finalizer) = finalizer {
-            this.stop_watcher = None;
-            finalizer.emit();
-        }
-        polled
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.state.lock().is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.state.lock().size_hint()
-    }
-}
-
-impl<B> Drop for WatchedBody<B> {
-    fn drop(&mut self) {
-        let stage = {
-            let mut guard = self.state.lock();
-            std::mem::replace(&mut *guard, ServerState::Closed)
-        };
-        drop(self.stop_watcher.take());
-        drop(stage);
-    }
+    response.map(|body| into_axum_body(start_response_body(body, call, fallback, custody, initial)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
     use http_body_util::BodyExt as _;
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     };
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::Duration;
-    use tokio::sync::Semaphore;
+    use parking_lot::Mutex;
+    use tokio::sync::{Semaphore, oneshot};
+
+    use super::*;
 
     const BUDGET: Duration = Duration::from_secs(1);
 
@@ -532,21 +432,30 @@ mod tests {
         frames: VecDeque<Frame<Bytes>>,
         polls: Arc<AtomicUsize>,
         dropped: Arc<AtomicBool>,
+        on_drop: Option<oneshot::Sender<()>>,
     }
 
     impl ProbeBody {
-        fn pending() -> Self {
-            Self {
-                frames: VecDeque::new(),
-                polls: Arc::default(),
-                dropped: Arc::default(),
-            }
+        fn pending() -> (Self, oneshot::Receiver<()>) {
+            let (tx, rx) = oneshot::channel();
+            (
+                Self {
+                    frames: VecDeque::new(),
+                    polls: Arc::default(),
+                    dropped: Arc::default(),
+                    on_drop: Some(tx),
+                },
+                rx,
+            )
         }
     }
 
     impl Drop for ProbeBody {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);
+            if let Some(tx) = self.on_drop.take() {
+                let _ = tx.send(());
+            }
         }
     }
 
@@ -572,14 +481,16 @@ mod tests {
         Call::start(methods.resolve(path), path)
     }
 
-    fn start_watched<B>(body: B, custody: ServerCustody) -> WatchedBody<B>
+    fn start_watched<B>(body: B, custody: ServerCustody) -> ResponseBody<B>
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        match ResponseBody::start(body, server_call(), None, custody, None) {
-            ResponseBody::Watched(body) => body,
-            ResponseBody::Local(_) => panic!("expected a response with a stop watcher"),
-        }
+        let body = start_response_body(body, server_call(), None, custody, None);
+        assert!(
+            body.is_watching(),
+            "expected a response with a stop watcher"
+        );
+        body
     }
 
     #[tokio::test]
@@ -590,14 +501,13 @@ mod tests {
         let frames = futures_util::stream::iter([Err::<Frame<Bytes>, _>(
             tonic::Status::unavailable("body read failed"),
         )]);
-        let mut body = ResponseBody::start(
+        let mut body = into_axum_body(start_response_body(
             http_body_util::StreamBody::new(frames),
             server_call(),
             None,
             ServerCustody::default(),
             None,
-        )
-        .into_body();
+        ));
         let error = body
             .frame()
             .await
@@ -620,7 +530,7 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
         let token = CancellationToken::new();
-        let source = ProbeBody::pending();
+        let (source, dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
         let mut body = start_watched(
@@ -632,9 +542,8 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let stop_watcher = body.stop_watcher.take().unwrap();
         tokio::time::advance(BUDGET).await;
-        tokio::time::timeout(BUDGET, stop_watcher)
+        tokio::time::timeout(BUDGET, dropped_rx)
             .await
             .unwrap()
             .unwrap();
@@ -671,7 +580,7 @@ mod tests {
         let permits = Arc::new(Semaphore::new(1));
         let listener_drain = CancellationToken::new();
         let response_token = listener_drain.child_token();
-        let source = ProbeBody::pending();
+        let (source, dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
         let mut body = start_watched(
@@ -683,9 +592,8 @@ mod tests {
                 end_on_drain: Some(response_token),
             },
         );
-        let watcher = body.stop_watcher.take().unwrap();
         listener_drain.cancel();
-        tokio::time::timeout(BUDGET, watcher)
+        tokio::time::timeout(BUDGET, dropped_rx)
             .await
             .unwrap()
             .unwrap();
@@ -709,7 +617,7 @@ mod tests {
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
-        let mut source = ProbeBody::pending();
+        let (mut source, _dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let mut trailers = HeaderMap::new();
         tonic::Status::aborted("peer terminal")
@@ -725,15 +633,13 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let done = body.stop_watcher_done.take().unwrap();
         assert_eq!(
             header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
             Some(tonic::Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(body.stop_watcher.is_none());
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+        assert!(!body.is_watching());
         tokio::time::advance(BUDGET).await;
         assert!(body.frame().await.is_none());
         drop(body);
@@ -750,9 +656,9 @@ mod tests {
     async fn response_drop_cancels_propagated_work_and_aborts_stop_watcher() {
         let cancellation = CancellationToken::new();
         let permits = Arc::new(Semaphore::new(1));
-        let source = ProbeBody::pending();
+        let (source, _dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
-        let mut body = start_watched(
+        let body = start_watched(
             source,
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -761,12 +667,10 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let done = body.stop_watcher_done.take().unwrap();
         drop(body);
         assert!(cancellation.is_cancelled());
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
     }
 
     struct PanicBody(Arc<AtomicBool>);
@@ -807,7 +711,6 @@ mod tests {
                 end_on_drain: None,
             },
         );
-        let done = body.stop_watcher_done.take().unwrap();
         let trailers = body
             .frame()
             .await
@@ -824,7 +727,7 @@ mod tests {
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+        assert!(!body.is_watching());
         assert!(body.frame().await.is_none());
         drop(body);
         let rendered = handle.render();
@@ -838,7 +741,7 @@ mod tests {
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
-        let source = ProbeBody::pending();
+        let (source, _dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -926,14 +829,13 @@ mod tests {
             server_call,
         );
         assert!(call.span().is_disabled());
-        let mut body = ResponseBody::start(
+        let mut body = into_axum_body(start_response_body(
             ContextBody(Arc::clone(&seen)),
             call,
             Some(fallback),
             ServerCustody::default(),
             None,
-        )
-        .into_body();
+        ));
         let ambient = opentelemetry::Context::current()
             .span()
             .span_context()

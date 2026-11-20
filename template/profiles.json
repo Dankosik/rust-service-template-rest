@@ -330,6 +330,7 @@
         "crates/config/src/grpc/",
         "crates/grpc-contracts/",
         "crates/infra-grpc/",
+        "crates/infra-grpc-core/",
         "crates/infra-outbound-grpc/",
         "crates/infra-telemetry/src/traces/tests/delivery/",
         "crates/service/examples/grpc.rs",

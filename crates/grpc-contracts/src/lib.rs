@@ -1,4 +1,4 @@
-pub mod codec;
+mod codec;
 
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/file_descriptor_set.binpb");
 

@@ -92,13 +92,14 @@ async fn grpc_unavailable(
 }
 
 fn grpc(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
-    use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial};
+    use infra_outbound_grpc::{Client, ClientSecurity};
 
-    let transport = Client::try_new(
+    let transport = Client::builder(
         "https://127.0.0.1:0",
-        ClientSecurity::Tls(ClientTlsMaterial::default()),
+        ClientSecurity::tls(),
         Duration::from_secs(5),
     )
+    .build()
     .unwrap();
     Resource::Grpc(Arc::new(tokens.grpc(transport).unwrap()))
 }
