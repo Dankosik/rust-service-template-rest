@@ -43,7 +43,7 @@ pub(super) fn prepare(
     if matches!(authentication, GrpcAuthentication::None) {
         return Err(ValidationError::new(
             "grpc.enabled",
-            infra_grpc::Error::UnauthenticatedBusinessCalls.to_string(),
+            infra_grpc::Error::unauthenticated_business_calls().to_string(),
         )
         .into());
     }

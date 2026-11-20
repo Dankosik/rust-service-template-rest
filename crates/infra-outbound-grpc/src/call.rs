@@ -6,13 +6,14 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
-use infra_grpc_core::watched::{FramePoll, PanicOutcome, StreamHooks, WatchedBody, register_waker};
+use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
+use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody, register_waker};
 use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
 use tokio_util::sync::DropGuard;
 
 use crate::observe::Call;
-use crate::protocol::{STATUS_HEADERS, grpc_code_from_http_status, header_status_code};
+use crate::protocol::grpc_code_from_http_status;
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
 type ClientResponseBody<B> = WatchedBody<B, ClientHooks>;
@@ -121,29 +122,21 @@ impl StreamHooks<tonic::Status> for ClientHooks {
         PanicOutcome::Unwind(ClientOutcome::local(tonic::Code::Cancelled))
     }
 
-    fn write_stop(&mut self, stop: tonic::Status, trailers: &mut HeaderMap) -> ClientOutcome {
+    fn write_stop(&self, stop: tonic::Status, trailers: &mut HeaderMap) -> ClientOutcome {
         self.observation.record_local_stop(&stop);
         let _ = stop.add_header(trailers);
         ClientOutcome::local(stop.code())
     }
 
-    fn terminal_outcome(&self, polled: &FramePoll<tonic::Status>) -> Option<ClientOutcome> {
-        match polled {
-            Poll::Ready(Some(Ok(frame))) => {
-                let trailers = frame.trailers_ref()?;
-                Some(
-                    ClientOutcome::from_headers(&self.observation, trailers)
-                        .unwrap_or(self.missing_status),
-                )
+    fn end_outcome(&self, end: StreamEnd<'_, tonic::Status>) -> ClientOutcome {
+        match end {
+            StreamEnd::Trailers(trailers) => {
+                ClientOutcome::from_headers(&self.observation, trailers)
+                    .unwrap_or(self.missing_status)
             }
-            Poll::Ready(Some(Err(error))) => Some(ClientOutcome::local(error.code())),
-            Poll::Ready(None) => Some(self.missing_status),
-            Poll::Pending => None,
+            StreamEnd::Error(error) => ClientOutcome::local(error.code()),
+            StreamEnd::Empty => self.missing_status,
         }
-    }
-
-    fn empty_outcome(&self) -> ClientOutcome {
-        self.missing_status
     }
 
     fn watcher_lost() -> tonic::Status {
@@ -322,6 +315,7 @@ mod tests {
     use std::time::Duration;
 
     use http_body_util::BodyExt as _;
+    use infra_grpc_core::watched::FramePoll;
     use operation_context::Deadline;
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;

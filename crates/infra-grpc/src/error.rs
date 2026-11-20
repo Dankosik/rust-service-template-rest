@@ -1,7 +1,11 @@
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PolicyKind {
+#[allow(
+    dead_code,
+    reason = "optional auth profiles construct policy error variants"
+)]
+pub(crate) enum PolicyKind {
     ScopeRequirement,
     CallerRule,
 }
@@ -16,7 +20,28 @@ impl fmt::Display for PolicyKind {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+#[error(transparent)]
+pub struct Error(pub(crate) ErrorKind);
+
+impl Error {
+    pub(crate) const fn new(kind: ErrorKind) -> Self {
+        Self(kind)
+    }
+
+    // template:begin authn:grpc-unauthenticated-business-calls-ctor
+    #[must_use]
+    pub const fn unauthenticated_business_calls() -> Self {
+        Self(ErrorKind::UnauthenticatedBusinessCalls)
+    }
+    // template:end authn:grpc-unauthenticated-business-calls-ctor
+}
+
+#[derive(Debug, thiserror::Error)]
+#[allow(
+    dead_code,
+    reason = "optional auth profiles construct policy error variants"
+)]
+pub(crate) enum ErrorKind {
     #[error("decode gRPC file descriptor set")]
     DecodeDescriptorSet(#[source] prost::DecodeError),
     #[error("inspect gRPC reflection file descriptor")]

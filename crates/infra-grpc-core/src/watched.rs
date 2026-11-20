@@ -22,6 +22,22 @@ pub fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
     }
 }
 
+#[derive(Debug)]
+pub enum StreamEnd<'a, E> {
+    Trailers(&'a HeaderMap),
+    Error(&'a E),
+    Empty,
+}
+
+fn stream_end<E>(polled: &FramePoll<E>) -> Option<StreamEnd<'_, E>> {
+    match polled {
+        Poll::Ready(Some(Ok(frame))) => frame.trailers_ref().map(StreamEnd::Trailers),
+        Poll::Ready(Some(Err(error))) => Some(StreamEnd::Error(error)),
+        Poll::Ready(None) => Some(StreamEnd::Empty),
+        Poll::Pending => None,
+    }
+}
+
 pub enum PanicOutcome<Stop, Outcome> {
     Stop(Stop),
     Unwind(Outcome),
@@ -47,11 +63,9 @@ pub trait StreamHooks<E>: Unpin + Send + 'static {
 
     fn on_panic(&self) -> PanicOutcome<Self::Stop, Self::Outcome>;
 
-    fn write_stop(&mut self, stop: Self::Stop, trailers: &mut HeaderMap) -> Self::Outcome;
+    fn write_stop(&self, stop: Self::Stop, trailers: &mut HeaderMap) -> Self::Outcome;
 
-    fn terminal_outcome(&self, polled: &FramePoll<E>) -> Option<Self::Outcome>;
-
-    fn empty_outcome(&self) -> Self::Outcome;
+    fn end_outcome(&self, end: StreamEnd<'_, E>) -> Self::Outcome;
 
     fn watcher_lost() -> Self::Stop;
 
@@ -111,16 +125,6 @@ where
             Self::PendingTrailers(_) | Self::Closed => SizeHint::with_exact(0),
         }
     }
-
-    fn pop_terminal(&mut self) -> FramePoll<B::Error> {
-        match std::mem::replace(self, Self::Closed) {
-            Self::PendingTrailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-            other => {
-                *self = other;
-                Poll::Ready(None)
-            }
-        }
-    }
 }
 
 impl<B, H> Envelope<B, H>
@@ -128,56 +132,54 @@ where
     B: Body<Data = Bytes>,
     H: StreamHooks<B::Error>,
 {
-    fn stopped(&self) -> Option<H::Stop> {
-        let Self::Active(active) = self else {
+    fn close_with(&mut self, outcome: H::Outcome) -> Option<StreamFinalizer<B, H>> {
+        let previous = std::mem::replace(self, Self::Closed);
+        let Self::Active(Active { body, hooks, .. }) = previous else {
             return None;
         };
-        active.hooks.stopped()
+        Some(Finalizer {
+            body,
+            hooks,
+            outcome,
+        })
     }
 
-    fn transition(&mut self, next: Self, outcome: H::Outcome) -> Option<StreamFinalizer<B, H>> {
-        match std::mem::replace(self, next) {
-            Self::Active(Active { body, hooks, .. }) => Some(Finalizer {
+    fn cut_off(&mut self, stop: H::Stop) -> (FramePoll<B::Error>, Option<StreamFinalizer<B, H>>) {
+        let previous = std::mem::replace(self, Self::Closed);
+        let Self::Active(Active { body, hooks, .. }) = previous else {
+            return (Poll::Ready(None), None);
+        };
+        let mut trailers = HeaderMap::new();
+        let outcome = hooks.write_stop(stop, &mut trailers);
+        (
+            Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
+            Some(Finalizer {
                 body,
                 hooks,
                 outcome,
             }),
-            other => {
-                *self = other;
-                None
-            }
-        }
-    }
-
-    fn stage_stop(&mut self, stop: H::Stop) -> Option<StreamFinalizer<B, H>> {
-        let Self::Active(active) = self else {
-            return None;
-        };
-        let mut trailers = HeaderMap::new();
-        let outcome = active.hooks.write_stop(stop, &mut trailers);
-        self.transition(Self::PendingTrailers(trailers), outcome)
-    }
-
-    fn close_empty(&mut self) -> Option<StreamFinalizer<B, H>> {
-        let Self::Active(active) = self else {
-            return None;
-        };
-        let outcome = active.hooks.empty_outcome();
-        self.transition(Self::Closed, outcome)
-    }
-
-    fn cut_off(&mut self, stop: H::Stop) -> (FramePoll<B::Error>, Option<StreamFinalizer<B, H>>) {
-        let finalizer = self.stage_stop(stop);
-        (self.pop_terminal(), finalizer)
+        )
     }
 
     fn terminate(&mut self, stop: H::Stop) -> Option<(Option<Waker>, StreamFinalizer<B, H>)> {
-        let Self::Active(active) = self else {
+        if !matches!(self, Self::Active(_)) {
+            return None;
+        }
+        let previous = std::mem::replace(self, Self::Closed);
+        let Self::Active(Active { body, hooks, waker }) = previous else {
             return None;
         };
-        let waker = active.waker.take();
-        let finalizer = self.stage_stop(stop)?;
-        Some((waker, finalizer))
+        let mut trailers = HeaderMap::new();
+        let outcome = hooks.write_stop(stop, &mut trailers);
+        *self = Self::PendingTrailers(trailers);
+        Some((
+            waker,
+            Finalizer {
+                body,
+                hooks,
+                outcome,
+            },
+        ))
     }
 }
 
@@ -192,7 +194,13 @@ where
         watched: bool,
     ) -> (WatchedPoll<B::Error>, Option<StreamFinalizer<B, H>>) {
         let Self::Active(active) = self else {
-            return (Ok(self.pop_terminal()), None);
+            let previous = std::mem::replace(self, Self::Closed);
+            let frame = if let Self::PendingTrailers(trailers) = previous {
+                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+            } else {
+                Poll::Ready(None)
+            };
+            return (Ok(frame), None);
         };
         if let Some(stop) = active.hooks.stopped() {
             let (frame, finalizer) = self.cut_off(stop);
@@ -212,19 +220,15 @@ where
                     let (frame, finalizer) = self.cut_off(stop);
                     (Ok(frame), finalizer)
                 }
-                PanicOutcome::Unwind(outcome) => {
-                    let finalizer = self.transition(Self::Closed, outcome);
-                    (Err(panic), finalizer)
-                }
+                PanicOutcome::Unwind(outcome) => (Err(panic), self.close_with(outcome)),
             },
             Ok(polled) => {
                 if let Some(stop) = active.hooks.stopped() {
                     let (frame, finalizer) = self.cut_off(stop);
                     (Ok(frame), finalizer)
                 } else {
-                    let outcome = active.hooks.terminal_outcome(&polled);
-                    let finalizer =
-                        outcome.and_then(|outcome| self.transition(Self::Closed, outcome));
+                    let outcome = stream_end(&polled).map(|end| active.hooks.end_outcome(end));
+                    let finalizer = outcome.and_then(|outcome| self.close_with(outcome));
                     (Ok(polled), finalizer)
                 }
             }
@@ -338,29 +342,42 @@ where
     where
         F: Future<Output = H::Stop> + Send + 'static,
     {
-        let ended = body.is_end_stream();
-        let mut envelope = Envelope::Active(Active {
+        if let Some(outcome) = initial {
+            Finalizer {
+                body,
+                hooks,
+                outcome,
+            }
+            .run();
+            return None;
+        }
+        if let Some(stop) = hooks.stopped() {
+            let mut trailers = HeaderMap::new();
+            let outcome = hooks.write_stop(stop, &mut trailers);
+            Finalizer {
+                body,
+                hooks,
+                outcome,
+            }
+            .run();
+            return Some(Self(State::Local(Envelope::PendingTrailers(trailers))));
+        }
+        if body.is_end_stream() {
+            let outcome = hooks.end_outcome(StreamEnd::Empty);
+            Finalizer {
+                body,
+                hooks,
+                outcome,
+            }
+            .run();
+            return None;
+        }
+        let stopped = watch(&hooks);
+        let envelope = Envelope::Active(Active {
             body,
             hooks,
             waker: None,
         });
-        let finalizer = if let Some(outcome) = initial {
-            envelope.transition(Envelope::Closed, outcome)
-        } else if let Some(stop) = envelope.stopped() {
-            envelope.stage_stop(stop)
-        } else if ended {
-            envelope.close_empty()
-        } else {
-            None
-        };
-        if let Some(finalizer) = finalizer {
-            finalizer.run();
-        }
-        let stopped = match &envelope {
-            Envelope::Active(active) => watch(&active.hooks),
-            Envelope::PendingTrailers(_) => None,
-            Envelope::Closed => return None,
-        };
         Some(Self(match stopped {
             Some(stopped) => State::Watched(Watched::new(envelope, stopped)),
             None => State::Local(envelope),
@@ -517,21 +534,17 @@ mod tests {
             PanicOutcome::Stop("panic")
         }
 
-        fn write_stop(&mut self, stop: Self::Stop, trailers: &mut HeaderMap) -> Self::Outcome {
+        fn write_stop(&self, stop: Self::Stop, trailers: &mut HeaderMap) -> Self::Outcome {
             trailers.insert("x-stop", HeaderValue::from_static(stop));
             stop
         }
 
-        fn terminal_outcome(&self, polled: &FramePoll<Infallible>) -> Option<Self::Outcome> {
-            match polled {
-                Poll::Ready(Some(Ok(frame))) if frame.is_trailers() => Some("polled"),
-                Poll::Ready(None) => Some("empty"),
-                _ => None,
+        fn end_outcome(&self, end: StreamEnd<'_, Infallible>) -> Self::Outcome {
+            match end {
+                StreamEnd::Trailers(_) => "polled",
+                StreamEnd::Empty => "empty",
+                StreamEnd::Error(never) => match *never {},
             }
-        }
-
-        fn empty_outcome(&self) -> Self::Outcome {
-            "empty"
         }
 
         fn watcher_lost() -> Self::Stop {

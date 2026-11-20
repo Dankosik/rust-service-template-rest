@@ -6,7 +6,7 @@ use enum_map::EnumMap;
 use infra_grpc_core::observe::{
     Call as CoreCall, CallMetrics, HANDLING_SECONDS_BUCKETS, StatusCounters, open_rpc_span,
 };
-use infra_grpc_core::protocol::RpcName;
+use infra_grpc_core::protocol::{RpcName, split_method_path};
 use opentelemetry::trace::SpanKind;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
@@ -51,7 +51,7 @@ pub(crate) struct MethodMetrics {
 
 impl MethodMetrics {
     fn build(path: &str, call_type: Option<CallType>) -> Self {
-        let parsed = call_type.and_then(|_| crate::protocol::split_method_path(path));
+        let parsed = call_type.and_then(|_| split_method_path(path));
         let rpc = parsed.unwrap_or(RpcName {
             service: "unknown",
             method: "unknown",
@@ -254,7 +254,12 @@ mod tests {
         let guard = tracing::subscriber::set_default(subscriber);
 
         let path = "/example.v1.EchoService/Unary";
-        let methods = crate::services::Methods::new([(path.into(), CallType::Unary, false)]);
+        let methods = crate::services::Methods::new([(
+            path.into(),
+            CallType::Unary,
+            false,
+            crate::services::MethodPolicy::None,
+        )]);
         let known = Call::start(methods.resolve(path), path);
         known.finish(tonic::Code::Unauthenticated);
 

@@ -37,11 +37,11 @@ use infra_bearerauthn::{
 // template:end oidc-introspection:grpc-transport-test-auth-imports
 // template:begin authn:grpc-transport-test-verifier-import
 use infra_bearerauthn::Verifier;
-use infra_grpc::{DelegationCredential, PolicyKind, Principal};
+use infra_grpc::{DelegationCredential, Principal};
 // template:end authn:grpc-transport-test-verifier-import
 use infra_grpc::{
-    ERROR_DOMAIN, Error, Failure, Limits, RequestExt as _, ServerOptions, ServerTlsMaterial,
-    Services, TlsMaterialError, server_options, server_tls_config,
+    ERROR_DOMAIN, Failure, Limits, RequestExt as _, ServerOptions, ServerTlsMaterial, Services,
+    TlsMaterialError, server_options, server_tls_config,
 };
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{
@@ -1263,7 +1263,7 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
         }
     }
 
-    assert_matches!(
+    assert_eq!(
         services
             .build(
                 readiness().control().reader(),
@@ -1273,11 +1273,9 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
                     trust_trace_context: false,
                 },
             )
-            .unwrap_err(),
-        Error::MissingPolicy {
-            policy: PolicyKind::ScopeRequirement,
-            path,
-        } if path == SERVER_STREAM_PATH
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC method {SERVER_STREAM_PATH} has no scope requirement")
     );
     fixture.stop().await;
 }
@@ -1296,24 +1294,26 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
         "/example.v1.EchoService/Unary",
     ] {
         let expected_path = format!("/{ECHO_SERVICE}/{method}");
-        assert_matches!(
-            registration.require_scopes(method, &["echo.read"]),
-            Err(Error::UnregisteredMethod {
-                policy: PolicyKind::ScopeRequirement,
-                path,
-            }) if path == expected_path,
+        assert_eq!(
+            registration
+                .require_scopes(method, &["echo.read"])
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "gRPC scope requirement for {expected_path} must name a described method of a registered service"
+            ),
             "{method}"
         );
     }
     registration
         .require_scopes("Unary", &["echo.read"])
         .expect("first requirement");
-    assert_matches!(
-        registration.require_scopes("Unary", &["echo.write"]),
-        Err(Error::DuplicatePolicy {
-            policy: PolicyKind::ScopeRequirement,
-            path,
-        }) if path == UNARY_PATH
+    assert_eq!(
+        registration
+            .require_scopes("Unary", &["echo.write"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC scope requirement is declared twice for {UNARY_PATH}")
     );
 }
 
@@ -1322,13 +1322,19 @@ fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
     let mut services = described();
     let mut registration = services.add(EchoServiceServer::new(Echo::new())).unwrap();
 
-    assert_matches!(
-        registration.require_scopes("Unary", &["echo.read", "echo.read echo.write"]),
-        Err(Error::InvalidScopeToken { path, index: 1 }) if path == UNARY_PATH
+    assert_eq!(
+        registration
+            .require_scopes("Unary", &["echo.read", "echo.read echo.write"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC scope requirement for {UNARY_PATH} has an invalid scope token at index 1")
     );
-    assert_matches!(
-        registration.require_scopes_for_delegation("Unary", &[""]),
-        Err(Error::InvalidScopeToken { path, index: 0 }) if path == UNARY_PATH
+    assert_eq!(
+        registration
+            .require_scopes_for_delegation("Unary", &[""])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC scope requirement for {UNARY_PATH} has an invalid scope token at index 0")
     );
     registration
         .require_scopes_for_delegation("Unary", &["echo.read", "echo.write"])
@@ -2872,9 +2878,9 @@ fn the_builtin_health_name_cannot_be_registered_as_a_business_service() {
         .describe(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .unwrap();
     let (_, health) = tonic_health::server::health_reporter();
-    assert_matches!(
-        services.add(health).unwrap_err(),
-        Error::DuplicateService("grpc.health.v1.Health")
+    assert_eq!(
+        services.add(health).unwrap_err().to_string(),
+        "gRPC service grpc.health.v1.Health is registered twice"
     );
 }
 
@@ -3444,14 +3450,9 @@ fn bytes_that_are_not_a_descriptor_set_are_rejected() {
     let error = Services::new()
         .describe(b"\xffprivate descriptor fixture")
         .unwrap_err();
-    assert_matches!(&error, Error::DecodeDescriptorSet(_));
     let source = std::error::Error::source(&error).unwrap();
     assert!(source.is::<prost::DecodeError>());
-    assert!(
-        error
-            .to_string()
-            .contains("decode gRPC file descriptor set")
-    );
+    assert_eq!(error.to_string(), "decode gRPC file descriptor set");
     assert!(!format!("{error:?} {error} {source}").contains("private descriptor fixture"));
 }
 
@@ -3481,9 +3482,12 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
         ..Default::default()
     };
     descriptor.file.insert(0, unnamed_file);
-    assert_matches!(
-        services.describe(encode(&descriptor)),
-        Err(Error::ConflictingServiceDescription(name)) if name == "example.v1.EchoService"
+    assert_eq!(
+        services
+            .describe(encode(&descriptor))
+            .unwrap_err()
+            .to_string(),
+        "gRPC descriptors disagree on the methods of service example.v1.EchoService"
     );
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
@@ -3503,9 +3507,12 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
     let service = &mut file.service[0];
     service.name = Some(String::new());
     service.method.remove(0);
-    assert_matches!(
-        services.describe(encode(&descriptor)),
-        Err(Error::ConflictingServiceDescription(name)) if name.is_empty()
+    assert_eq!(
+        services
+            .describe(encode(&descriptor))
+            .unwrap_err()
+            .to_string(),
+        "gRPC descriptors disagree on the methods of service "
     );
     descriptor.file[0].service[0]
         .method
@@ -3522,27 +3529,31 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
 fn reflection_added_twice_is_rejected() {
     let mut services = Services::new();
     services.add_reflection().expect("first registration");
-    assert_matches!(
-        services.add_reflection(),
-        Err(Error::DuplicateService(
-            "grpc.reflection.v1.ServerReflection"
-        ))
+    assert_eq!(
+        services.add_reflection().unwrap_err().to_string(),
+        "gRPC service grpc.reflection.v1.ServerReflection is registered twice"
     );
 }
 
 #[test]
 fn a_service_is_described_before_it_is_added_and_added_once() {
-    assert_matches!(
-        Services::new().add(EchoServiceServer::new(Echo::new())),
-        Err(Error::UndescribedService("example.v1.EchoService"))
+    assert_eq!(
+        Services::new()
+            .add(EchoServiceServer::new(Echo::new()))
+            .unwrap_err()
+            .to_string(),
+        "gRPC service example.v1.EchoService is in no described file descriptor set"
     );
     let mut services = described();
     services
         .add(EchoServiceServer::new(Echo::new()))
         .expect("first registration");
-    assert_matches!(
-        services.add(EchoServiceServer::new(Echo::new())),
-        Err(Error::DuplicateService("example.v1.EchoService"))
+    assert_eq!(
+        services
+            .add(EchoServiceServer::new(Echo::new()))
+            .unwrap_err()
+            .to_string(),
+        "gRPC service example.v1.EchoService is registered twice"
     );
 }
 

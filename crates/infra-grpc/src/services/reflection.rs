@@ -10,6 +10,7 @@ use prost_reflect::{DynamicMessage, ReflectMessage as _};
 use prost_types::FileDescriptorProto;
 use tonic::body::Body;
 
+use crate::error::ErrorKind;
 use crate::{Error, ResponseContext};
 
 #[derive(Message)]
@@ -22,16 +23,20 @@ pub(super) fn check_files(sets: impl IntoIterator<Item = &'static [u8]>) -> Resu
     let mut files: HashMap<String, Bytes> = HashMap::default();
     for encoded in sets {
         let set = EncodedFileDescriptorSet::decode(Bytes::from_static(encoded))
-            .map_err(Error::InspectReflectionFile)?;
+            .map_err(|source| Error::new(ErrorKind::InspectReflectionFile(source)))?;
         for file in set.file {
-            let descriptor =
-                FileDescriptorProto::decode(file.as_ref()).map_err(Error::InspectReflectionFile)?;
-            let name = descriptor.name.ok_or(Error::MissingReflectionFileName)?;
+            let descriptor = FileDescriptorProto::decode(file.as_ref())
+                .map_err(|source| Error::new(ErrorKind::InspectReflectionFile(source)))?;
+            let name = descriptor
+                .name
+                .ok_or_else(|| Error::new(ErrorKind::MissingReflectionFileName))?;
             match files.entry(name) {
                 Entry::Occupied(entry) => {
                     let first = entry.get();
                     if file != first && definition(&file)? != definition(first)? {
-                        return Err(Error::ConflictingFileDescription(entry.remove_entry().0));
+                        return Err(Error::new(ErrorKind::ConflictingFileDescription(
+                            entry.remove_entry().0,
+                        )));
                     }
                 }
                 Entry::Vacant(entry) => {
@@ -45,7 +50,7 @@ pub(super) fn check_files(sets: impl IntoIterator<Item = &'static [u8]>) -> Resu
 
 fn definition(file: &[u8]) -> Result<DynamicMessage, Error> {
     let mut descriptor = DynamicMessage::decode(FileDescriptorProto::default().descriptor(), file)
-        .map_err(Error::InspectReflectionFile)?;
+        .map_err(|source| Error::new(ErrorKind::InspectReflectionFile(source)))?;
     descriptor.clear_field_by_name("source_code_info");
     Ok(descriptor)
 }
@@ -65,6 +70,7 @@ pub(super) fn stop_request_body_on_cancellation(request: Request<Body>) -> Reque
 #[cfg(test)]
 mod tests {
     use super::EncodedFileDescriptorSet;
+    use crate::error::ErrorKind;
     use crate::{Error, Services};
     use bytes::Bytes;
     use prost::Message as _;
@@ -84,7 +90,7 @@ mod tests {
         services.add_reflection().unwrap();
         std::assert_matches!(
             services.attach_reflection(),
-            Err(Error::MissingReflectionFileName)
+            Err(Error(ErrorKind::MissingReflectionFileName))
         );
     }
 
@@ -111,7 +117,10 @@ mod tests {
             services.add_reflection().unwrap();
             let result = services.attach_reflection();
             if conflicting {
-                std::assert_matches!(result, Err(Error::ConflictingFileDescription(name)) if name == "shared.proto");
+                std::assert_matches!(
+                    result,
+                    Err(Error(ErrorKind::ConflictingFileDescription(name))) if name == "shared.proto"
+                );
             } else {
                 result.unwrap();
             }

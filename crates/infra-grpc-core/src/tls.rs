@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 
 use rustls::crypto::CryptoProvider;
@@ -12,8 +13,34 @@ pub enum CertParseError {
     InvalidDer(rustls::Error),
 }
 
+impl fmt::Display for CertParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedPem => formatter.write_str("malformed PEM certificate data"),
+            Self::InvalidDer(_) => formatter.write_str("invalid DER certificate"),
+        }
+    }
+}
+
+impl std::error::Error for CertParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MalformedPem => None,
+            Self::InvalidDer(source) => Some(source),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidPrivateKey;
+
+impl fmt::Display for InvalidPrivateKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid PEM private key")
+    }
+}
+
+impl std::error::Error for InvalidPrivateKey {}
 
 pub fn parse_cert_chain(pem: &str) -> Result<Vec<CertificateDer<'static>>, CertParseError> {
     let mut chain = Vec::new();

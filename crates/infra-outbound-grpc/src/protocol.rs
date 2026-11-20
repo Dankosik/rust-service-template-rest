@@ -1,9 +1,5 @@
 use http::StatusCode;
 
-pub(crate) use infra_grpc_core::protocol::{
-    GRPC_TIMEOUT, STATUS_HEADERS, grpc_timeout, header_status_code, set_grpc_timeout,
-};
-
 pub(crate) fn unbracket_host(host: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|inner| inner.strip_suffix(']'))

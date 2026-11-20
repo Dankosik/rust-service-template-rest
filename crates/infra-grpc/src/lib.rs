@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 // template:begin authn:grpc-authn-module
 mod authn;
 // template:end authn:grpc-authn-module
@@ -22,7 +20,7 @@ pub use infra_bearerauthn::{
     Actor, ClaimAccessError, DelegationCredential, Principal, PrincipalIdentity,
 };
 // template:end authn:grpc-authn-exports
-pub use error::{Error, PolicyKind, TlsMaterialError, TlsRequiredError};
+pub use error::{Error, TlsMaterialError, TlsRequiredError};
 pub use observe::HISTOGRAMS;
 pub use request::{RequestExt, ResponseContext};
 pub use router::{Application, Authentication, Limits, ServerOptions, server_options};

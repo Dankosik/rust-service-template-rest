@@ -1,5 +1,4 @@
 use axum::extract::Request;
-use foldhash::HashMap;
 use http::header::AUTHORIZATION;
 use infra_bearerauthn::{
     DelegationCredential, Failure as AuthFailure, Principal, Transport, Verifier,
@@ -33,11 +32,9 @@ pub(crate) struct ScopeRequirement {
     pub(crate) delegate: bool,
 }
 
-pub(crate) type Scopes = HashMap<String, ScopeRequirement>;
-
 pub(crate) async fn authenticate(
     verifier: &Verifier,
-    scopes: &Scopes,
+    requirement: Option<&ScopeRequirement>,
     context: &OperationContext,
     mut request: Request,
 ) -> Result<Request, Rejection> {
@@ -63,7 +60,7 @@ pub(crate) async fn authenticate(
             );
         }
     };
-    let Some(requirement) = scopes.get(request.uri().path()) else {
+    let Some(requirement) = requirement else {
         return Err(
             reject_with_budget(context, request, tonic::Status::unimplemented(""))
                 .await

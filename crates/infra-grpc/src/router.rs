@@ -12,6 +12,7 @@ use axum::response::{IntoResponse as _, Response};
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
+use infra_grpc_core::protocol::grpc_timeout;
 use infra_http_transport::{ConnectionLimits, Http2Options};
 use opentelemetry::context::FutureExt as _;
 use operation_context::{Deadline, OperationContext};
@@ -24,8 +25,7 @@ use tracing::Instrument as _;
 use crate::call::{ServerCustody, check_open, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
-use crate::protocol::grpc_timeout;
-use crate::services::{BuiltServices, ListenerLayer, ListenerService, MethodKind, Methods};
+use crate::services::{BuiltServices, ListenerLayer, ListenerService, Method, MethodKind, Methods};
 use crate::status::{FixedFailure, internal_status};
 use crate::{Error, ResponseContext, Services, TlsRequiredError};
 
@@ -53,22 +53,6 @@ pub enum Authentication {
     // template:end service-auth:grpc-authentication-service-tokens
 }
 
-pub(crate) enum BusinessAuth {
-    None,
-    // template:begin authn:grpc-router-bearer-field
-    Bearer {
-        verifier: infra_bearerauthn::Verifier,
-        scopes: crate::authn::Scopes,
-    },
-    // template:end authn:grpc-router-bearer-field
-    // template:begin service-auth:grpc-router-caller-field
-    ServiceTokens {
-        verifier: infra_serviceauth::Verifier,
-        caller_rules: crate::service_auth::CallerRules,
-    },
-    // template:end service-auth:grpc-router-caller-field
-}
-
 struct AdmissionPermits {
     opening: Arc<Semaphore>,
     call: Arc<Semaphore>,
@@ -76,7 +60,7 @@ struct AdmissionPermits {
 }
 
 struct BusinessState {
-    authentication: BusinessAuth,
+    authentication: Authentication,
     methods: Arc<Methods>,
     request_timeout: Duration,
     admission: Option<AdmissionPermits>,
@@ -164,7 +148,7 @@ pub(crate) fn build(
     });
     Ok(Application {
         // template:begin service-auth:grpc-app-tls-init
-        requires_tls: matches!(authentication, BusinessAuth::ServiceTokens { .. }),
+        requires_tls: matches!(authentication, Authentication::ServiceTokens(_)),
         // template:end service-auth:grpc-app-tls-init
         router: {
             let state = Arc::new(BusinessState {
@@ -221,16 +205,21 @@ fn native_router(
     let router = if listener_layers.is_empty() {
         router
     } else {
+        let base = ListenerService::new(tower::util::MapResponse::new(
+            router,
+            |response: Response| response.map(tonic::body::Body::new),
+        ));
         let layered = listener_layers
             .into_iter()
-            .fold(ListenerService::new(router), |service, layer| {
-                layer.layer(service)
-            });
+            .fold(base, |service, layer| layer.layer(service));
         #[expect(
             clippy::disallowed_methods,
             reason = "the native gRPC listener delegates every route and its tonic fallback through the stacked listener layers"
         )]
-        axum::Router::new().fallback_service(layered)
+        axum::Router::new()
+            .fallback_service(tower::util::MapRequest::new(layered, |request: Request| {
+                request.map(tonic::body::Body::new)
+            }))
     };
     router.layer(axum::middleware::from_fn_with_state(
         trust_trace_context,
@@ -264,15 +253,19 @@ struct Admitted {
     permit: Option<OwnedSemaphorePermit>,
 }
 
-struct StartedCall {
-    method: MethodKind,
+struct StartedCall<'a> {
+    method: &'a Method,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
     opening_deadline: Deadline,
     response_deadline: Option<Deadline>,
 }
 
-fn start_call(request: &mut Request, methods: &Methods, request_timeout: Duration) -> StartedCall {
+fn start_call<'a>(
+    request: &mut Request,
+    methods: &'a Methods,
+    request_timeout: Duration,
+) -> StartedCall<'a> {
     sanitize_extensions(request.extensions_mut());
     let path = request.uri().path();
     let method = methods.resolve(path);
@@ -280,7 +273,7 @@ fn start_call(request: &mut Request, methods: &Methods, request_timeout: Duratio
     let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
     let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
     StartedCall {
-        method: method.kind,
+        method,
         call,
         fallback,
         opening_deadline,
@@ -332,7 +325,7 @@ async fn business_call(
         .extensions_mut()
         .remove::<infra_http_transport::ConnectionInfo>();
     // template:begin service-auth:grpc-router-verified-transport
-    if matches!(state.authentication, BusinessAuth::ServiceTokens { .. })
+    if matches!(state.authentication, Authentication::ServiceTokens(_))
         && connection
             .as_ref()
             .is_none_or(|info| !info.scheme().is_tls())
@@ -343,7 +336,7 @@ async fn business_call(
 
     let started = start_call(&mut request, &state.methods, state.request_timeout);
     let lifecycle = business_lifecycle(
-        started.method,
+        started.method.kind,
         started.opening_deadline,
         started.response_deadline,
         connection,
@@ -360,7 +353,7 @@ async fn business_call(
                 .run(open_business(
                     &state,
                     &lifecycle.opening_context,
-                    started.method.is_registered(),
+                    started.method,
                     request,
                     next,
                 ))
@@ -380,7 +373,7 @@ async fn business_call(
 async fn open_business(
     state: &BusinessState,
     opening_context: &OperationContext,
-    registered: bool,
+    method: &Method,
     request: Request,
     next: Next,
 ) -> Result<Admitted, Rejection> {
@@ -397,19 +390,27 @@ async fn open_business(
     .await?;
     let authenticated: Result<_, Rejection> = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
-        BusinessAuth::Bearer { verifier, scopes } => {
-            crate::authn::authenticate(verifier, scopes, opening_context, request).await
+        Authentication::Bearer(verifier) => {
+            crate::authn::authenticate(
+                verifier,
+                method.scope_requirement(),
+                opening_context,
+                request,
+            )
+            .await
         }
         // template:end authn:grpc-router-run-authn
         // template:begin service-auth:grpc-router-run-service-auth
-        BusinessAuth::ServiceTokens {
+        Authentication::ServiceTokens(verifier) => crate::service_auth::admit_caller(
             verifier,
-            caller_rules,
-        } => crate::service_auth::admit_caller(verifier, caller_rules, opening_context, request)
-            .await
-            .map_err(Rejection::from),
+            method.allowed_callers(),
+            opening_context,
+            request,
+        )
+        .await
+        .map_err(Rejection::from),
         // template:end service-auth:grpc-router-run-service-auth
-        BusinessAuth::None => {
+        Authentication::None => {
             // template:begin service-auth:grpc-router-strip-unverified-authorization
             let mut request = request;
             request.headers_mut().remove(http::header::AUTHORIZATION);
@@ -418,7 +419,7 @@ async fn open_business(
         }
     };
     let request = authenticated?;
-    if !registered {
+    if !method.kind.is_registered() {
         let status = tonic::Status::unimplemented("");
         return Err(reject_with_budget(opening_context, request, status)
             .await

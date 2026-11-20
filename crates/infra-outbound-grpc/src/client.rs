@@ -7,6 +7,7 @@ use futures_util::future::BoxFuture;
 use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
+use infra_grpc_core::protocol::{GRPC_TIMEOUT, grpc_timeout, set_grpc_timeout};
 use operation_context::{Deadline, OperationContext};
 use shared_rules::error_chain::{self, DisplayErrorChain};
 use tokio::net::TcpStream;
@@ -111,7 +112,6 @@ impl ClientBuilder<'_> {
         }
         let (uri, origin, tls) = parse_destination(self.destination, self.security)?;
         let endpoint = Endpoint::from(uri)
-            .connect_timeout(CONNECT_TIMEOUT)
             .http2_keep_alive_interval(Duration::from_mins(1))
             .keep_alive_timeout(Duration::from_secs(20))
             .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
@@ -261,14 +261,9 @@ pub struct WithContext<S> {
     context: OperationContext,
 }
 
-#[must_use]
-pub fn bind_context<S>(inner: S, context: &OperationContext) -> WithContext<S> {
-    WithContext::new(inner, context)
-}
-
 impl<S> WithContext<S> {
     #[must_use]
-    pub(crate) fn new(inner: S, context: &OperationContext) -> Self {
+    pub fn new(inner: S, context: &OperationContext) -> Self {
         Self {
             inner,
             context: context.clone(),
@@ -324,9 +319,9 @@ impl PreparedCall {
             .remove::<ContextConflict>()
             .is_some();
         let started_at = Instant::now();
-        let caller_timeout = crate::protocol::grpc_timeout(request.headers());
+        let caller_timeout = grpc_timeout(request.headers());
         if caller_timeout.is_none() {
-            request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
+            request.headers_mut().remove(GRPC_TIMEOUT);
         }
         let call = crate::observe::start_call(client.series, &request, client.destination.as_ref());
         if context_conflict {
@@ -606,14 +601,14 @@ fn apply_forwarded_timeout(
     forwarded: Option<Deadline>,
 ) -> Result<(), tonic::Status> {
     let Some(deadline) = forwarded else {
-        headers.remove(crate::protocol::GRPC_TIMEOUT);
+        headers.remove(GRPC_TIMEOUT);
         return Ok(());
     };
     let remaining = deadline.remaining();
     if remaining.is_zero() {
         return Err(client_deadline_status());
     }
-    crate::protocol::set_grpc_timeout(headers, remaining);
+    set_grpc_timeout(headers, remaining);
     Ok(())
 }
 
@@ -756,16 +751,13 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         let mut headers = http::HeaderMap::new();
         apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, caller_budget))).unwrap();
-        assert_eq!(
-            crate::protocol::grpc_timeout(&headers),
-            Some(Duration::from_secs(4))
-        );
+        assert_eq!(grpc_timeout(&headers), Some(Duration::from_secs(4)));
         assert_eq!(opening.remaining(), Duration::from_secs(1));
         assert_eq!(full_life.unwrap().remaining(), Duration::from_secs(1));
         assert_eq!(open_only_life.unwrap().remaining(), Duration::from_secs(4));
 
         apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, Duration::MAX))).unwrap();
-        assert_eq!(headers[crate::protocol::GRPC_TIMEOUT], "99999999H");
+        assert_eq!(headers[GRPC_TIMEOUT], "99999999H");
 
         tokio::time::advance(Duration::from_secs(4)).await;
         assert_eq!(
@@ -783,18 +775,12 @@ mod tests {
         .build()
         .unwrap();
         let mut request = Request::new(Body::empty());
-        request.headers_mut().insert(
-            crate::protocol::GRPC_TIMEOUT,
-            http::HeaderValue::from_static("+5S"),
-        );
+        request
+            .headers_mut()
+            .insert(GRPC_TIMEOUT, http::HeaderValue::from_static("+5S"));
         let prepared = PreparedCall::prepare(&client, request).unwrap();
         assert!(!prepared.watch_stop);
-        assert!(
-            !prepared
-                .request
-                .headers()
-                .contains_key(crate::protocol::GRPC_TIMEOUT)
-        );
+        assert!(!prepared.request.headers().contains_key(GRPC_TIMEOUT));
     }
 
     #[tokio::test]
