@@ -543,7 +543,7 @@ mod tests {
             match end {
                 StreamEnd::Trailers(_) => "polled",
                 StreamEnd::Empty => "empty",
-                StreamEnd::Error(never) => match *never {},
+                StreamEnd::Error(_) => "error",
             }
         }
 

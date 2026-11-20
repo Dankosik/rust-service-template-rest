@@ -731,7 +731,8 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         );
         assert!(
             std::error::Error::source(&error)
-                .is_some_and(|source| source.is::<infra_serviceauth::InvalidServiceName>()),
+                .unwrap()
+                .is::<infra_serviceauth::InvalidServiceName>(),
             "{callers:?}"
         );
     }
