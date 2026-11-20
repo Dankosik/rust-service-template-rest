@@ -115,42 +115,35 @@ impl AuthenticatedClient {
     }
 
     fn begin_call(&self, request: Request<Body>) -> Result<RpcFuture, Status> {
-        let prepared =
-            PreparedCall::prepare(&self.resource, request).map_err(|status| {
-                match status.code() {
-                    Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
-                    Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
-                    _ => status,
+        let prepared = PreparedCall::prepare(&self.resource, request)
+            .map_err(|status| match status.code() {
+                Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
+                Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
+                _ => status,
+            })?
+            .try_step(|opening, headers| {
+                self.tokens
+                    .check_active(acquisition_deadline(opening))
+                    .map_err(acquisition_status)?;
+                if headers.contains_key(AUTHORIZATION) {
+                    return Err(Status::internal(
+                        "authorization conflicts with client credentials",
+                    ));
                 }
+                Ok(())
             })?;
-        let (prepared, context) = prepared.try_step(|opening, headers| {
-            self.tokens
-                .check_active(acquisition_deadline(opening))
-                .map_err(acquisition_status)?;
-            if headers.contains_key(AUTHORIZATION) {
-                return Err(Status::internal(
-                    "authorization conflicts with client credentials",
-                ));
-            }
-            Ok(opening.clone())
-        })?;
-        Ok(Box::pin(send_admitted(
-            prepared,
-            self.tokens.clone(),
-            context,
-        )))
+        Ok(Box::pin(send_admitted(prepared, self.tokens.clone())))
     }
 }
 
 async fn send_admitted(
     prepared: PreparedCall,
     tokens: BoundTokens,
-    context: OperationContext,
 ) -> Result<Response<Body>, Status> {
     let (prepared, token) = prepared
-        .try_await(async {
+        .try_await(async move |opening| {
             tokens
-                .acquire_for_request(acquisition_deadline(&context))
+                .acquire_for_request(acquisition_deadline(opening))
                 .await
                 .map_err(acquisition_status)
         })

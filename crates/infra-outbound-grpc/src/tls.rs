@@ -8,8 +8,24 @@ use parking_lot::Mutex;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, InconsistentKeys, RootCertStore};
 use rustls_platform_verifier::Verifier;
+use secrecy::SecretString;
 
-use crate::{ClientIdentity, ClientTlsError, ClientTlsMaterial};
+use crate::ClientTlsError;
+
+#[derive(Clone, Copy, derive_more::Debug, Default)]
+pub struct ClientTlsMaterial<'a> {
+    #[debug(skip)]
+    pub ca_certificate_pem: Option<&'a str>,
+    pub identity: Option<ClientIdentity<'a>>,
+}
+
+#[derive(Clone, Copy, derive_more::Debug)]
+pub struct ClientIdentity<'a> {
+    #[debug(skip)]
+    pub certificate_pem: &'a str,
+    #[debug(skip)]
+    pub private_key_pem: &'a SecretString,
+}
 
 pub(crate) fn client_tls_config(
     material: &ClientTlsMaterial<'_>,

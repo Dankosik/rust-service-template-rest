@@ -12,12 +12,10 @@ pub mod transport {
     pub use crate::client::{PreparedCall, bind_context};
 }
 
-pub use client::{
-    Client, ClientBuilder, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
-    WithContext,
-};
+pub use client::{Client, ClientBuilder, ClientSecurity, ClientTimeout, WithContext};
 pub use error::{ClientError, ClientTlsError};
 pub use observe::HISTOGRAMS;
 // template:begin service-auth:outbound-grpc-service-auth-exports
 pub use service_auth::ServiceTokenClient;
 // template:end service-auth:outbound-grpc-service-auth-exports
+pub use tls::{ClientIdentity, ClientTlsMaterial};

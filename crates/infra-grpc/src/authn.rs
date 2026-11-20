@@ -1,5 +1,4 @@
 use axum::extract::Request;
-use axum::response::Response;
 use foldhash::HashMap;
 use http::header::AUTHORIZATION;
 use infra_bearerauthn::{
@@ -9,7 +8,7 @@ use operation_context::OperationContext;
 
 use crate::Failure;
 use crate::call::check_open;
-use crate::router::reject_with_budget;
+use crate::router::{Rejection, reject_with_budget};
 
 pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:begin oidc-jwt:grpc-verifier-setting-jwt
@@ -36,19 +35,12 @@ pub(crate) struct ScopeRequirement {
 
 pub(crate) type Scopes = HashMap<String, ScopeRequirement>;
 
-#[derive(Clone)]
-pub(crate) struct InsufficientScope;
-
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
 pub(crate) async fn authenticate(
     verifier: &Verifier,
     scopes: &Scopes,
     context: &OperationContext,
     mut request: Request,
-) -> Result<Request, Response> {
+) -> Result<Request, Rejection> {
     check_open(context)?;
     let result = {
         let authorization = request
@@ -64,20 +56,28 @@ pub(crate) async fn authenticate(
     let (principal, token) = match result {
         Ok(presentation) => presentation,
         Err(failure) => {
-            return Err(reject_with_budget(context, request, authentication_status(failure)).await);
+            return Err(
+                reject_with_budget(context, request, authentication_status(failure))
+                    .await
+                    .into(),
+            );
         }
     };
     let Some(requirement) = scopes.get(request.uri().path()) else {
-        return Err(reject_with_budget(context, request, tonic::Status::unimplemented("")).await);
+        return Err(
+            reject_with_budget(context, request, tonic::Status::unimplemented(""))
+                .await
+                .into(),
+        );
     };
     if !principal.has_scopes(requirement.scopes.iter()) {
         let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
         );
-        let mut response = reject_with_budget(context, request, status).await;
-        response.extensions_mut().insert(InsufficientScope);
-        return Err(response);
+        return Err(Rejection::InsufficientScope(
+            reject_with_budget(context, request, status).await,
+        ));
     }
     check_open(context)?;
     let delegation = requirement

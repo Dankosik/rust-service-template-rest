@@ -2522,7 +2522,7 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
                     Duration::from_secs(seconds),
                 ));
         }
-        let (prepared, ()) = PreparedCall::prepare(&client, request)
+        let prepared = PreparedCall::prepare(&client, request)
             .unwrap()
             .try_step(|_, headers| {
                 headers.insert("grpc-timeout", http::HeaderValue::from_static("1H"));
