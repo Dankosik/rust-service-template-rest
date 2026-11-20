@@ -13,14 +13,14 @@ use compact_str::CompactString;
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use http::{HeaderMap, Request, StatusCode, Uri, header};
-use infra_jobs::{Handler, Job, JobError, JobKind, KindName, KindsBuilder, Policy, RetrySchedule};
+use infra_jobs::{
+    EnqueueError, Handler, Job, JobError, JobKind, KindName, KindsBuilder, Policy, RetrySchedule,
+};
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits, Origin};
 use metrics::{Counter, SharedString};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use url::Url;
 
-use crate::StreamingBase64;
 use crate::protocol::KeyRing;
 
 pub use producer::{JSON_CONTENT_TYPE, OutboundError, Producer};
@@ -197,14 +197,13 @@ fn format_message_id(job_id: infra_jobs::JobId) -> Option<ArrayString<36>> {
     Some(message_id)
 }
 
-#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 struct Delivery {
     #[serde(skip_deserializing, default = "delivery_version")]
     version: u8,
     endpoint_id: CompactString,
     content_type: CompactString,
-    #[serde_as(as = "StreamingBase64")]
+    #[serde(with = "crate::base64_bytes")]
     body: Bytes,
 }
 
@@ -213,7 +212,7 @@ const fn delivery_version() -> u8 {
 }
 
 impl Delivery {
-    fn empty_serialized_len() -> Result<usize, serde_json::Error> {
+    fn empty_serialized_len() -> Result<usize, EnqueueError> {
         static LEN: OnceLock<usize> = OnceLock::new();
         if let Some(&len) = LEN.get() {
             return Ok(len);
@@ -223,7 +222,8 @@ impl Delivery {
             endpoint_id: CompactString::const_new(""),
             content_type: CompactString::const_new(""),
             body: Bytes::new(),
-        })?;
+        })
+        .map_err(EnqueueError::Serialize)?;
         Ok(*LEN.get_or_init(|| len))
     }
 }
