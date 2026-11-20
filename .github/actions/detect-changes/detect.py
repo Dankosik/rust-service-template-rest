@@ -56,6 +56,7 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "crates/infra-webhooks/**", "crates/jobs-worker/**", "crates/migrate/**",
         "crates/infra-messaging/**", "crates/domain-events/**", "crates/nats-test-support/**",
         "crates/infra-http/**", "crates/infra-http-transport/**", "crates/infra-grpc/**",
+        "crates/infra-grpc-core/**",
         "crates/infra-outbound-http/**", "crates/infra-outbound-grpc/**", "crates/grpc-contracts/**",
         "crates/infra-bearerauthn/**", "crates/health/**", "crates/operation-context/**",
         "crates/shared-rules/**", "crates/service-failure/**", "crates/json-payload/**",
