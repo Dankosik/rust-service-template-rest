@@ -9,21 +9,9 @@ pub struct ObjectKey(String);
 pub struct InvalidObjectKey;
 
 impl ObjectKey {
-    pub fn try_new(key: impl Into<String>) -> Result<Self, InvalidObjectKey> {
-        let key = key.into();
-        if key.len() > MAX_KEY_BYTES || key == "soap" {
-            return Err(InvalidObjectKey);
-        }
-        let valid = key.split('/').all(|segment| {
-            !segment.is_empty()
-                && segment != "."
-                && segment != ".."
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"._~-".contains(&byte))
-        });
-        if valid {
-            Ok(Self(key))
+    pub fn try_new(key: impl AsRef<str> + Into<String>) -> Result<Self, InvalidObjectKey> {
+        if is_valid(key.as_ref()) {
+            Ok(Self(key.into()))
         } else {
             Err(InvalidObjectKey)
         }
@@ -33,6 +21,20 @@ impl ObjectKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn is_valid(key: &str) -> bool {
+    if key.len() > MAX_KEY_BYTES || key == "soap" {
+        return false;
+    }
+    key.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._~-".contains(&byte))
+    })
 }
 
 impl AsRef<str> for ObjectKey {

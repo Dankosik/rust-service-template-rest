@@ -21,7 +21,11 @@ pub(crate) struct Admitted {
 
 enum AdmittedAddress {
     Plaintext(ServerEndpoint),
-    Tls(ServerEndpoint),
+    Tls {
+        server: ServerEndpoint,
+        root_ca_path: Option<PathBuf>,
+        client_certificate: Option<ClientCertificate>,
+    },
 }
 
 pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
@@ -41,17 +45,16 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
     if info.redis_settings().db() < 0 {
         return Err(StartError::InvalidDsn);
     }
-    let address = admit_address(
-        &info,
-        allow_plaintext,
-        root_ca_path.is_some(),
-        client_certificate.is_some(),
-    )?;
+    let address = admit_address(&info, allow_plaintext, root_ca_path, client_certificate)?;
     let password_file =
         admit_password(info.redis_settings(), password_file, allow_unauthenticated)?;
     let (server, transport) = match address {
         AdmittedAddress::Plaintext(server) => (server, Transport::Plaintext),
-        AdmittedAddress::Tls(server) => {
+        AdmittedAddress::Tls {
+            server,
+            root_ca_path,
+            client_certificate,
+        } => {
             let roots = root_ca_path.as_deref().map(read_root_ca).transpose()?;
             let identity = client_certificate
                 .as_ref()
@@ -80,18 +83,18 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartError> {
 fn admit_address(
     info: &redis::ConnectionInfo,
     allow_plaintext: bool,
-    has_root_ca: bool,
-    has_client_certificate: bool,
+    root_ca_path: Option<PathBuf>,
+    client_certificate: Option<ClientCertificate>,
 ) -> Result<AdmittedAddress, StartError> {
     match info.addr() {
         redis::ConnectionAddr::Tcp(host, port) => {
             if !allow_plaintext {
                 return Err(StartError::PlaintextRefused);
             }
-            if has_root_ca {
+            if root_ca_path.is_some() {
                 return Err(StartError::CaRequiresTls);
             }
-            if has_client_certificate {
+            if client_certificate.is_some() {
                 return Err(StartError::ClientCertificateRequiresTls);
             }
             Ok(AdmittedAddress::Plaintext(ServerEndpoint {
@@ -106,11 +109,15 @@ fn admit_address(
             port,
             insecure: false,
             ..
-        } => Ok(AdmittedAddress::Tls(ServerEndpoint {
-            host: host.clone(),
-            port: *port,
-            database_index: info.redis_settings().db(),
-        })),
+        } => Ok(AdmittedAddress::Tls {
+            server: ServerEndpoint {
+                host: host.clone(),
+                port: *port,
+                database_index: info.redis_settings().db(),
+            },
+            root_ca_path,
+            client_certificate,
+        }),
         _ => Err(StartError::UnsupportedAddress),
     }
 }

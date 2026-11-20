@@ -3,7 +3,7 @@ use url::Url;
 
 use crate::credentials::{AccessKey, AmazonCredentials};
 use crate::error::ConfigError;
-use crate::put_body::UploadSource;
+use crate::put_body::Payload;
 
 #[derive(Clone, derive_more::Debug)]
 pub enum Provider {
@@ -75,10 +75,10 @@ pub(crate) enum UploadChecksum {
 }
 
 impl UploadChecksum {
-    pub(crate) fn applies_to(self, source: &UploadSource) -> bool {
-        match (self, source) {
-            (Self::Always, _) | (Self::InMemoryOnly, UploadSource::InMemory) => true,
-            (Self::InMemoryOnly, UploadSource::Streamed { .. }) | (Self::Never, _) => false,
+    pub(crate) fn applies_to(self, payload: &Payload) -> bool {
+        match (self, payload) {
+            (Self::Always, _) | (Self::InMemoryOnly, Payload::InMemory(_)) => true,
+            (Self::InMemoryOnly, Payload::Streamed { .. }) | (Self::Never, _) => false,
         }
     }
 }

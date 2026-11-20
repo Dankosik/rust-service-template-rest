@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use crate::error::{CommandError, Refusal};
 use crate::exchange::reply_data;
 use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, SuccessOutcome};
-use crate::{Cache, MutationError, OperationError, SetError};
+use crate::{Cache, MutationError, MutationFailure, OperationError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Namespace(&'static str);
@@ -152,7 +152,7 @@ impl CacheNamespace {
         parent: &OperationContext,
         key: &str,
     ) -> Result<Option<Vec<u8>>, OperationError> {
-        let key = self.admit_key(key)?;
+        let key = self.admit_key(key).ok_or(OperationError::KeyTooLarge)?;
         let max_value_bytes = self.cache.max_value_bytes;
         self.run(
             parent,
@@ -180,15 +180,17 @@ impl CacheNamespace {
         key: &str,
         value: &[u8],
         ttl: Duration,
-    ) -> Result<(), SetError> {
+    ) -> Result<(), MutationError> {
         let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
             .filter(|milliseconds| *milliseconds > 0)
-            .ok_or(SetError::InvalidTtl)?;
-        let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
+            .ok_or(MutationError::NotApplied(MutationFailure::InvalidTtl))?;
+        let key = self
+            .admit_key(key)
+            .ok_or(MutationError::NotApplied(MutationFailure::KeyTooLarge))?;
         if value.len() > self.cache.max_value_bytes {
             LocalSizeRefusal::Value.record(self.histograms.namespace());
-            return Err(MutationError::NotApplied(OperationError::ValueTooLarge).into());
+            return Err(MutationError::NotApplied(MutationFailure::ValueTooLarge));
         }
         let build_query = |connection| {
             query_mutation(
@@ -205,7 +207,9 @@ impl CacheNamespace {
     }
 
     pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
-        let key = self.admit_key(key).map_err(MutationError::NotApplied)?;
+        let key = self
+            .admit_key(key)
+            .ok_or(MutationError::NotApplied(MutationFailure::KeyTooLarge))?;
         let build_query = |connection| {
             query_mutation(key.delete_command(), connection, |value| {
                 matches!(value, redis::Value::Int(0 | 1))
@@ -247,14 +251,14 @@ impl CacheNamespace {
         }
     }
 
-    fn admit_key<'a>(&self, key: &'a str) -> Result<NamespacedKey<'a>, OperationError> {
+    fn admit_key<'a>(&self, key: &'a str) -> Option<NamespacedKey<'a>> {
         let namespace = self.histograms.namespace();
         let full_key = NamespacedKey { namespace, key };
         if full_key.len() > self.cache.max_key_bytes {
             LocalSizeRefusal::Key.record(namespace);
-            return Err(OperationError::KeyTooLarge);
+            return None;
         }
-        Ok(full_key)
+        Some(full_key)
     }
 }
 

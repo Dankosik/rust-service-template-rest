@@ -7,7 +7,7 @@ use metrics::{Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
 
-use crate::error::{CommandError, ErrorType, Refusal};
+use crate::error::{CommandError, ErrorType, Refusal, UnknownCause};
 use crate::namespace::Operation;
 use crate::{Namespace, ServerEndpoint};
 
@@ -208,25 +208,30 @@ impl<'a> OperationGuard<'a> {
             };
             self.0.span.record("cache.mutation.outcome", effect);
         }
-        let refusal = match error {
-            CommandError::NotApplied(refusal) => refusal,
-            CommandError::OutcomeUnknown(cause) => cause.into(),
-        };
-        match refusal {
-            Refusal::Stopped(Stopped::Cancelled) => {
-                DropGuard::dismiss(self.0).finish(Outcome::Cancelled);
-            }
-            Refusal::Stopped(Stopped::Deadline) => {
-                self.record_error(ErrorType::Timeout, None);
-            }
-            Refusal::Failed(error) => self.record_error(error, None),
-            Refusal::PermissionDenied => {
+        match error {
+            CommandError::OutcomeUnknown(cause)
+            | CommandError::NotApplied(Refusal::Cause(cause)) => self.record_cause(cause),
+            CommandError::NotApplied(Refusal::PermissionDenied) => {
                 self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
             }
-            Refusal::InvalidTtl => self.record_error(ErrorType::ServerErrorReply, None),
-            Refusal::ValueTooLarge => {
+            CommandError::NotApplied(Refusal::InvalidTtl) => {
+                self.record_error(ErrorType::ServerErrorReply, None);
+            }
+            CommandError::NotApplied(Refusal::ValueTooLarge) => {
                 self.record_failure(Outcome::ValueTooLarge, "value_too_large", None);
             }
+        }
+    }
+
+    fn record_cause(self, cause: UnknownCause) {
+        match cause {
+            UnknownCause::Stopped(Stopped::Cancelled) => {
+                DropGuard::dismiss(self.0).finish(Outcome::Cancelled);
+            }
+            UnknownCause::Stopped(Stopped::Deadline) => {
+                self.record_error(ErrorType::Timeout, None);
+            }
+            UnknownCause::Failed(error) => self.record_error(error, None),
         }
     }
 

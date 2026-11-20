@@ -14,6 +14,7 @@ mod response_limit;
 mod tests;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use aws_sdk_s3::config::{
@@ -250,29 +251,26 @@ impl ObjectStorage {
     ) -> Result<(), MutationError> {
         self.observe(parent, Operation::Put, async |context, guard| {
             context.check_active()?;
-            if body.len > self.inner.max_object_bytes {
+            if body.len() > self.inner.max_object_bytes {
                 return Err(Failure::too_large());
             }
             let _permit = self.try_admit().ok_or_else(Failure::busy)?;
-            let PutBody {
-                len,
-                stream,
-                source,
-                outcomes,
-            } = within(context, body.normalize_empty_stream())
+            let PutBody { payload, outcomes } = body;
+            let payload = within(context, payload.normalize_empty_stream())
                 .await
                 .map_err(|interrupted| Failure::not_applied_stop(interrupted.stopped))??;
             let checksum = self
                 .inner
                 .checksum
-                .applies_to(&source)
+                .applies_to(&payload)
                 .then_some(ChecksumAlgorithm::Crc64Nvme);
+            let (len, stream, mismatch) = payload.into_stream();
             let (call, if_none_match) = if options.create_only {
                 (Call::CreateOnly, Some("*".to_owned()))
             } else {
                 (Call::UnconditionalMutation, None)
             };
-            let mut call_config = self.operation_config(context, call);
+            let mut call_config = self.operation_config(context, call, SuccessBody::Bounded);
             if checksum.is_some() {
                 call_config = call_config
                     .request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
@@ -291,7 +289,6 @@ impl ObjectStorage {
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
                 .config_override(call_config)
-                .interceptor(ResponseLimit::SuccessBody)
                 .send();
             let mut inflight = None;
             let result = within_mutation(context, async {
@@ -302,7 +299,8 @@ impl ObjectStorage {
             if let Ok((answer, _)) = &result {
                 guard.record_request_ids(answer);
             }
-            let outcome = error::interpret_put_result(&result, call, source.mismatched());
+            let mismatched = mismatch.is_some_and(|flag| flag.load(Ordering::Acquire));
+            let outcome = error::interpret_put_result(&result, call, mismatched);
             if !matches!(
                 outcome,
                 Err(Failure {
@@ -337,7 +335,11 @@ impl ObjectStorage {
                     .checksum_mode(ChecksumMode::Enabled)
                     .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                     .customize()
-                    .config_override(self.operation_config(&context, Call::Read))
+                    .config_override(self.operation_config(
+                        &context,
+                        Call::Read,
+                        SuccessBody::Streamed,
+                    ))
                     .send(),
             );
             let reply =
@@ -374,8 +376,7 @@ impl ObjectStorage {
                 .key(key.as_str())
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
-                .config_override(self.operation_config(context, Call::Read))
-                .interceptor(ResponseLimit::SuccessBody)
+                .config_override(self.operation_config(context, Call::Read, SuccessBody::Bounded))
                 .send();
             let reply = Self::checked_read_reply(within(context, request).await, context, guard)?;
             let output = reply.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
@@ -405,8 +406,11 @@ impl ObjectStorage {
                 .key(key.as_str())
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
-                .config_override(self.operation_config(context, Call::UnconditionalMutation))
-                .interceptor(ResponseLimit::SuccessBody)
+                .config_override(self.operation_config(
+                    context,
+                    Call::UnconditionalMutation,
+                    SuccessBody::Bounded,
+                ))
                 .send();
             let (reply, stopped_on_reply) = within_mutation(context, request).await?;
             guard.record_request_ids(&reply);
@@ -435,7 +439,7 @@ impl ObjectStorage {
                 .bucket(&self.inner.bucket)
                 .key(key.as_str())
                 .customize()
-                .config_override(self.operation_config(context, Call::Read))
+                .config_override(self.operation_config(context, Call::Read, SuccessBody::Bounded))
                 .presigned(config);
             let reply = within(context, request).await?;
             context.check_active()?;
@@ -488,13 +492,28 @@ impl ObjectStorage {
         Ok(reply)
     }
 
-    fn operation_config(&self, context: &CallContext, call: Call) -> aws_sdk_s3::config::Builder {
+    fn operation_config(
+        &self,
+        context: &CallContext,
+        call: Call,
+        success_body: SuccessBody,
+    ) -> aws_sdk_s3::config::Builder {
         let remaining = context.remaining();
         let (timeout, retry) = call_policy(call, remaining, self.inner.operation_timeout);
-        aws_sdk_s3::Config::builder()
+        let config = aws_sdk_s3::Config::builder()
             .timeout_config(timeout)
-            .retry_config(retry)
+            .retry_config(retry);
+        match success_body {
+            SuccessBody::Bounded => config.interceptor(ResponseLimit::SuccessBody),
+            SuccessBody::Streamed => config,
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+enum SuccessBody {
+    Bounded,
+    Streamed,
 }
 
 fn download_metadata(

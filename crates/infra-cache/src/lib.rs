@@ -17,7 +17,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 
 use self::connection::Link;
-pub use self::error::{MutationError, OperationError, SetError, StartError, UnknownOutcome};
+pub use self::error::{MutationError, MutationFailure, OperationError, StartError, UnknownOutcome};
 pub use self::namespace::{CacheLookup, CacheNamespace, Namespace};
 pub use self::observe::HISTOGRAMS;
 

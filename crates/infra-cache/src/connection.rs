@@ -37,7 +37,7 @@ mod full_pipeline_tests;
 #[derive(derive_more::Debug)]
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
-    pub(crate) command_timeout: Duration,
+    command_timeout: Duration,
     #[debug(skip)]
     shared: Arc<Shared>,
     #[debug(skip)]
