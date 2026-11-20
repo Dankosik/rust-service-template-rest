@@ -16,13 +16,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const SOURCE_POLLS_PER_YIELD: usize = 64;
 
 #[derive(derive_more::Debug)]
+#[debug("PutBody {{ len: {}, .. }}", payload.len())]
 pub struct PutBody {
-    pub(crate) len: u64,
-    #[debug(skip)]
-    pub(crate) stream: ByteStream,
-    #[debug(skip)]
-    pub(crate) source: UploadSource,
-    #[debug(skip)]
+    pub(crate) payload: Payload,
     pub(crate) outcomes: Option<PutOutcomes>,
 }
 
@@ -56,17 +52,47 @@ impl DispatchedPut<'_> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum UploadSource {
-    InMemory,
-    Streamed { mismatch: Arc<AtomicBool> },
+pub(crate) enum Payload {
+    InMemory(Bytes),
+    Streamed {
+        len: u64,
+        stream: ByteStream,
+        mismatch: Arc<AtomicBool>,
+    },
 }
 
-impl UploadSource {
-    pub(crate) fn mismatched(&self) -> bool {
+impl Payload {
+    pub(crate) fn len(&self) -> u64 {
         match self {
-            Self::InMemory => false,
-            Self::Streamed { mismatch } => mismatch.load(Ordering::Acquire),
+            Self::InMemory(bytes) => bytes.len() as u64,
+            Self::Streamed { len, .. } => *len,
+        }
+    }
+
+    pub(crate) async fn normalize_empty_stream(self) -> Result<Self, UploadFailure> {
+        let Self::Streamed {
+            len: 0,
+            mut stream,
+            mismatch,
+        } = self
+        else {
+            return Ok(self);
+        };
+        match stream.next().await {
+            Some(_) if mismatch.load(Ordering::Acquire) => Err(UploadFailure::Length),
+            Some(_) => Err(UploadFailure::Body),
+            None => Ok(Self::InMemory(Bytes::new())),
+        }
+    }
+
+    pub(crate) fn into_stream(self) -> (u64, ByteStream, Option<Arc<AtomicBool>>) {
+        match self {
+            Self::InMemory(bytes) => (bytes.len() as u64, ByteStream::from(bytes), None),
+            Self::Streamed {
+                len,
+                stream,
+                mismatch,
+            } => (len, stream, Some(mismatch)),
         }
     }
 }
@@ -79,45 +105,30 @@ impl PutBody {
     {
         let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
         Self {
-            len,
-            stream: ByteStream::from_body_1_x(body),
-            source: UploadSource::Streamed { mismatch },
+            payload: Payload::Streamed {
+                len,
+                stream: ByteStream::from_body_1_x(body),
+                mismatch,
+            },
             outcomes: None,
         }
     }
 
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.len
+        self.payload.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, UploadFailure> {
-        if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
-            return Ok(self);
-        }
-        match self.stream.next().await {
-            Some(_) if self.source.mismatched() => Err(UploadFailure::Length),
-            Some(_) => Err(UploadFailure::Body),
-            None => Ok(Self {
-                stream: ByteStream::from(Bytes::new()),
-                source: UploadSource::InMemory,
-                ..self
-            }),
-        }
+        self.len() == 0
     }
 }
 
 impl From<Bytes> for PutBody {
     fn from(bytes: Bytes) -> Self {
         Self {
-            len: bytes.len() as u64,
-            stream: ByteStream::from(bytes),
-            source: UploadSource::InMemory,
+            payload: Payload::InMemory(bytes),
             outcomes: None,
         }
     }

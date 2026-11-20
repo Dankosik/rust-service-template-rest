@@ -79,7 +79,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     use operation_context::Stopped;
     use tracing_subscriber::fmt::format::FmtSpan;
 
-    use crate::{MutationError, OperationError, SetError, UnknownOutcome};
+    use crate::{MutationError, MutationFailure, UnknownOutcome};
 
     let captured = super::connection::CapturedLogs::default();
     let writer = captured.clone();
@@ -103,7 +103,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     let expired = OperationContext::with_timeout(Duration::ZERO);
     assert_eq!(
         namespace.delete(&expired, "secret-key").await,
-        Err(MutationError::NotApplied(OperationError::Stopped(
+        Err(MutationError::NotApplied(MutationFailure::Stopped(
             Stopped::Deadline
         )))
     );
@@ -131,9 +131,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     server.hang_up();
     assert_eq!(
         write.await,
-        Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            UnknownOutcome::Unavailable
-        )))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
 
     let traces = captured.rendered();
@@ -181,13 +179,17 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
     ] {
         assert_eq!(
             namespace.set(&caller, "key", b"value", ttl).await,
-            Err(crate::SetError::InvalidTtl),
+            Err(crate::MutationError::NotApplied(
+                crate::MutationFailure::InvalidTtl
+            )),
             "{ttl:?}"
         );
         let stopped = OperationContext::with_timeout(Duration::ZERO);
         assert_eq!(
             namespace.set(&stopped, "key", b"value", ttl).await,
-            Err(crate::SetError::InvalidTtl),
+            Err(crate::MutationError::NotApplied(
+                crate::MutationFailure::InvalidTtl
+            )),
             "invalid TTL takes precedence over stopped context: {ttl:?}"
         );
     }
