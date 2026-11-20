@@ -18,8 +18,8 @@ macro_rules! idempotent_route {
 }
 
 #[macro_export]
-macro_rules! created_json_response {
-    ($vis:vis $name:ident($body:ty)) => {
+macro_rules! json_response {
+    ($vis:vis $name:ident($body:ty), status = $status:expr, description = $description:literal $(,)?) => {
         $vis struct $name {
             pub body: $body,
             pub headers: ::axum::http::HeaderMap,
@@ -37,15 +37,17 @@ macro_rules! created_json_response {
                 dead_code,
                 reason = "The schema wrapper exists only for the OpenAPI derive"
             )]
-            struct __InfraHttpCreatedBody($body);
+            struct __InfraHttpJsonBody($body);
 
             impl ::utoipa::IntoResponses for $name {
                 fn responses() -> ::std::collections::BTreeMap<
                     ::std::string::String,
                     ::utoipa::openapi::RefOr<::utoipa::openapi::Response>,
                 > {
-                    $crate::idempotency::created_json_responses(
-                        <__InfraHttpCreatedBody as ::utoipa::PartialSchema>::schema(),
+                    $crate::idempotency::json_responses(
+                        $status,
+                        $description,
+                        <__InfraHttpJsonBody as ::utoipa::PartialSchema>::schema(),
                     )
                 }
             }
@@ -56,7 +58,7 @@ macro_rules! created_json_response {
                     ::utoipa::openapi::RefOr<::utoipa::openapi::Schema>,
                 )> {
                     let mut schemas = ::std::vec::Vec::new();
-                    <__InfraHttpCreatedBody as ::utoipa::ToSchema>::schemas(&mut schemas);
+                    <__InfraHttpJsonBody as ::utoipa::ToSchema>::schemas(&mut schemas);
                     schemas
                 }
 
@@ -65,7 +67,7 @@ macro_rules! created_json_response {
                     $crate::idempotency::ReplayError,
                 > {
                     $crate::idempotency::ReplayableResponse::json(
-                        ::axum::http::StatusCode::CREATED,
+                        $status,
                         self.headers,
                         &self.body,
                     )
@@ -75,14 +77,27 @@ macro_rules! created_json_response {
     };
 }
 
+#[macro_export]
+macro_rules! created_json_response {
+    ($vis:vis $name:ident($body:ty)) => {
+        $crate::json_response!(
+            $vis $name($body),
+            status = ::axum::http::StatusCode::CREATED,
+            description = "created",
+        );
+    };
+}
+
 pub use compose::{CommandHandler, FromCommand, FromCommandPart, route};
 pub use declaration::CompositionError;
 pub use execute::{FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Rollback, TerminalMode};
 pub use infra_postgres::BudgetedTx as Tx;
 pub use input::CommandInput;
 #[doc(hidden)]
-pub use stored::created_json_responses;
-pub use stored::{CreatedText, ReplayError, ReplaySuccess, ReplayableResponse, TerminalProblem};
+pub use stored::json_responses;
+pub use stored::{
+    CreatedText, NoContent, ReplayError, ReplaySuccess, ReplayableResponse, TerminalProblem,
+};
 
 pub(crate) const KEY_HEADER: &str = "Idempotency-Key";
 pub(crate) const REPLAYED_HEADER: &str = "Idempotent-Replayed";

@@ -193,8 +193,10 @@ mod idempotency_tests {
         }))
         .unwrap();
         assert_eq!(
-            HttpContract::<AppState>::application(stale).unwrap_err(),
-            infra_http::FinalizeError::ApplicationPaths
+            HttpContract::<AppState>::application(stale)
+                .unwrap_err()
+                .to_string(),
+            "application metadata must contain no registered paths"
         );
     }
 

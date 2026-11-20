@@ -8,7 +8,7 @@ use utoipa::openapi::path::{Operation, Parameter, ParameterIn, Paths};
 use utoipa::openapi::response::Response;
 use utoipa::openapi::{Content, RefOr, Schema};
 
-use crate::contract::{path_operations_mut, same_definition};
+use crate::contract::{ComponentKind, path_operations_mut, same_definition};
 
 use super::openapi::{
     can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
@@ -125,7 +125,7 @@ pub(super) fn prepare(
     fingerprint_headers.dedup();
     prepare_problem_responses(operation).map_err(at_operation)?;
     let schemas = &mut document.components.get_or_insert_default().schemas;
-    crate::contract::merge_map("schemas", schemas, success_schemas)?;
+    crate::contract::merge_map(ComponentKind::Schemas, schemas, success_schemas)?;
     prepare_success_responses(operation, successes, schemas).map_err(at_operation)?;
     if operation.external_docs.is_none() {
         operation.external_docs = route_docs;
@@ -378,6 +378,7 @@ mod tests {
 
     use super::*;
     use crate::authn::ProtectedOperationProblemResponses;
+    use crate::contract::{FinalizeKind, PolicyFault};
     use crate::idempotency::{CreatedText, Rollback};
 
     const WIDGETS: &str = "/_test/widgets";
@@ -397,7 +398,7 @@ mod tests {
 
     fn rule(error: crate::FinalizeError) -> Rule {
         match error {
-            crate::FinalizeError::Idempotency(error) => error.rule,
+            crate::FinalizeError(FinalizeKind::Idempotency(error)) => error.rule,
             other => panic!("expected idempotency composition error, got {other:?}"),
         }
     }
@@ -504,11 +505,11 @@ mod tests {
             } else {
                 assert_eq!(
                     result.unwrap_err(),
-                    crate::FinalizeError::InvalidPolicy {
+                    crate::FinalizeError::new(FinalizeKind::InvalidPolicy {
                         path: WIDGETS.to_owned(),
                         method: "POST".to_owned(),
-                        fault: "idempotency_requires_authentication",
-                    }
+                        fault: PolicyFault::IdempotencyRequiresAuthentication,
+                    })
                 );
             }
         }
@@ -520,20 +521,20 @@ mod tests {
             (
                 "security",
                 serde_json::json!([]),
-                crate::FinalizeError::ApplicationMetadata,
+                crate::FinalizeError::new(FinalizeKind::ApplicationMetadata),
             ),
             (
                 "components",
                 serde_json::json!({"securitySchemes": {"featureAuth": {"type": "http", "scheme": "basic"}}}),
-                crate::FinalizeError::ApplicationMetadata,
+                crate::FinalizeError::new(FinalizeKind::ApplicationMetadata),
             ),
             (
                 "components",
                 serde_json::json!({"responses": {"IdempotencyBadRequest": {"description": "conflicting feature response"}}}),
-                crate::FinalizeError::ConflictingComponent {
-                    kind: "responses",
+                crate::FinalizeError::new(FinalizeKind::ConflictingComponent {
+                    kind: ComponentKind::Responses,
                     name: "IdempotencyBadRequest".to_owned(),
-                },
+                }),
             ),
         ] {
             let mut document =

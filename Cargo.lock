@@ -2728,7 +2728,6 @@ dependencies = [
  "opentelemetry_sdk",
  "operation-context",
  "parking_lot",
- "pin-project-lite",
  "proptest",
  "regex",
  "rustls",

@@ -13,7 +13,6 @@ use infra_postgres::{SqlError, failure_cause, sqlstate};
 use metrics::{Key, Label, Level, Metadata};
 use tokio::time::Instant;
 
-use super::compose::wiring_failure;
 use super::stored::{ReplayError, ReplaySuccess, TerminalProblem, response_from_record};
 use super::{REPLAYED_HEADER_NAME, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
@@ -169,9 +168,12 @@ impl Attempt {
                         Err(Rollback::Terminal(problem)) => {
                             Ok(WriteOutcome::TerminalRefusal(problem.capture_terminal()?))
                         }
-                        Err(Rollback::Refused(response)) => Err(AttemptRollback::Refused(response)),
-                        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
-                        Err(Rollback::Unstorable(error)) => Err(AttemptRollback::Unstorable(error)),
+                        Err(Rollback::Refused(problem)) => {
+                            Err(AttemptRollback::Command(Rollback::Refused(problem)))
+                        }
+                        Err(Rollback::Database(error)) => {
+                            Err(AttemptRollback::Command(Rollback::Database(error)))
+                        }
                     },
                 );
                 let result = tokio::time::timeout_at(attempt_end, attempt)
@@ -229,7 +231,7 @@ const _: () = assert!(std::mem::size_of::<Rollback<TerminalProblem>>() <= 128);
 pub enum Rollback<T = Infallible> {
     #[debug("{self}")]
     #[error("operation refused")]
-    Refused(Box<Response>),
+    Refused(Box<Problem>),
     #[debug("{self}")]
     #[error("terminal business refusal")]
     Terminal(T),
@@ -237,15 +239,11 @@ pub enum Rollback<T = Infallible> {
     #[debug("{self}")]
     #[error("database")]
     Database(SqlError),
-    #[debug("{self}")]
-    #[error(transparent)]
-    Unstorable(#[from] ReplayError),
 }
 
-impl<T> Rollback<T> {
-    #[must_use]
-    pub fn refuse(response: impl IntoResponse) -> Self {
-        Self::Refused(Box::new(response.into_response()))
+impl<T> From<Problem> for Rollback<T> {
+    fn from(problem: Problem) -> Self {
+        Self::Refused(Box::new(problem))
     }
 }
 
@@ -288,8 +286,7 @@ impl Answer {
 }
 
 enum AttemptRollback {
-    Refused(Box<Response>),
-    Database(SqlError),
+    Command(Rollback<Infallible>),
     Unstorable(ReplayError),
 }
 
@@ -307,13 +304,10 @@ fn map_attempted(
     let operation_id = &route.operation_id;
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
-        Ok(Attempted::RolledBack(AttemptRollback::Refused(response))) => {
-            Answer::operation_response(
-                sanitize_refusal(*response, operation_id),
-                Outcome::NotStored,
-            )
+        Ok(Attempted::RolledBack(AttemptRollback::Command(Rollback::Refused(problem)))) => {
+            Answer::operation_response((*problem).into_response(), Outcome::NotStored)
         }
-        Ok(Attempted::RolledBack(AttemptRollback::Database(error))) => {
+        Ok(Attempted::RolledBack(AttemptRollback::Command(Rollback::Database(error)))) => {
             let class = AttemptError::classify_sql(&error);
             tracing::warn!(
                 operation = operation_id,
@@ -323,6 +317,9 @@ fn map_attempted(
                 "http_idempotency_command_failed"
             );
             attempt_failure(class, scope, operation_id)
+        }
+        Ok(Attempted::RolledBack(AttemptRollback::Command(Rollback::Terminal(never)))) => {
+            match never {}
         }
         Ok(Attempted::RolledBack(AttemptRollback::Unstorable(error))) => {
             tracing::warn!(
@@ -373,14 +370,6 @@ fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) ->
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
         }
     }
-}
-
-fn sanitize_refusal(mut response: Response, operation_id: &str) -> Response {
-    if !(response.status().is_client_error() || response.status().is_server_error()) {
-        return wiring_failure(operation_id, "invalid_refusal_status");
-    }
-    response.headers_mut().remove(&REPLAYED_HEADER_NAME);
-    response
 }
 
 fn unavailable() -> Response {
@@ -501,40 +490,37 @@ mod tests {
         assert_eq!(problem["code"], "internal_error");
     }
 
-    #[test]
-    fn a_rollback_cannot_claim_success_or_replay() {
+    #[tokio::test]
+    async fn a_problem_refusal_answers_without_replay_header() {
         let route = route_state();
-        for (status, expected) in [
-            (StatusCode::CONTINUE, StatusCode::INTERNAL_SERVER_ERROR),
-            (StatusCode::CREATED, StatusCode::INTERNAL_SERVER_ERROR),
-            (StatusCode::NOT_MODIFIED, StatusCode::INTERNAL_SERVER_ERROR),
-            (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                StatusCode::from_u16(600).unwrap(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-        ] {
-            let rollback = AttemptRollback::Refused(Box::new(
-                (status, [(REPLAYED_HEADER_NAME, "true")]).into_response(),
-            ));
-            let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), &route);
-            assert_eq!(answer.response.status(), expected);
-            assert!(
-                !answer
-                    .response
-                    .headers()
-                    .contains_key(&REPLAYED_HEADER_NAME)
-            );
-        }
+        let rollback = AttemptRollback::Command(Rollback::from(
+            Problem::new(Code::UnprocessableContent).detail("rejected"),
+        ));
+        let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), &route);
+        assert_eq!(answer.outcome, Outcome::NotStored);
+        assert_eq!(answer.response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            answer.response.headers()[CONTENT_TYPE],
+            "application/problem+json"
+        );
+        assert!(
+            !answer
+                .response
+                .headers()
+                .contains_key(&REPLAYED_HEADER_NAME)
+        );
+        let problem = body_json(answer.response).await;
+        assert_eq!(problem["code"], "unprocessable_content");
+        assert_eq!(problem["detail"], "rejected");
     }
 
     #[test]
-    fn rollback_debug_and_database_from_preserve_bounds_and_source_privacy() {
+    fn rollback_debug_and_conversions_preserve_bounds_and_source_privacy() {
         struct OpaqueTerminal;
+
+        let refused: Rollback<OpaqueTerminal> = Rollback::from(Problem::new(Code::BadRequest));
+        assert_eq!(format!("{refused:?}"), "operation refused");
+        assert!(refused.source().is_none());
 
         let terminal: Rollback<OpaqueTerminal> = Rollback::Terminal(OpaqueTerminal);
         assert_eq!(format!("{terminal:?}"), "terminal business refusal");

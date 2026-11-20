@@ -335,7 +335,7 @@ async fn business_call(
     if matches!(state.authentication, BusinessAuth::ServiceTokens { .. })
         && connection
             .as_ref()
-            .is_none_or(|info| info.scheme() != "https")
+            .is_none_or(|info| !info.scheme().is_tls())
     {
         return tonic::Status::unauthenticated("service tokens require TLS").into_http();
     }

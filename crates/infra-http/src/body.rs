@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use axum::body::{Body, Bytes};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 
-pub(crate) fn hold_guard_until_end<G: Send + 'static>(body: Body, guard: G) -> Body {
+pub(crate) fn hold_guard_until_end<G: Send + Unpin + 'static>(body: Body, guard: G) -> Body {
     on_body_end(body, None, move |_| drop(guard))
 }
 
@@ -17,7 +17,7 @@ pub(crate) enum BodyEnd {
 pub(crate) fn on_body_end(
     body: Body,
     remaining: Option<u64>,
-    finish: impl FnOnce(BodyEnd) + Send + 'static,
+    finish: impl FnOnce(BodyEnd) + Send + Unpin + 'static,
 ) -> Body {
     if let Some(end) = body_end(body.is_end_stream(), remaining) {
         finish(end);
@@ -38,28 +38,25 @@ fn body_end(end_stream: bool, remaining: Option<u64>) -> Option<BodyEnd> {
     }
 }
 
-pin_project_lite::pin_project! {
-    struct GuardedBody<F> {
-        #[pin]
-        body: Body,
-        remaining: Option<u64>,
-        finish: Option<F>,
-    }
+struct GuardedBody<F> {
+    body: Body,
+    remaining: Option<u64>,
+    finish: Option<F>,
 }
 
-impl<F: FnOnce(BodyEnd)> HttpBody for GuardedBody<F> {
+impl<F: FnOnce(BodyEnd) + Unpin> HttpBody for GuardedBody<F> {
     type Data = Bytes;
     type Error = axum::Error;
 
     fn poll_frame(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut this = self.project();
-        let frame = this.body.as_mut().poll_frame(cx);
+        let this = &mut *self;
+        let frame = Pin::new(&mut this.body).poll_frame(cx);
         if let Poll::Ready(ref frame) = frame
             && this.finish.is_some()
-            && let Some(end) = end_after(this.remaining, &this.body, frame.as_ref())
+            && let Some(end) = end_after(&mut this.remaining, &this.body, frame.as_ref())
             && let Some(finish) = this.finish.take()
         {
             finish(end);
