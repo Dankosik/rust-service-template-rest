@@ -25,7 +25,7 @@ async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer(
 
     run_scheduled_cleanup(
         TEST_CLEANUP,
-        RUNS_METRIC,
+        Some(RUNS_METRIC),
         &cancel,
         || {
             attempts += 1;
@@ -74,7 +74,7 @@ async fn scheduled_cleanup_with_borrowing_closures_is_send_for_spawned_owners() 
     tokio::spawn(async move {
         run_scheduled_cleanup(
             TEST_CLEANUP,
-            RUNS_METRIC,
+            None,
             &cancel,
             || owner.pass(&cancel),
             || owner.sample(),

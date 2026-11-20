@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use metrics::Unit;
@@ -66,8 +67,8 @@ pub struct CleanupPassResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CleanupBatchOptions {
     pub transaction: TxOptions,
-    pub limit: u32,
-    pub removed_metric: &'static str,
+    pub limit: NonZeroU32,
+    pub removed_metric: Option<&'static str>,
     pub failure_message: &'static str,
 }
 
@@ -202,7 +203,7 @@ impl CleanupPass {
         mut delete: F,
     ) -> Result<CleanupPassResult, CleanupError>
     where
-        F: AsyncFnMut(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, NonZeroU32) -> Result<u64, sqlx::Error>,
     {
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -212,8 +213,10 @@ impl CleanupPass {
                 });
             }
             let rows = self.run_batch(pool, options, &mut delete).await?;
-            metrics::counter!(options.removed_metric).increment(rows);
-            if rows < u64::from(options.limit) {
+            if let Some(metric) = options.removed_metric {
+                metrics::counter!(metric).increment(rows);
+            }
+            if rows < u64::from(options.limit.get()) {
                 let removed_rows = self.complete();
                 return Ok(CleanupPassResult {
                     removed_rows,
@@ -230,7 +233,7 @@ impl CleanupPass {
         delete: &mut F,
     ) -> Result<u64, CleanupError>
     where
-        F: AsyncFnMut(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, NonZeroU32) -> Result<u64, sqlx::Error>,
     {
         let limit = options.limit;
         self.await_batch(

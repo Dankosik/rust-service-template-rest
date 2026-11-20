@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::mem::DropGuard;
-use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -84,25 +83,21 @@ pub(super) enum Queue {
 
 #[derive(Debug)]
 #[must_use = "the slot is released when this guard is dropped"]
-pub(crate) struct Slot(Arc<Slots>);
+pub(crate) struct Slot<'a>(&'a Slots);
 
 impl Slots {
-    pub(crate) fn new(capacity: usize) -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
             state: Mutex::new(State {
                 free: capacity,
                 next_waiter: 0,
                 probes: BTreeMap::new(),
                 regular: RegularQueue::default(),
             }),
-        })
+        }
     }
 
-    pub(super) async fn take(
-        self: Arc<Self>,
-        queue: Queue,
-        deadline: Instant,
-    ) -> Result<Slot, Elapsed> {
+    pub(super) async fn take(&self, queue: Queue, deadline: Instant) -> Result<Slot<'_>, Elapsed> {
         let (id, granted) = {
             let mut state = self.state.lock();
             if let Some(free) = state.free.checked_sub(1) {
@@ -157,7 +152,7 @@ impl Slots {
     }
 }
 
-impl Drop for Slot {
+impl Drop for Slot<'_> {
     fn drop(&mut self) {
         self.0.release();
     }
@@ -174,8 +169,8 @@ mod tests {
         future.poll(&mut Context::from_waker(Waker::noop()))
     }
 
-    async fn take(slots: &Arc<Slots>, queue: Queue) -> Slot {
-        Arc::clone(slots)
+    async fn take(slots: &Slots, queue: Queue) -> Slot<'_> {
+        slots
             .take(queue, Instant::now() + Duration::from_secs(1))
             .await
             .unwrap()

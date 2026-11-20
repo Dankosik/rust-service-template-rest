@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use infra_postgres::maintenance::{
@@ -14,8 +15,8 @@ const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
 const EXPIRED_RECORDS_BATCH: CleanupBatchOptions = CleanupBatchOptions {
     transaction: READ_COMMITTED,
-    limit: 500,
-    removed_metric: CLEANUP_REMOVED_METRIC,
+    limit: NonZeroU32::new(500).expect("500 is nonzero"),
+    removed_metric: Some(CLEANUP_REMOVED_METRIC),
     failure_message: "http_idempotency_cleanup_failed",
 };
 
@@ -78,7 +79,10 @@ impl Store {
             .await
     }
 
-    async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
+    async fn delete_expired_batch(
+        tx: &mut Tx<'_>,
+        batch_limit: NonZeroU32,
+    ) -> Result<u64, sqlx::Error> {
         let deleted = observed!(
             "delete expired idempotency records",
             sqlx::query!(
@@ -88,7 +92,7 @@ impl Store {
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                i64::from(batch_limit),
+                i64::from(batch_limit.get()),
             )
             .execute(tx),
         )
@@ -109,7 +113,7 @@ impl Store {
         );
         run_scheduled_cleanup(
             CLEANUP,
-            CLEANUP_RUNS_METRIC,
+            Some(CLEANUP_RUNS_METRIC),
             &cancel,
             || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },
             || self.sample_expired_population(),

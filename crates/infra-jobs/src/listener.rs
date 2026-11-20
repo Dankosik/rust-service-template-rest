@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use backon::BackoffBuilder as _;
-use infra_postgres::Pool;
-use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
+use infra_postgres::{CloseOutcome, ListenerPool};
+use sqlx::postgres::PgListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{
@@ -17,27 +17,12 @@ type ReconnectBackoff = <backon::ExponentialBuilder as backon::BackoffBuilder>::
 
 pub(crate) async fn run_listener(engine: &Engine, cancel: CancellationToken) {
     let primary_group = engine.primary_group();
-    let listener_pool = listener_pool(&primary_group.pool);
+    let listener_pool = primary_group.pool.listener_pool();
     let _ =
         Box::pin(cancel.run_until_cancelled(listen(primary_group, engine, &listener_pool))).await;
-    if tokio::time::timeout(LISTENER_CLOSE_BUDGET, listener_pool.close())
-        .await
-        .is_err()
-    {
+    if listener_pool.close(LISTENER_CLOSE_BUDGET).await == CloseOutcome::TimedOut {
         tracing::warn!("jobs_listener_close_unconfirmed");
     }
-}
-
-fn listener_pool(engine_pool: &Pool) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(1)
-        .idle_timeout(None)
-        .max_lifetime(None)
-        .connect_lazy_with(engine_pool.connect_options().as_ref().clone())
-}
-
-fn follow_connect_options(engine_pool: &Pool, listener_pool: &PgPool) {
-    listener_pool.set_connect_options(engine_pool.connect_options().as_ref().clone());
 }
 
 fn reconnect_backoff() -> ReconnectBackoff {
@@ -56,10 +41,9 @@ fn next_reconnect_delay(backoff: &mut ReconnectBackoff) -> Duration {
         .min(RECONNECT_MAX_DELAY)
 }
 
-async fn listen(primary_group: &WorkerGroup, engine: &Engine, listener_pool: &PgPool) -> ! {
+async fn listen(primary_group: &WorkerGroup, engine: &Engine, listener_pool: &ListenerPool) -> ! {
     let mut backoff = reconnect_backoff();
     loop {
-        follow_connect_options(&primary_group.pool, listener_pool);
         let error = match subscribe(listener_pool).await {
             Ok(listener) => {
                 backoff = reconnect_backoff();
@@ -94,8 +78,8 @@ fn connection_lost() -> sqlx::Error {
     sqlx::Error::Io(std::io::ErrorKind::ConnectionAborted.into())
 }
 
-async fn subscribe(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
-    let mut listener = PgListener::connect_with(pool).await?;
+async fn subscribe(pool: &ListenerPool) -> Result<PgListener, sqlx::Error> {
+    let mut listener = pool.connect().await?;
     listener.eager_reconnect(false);
     listener.listen(WAKE_CHANNEL).await?;
     Ok(listener)

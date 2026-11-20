@@ -139,7 +139,7 @@ async fn scheduled_cleanup_counts_a_timed_out_batch_and_runs_the_next_pass() {
 
     let cleanup = run_scheduled_cleanup(
         TEST_CLEANUP,
-        RUNS_METRIC,
+        Some(RUNS_METRIC),
         &cancel,
         || {
             passes += 1;

@@ -1,5 +1,5 @@
 use std::mem::DropGuard;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum, EnumMap};
@@ -337,14 +337,14 @@ pub(crate) fn transaction_span(pool: &Pool) -> Span {
     )
 }
 
-struct TransactionInner {
+struct TransactionInner<'a> {
     started: Instant,
     span: Span,
-    metrics: Arc<PoolMetrics>,
+    metrics: &'a PoolMetrics,
     committing: bool,
 }
 
-impl TransactionInner {
+impl TransactionInner<'_> {
     fn abandon(self) {
         if self.committing {
             tracing::warn!(
@@ -376,10 +376,12 @@ impl TransactionInner {
     }
 }
 
-pub(crate) struct TransactionObservation(DropGuard<TransactionInner, fn(TransactionInner)>);
+pub(crate) struct TransactionObservation<'a>(
+    DropGuard<TransactionInner<'a>, fn(TransactionInner<'a>)>,
+);
 
-impl TransactionObservation {
-    pub(crate) fn start(span: Span, metrics: Arc<PoolMetrics>) -> Self {
+impl<'a> TransactionObservation<'a> {
+    pub(crate) fn start(span: Span, metrics: &'a PoolMetrics) -> Self {
         Self(DropGuard::new(
             TransactionInner {
                 started: Instant::now(),

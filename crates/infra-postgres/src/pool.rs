@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use sqlx::pool::{CloseEvent, PoolConnection, PoolConnectionMetadata};
-use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgListener, PgPool, PgPoolOptions};
 use sqlx::{ConnectOptions, Connection, Postgres};
 use tokio::time::{Instant, timeout_at};
 
@@ -124,9 +124,9 @@ pub struct Pool {
 }
 
 struct PoolPolicy {
-    slots: Option<Arc<Slots>>,
+    slots: Option<Slots>,
     notifications: bool,
-    metrics: Arc<PoolMetrics>,
+    metrics: PoolMetrics,
     default_isolation: Isolation,
     session_settings_source: SessionSettingsSource,
 }
@@ -141,6 +141,33 @@ impl fmt::Debug for Pool {
             .field("notifications", &self.policy.notifications)
             .field("adaptive_slots", &self.policy.slots.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+pub struct ListenerPool {
+    source: Pool,
+    inner: PgPool,
+}
+
+impl fmt::Debug for ListenerPool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ListenerPool")
+            .field("size", &self.inner.size())
+            .field("is_closed", &self.inner.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ListenerPool {
+    pub async fn connect(&self) -> Result<PgListener, sqlx::Error> {
+        self.inner
+            .set_connect_options((*self.source.inner.connect_options()).clone());
+        PgListener::connect_with(&self.inner).await
+    }
+
+    pub async fn close(&self, budget: Duration) -> CloseOutcome {
+        close_pool(&self.inner, budget).await
     }
 }
 
@@ -187,7 +214,7 @@ impl Pool {
                 notifications: options.notifications,
                 default_isolation: options.default_isolation,
                 session_settings_source: options.session_settings_source,
-                metrics: Arc::new(PoolMetrics::default()),
+                metrics: PoolMetrics::default(),
             }),
         }
     }
@@ -214,9 +241,19 @@ impl Pool {
     }
 
     pub async fn close(&self, budget: Duration) -> CloseOutcome {
-        match tokio::time::timeout(budget, self.inner.close()).await {
-            Ok(()) => CloseOutcome::Complete,
-            Err(_elapsed) => CloseOutcome::TimedOut,
+        close_pool(&self.inner, budget).await
+    }
+
+    #[must_use]
+    pub fn listener_pool(&self) -> ListenerPool {
+        let inner = PgPoolOptions::new()
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_lazy_with((*self.inner.connect_options()).clone());
+        ListenerPool {
+            source: self.clone(),
+            inner,
         }
     }
 
@@ -257,7 +294,7 @@ impl Pool {
     }
 
     #[must_use]
-    pub fn connect_options(&self) -> Arc<PgConnectOptions> {
+    pub(crate) fn connect_options(&self) -> Arc<PgConnectOptions> {
         self.inner.connect_options()
     }
 
@@ -288,8 +325,8 @@ impl Pool {
         self.inner.options()
     }
 
-    pub(crate) fn metrics(&self) -> Arc<PoolMetrics> {
-        Arc::clone(&self.policy.metrics)
+    pub(crate) fn metrics(&self) -> &PoolMetrics {
+        &self.policy.metrics
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -302,7 +339,7 @@ impl Pool {
                 notifications: true,
                 default_isolation: Isolation::ServerDefault,
                 session_settings_source: SessionSettingsSource::Startup,
-                metrics: Arc::new(PoolMetrics::default()),
+                metrics: PoolMetrics::default(),
             }),
         }
     }
@@ -332,20 +369,33 @@ impl Pool {
             let budget = self.inner.options().get_acquire_timeout();
             (Instant::now() + budget, budget)
         };
-        let enforce_caller_deadline = caller_deadline.is_some();
         observe_acquisition(operation, budget, async {
             let _slot = take_slot(self.policy.slots.as_ref(), deadline, queue).await?;
-            while !enforce_caller_deadline || Instant::now() < deadline {
+            if let Some(deadline) = caller_deadline {
+                self.acquire_until_deadline(deadline).await
+            } else {
                 match timeout_at(deadline, self.inner.acquire()).await {
-                    Err(_elapsed) => break,
-                    Ok(Ok(_)) if enforce_caller_deadline && Instant::now() >= deadline => break,
-                    Ok(Err(sqlx::Error::PoolTimedOut)) if enforce_caller_deadline => {}
-                    Ok(result) => return result,
+                    Ok(result) => result,
+                    Err(_elapsed) => Err(sqlx::Error::PoolTimedOut),
                 }
             }
-            Err(sqlx::Error::PoolTimedOut)
         })
         .await
+    }
+
+    async fn acquire_until_deadline(
+        &self,
+        deadline: Instant,
+    ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+        while Instant::now() < deadline {
+            match timeout_at(deadline, self.inner.acquire()).await {
+                Err(_elapsed) => break,
+                Ok(Ok(_)) if Instant::now() >= deadline => break,
+                Ok(Err(sqlx::Error::PoolTimedOut)) => {}
+                Ok(result) => return result,
+            }
+        }
+        Err(sqlx::Error::PoolTimedOut)
     }
 
     async fn verify_session(&self) -> Result<(), ConnectError> {
@@ -398,15 +448,22 @@ impl Pool {
     }
 }
 
+async fn close_pool(pool: &PgPool, budget: Duration) -> CloseOutcome {
+    match tokio::time::timeout(budget, pool.close()).await {
+        Ok(()) => CloseOutcome::Complete,
+        Err(_elapsed) => CloseOutcome::TimedOut,
+    }
+}
+
 async fn take_slot(
-    slots: Option<&Arc<Slots>>,
+    slots: Option<&Slots>,
     deadline: Instant,
     queue: Queue,
-) -> Result<Option<Slot>, sqlx::Error> {
+) -> Result<Option<Slot<'_>>, sqlx::Error> {
     let Some(slots) = slots else {
         return Ok(None);
     };
-    Arc::clone(slots)
+    slots
         .take(queue, deadline)
         .await
         .map(Some)
@@ -684,5 +741,27 @@ mod tests {
 
         drop(pool);
         assert!(policy.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_pool_follows_rotated_connect_options_and_redacts_debug() {
+        let pool = unreachable_pool(WaitOrder::Arrival);
+        let listener = pool.listener_pool();
+        assert_eq!(
+            listener.inner.connect_options().to_url_lossy().password(),
+            Some("pw")
+        );
+        assert_eq!(
+            listener.close(ACQUIRE_TIMEOUT).await,
+            CloseOutcome::Complete
+        );
+        pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
+        std::assert_matches!(listener.connect().await, Err(sqlx::Error::PoolClosed));
+        assert_eq!(
+            listener.inner.connect_options().to_url_lossy().password(),
+            Some("rotated")
+        );
+        assert!(!format!("{listener:?}").contains("rotated"));
+        assert_eq!(pool.close(ACQUIRE_TIMEOUT).await, CloseOutcome::Complete);
     }
 }
