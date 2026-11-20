@@ -354,7 +354,7 @@ fn object_storage_environment_maps_railway_bucket_variables() {
     assert_eq!(credentials.secret_access_key.expose_secret(), "hunter2");
     assert_eq!(storage.provider.credentials_label(), "access_key");
     assert_eq!(storage.max_object_bytes.as_u64(), 2 * 1024 * 1024);
-    assert_eq!(storage.max_concurrency, 32);
+    assert_eq!(storage.max_concurrency.get(), 32);
     assert_eq!(storage.operation_timeout, Duration::from_secs(10));
     assert!(!format!("{cfg:?}").contains("hunter2"));
 }

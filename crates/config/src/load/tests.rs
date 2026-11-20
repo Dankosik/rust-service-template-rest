@@ -359,11 +359,9 @@ fn a_replaced_file_does_not_change_the_admitted_source() {
     let source = scan_file(&path).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
-    let merged = config::Config::builder()
-        .add_source(source)
-        .build()
-        .unwrap();
-    assert_eq!(merged.get_string("log.level").unwrap(), "debug");
+    let merged: ConfigInput = merge_inputs(vec![source], BTreeMap::new()).unwrap();
+    let cfg = merged.admit(BUILD, None).unwrap();
+    assert_eq!(cfg.log().level, "debug");
 }
 
 #[rstest::rstest]

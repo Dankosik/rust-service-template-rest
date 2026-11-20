@@ -3,28 +3,30 @@ use std::num::NonZeroU32;
 
 use secrecy::SecretString;
 
-use super::{WebhookEndpointConfig, WebhooksConfig};
+use super::{WebhookEndpointInput, WebhooksInput};
 use crate::LoadOptions;
 use crate::load::{ErrorKind, InputError, load_from, load_worker_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_worker_env, write};
-use crate::validate::validate_with;
+use crate::validate::admit_with;
 
 #[test]
 fn defaults_are_inert() {
-    let config = WebhooksConfig::default();
+    let config = admit_with(|v| Ok(WebhooksInput::default().admit(v))).unwrap();
     assert!(config.endpoints.is_empty());
     assert_eq!(config.max_concurrent_deliveries, None);
-    validate_with(|v| config.validate(v)).unwrap();
 }
 
 #[test]
 fn a_zero_delivery_bound_fails_to_deserialize() {
-    let err = toml::from_str::<WebhooksConfig>("max_concurrent_deliveries = 0").unwrap_err();
+    let err = toml::from_str::<WebhooksInput>("max_concurrent_deliveries = 0")
+        .err()
+        .expect("zero max_concurrent_deliveries must fail to deserialize");
     assert!(
         err.to_string().contains("max_concurrent_deliveries"),
         "{err}"
     );
-    let config = toml::from_str::<WebhooksConfig>("max_concurrent_deliveries = 4").unwrap();
+    let input = toml::from_str::<WebhooksInput>("max_concurrent_deliveries = 4").unwrap();
+    let config = admit_with(|v| Ok(input.admit(v))).unwrap();
     assert_eq!(
         config.max_concurrent_deliveries.map(NonZeroU32::get),
         Some(4)
@@ -33,37 +35,46 @@ fn a_zero_delivery_bound_fails_to_deserialize() {
 
 #[test]
 fn rejects_an_empty_endpoint_id() {
-    let mut config = WebhooksConfig::default();
-    config.endpoints.insert(
+    let mut input = WebhooksInput::default();
+    input.endpoints.insert(
         String::new(),
-        WebhookEndpointConfig {
+        WebhookEndpointInput {
             url: "https://partner.example/events".to_owned(),
             secret: SecretString::from("whsec_current".to_owned()),
             previous_secret: None,
         },
     );
 
-    let errors = validate_with(|v| config.validate(v)).unwrap_err();
+    let mut invalid = WebhooksInput::default();
+    invalid.endpoints.insert(
+        String::new(),
+        WebhookEndpointInput {
+            url: "https://partner.example/events".to_owned(),
+            secret: SecretString::from("whsec_current".to_owned()),
+            previous_secret: None,
+        },
+    );
+    let errors = admit_with(|v| Ok(invalid.admit(v))).unwrap_err();
     assert!(errors.names("webhooks.endpoints"));
 
-    let endpoint = config.endpoints.remove("").unwrap();
-    config.endpoints.insert("partner/a?#".to_owned(), endpoint);
-    validate_with(|v| config.validate(v)).unwrap();
+    let endpoint = input.endpoints.remove("").unwrap();
+    input.endpoints.insert("partner/a?#".to_owned(), endpoint);
+    admit_with(|v| Ok(input.admit(v))).unwrap();
 }
 
 #[test]
 fn rejects_empty_signing_secrets() {
-    let mut config = WebhooksConfig::default();
-    config.endpoints.insert(
+    let mut input = WebhooksInput::default();
+    input.endpoints.insert(
         "partner".to_owned(),
-        WebhookEndpointConfig {
+        WebhookEndpointInput {
             url: "https://partner.example/events".to_owned(),
             secret: SecretString::from(String::new()),
             previous_secret: None,
         },
     );
 
-    let errors = validate_with(|v| config.validate(v)).unwrap_err();
+    let errors = admit_with(|v| Ok(input.admit(v))).unwrap_err();
     assert!(errors.names("webhooks.endpoints.partner.secret"));
 }
 

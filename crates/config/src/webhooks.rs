@@ -4,9 +4,7 @@ use std::num::NonZeroU32;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
-use crate::de::{
-    BlankAsNoneVerbatim, Keep, Mode, ModeMarker, Skip, StrictCount, StrictString, When,
-};
+use crate::de::{BlankAsNoneVerbatim, Keep, Mode, ModeMarker, Skip, StrictCount, When};
 use crate::validate::{Violations, non_blank, validate_endpoint_id};
 
 #[serde_with::serde_as]
@@ -28,7 +26,18 @@ pub(crate) struct WebhooksFields<Endpoint, MaxConcurrent: Mode = Keep> {
 
 pub(crate) type ServiceWebhooksInput = WebhooksFields<serde::de::IgnoredAny, Skip>;
 
-type WebhooksInput = WebhooksFields<WebhookEndpointConfig>;
+pub(crate) type WebhooksInput = WebhooksFields<WebhookEndpointInput>;
+
+#[serde_with::serde_as]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WebhookEndpointInput {
+    url: String,
+    secret: SecretString,
+    #[serde(default)]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
+    previous_secret: Option<SecretString>,
+}
 
 impl ServiceWebhooksInput {
     pub(crate) fn admit(self, violations: &mut Violations) -> Vec<String> {
@@ -39,8 +48,33 @@ impl ServiceWebhooksInput {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(from = "WebhooksInput")]
+impl WebhooksInput {
+    pub(crate) fn admit(self, violations: &mut Violations) -> WebhooksConfig {
+        let endpoints = self
+            .endpoints
+            .into_iter()
+            .map(|(endpoint_id, endpoint)| {
+                violations.check(validate_endpoint_id("webhooks.endpoints", &endpoint_id));
+                let key = format!("webhooks.endpoints.{endpoint_id}.secret");
+                violations.check(non_blank(&key, endpoint.secret.expose_secret()));
+                (
+                    endpoint_id,
+                    WebhookEndpointConfig {
+                        url: endpoint.url,
+                        secret: endpoint.secret,
+                        previous_secret: endpoint.previous_secret,
+                    },
+                )
+            })
+            .collect();
+        WebhooksConfig {
+            endpoints,
+            max_concurrent_deliveries: self.max_concurrent_deliveries,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct WebhooksConfig {
     pub endpoints: BTreeMap<String, WebhookEndpointConfig>,
     /// The most deliveries one worker process runs at once
@@ -52,39 +86,14 @@ pub struct WebhooksConfig {
     pub max_concurrent_deliveries: Option<NonZeroU32>,
 }
 
-impl From<WebhooksInput> for WebhooksConfig {
-    fn from(input: WebhooksInput) -> Self {
-        Self {
-            endpoints: input.endpoints,
-            max_concurrent_deliveries: input.max_concurrent_deliveries,
-        }
-    }
-}
-
-#[serde_with::serde_as]
-#[derive(Clone, derive_more::Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, derive_more::Debug)]
 pub struct WebhookEndpointConfig {
     #[debug(skip)]
-    #[serde_as(as = "StrictString")]
     pub url: String,
-    #[serde_as(as = "StrictString")]
     pub secret: SecretString,
     /// Optional environment-only predecessor retained during a key rotation.
     /// Blank is absent.
-    #[serde(default)]
-    #[serde_as(as = "BlankAsNoneVerbatim")]
     pub previous_secret: Option<SecretString>,
-}
-
-impl WebhooksConfig {
-    pub(crate) fn validate(&self, violations: &mut Violations) {
-        for (endpoint_id, endpoint) in &self.endpoints {
-            violations.check(validate_endpoint_id("webhooks.endpoints", endpoint_id));
-            let key = format!("webhooks.endpoints.{endpoint_id}.secret");
-            violations.check(non_blank(&key, endpoint.secret.expose_secret()));
-        }
-    }
 }
 
 #[cfg(test)]

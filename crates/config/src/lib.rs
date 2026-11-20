@@ -81,7 +81,10 @@ pub use observability::{
 };
 pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
-pub use messaging::{ConsumerKeys, MessagingConfig, MessagingCredentials};
+pub use messaging::{
+    AdmittedMessaging, AdmittedMessagingConsumer, MessagingConfig, MessagingCredentials,
+    MessagingTransportSecurity,
+};
 // template:end messaging:config-export
 // template:begin cache:config-export
 pub use cache::{CacheClientCertificate, CacheConfig};
@@ -126,7 +129,7 @@ pub use validate::{ValidationError, ValidationErrors};
 #[derive(Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct ConfigInput {
-    pub(crate) app: AppConfig,
+    app: app::AppInput,
     http: http::HttpInput,
     // template:begin grpc:config-input-field
     grpc: grpc::GrpcInput,
@@ -164,10 +167,11 @@ pub(crate) struct ConfigInput {
 impl ConfigInput {
     pub(crate) fn admit(
         self,
+        build: BuildInfo,
         shutdown_tail: Option<ShutdownTail>,
     ) -> Result<Config, ValidationErrors> {
         admit_with(|v| {
-            self.app.validate(v);
+            let app = self.app.admit(build, v);
             #[allow(
                 unused_variables,
                 reason = "only the gRPC profile consumes the HTTP drain budget"
@@ -190,20 +194,18 @@ impl ConfigInput {
             self.runtime.validate(v);
             let observability = self.observability.admit(v);
             // template:begin cache:config-admit
-            let cache = self.cache.admit(self.app.is_local_development(), v);
+            let cache = self.cache.admit(app.is_local_development(), v);
             // template:end cache:config-admit
             // template:begin object-storage:config-admit
-            let object_storage = self
-                .object_storage
-                .admit(self.app.is_local_development(), v);
+            let object_storage = self.object_storage.admit(app.is_local_development(), v);
             // template:end object-storage:config-admit
             // template:begin authn:config-admit
             let authn = self.authn.admit(v);
             // template:end authn:config-admit
             // template:begin service-auth:config-service-auth-admit
-            let service_auth =
-                self.service_auth
-                    .admit(self.app.is_local_development(), grpc_enabled, v);
+            let service_auth = self
+                .service_auth
+                .admit(app.is_local_development(), grpc_enabled, v);
             if let (Ok(Some(listener)), Ok(ServiceAuthConfig::Jwt { .. })) = (&grpc, &service_auth)
                 && matches!(listener.security, GrpcListenerSecurity::Plaintext)
             {
@@ -220,7 +222,7 @@ impl ConfigInput {
             self.http_idempotency.validate(v);
             // template:end http-idempotency:config-http-idempotency-validate
             Ok(Config {
-                app: self.app,
+                app,
                 http,
                 // template:begin grpc:config-admitted-field
                 grpc: grpc?,

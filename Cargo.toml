@@ -166,10 +166,8 @@ rustls-platform-verifier = { version = "0.7.0", default-features = false }
 utoipa = { version = "6.0.0", default-features = false }
 utoipa-axum = { version = "0.3.0", default-features = false }
 
-config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
-serde-untagged = { version = "0.1.9", default-features = false }
 serde_json = { version = "1", default-features = false }
 serde_path_to_error = { version = "0.1.20", default-features = false }
 serde_html_form = { version = "0.2.8", default-features = false }

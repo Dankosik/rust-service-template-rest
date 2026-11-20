@@ -344,7 +344,7 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
     assert_eq!(
         *cache,
         Some(IntrospectionCacheConfig {
-            capacity: 256,
+            capacity: NonZeroUsize::new(256).unwrap(),
             ttl: Duration::from_secs(30),
         })
     );
@@ -514,7 +514,7 @@ fn introspection_environment_decodes_and_redacts_the_secret() {
         assert_eq!(
             *cache,
             expected.then_some(IntrospectionCacheConfig {
-                capacity: 64,
+                capacity: NonZeroUsize::new(64).unwrap(),
                 ttl: Duration::from_secs(90),
             })
         );

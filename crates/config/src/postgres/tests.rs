@@ -1,7 +1,6 @@
 use super::*;
 use crate::load::{ErrorKind, InputError, load_from, load_migration_from};
 use crate::test_support::{BUILD, env, write};
-use crate::validate::admit_with;
 use crate::{LoadOptions, LogFormat};
 use secrecy::ExposeSecret as _;
 use std::assert_matches;
@@ -119,18 +118,12 @@ fn blank_migration_dsn_falls_back_to_runtime_dsn_and_password_file(#[case] blank
 }
 
 #[rstest::rstest]
-#[case::integer(config::Value::from(123_i64))]
-#[case::boolean(config::Value::from(true))]
-#[case::array(config::Value::from(vec!["postgres://localhost/app"]))]
-fn migration_dsn_rejects_non_string_config_scalars(#[case] value: config::Value) {
-    let err = config::Config::builder()
-        .set_override("migration_dsn", value)
-        .unwrap()
-        .build()
-        .unwrap()
-        .try_deserialize::<MigrationPostgresInput>()
-        .unwrap_err();
-    assert!(err.to_string().contains("expected a string"), "{err}");
+#[case::integer("migration_dsn = 123\n")]
+#[case::boolean("migration_dsn = true\n")]
+#[case::array("migration_dsn = [\"postgres://localhost/app\"]\n")]
+fn migration_dsn_rejects_non_string_config_scalars(#[case] body: &str) {
+    let err = crate::load::deserialize_toml_for_test::<MigrationPostgresInput>(body).unwrap_err();
+    assert!(err.contains("expected a string"), "{err}");
 }
 
 #[rstest::rstest]
