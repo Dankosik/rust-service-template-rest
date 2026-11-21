@@ -462,34 +462,10 @@ fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
     span.context().span().span_context().trace_id()
 }
 
-type Logged = Arc<Mutex<Vec<Vec<(&'static str, String)>>>>;
+type Logged = observe_test_support::EventCapture;
 
-struct LoggedFields(Vec<(&'static str, String)>);
-
-impl tracing::field::Visit for LoggedFields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.push((field.name(), format!("{value:?}")));
-    }
-
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.0.push((field.name(), value.to_owned()));
-    }
-}
-
-struct LogCapture(Logged);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let mut fields = LoggedFields(Vec::new());
-        event.record(&mut fields);
-        self.0.lock().expect("log lock").push(fields.0);
-    }
-}
-
-fn capture_logs() -> (tracing::subscriber::DefaultGuard, Logged) {
-    use tracing_subscriber::layer::SubscriberExt as _;
-
-    let logged = Logged::default();
-    let subscriber = tracing_subscriber::registry().with(LogCapture(Arc::clone(&logged)));
-    (tracing::subscriber::set_default(subscriber), logged)
+fn capture_logs() -> (observe_test_support::ScopedDispatch, Logged) {
+    let logged = observe_test_support::EventCapture::new();
+    let guard = logged.install_default();
+    (guard, logged)
 }

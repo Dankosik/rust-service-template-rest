@@ -612,27 +612,8 @@ fn has_json_content_type(response: &reqwest::Response) -> bool {
 
 #[cfg(test)]
 pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8>) {
-    use tokio_rustls::rustls::{
-        ServerConfig,
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    };
-
     let material = tls_test_support::TlsMaterial::new(host);
-    let config = ServerConfig::builder_with_provider(std::sync::Arc::new(
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from(material.cert)],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
-    )
-    .unwrap();
-    (
-        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
-        material.root,
-    )
+    (material.acceptor(), material.root)
 }
 
 #[cfg(test)]

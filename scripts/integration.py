@@ -16,25 +16,20 @@ from pathlib import Path
 from scripts import lib
 
 
-_DB_TEST_TARGETS: tuple[tuple[str, str], ...] = (
-    ("postgres", "test/tests/postgres.rs"),
-    ("http_idempotency", "test/tests/http_idempotency/main.rs"),
-    ("jobs", "test/tests/jobs/main.rs"),
-    ("webhooks", "test/tests/webhooks/main.rs"),
-    ("messaging_outbox", "test/tests/messaging_outbox.rs"),
-    ("messaging_recovery", "test/tests/messaging_recovery.rs"),
-)
-
 _INBOUND_LIFECYCLE_TEST = (
     "restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_another_job"
 )
 
 
 def _db_test_args(root: Path = lib.ROOT) -> list[str]:
+    manifest_path = root / "test/Cargo.toml"
+    if not manifest_path.is_file():
+        return []
+    manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     args: list[str] = []
-    for name, rel_path in _DB_TEST_TARGETS:
-        if (root / rel_path).is_file():
-            args.extend(["--test", name])
+    for target in manifest.get("test", ()):
+        if "integration" in target.get("required-features", ()):
+            args.extend(["--test", target["name"]])
     return args
 
 

@@ -1,15 +1,9 @@
 #![expect(
-    clippy::expect_used,
     clippy::unwrap_used,
     reason = "a broken fixture or setup fails the test"
 )]
 
-#[allow(
-    dead_code,
-    reason = "shared transport supports other transaction fault cases"
-)]
-#[path = "support/commit_proxy.rs"]
-mod commit_proxy;
+use integration_tests::commit_proxy;
 
 mod effect {
     use domain_events::{Event, EventPayload};
@@ -372,15 +366,26 @@ async fn concurrent_identity_waits_for_commit_or_rollback_before_deciding(pool: 
                 )
                 .await
         });
-        timeout(WAIT, reached).await.unwrap().unwrap();
+        timeout(WAIT, reached)
+            .await
+            .expect("first arbitration enters transaction within budget")
+            .expect("first arbitration signals readiness");
         let second_pool = business.clone();
         let second = tokio::spawn(async move { effect::attempt(&second_pool, &original).await });
         waiting_for_arbitration(&pool).await;
-        release.send(()).unwrap();
-        let first_result = timeout(WAIT, first).await.unwrap().unwrap();
+        release.send(()).expect("release first arbitration");
+        let first_result = timeout(WAIT, first)
+            .await
+            .expect("first arbitration completes within budget")
+            .expect("first arbitration task does not panic");
         assert_eq!(first_result.is_ok(), commit);
+        let second_outcome = timeout(WAIT, second)
+            .await
+            .expect("second arbitration completes within budget")
+            .expect("second arbitration task does not panic")
+            .expect("second arbitration succeeds");
         assert_eq!(
-            timeout(WAIT, second).await.unwrap().unwrap().unwrap(),
+            second_outcome,
             if commit {
                 Applied::Duplicate
             } else {

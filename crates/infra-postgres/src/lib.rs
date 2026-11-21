@@ -6,8 +6,6 @@ mod observe;
 mod pool;
 mod probe;
 mod slots;
-#[cfg(test)]
-mod test_metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod transaction;

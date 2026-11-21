@@ -21,5 +21,6 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
+observe-test-support = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

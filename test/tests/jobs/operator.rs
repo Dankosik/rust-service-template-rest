@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use super::commit_proxy::{Boundary, CommitProxy, Fault};
+use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const KIND: &str = "test.operator";
 const SECRET: &str = "private-job-content";

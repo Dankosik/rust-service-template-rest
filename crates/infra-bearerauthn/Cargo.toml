@@ -66,6 +66,7 @@ http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 metrics-util = { workspace = true, features = ["debugging"] }
+observe-test-support = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dev-dependency
 proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
@@ -73,4 +74,3 @@ rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tls-test-support = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-tracing-subscriber = { workspace = true, features = ["std", "registry"] }

@@ -32,13 +32,13 @@ use infra_webhooks::inbound::{
 };
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
+use integration_tests::jobs::EngineRun;
 use integration_tests::{close_pools, dsn_for, poll_until};
 use nats_test_support::{AckDroppingRelay, DroppedAck};
 use sqlx::{PgPool, Row};
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
-use tokio_util::sync::{CancellationToken, DropGuard};
-use tokio_util::task::TaskTracker;
+use tokio_util::sync::CancellationToken;
 
 #[path = "messaging_outbox/upgrade.rs"]
 mod upgrade;
@@ -282,13 +282,6 @@ async fn template_pool(pool: &PgPool, max_connections: u32) -> Pool {
     .await
 }
 
-struct EngineRun {
-    started: infra_jobs::Started,
-    tracker: TaskTracker,
-    cancel: CancellationToken,
-    _cancel_guard: DropGuard,
-}
-
 async fn start(pool: &Pool, registry: Kinds) -> EngineRun {
     start_engine(Engine::new(pool.clone(), registry, NonZeroU32::MIN)).await
 }
@@ -298,28 +291,11 @@ async fn start_engine(engine: Engine) -> EngineRun {
         .check_startup()
         .await
         .expect("outbox engine admits the shared jobs store");
-    let tracker = TaskTracker::new();
-    let cancel = CancellationToken::new();
-    let started = engine.start(&tracker, &cancel);
-    tracker.close();
-    let cancel_guard = cancel.clone().drop_guard();
-    EngineRun {
-        started,
-        tracker,
-        cancel,
-        _cancel_guard: cancel_guard,
-    }
+    EngineRun::start(engine)
 }
 
 async fn finish(run: EngineRun, pools: &[&Pool]) {
-    run.started.stop_claiming();
-    timeout(WAIT, run.started.drained())
-        .await
-        .expect("the engine drains");
-    run.cancel.cancel();
-    timeout(WAIT, run.tracker.wait())
-        .await
-        .expect("engine background tasks join");
+    run.drain_and_join(WAIT).await;
     close_pools(pools).await;
 }
 

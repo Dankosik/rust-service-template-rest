@@ -10,7 +10,7 @@ use integration_tests::reading_counter::{
 use sqlx::PgPool;
 use tokio::sync::Notify;
 
-use super::commit_proxy::{Boundary, CommitProxy, Fault};
+use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault};
 
 fn operation(index: u128) -> Operation {
     Operation {

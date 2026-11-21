@@ -10,6 +10,8 @@ pub async fn verify_fixture_authorization(
 // template:begin oidc-jwt:authn-jwt-test-support
 #[cfg(feature = "test-support")]
 pub use crate::jwt::JwtFixture;
+#[cfg(feature = "test-support")]
+pub const JWT_SIGNING_DER: &[u8] = crate::jwks::fixtures::JWT_SIGNING_DER;
 // template:end oidc-jwt:authn-jwt-test-support
 
 // template:begin oidc-introspection:authn-introspection-test-support

@@ -46,6 +46,7 @@ uuid = { workspace = true, features = ["std", "v4", "v7", "fast-rng"] }
 [dev-dependencies]
 infra-postgres = { workspace = true, features = ["test-support"] }
 metrics-util = { workspace = true, features = ["debugging"] }
+observe-test-support = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
 regex = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }

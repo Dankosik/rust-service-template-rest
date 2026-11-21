@@ -31,11 +31,13 @@ for concrete modules, types, and commands.
    when it cannot, each caller keeps its own copy until a single-purpose
    contract crate such as `json-payload` earns an owner.
 4. Test code shared by several crates lives in a `crates/<topic>-test-support`
-   crate with the `test` role in `quality/architecture.json`. It depends on no
-   workspace crate, appears only in dev-dependencies, and leaves with the
+   crate with the `test-support` role in `quality/architecture.json`. It depends
+   on no workspace crate, appears only in dev-dependencies, and leaves with the
    template profile of its last consumer. A helper that needs one crate's types
-   stays behind that crate's `test-support` feature. `just architecture-check`
-   rejects a `#[path]` that reaches outside its own package.
+   stays behind that crate's `test-support` feature inside `pub mod test_support`
+   (keeping production types invariant). `just architecture-check` enforces
+   `no_workspace_dependencies` on `test-support` crates and rejects `#[path]`,
+   `include_bytes!`, and `include_str!` reaching into another workspace package.
 5. Trust, ingress/egress, dependency criticality, failure mapping (`crates/service-failure`),
    readiness (`crates/health`), and staged shutdown budgets (`crates/service/src/bootstrap`)
    are enforced explicitly at their owning runtime boundaries.

@@ -1,7 +1,61 @@
+use std::fmt;
 use std::time::Duration;
 
-use infra_jobs::{Job, JobError, JobKind, KindName, Policy};
+use infra_jobs::{Engine, Job, JobError, JobKind, KindName, Policy, Started};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::TaskTracker;
+
+pub struct EngineRun {
+    pub started: Started,
+    pub tracker: TaskTracker,
+    pub cancel: CancellationToken,
+    _cancel_guard: DropGuard,
+}
+
+impl fmt::Debug for EngineRun {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EngineRun")
+            .field("tracker", &self.tracker)
+            .field("cancel", &self.cancel)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EngineRun {
+    #[must_use]
+    pub fn start(engine: Engine) -> Self {
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let started = engine.start(&tracker, &cancel);
+        tracker.close();
+        let cancel_guard = cancel.clone().drop_guard();
+        Self {
+            started,
+            tracker,
+            cancel,
+            _cancel_guard: cancel_guard,
+        }
+    }
+
+    pub async fn drain_and_join(self, bound: Duration) {
+        self.started.stop_claiming();
+        tokio::time::timeout(bound, self.started.drained())
+            .await
+            .expect("the engine drains");
+        self.cancel.cancel();
+        tokio::time::timeout(bound, self.tracker.wait())
+            .await
+            .expect("engine background tasks join");
+    }
+
+    pub async fn cancel_and_join(self, bound: Duration) {
+        self.cancel.cancel();
+        tokio::time::timeout(bound, self.tracker.wait())
+            .await
+            .expect("engine background tasks join");
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Probe {

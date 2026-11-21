@@ -568,4 +568,45 @@ mod tests {
         .expect("unpadded content_type");
         assert_eq!(unpadded_type.content_type(), Some(b"\xff".as_slice()));
     }
+
+    #[test]
+    fn incoming_preserves_base64_json_bytes_and_decodes_original_body() {
+        const ENDPOINT: &str = "partner/a?#";
+        for (body, encoded) in [
+            (Vec::new(), String::new()),
+            (vec![0], "AA==".to_owned()),
+            (vec![0, 255], "AP8=".to_owned()),
+            (vec![0, 255, 65], "AP9B".to_owned()),
+            (vec![251, 255], "+/8=".to_owned()),
+            ([0, 255, 65].repeat(21_846), "AP9B".repeat(21_846)),
+            (
+                [[0, 255, 65].repeat(21_846), vec![0]].concat(),
+                format!("{}AA==", "AP9B".repeat(21_846)),
+            ),
+            (
+                [[0, 255, 65].repeat(21_846), vec![0, 255]].concat(),
+                format!("{}AP8=", "AP9B".repeat(21_846)),
+            ),
+        ] {
+            for (content_type, encoded_type) in [
+                (None, "null"),
+                (Some(b"".as_slice()), "\"\""),
+                (Some(b"\xff".as_slice()), "\"/w==\""),
+            ] {
+                let expected = format!(
+                    "{{\"version\":1,\"endpoint_id\":\"partner/a?#\",\"message_id\":\"aWSA/w==\",\"content_type\":{encoded_type},\"body\":\"{encoded}\"}}"
+                );
+                let incoming: Incoming =
+                    serde_json::from_str(&expected).expect("historical payload");
+                assert_eq!(incoming.endpoint_id(), ENDPOINT);
+                assert_eq!(incoming.message_id(), b"id\x80\xff");
+                assert_eq!(incoming.content_type(), content_type);
+                assert_eq!(incoming.body(), body);
+                assert_eq!(
+                    serde_json::to_vec(&incoming).expect("payload bytes"),
+                    expected.as_bytes()
+                );
+            }
+        }
+    }
 }

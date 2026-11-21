@@ -663,4 +663,61 @@ mod tests {
                 .contains(r#""code":"request_entity_too_large""#)
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn unfinished_webhook_upload_returns_the_declared_timeout() {
+        use std::time::Duration;
+
+        let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let mut verifiers = Verifiers::new();
+        verifiers.bind(
+            "partner/a?#",
+            KeyRing::from_encoded("whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=", None)
+                .expect("key"),
+        );
+        let app = router()
+            .expect("webhook operation registers")
+            .build(
+                WebhookState::active(verifiers.into_receiver(pool)),
+                infra_http::Authentication::Public,
+                &infra_http::HardenOptions {
+                    max_body_bytes: MAX_BODY_BYTES + 1,
+                    request_timeout: Duration::from_secs(1),
+                    max_in_flight: None,
+                    admission_wait: Duration::from_secs(1),
+                    log_health_probes: false,
+                    trust_trace_context: false,
+                    draining: None,
+                },
+            )
+            .expect("webhook operation is public");
+        let upload = Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let response = app
+            .oneshot(
+                Request::post("/webhooks/partner%2Fa%3F%23")
+                    .body(upload)
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+        let bytes = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("problem body");
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("problem JSON");
+        assert_eq!(problem["code"], "request_timeout");
+        let document = router::<WebhookState>()
+            .expect("webhook operation registers")
+            .into_openapi()
+            .expect("valid webhook contract");
+        let document = serde_json::to_value(document).expect("document");
+        assert_eq!(
+            document["paths"]["/webhooks/{endpoint_id}"]["post"]["responses"]["408"]["$ref"],
+            "#/components/responses/RequestTimeout"
+        );
+    }
 }

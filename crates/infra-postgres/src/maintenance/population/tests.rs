@@ -1,8 +1,8 @@
 use metrics::{Key, Level, Metadata, Recorder as _};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use observe_test_support::{Series, counter, gauge};
 
 use super::*;
-use crate::test_metrics::{self, Series};
 
 const TEST_CLEANUP: CleanupName = CleanupName::new("jobs");
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
@@ -47,12 +47,11 @@ impl TestMetrics {
             format!("postgres_maintenance_{name}"),
             &[("population", "jobs")],
         );
-        test_metrics::gauge(&self.snapshot(), &target).unwrap_or_else(|| panic!("missing {target}"))
+        gauge(&self.snapshot(), &target).unwrap_or_else(|| panic!("missing {target}"))
     }
 
     fn counter(&self, target: &Key) -> u64 {
-        test_metrics::counter(&self.snapshot(), target)
-            .unwrap_or_else(|| panic!("missing {target}"))
+        counter(&self.snapshot(), target).unwrap_or_else(|| panic!("missing {target}"))
     }
 
     fn observation_count(&self, outcome: &'static str) -> u64 {

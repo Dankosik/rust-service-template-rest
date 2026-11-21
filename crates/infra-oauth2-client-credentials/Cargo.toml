@@ -63,6 +63,6 @@ tower = { workspace = true, features = ["util"] }
 # template:end outbound-auth-grpc:oauth-grpc-test-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
 metrics-util = { workspace = true, features = ["debugging"] }
+observe-test-support = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
-tracing-subscriber = { workspace = true, features = ["std", "registry"] }

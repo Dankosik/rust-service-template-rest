@@ -32,10 +32,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{ServerConfig, crypto::aws_lc_rs, pki_types::PrivatePkcs8KeyDer},
-};
+use tokio_rustls::TlsAcceptor;
 use tonic::{Code, Request, Response, Status, body::Body};
 use tower::{Service as _, service_fn};
 
@@ -138,16 +135,7 @@ impl Resource {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let material = TlsMaterial::new("127.0.0.1");
-        let mut config =
-            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![material.cert.into()],
-                    PrivatePkcs8KeyDer::from(material.key).into(),
-                )
-                .unwrap();
+        let mut config = material.server_config();
         config.alpn_protocols = vec![b"h2".to_vec()];
         let peer = Peer::new();
         let (shutdown, receiver) = oneshot::channel();

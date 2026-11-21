@@ -1,0 +1,55 @@
+[package]
+name = "utility-recipes"
+description = "Executable utility recipes demonstrating adopted standard libraries."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+axum = { workspace = true, features = ["json", "query"] }
+axum-extra = { workspace = true, features = ["typed-header"] }
+axum-test = { workspace = true }
+backon = { workspace = true, features = ["tokio-sleep"] }
+base64 = { workspace = true, features = ["std"] }
+bon = { workspace = true }
+bstr = { workspace = true, features = ["std"] }
+bytes = { workspace = true, features = ["std"] }
+camino = { workspace = true }
+csv = { workspace = true }
+derive_more = { workspace = true, features = ["display", "as_ref"] }
+fs-err = { workspace = true }
+futures-util = { workspace = true, features = ["std", "async-await"] }
+heck = { workspace = true }
+indexmap = { workspace = true, features = ["std"] }
+infra-http = { workspace = true }
+insta = { workspace = true, features = ["json"] }
+ipnet = { workspace = true, features = ["std"] }
+itertools = { workspace = true, features = ["use_std"] }
+json-patch = { workspace = true }
+moka = { workspace = true, features = ["future"] }
+proptest = { workspace = true, features = ["std"] }
+regex = { workspace = true, features = ["std", "unicode", "perf"] }
+reqwest = { workspace = true, features = ["json"] }
+rust_decimal = { workspace = true, features = ["std", "serde-with-str"] }
+semver = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+serde_with = { workspace = true, features = ["std", "macros"] }
+strsim = { workspace = true }
+tempfile = { workspace = true, features = ["getrandom"] }
+time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util"] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
+unicode-normalization = { workspace = true, features = ["std"] }
+unicode-segmentation = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["std", "serde", "v4"] }
+validator = { workspace = true, features = ["derive"] }
+walkdir = { workspace = true }
+wiremock = { workspace = true }

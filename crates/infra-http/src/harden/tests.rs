@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 
 use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
@@ -6,10 +5,10 @@ use axum::http::{Method, Request as HttpRequest};
 use axum::routing::{get, post};
 use axum_test::TestServer;
 use http_body_util::BodyExt;
+use observe_test_support::EventCapture;
 use serde_json::Value;
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
-use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
 use crate::request_id::REQUEST_ID_HEADER;
@@ -196,11 +195,8 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
                 .extensions_mut()
                 .insert(RequestId::new(HeaderValue::from_static(id)));
         }
-        let fields = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(EventFields {
-            target: concat!(env!("CARGO_CRATE_NAME"), "::observe"),
-            fields: Arc::clone(&fields),
-        });
+        let events = EventCapture::new();
+        let subscriber = events.dispatch_for(&[concat!(env!("CARGO_CRATE_NAME"), "::observe")]);
         let response = app
             .clone()
             .oneshot(request)
@@ -215,11 +211,10 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
             "{path}"
         );
         assert!(
-            fields
-                .lock()
-                .unwrap()
+            events
+                .snapshot()
                 .iter()
-                .any(|field| field == "request_id=\"client-id\""),
+                .any(|event| event.field("request_id") == Some("\"client-id\"")),
             "{path}"
         );
     }
@@ -323,37 +318,10 @@ async fn a_cancelled_body_read_does_not_turn_a_handler_timeout_into_408() {
     assert_eq!(body_json(response).await["code"], "gateway_timeout");
 }
 
-struct EventFields {
-    target: &'static str,
-    fields: Arc<Mutex<Vec<String>>>,
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFields {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _context: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        if event.metadata().target() == self.target {
-            event.record(
-                &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                    self.fields
-                        .lock()
-                        .unwrap()
-                        .push(format!("{}={value:?}", field.name()));
-                },
-            );
-        }
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn panic_is_a_sanitized_500_problem() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(EventFields {
-        target: module_path!().trim_suffix("::tests"),
-        fields: Arc::clone(&events),
-    });
+    let events = EventCapture::new();
+    let subscriber = events.dispatch_for(&["infra_http::harden"]);
     let response = app(&options())
         .oneshot(HttpRequest::get("/panic").body(Body::empty()).unwrap())
         .with_subscriber(subscriber)
@@ -371,7 +339,10 @@ async fn panic_is_a_sanitized_500_problem() {
     assert_eq!(json["code"], "internal_error");
     assert_eq!(json["detail"], SANITIZED_DETAIL);
     assert!(!json.to_string().contains("boom"));
-    assert_eq!(*events.lock().unwrap(), ["message=http_handler_panicked"]);
+    let captured = events.snapshot();
+    assert_eq!(captured.len(), 1, "{captured:?}");
+    assert_eq!(captured[0].message(), Some("http_handler_panicked"));
+    assert_eq!(captured[0].fields.len(), 1, "{captured:?}");
 }
 
 #[tokio::test]
@@ -696,11 +667,8 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
             Observer::new(false, false, ProbeRoutes::default()),
             observe::observe,
         ));
-    let fields = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing::Dispatch::new(tracing_subscriber::registry().with(EventFields {
-        target: concat!(env!("CARGO_CRATE_NAME"), "::observe"),
-        fields: Arc::clone(&fields),
-    }));
+    let events = EventCapture::new();
+    let subscriber = events.dispatch_for(&[concat!(env!("CARGO_CRATE_NAME"), "::observe")]);
 
     let holder = tokio::spawn({
         let app = app.clone();
@@ -724,17 +692,11 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     assert_eq!(json["code"], "service_unavailable");
     assert_eq!(json["detail"], service_failure::AT_CAPACITY_DETAIL);
 
-    let shed_fields = std::mem::take(&mut *fields.lock().unwrap());
-    assert!(
-        shed_fields
-            .iter()
-            .any(|field| field == "message=http_request")
-    );
-    assert!(
-        shed_fields
-            .iter()
-            .any(|field| field == "termination=\"load_shed\"")
-    );
+    let shed_events = events.take();
+    assert!(shed_events.iter().any(|event| {
+        event.message() == Some("http_request")
+            && event.field("termination") == Some("\"load_shed\"")
+    }));
 
     gate.notify_one();
     let unavailable = tokio::time::timeout(Duration::from_secs(1), holder)
@@ -744,9 +706,10 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
         .unwrap();
     assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body_json(unavailable).await["code"], "service_unavailable");
-    let fields = fields.lock().unwrap();
-    assert!(fields.iter().any(|field| field == "message=http_request"));
-    assert!(!fields.iter().any(|field| field.starts_with("termination=")));
+    let holder_events = events.snapshot();
+    assert!(holder_events.iter().any(|event| {
+        event.message() == Some("http_request") && event.field("termination").is_none()
+    }));
 }
 
 async fn probe_admission_app() -> (

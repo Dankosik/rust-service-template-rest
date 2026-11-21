@@ -724,22 +724,8 @@ mod grpc {
         };
         use infra_http_transport::{BoundListener, TlsOptions};
         use std::{num::NonZeroUsize, sync::Arc};
-        use tokio_rustls::rustls::{
-            self,
-            pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-        };
         let material = tls_test_support::TlsMaterial::new("provider.test");
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(material.cert)],
-            PrivatePkcs8KeyDer::from(material.key).into(),
-        )
-        .unwrap();
+        let config = material.server_config_tls13();
         let router = axum::Router::new().route("/introspect", axum::routing::post(|| async {
             let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
             axum::Json(serde_json::json!({"active": true, "iss": "https://issuer.example", "aud": "api", "sub": "consumer", "exp": expiry}))

@@ -341,6 +341,7 @@ pub fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
         .is_ok_and(|reply| reply["stream"] == stream && reply["seq"].is_u64())
 }
 
+#[track_caller]
 #[must_use]
 pub fn relay_target(url: &str) -> String {
     let after_scheme = url

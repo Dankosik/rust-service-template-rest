@@ -5,12 +5,6 @@
     reason = "a broken fixture or setup fails the test"
 )]
 
-#[allow(
-    dead_code,
-    reason = "the shared transport also supplies pending-BEGIN cancellation proof to the postgres integration target"
-)]
-#[path = "../support/commit_proxy.rs"]
-mod commit_proxy;
 mod enqueue;
 mod execution;
 mod operator;

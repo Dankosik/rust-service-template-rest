@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use infra_postgres::{Dsn, SslPolicy};
-use integration_tests::{DATABASE_URL, dsn_for, propagate_join_panic, url_for};
 use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -15,6 +14,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::{DATABASE_URL, dsn_for, propagate_join_panic, url_for};
+
 const COMMIT: &[u8] = b"COMMIT";
 
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
@@ -22,7 +23,7 @@ const JOIN_BUDGET: Duration = Duration::from_secs(5);
 const READY_HOLD_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Fault {
+pub enum Fault {
     ForwardThenDrop,
     ForwardThenSilence,
     DropBeforeForward,
@@ -30,7 +31,7 @@ pub(crate) enum Fault {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Boundary {
+pub enum Boundary {
     Commit(Option<&'static str>),
     Autocommit(&'static str),
     OutsideTransaction(&'static str),
@@ -53,7 +54,7 @@ enum ReadyHoldState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReadyBoundary {
+pub enum ReadyBoundary {
     Begin,
     Commit,
     Sync,
@@ -126,7 +127,7 @@ struct Silence {
 }
 
 #[derive(Debug)]
-pub(crate) struct CommitProxy {
+pub struct CommitProxy {
     address: SocketAddr,
     arming: Arc<Mutex<Arming>>,
     ready_hold: Arc<ReadyHold>,
@@ -137,7 +138,7 @@ pub(crate) struct CommitProxy {
 }
 
 impl CommitProxy {
-    pub(crate) async fn start(server: SocketAddr) -> Self {
+    pub async fn start(server: SocketAddr) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("the proxy listens");
@@ -172,7 +173,7 @@ impl CommitProxy {
         }
     }
 
-    pub(crate) async fn start_for(pool: &PgPool) -> (Self, Dsn) {
+    pub async fn start_for(pool: &PgPool) -> (Self, Dsn) {
         let dsn = dsn_for(pool).await;
         assert_eq!(
             dsn.ssl_mode_name(),
@@ -197,18 +198,20 @@ impl CommitProxy {
         (proxy, proxied)
     }
 
-    pub(crate) fn address(&self) -> SocketAddr {
+    #[must_use]
+    pub fn address(&self) -> SocketAddr {
         self.address
     }
 
-    pub(crate) fn arm(&self, fault: Fault, boundary: Boundary) {
+    pub fn arm(&self, fault: Fault, boundary: Boundary) {
         self.silence
             .fault_baseline
             .store(*self.silence.entered.borrow(), Ordering::Release);
         *lock(&self.arming) = Arming::Armed { fault, boundary };
     }
 
-    pub(crate) fn fired(&self) -> Option<Fault> {
+    #[must_use]
+    pub fn fired(&self) -> Option<Fault> {
         let state = *lock(&self.arming);
         match state {
             Arming::Fired(fault) => Some(fault),
@@ -216,23 +219,23 @@ impl CommitProxy {
         }
     }
 
-    pub(crate) fn arm_ready_hold(&self, boundary: ReadyBoundary) {
+    pub fn arm_ready_hold(&self, boundary: ReadyBoundary) {
         self.ready_hold.arm(boundary);
     }
 
-    pub(crate) async fn ready_held(&self) {
+    pub async fn ready_held(&self) {
         self.ready_hold.held().await;
     }
 
-    pub(crate) fn release_ready(&self) {
+    pub fn release_ready(&self) {
         self.ready_hold.release();
     }
 
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.cancel.cancel();
     }
 
-    pub(crate) async fn silence_connection(&self) {
+    pub async fn silence_connection(&self) {
         assert_eq!(self.silence.signal.receiver_count(), 1);
         let mut entered = self.silence.entered.subscribe();
         let before = *entered.borrow_and_update();
@@ -243,7 +246,7 @@ impl CommitProxy {
             .expect("silence counter sender stays open");
     }
 
-    pub(crate) async fn silenced(&self) {
+    pub async fn silenced(&self) {
         let target = self.silence.fault_baseline.load(Ordering::Acquire);
         let mut entered = self.silence.entered.subscribe();
         tokio::time::timeout(READY_HOLD_BUDGET, entered.wait_for(|n| *n > target))
@@ -252,7 +255,7 @@ impl CommitProxy {
             .expect("silence counter sender stays open");
     }
 
-    pub(crate) async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) {
         self.cancel.cancel();
         let result = tokio::time::timeout(JOIN_BUDGET, &mut self.task).await;
         if result.is_err() {
@@ -566,25 +569,30 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[test]
-fn frontend_preserves_frame_boundaries_across_fragmented_and_coalesced_reads() {
-    let startup = b"\0\0\0\x09\0\x03\0\0\0";
-    let sync = b"S\0\0\0\x04";
-    let query = b"Q\0\0\0\x06x\0";
-    let mut frontend = Frontend::default();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for fragment in [&startup[..2], &startup[2..6]] {
-        frontend.pending.extend_from_slice(fragment);
+    #[test]
+    fn frontend_preserves_frame_boundaries_across_fragmented_and_coalesced_reads() {
+        let startup = b"\0\0\0\x09\0\x03\0\0\0";
+        let sync = b"S\0\0\0\x04";
+        let query = b"Q\0\0\0\x06x\0";
+        let mut frontend = Frontend::default();
+
+        for fragment in [&startup[..2], &startup[2..6]] {
+            frontend.pending.extend_from_slice(fragment);
+            assert!(frontend.take_message().is_none());
+        }
+        for fragment in [&startup[6..], sync.as_slice(), sync.as_slice(), &query[..5]] {
+            frontend.pending.extend_from_slice(fragment);
+        }
+        for expected in [startup.as_slice(), sync.as_slice(), sync.as_slice()] {
+            assert_eq!(frontend.take_message().unwrap().unwrap().as_ref(), expected);
+        }
+        assert!(frontend.take_message().is_none());
+        frontend.pending.extend_from_slice(&query[5..]);
+        assert_eq!(frontend.take_message().unwrap().unwrap().as_ref(), query);
         assert!(frontend.take_message().is_none());
     }
-    for fragment in [&startup[6..], sync.as_slice(), sync.as_slice(), &query[..5]] {
-        frontend.pending.extend_from_slice(fragment);
-    }
-    for expected in [startup.as_slice(), sync.as_slice(), sync.as_slice()] {
-        assert_eq!(frontend.take_message().unwrap().unwrap().as_ref(), expected);
-    }
-    assert!(frontend.take_message().is_none());
-    frontend.pending.extend_from_slice(&query[5..]);
-    assert_eq!(frontend.take_message().unwrap().unwrap().as_ref(), query);
-    assert!(frontend.take_message().is_none());
 }

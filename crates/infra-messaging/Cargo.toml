@@ -88,6 +88,7 @@ nix = { workspace = true, features = ["fs"] }
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
 nats-test-support = { workspace = true }
+observe-test-support = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["crypto", "pem", "aws_lc_rs"] }
