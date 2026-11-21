@@ -61,8 +61,8 @@ the user's frontier—the agent owns those autonomously once requirements settle
      instructed to proceed without confirmation and zero high-risk branches or
      material assumptions remain). If `intent.md` was persisted, flip it to
      `status: ready`.
-   - Once confirmed, **continue autonomously in this session** into [Spec And
-     Design](spec-and-design.md).
+   - Once confirmed, **continue autonomously in this session** into
+     [Specification](specification.md).
    - *Done when:* the user confirms shared understanding with zero unresolved
      product or risk forks.
 

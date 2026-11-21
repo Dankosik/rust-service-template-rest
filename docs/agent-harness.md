@@ -41,12 +41,12 @@ how the harness provides it.
 | Owner | Lifetime |
 | --- | --- |
 | Orchestrator | The ledger; recover from canonical state if unreliable. |
-| Preparation session | Continuous root session from Intake through Planning (fresh subagents only for evidence scans, bounded specialists, `Design It Twice`, and `Plan Review` / adjudication). |
+| Preparation session | Continuous root session from Intake through Planning (fresh subagents only for evidence scans, bounded specialists, `Design It Twice`, and `Design Review` / `Plan Review` / adjudication). |
 | Lead | Its unit until integrated; fresh Lead per task and per batched repair pass under [Implementation](spec-first-workflow/phases/implementation.md#orchestrator-loop). |
 | Execution lane | One bounded brief and its corrections, including smaller models. |
 | Evidence lane | One bounded evidence brief and related follow-ups. |
 
-Keep preparation (Intake through Planning, plus Plan Review repairs) in the
+Keep preparation (Intake through Planning, plus Design/Plan Review repairs) in the
 continuous root session. Start every subagent—Lead, `evidence-agent`,
 `specialist-agent`, `reviewer-agent`, `adjudicator-agent`, or `worker-agent`—with
 a fresh conversation (no parent chat turns, tool outputs, or summaries) and

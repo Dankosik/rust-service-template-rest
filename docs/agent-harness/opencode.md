@@ -9,7 +9,7 @@ Start an ordinary request in `build` under [Work Selection](../../AGENTS.md#work
 Keep preparation (Intake through Planning) in that root session, dispatching
 fresh read-only `evidence-agent`, `specialist-agent`, `reviewer-agent`, or
 `adjudicator-agent` lanes as needed for grounding, bounded specialists / `Design
-It Twice`, and `Plan Review` / adjudication. If `reviewer-agent`'s model is
+It Twice`, and `Design Review` / `Plan Review` / adjudication. If `reviewer-agent`'s model is
 unavailable, preserve the candidate and report the pending review—a writable
 `general` session cannot supply that verdict.
 After ready Planning, return the [user's launch message](../spec-first-workflow/shared/transition.md#implementation-handoff).

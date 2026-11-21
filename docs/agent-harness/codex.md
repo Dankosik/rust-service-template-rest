@@ -12,7 +12,8 @@ availability alone does not authorize use.
   handoff as a carrier or fallback.
 - Keep preparation (Intake through Planning) in the root session, using fresh
   collaboration subagents (`fork_turns: "none"`) for wide scans, bounded
-  specialists / `Design It Twice`, and `Plan Review` / adjudication.
+  specialists / `Design It Twice`, and `Design Review` / `Plan Review` /
+  adjudication.
 - Subagents share the parent's working directory. For a neighboring repository,
   apply [Authority](../../AGENTS.md#authority) and target it in
   commands/navigation; brief paths or command `cwd` do not reload that project's

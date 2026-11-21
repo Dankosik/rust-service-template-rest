@@ -16,8 +16,8 @@ slices plus an integrated check in `tasks.md`'s `Completion`.
 - **Gate risk-dependent slices:** add `Depends on: T<ID>` (`T<ID> — retires
   <assumption>`) on every task whose work would be discarded if the seam
   falsifies; keep independent tasks unblocked.
-- Record the exact assumption and upstream reopen owner ([Spec And
-  Design](../spec-and-design.md) or the user for a product/risk trade-off) in
+- Record the exact assumption and upstream reopen owner ([Technical
+  Design](../technical-design.md) or the user for a product/risk trade-off) in
   `Reopen if`.
 
 ## Wide refactor (expand–migrate–contract)
@@ -36,7 +36,7 @@ wide for one atomic green task, sequence `expand -> migrate -> contract`:
 - **Preserve rollout deploy boundaries:** when mixed-version deploys
   separate `Expand` and `Contract` across releases, keep post-deploy `Contract`
   outside Release 1's ledger (record it in `Boundary -> Out of scope` citing
-  the Rollout section of `spec.md` / `design.md`).
+  `design.md`'s `## Crossings, failure semantics & rollout`).
 
 ## Claim Rules
 

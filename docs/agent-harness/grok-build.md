@@ -13,7 +13,8 @@ a deeper native route.
 - Keep preparation (Intake through Planning) in the root primary session,
   using fresh read-only `spawn_subagent` lanes (`evidence-agent`,
   `specialist-agent`, `reviewer-agent`, `adjudicator-agent`) for wide scans,
-  bounded specialists / `Design It Twice`, and `Plan Review` / adjudication.
+  bounded specialists / `Design It Twice`, and `Design Review` / `Plan Review` /
+  adjudication.
 - The ordinary Grok primary session is the root carrier (`--agent orchestrator`
   is optional). Bind `LEDGER_ORCHESTRATOR` under
   [Implementation](../spec-first-workflow/phases/implementation.md#carrier);

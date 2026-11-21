@@ -24,8 +24,8 @@ Derive vendor-neutral terms from required behavior, invariants, workload,
 failure/recovery, and hard constraints. Classify each candidate as a substitute,
 prerequisite, complement, or defense-in-depth mechanism, comparing only
 same-level substitutes (eliminate candidates contradicted by primary authority
-or hard constraints; leave mechanism selection to [Spec And
-Design](spec-and-design.md)).
+or hard constraints; leave mechanism selection to [Technical
+Design](technical-design.md)).
 
 Scan only relevant rungs (`repo reuse -> Rust std -> native platform -> approved
 infra -> managed service -> mature OSS -> custom`). For each material precedent,

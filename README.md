@@ -56,7 +56,7 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity
   axum routes, the API contract, errors, configuration, observability,
   reliability, security, SQL, tests, performance and dependencies.
 - Larger work follows a [spec-first workflow](docs/spec-first-workflow.md):
-  intake, specification & design, planning, implementation, and review.
+  intake, specification, technical design, planning, implementation, and review.
 - Lints, tests and CI hold the agent to the same rules as a person. CI runs
   only the checks a change touches.
 - One canonical instruction set lives in `.agents`. Initialization installs only

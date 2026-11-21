@@ -12,7 +12,8 @@ workflow (Direct Work still runs in-session).
   [`invoke_subagent`](https://antigravity.google/docs/subagents.md) read-only
   lanes (`evidence-agent`, `specialist-agent`, `reviewer-agent`,
   `adjudicator-agent`) on workspace `inherit` for wide scans, bounded
-  specialists / `Design It Twice`, and `Plan Review` / adjudication.
+  specialists / `Design It Twice`, and `Design Review` / `Plan Review` /
+  adjudication.
 - Antigravity reads `AGENTS.md`, `.agents/rules/antigravity-harness.md`, and
   `.agents/skills` directly; skills load by description or `/<skill-name>`.
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by

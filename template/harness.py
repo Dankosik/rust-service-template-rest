@@ -118,7 +118,7 @@ OUTPUT_SCHEMA_LINES = {
         "or blocked), rejected_steelman (strongest simpler substitute and "
         "broken invariant, or none), consequences_and_proof, reopen_if; for "
         "Design It Twice, return "
-        "`docs/spec-first-workflow/phases/spec-and-design/design-it-twice.md#candidate-proposal`."
+        "`docs/spec-first-workflow/phases/technical-design/design-it-twice.md#candidate-proposal`."
     ),
     "review-result": (
         "Return fields: candidate, verdict (PASS | CONCERNS | FAIL | NEEDS_PARENT | "
