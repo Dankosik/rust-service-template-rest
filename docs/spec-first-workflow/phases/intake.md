@@ -117,9 +117,9 @@ requirements settle.
 Consult only the branches this request reaches, and ask a branch **only** when
 it is a genuine product or risk fork not already fixed by repo conventions
 (`docs/decisions/`, [Production Contract](../../production-contract.md), or
-sibling endpoints). Protocol edge cases, rollout mechanics, and optional
-profile invariants belong autonomously to [Specification](specification.md) and
-[Technical Design](technical-design.md).
+sibling endpoints). Protocol and behavioral edge cases belong autonomously to
+[Specification](specification.md); rollout mechanics and optional profile
+invariants belong to [Technical Design](technical-design.md).
 
 - **Problem vs mechanism (XY):** real user/operator situation behind any
   suggested mechanism, and whether a named mechanism is a hard external
@@ -130,9 +130,9 @@ profile invariants belong autonomously to [Specification](specification.md) and
 - **Freshness & completion promise:** whether callers must see the effect
   immediately after the response or can tolerate bounded async lag.
 - **Existing data & compatibility:** what happens to pre-existing records and
-  in-flight work once this ships (keep old behavior, migrate existing data,
-  reject, or upgrade on touch), and whether breaking callers or a maintenance
-  window is permitted.
+  in-flight work once this ships (keep old rule, follow new rule immediately, or
+  reject on next action), and whether breaking callers or a maintenance window
+  is permitted.
 - **User-visible failure & conflict policy:** partial success vs all-or-nothing
   rejection, duplicate/retry outcomes, and whether a missing dependency stops
   the operation or degrades with a user-visible fallback.

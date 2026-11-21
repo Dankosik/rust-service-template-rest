@@ -22,9 +22,9 @@ ready handoff for a fresh Implementation session.
      work awaiting acceptance), verify via [Plan
      Review](plan-review.md#zero-delta-check) and report directly without
      writing a ledger.
-   - *Done when:* every obligation (`R<n>`, `G<n>`, `Must not`, `D<n>`, `S<n>`,
-     rollout gates, durable doc updates, superseded cleanup) and affected caller
-     is mapped.
+   - *Done when:* every obligation (`R<n>`, `G<n>`, hard external constraints,
+     `Must not`, `D<n>`, `S<n>`, rollout gates, durable doc updates, superseded
+     cleanup) and affected caller is mapped.
 
 2. **Choose the smallest coherent task graph.**
    - Default to **1 task** whenever one fresh Lead holds the change in its
@@ -44,9 +44,10 @@ ready handoff for a fresh Implementation session.
      Remove superseded orphan packets and clear Orchestrator runtime fields on a
      fresh draft with no integrated `[x]` tasks.
    - Verify on disk before review: acyclic topologically ordered DAG, every
-     `R<n>`/`G<n>`/`Must not`/`D<n>`/`S<n>` traced, producer isolation satisfied,
-     zero undeclared lock or exhaustive-type collisions across concurrently
-     eligible pairs, and a shape-appropriate `Observable claim` per task.
+     `R<n>`/`G<n>`/hard external constraint/`Must not`/`D<n>`/`S<n>` traced,
+     producer isolation satisfied, zero undeclared lock or exhaustive-type
+     collisions across concurrently eligible pairs, and a shape-appropriate
+     `Observable claim` per task.
    - *Done when:* the on-disk bundle passes every structural and cold-start
      check.
 

@@ -34,10 +34,10 @@ locator>`. On a failing check give anchor, concrete witness, classification
 ### Axis 1 — Obligation Parity, Slicing & Unreviewed Inline Scope *(receives `spec.md`, optional `design.md` and `intent.md`, `tasks.md`, packets, `research/*.md`)*
 
 1. **Obligation parity & design drift:** trace every requirement (`R<n>`),
-   preserved guarantee (`G<n>`), `Must not` prohibition, non-goal, decision
-   (`D<n>`), seam (`S<n>`), rollout gate, durable doc update, and carried
-   `CONCERNS` / `[integration-first]` assumption into task packets and
-   `Completion`.
+   preserved guarantee (`G<n>`), hard external constraint, `Must not`
+   prohibition, non-goal, decision (`D<n>`), seam (`S<n>`), rollout gate,
+   durable doc update, and carried `CONCERNS` / `[integration-first]` assumption
+   into task packets and `Completion`.
    - `design.md` present without both `status: ready` and `Design review:
      PASS | CONCERNS` (including `status: draft`, `Design review: pending`, or
      missing receipt): immediate `FAIL` (`PHASE_DEFECT`, owner: [Technical
@@ -53,12 +53,12 @@ locator>`. On a failing check give anchor, concrete witness, classification
      Architecture`): **verify none of the [Design Review
      Gate](technical-design.md#design-review-gate) triggers hold** (`FAIL`
      routing back to [Technical Design](technical-design.md) if any slipped
-     through). Otherwise verify behavioral rules against [Behavioral
-     Probes](specification/behavioral-probes.md), verify autonomous choices
-     under user-delegated boundaries in `spec.md` stay within stated limits
-     rather than flagging them as `UPSTREAM_GAP`, apply the deletion test to
-     inline architecture, and check `quality/architecture.json`, `Cargo.lock`,
-     and `docs/decisions/` against live code.
+     through). Otherwise run Check 1 of [Design
+     Review](design-review.md#axis-1--behavior-system-crossings--rollout) on
+     `spec.md` (treating inline `## Architecture` as `design.md` for ownership
+     and `Durable doc updates`), apply the deletion test to inline architecture,
+     and check `quality/architecture.json`, `Cargo.lock`, and `docs/decisions/`
+     against live code.
 2. **Slicing & falsifiable claims:** attack the task cut under [Task Shapes And
    Granularity](planning.md#task-shapes-and-granularity) (delete redundant
    tasks, merge lock-serialized slices, catch horizontal layers). Verify every

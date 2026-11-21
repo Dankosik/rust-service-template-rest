@@ -22,6 +22,11 @@ For any change touching persisted state, wire contracts, or multiple binaries,
 prove rolling mixed-version survival across retained binaries (`crates/migrate`,
 `crates/service`, `crates/jobs-worker`):
 
+- **Pre-existing state transition** *(load `rust-sqlx` for DB migrations)*:
+  choose the concrete storage or migration tactic (`backfill`, `lazy upgrade`,
+  dual-read/write, or `grandfather` / `reject` guard) that fulfills `spec.md`'s
+  pre-existing-state policy without locking live traffic or corrupting in-flight
+  work.
 - **Lock-safe DDL (`rust-sqlx`):** migrations must run safely while old and new
   replicas execute concurrently.
 - **Forward/backward payload compatibility:** old and new binaries must safely
