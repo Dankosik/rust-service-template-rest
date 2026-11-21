@@ -17,6 +17,8 @@ const JOIN_POLL: Duration = Duration::from_millis(1);
 const DRAINING_BIT: u32 = 1 << 31;
 const DROPPED_METRIC: &str = "telemetry_log_records_dropped_total";
 const SINK_ERRORS_METRIC: &str = "telemetry_log_sink_errors_total";
+static METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 static TOTALS: Counters = Counters::new();
 
 thread_local! {
@@ -40,14 +42,24 @@ pub(super) enum DropReason {
 }
 
 impl DropReason {
-    const fn label(self) -> &'static str {
+    fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::QueueFull => "queue_full",
-            Self::Oversize => "oversize",
-            Self::SpanCapacity => "span_capacity",
-            Self::Busy => "busy",
-            Self::Reentrant => "reentrant",
-            Self::Closed => "closed",
+            Self::QueueFull => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "queue_full"))
+            }
+            Self::Oversize => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "oversize"))
+            }
+            Self::SpanCapacity => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "span_capacity"))
+            }
+            Self::Busy => crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "busy")),
+            Self::Reentrant => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "reentrant"))
+            }
+            Self::Closed => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "closed"))
+            }
         }
     }
 }
@@ -60,11 +72,17 @@ enum SinkOperation {
 }
 
 impl SinkOperation {
-    const fn label(self) -> &'static str {
+    fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::Write => "write",
-            Self::Flush => "flush",
-            Self::Worker => "worker",
+            Self::Write => {
+                crate::metrics::static_metric_key!(SINK_ERRORS_METRIC, ("operation", "write"))
+            }
+            Self::Flush => {
+                crate::metrics::static_metric_key!(SINK_ERRORS_METRIC, ("operation", "flush"))
+            }
+            Self::Worker => {
+                crate::metrics::static_metric_key!(SINK_ERRORS_METRIC, ("operation", "worker"))
+            }
         }
     }
 }
@@ -545,10 +563,14 @@ pub(super) fn describe_metrics() {
 pub(super) fn publish() {
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
-        metrics::counter!(DROPPED_METRIC, "reason" => reason.label()).absolute(dropped);
+        let key = reason.metric_key();
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &METRIC_METADATA))
+            .absolute(dropped);
     }
     for (operation, &errors) in &snapshot.sink_errors {
-        metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label()).absolute(errors);
+        let key = operation.metric_key();
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &METRIC_METADATA))
+            .absolute(errors);
     }
 }
 

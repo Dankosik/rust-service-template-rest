@@ -30,16 +30,37 @@ impl SdkEvent {
         }
     }
 
-    const fn label(self) -> &'static str {
+    fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::SpanDroppingStarted => "queue_dropping_started",
-            Self::SpansDropped => "queue_spans_dropped",
-            Self::PartialSuccess => "partial_success",
-            Self::ResponseParseError => "response_parse_error",
-            Self::StatusError => "http_status_error",
-            Self::NetworkError => "network_error",
-            Self::ResponseBodyTooLarge => "response_body_too_large",
-            Self::ExportError => "export_error",
+            Self::SpanDroppingStarted => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "queue_dropping_started")
+            ),
+            Self::SpansDropped => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "queue_spans_dropped")
+            ),
+            Self::PartialSuccess => {
+                crate::metrics::static_metric_key!(DIAGNOSTICS_METRIC, ("event", "partial_success"))
+            }
+            Self::ResponseParseError => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "response_parse_error")
+            ),
+            Self::StatusError => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "http_status_error")
+            ),
+            Self::NetworkError => {
+                crate::metrics::static_metric_key!(DIAGNOSTICS_METRIC, ("event", "network_error"))
+            }
+            Self::ResponseBodyTooLarge => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "response_body_too_large")
+            ),
+            Self::ExportError => {
+                crate::metrics::static_metric_key!(DIAGNOSTICS_METRIC, ("event", "export_error"))
+            }
         }
     }
 }
@@ -47,6 +68,8 @@ impl SdkEvent {
 const DIAGNOSTICS_METRIC: &str = "telemetry_sdk_diagnostics_total";
 const QUEUE_DROPPED_METRIC: &str = "telemetry_sdk_queue_dropped_spans";
 const REJECTED_METRIC: &str = "telemetry_sdk_reported_rejected_spans_total";
+static METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
 static COUNTS: EnumMap<SdkEvent, AtomicU64> =
     EnumMap::from_array([const { AtomicU64::new(0) }; enum_len::<SdkEvent>()]);
@@ -185,7 +208,8 @@ pub(super) fn describe_metrics() {
 
 pub(super) fn publish() {
     for (event, count) in &COUNTS {
-        metrics::counter!(DIAGNOSTICS_METRIC, "event" => event.label())
+        let key = event.metric_key();
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &METRIC_METADATA))
             .absolute(count.load(Ordering::Relaxed));
     }
     if let Some(count) = DROPPED.get() {

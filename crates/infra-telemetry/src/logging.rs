@@ -76,8 +76,12 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
         .with_max_level(max_level.as_log())
         .init()
         .map_err(|_| LoggingError::LogLoggerInstalled)?;
-    tracing::subscriber::set_global_default(subscriber)
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::set_global_default(dispatch.clone())
         .map_err(|_| LoggingError::AlreadyInstalled)?;
+    if let Some(format) = dispatch.downcast_ref::<format::FormatLayer>() {
+        format.pin_global_dispatch(&dispatch);
+    }
     Ok(guard)
 }
 

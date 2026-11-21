@@ -46,10 +46,40 @@ thread_local! {
     static FORMATTING: Cell<bool> = const { Cell::new(false) };
 }
 
+struct TraceDispatch {
+    global: OnceLock<Dispatch>,
+    registered: OnceLock<WeakDispatch>,
+}
+
+impl TraceDispatch {
+    fn new() -> Self {
+        Self {
+            global: OnceLock::new(),
+            registered: OnceLock::new(),
+        }
+    }
+
+    fn register(&self, subscriber: &Dispatch) {
+        let _ = self.registered.set(subscriber.downgrade());
+    }
+
+    fn pin_global(&self, dispatch: Dispatch) {
+        let _ = self.global.set(dispatch);
+    }
+
+    fn otel_context(&self, id: &Id) -> Option<opentelemetry::Context> {
+        if let Some(dispatch) = self.global.get() {
+            return tracing_opentelemetry::get_otel_context(id, dispatch);
+        }
+        let dispatch = self.registered.get()?.upgrade()?;
+        tracing_opentelemetry::get_otel_context(id, &dispatch)
+    }
+}
+
 pub(super) struct FormatLayer {
     output: Output,
     format: LoggingFormat,
-    trace_dispatch: Option<OnceLock<WeakDispatch>>,
+    trace_dispatch: Option<TraceDispatch>,
 }
 
 impl FormatLayer {
@@ -57,8 +87,21 @@ impl FormatLayer {
         Self {
             output,
             format,
-            trace_dispatch: trace_context.then(OnceLock::new),
+            trace_dispatch: trace_context.then(TraceDispatch::new),
         }
+    }
+
+    pub(super) fn pin_global_dispatch(&self, dispatch: &Dispatch) {
+        if let Some(trace_dispatch) = &self.trace_dispatch {
+            trace_dispatch.pin_global(dispatch.clone());
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_pinned_global_dispatch(&self) -> bool {
+        self.trace_dispatch
+            .as_ref()
+            .is_some_and(|dispatch| dispatch.global.get().is_some())
     }
 }
 
@@ -415,6 +458,17 @@ impl SpanFields {
     }
 
     fn apply(&mut self, delta: &SpanScratch) -> bool {
+        if delta.values.failed {
+            return false;
+        }
+        if delta.fields.is_empty() {
+            return true;
+        }
+        if let [field] = delta.fields.as_slice()
+            && !self.fields.iter().any(|existing| existing.key == field.key)
+        {
+            return self.insert_new_field(field.key, &delta.values.as_slice()[field.range()]);
+        }
         let Some((values, fields)) = compact_span_fields(&self.fields, &self.values, delta) else {
             return false;
         };
@@ -422,6 +476,34 @@ impl SpanFields {
         self.fields = fields;
         true
     }
+
+    fn insert_new_field(&mut self, key: &'static str, value: &[u8]) -> bool {
+        if self.fields.len() == MAX_SPAN_FIELDS
+            || value.len() > MAX_SPAN_BYTES.saturating_sub(self.values.len())
+        {
+            return false;
+        }
+        let start = self.values.len();
+        append_bounded(&mut self.values, value, MAX_SPAN_BYTES);
+        self.fields.insert(
+            0,
+            Entry {
+                key,
+                start: offset(start),
+                end: offset(self.values.len()),
+            },
+        );
+        true
+    }
+}
+
+fn append_bounded(buf: &mut Vec<u8>, bytes: &[u8], limit: usize) {
+    let needed = buf.len() + bytes.len();
+    if needed > buf.capacity() {
+        let capacity = needed.max(buf.capacity().saturating_mul(2)).min(limit);
+        buf.reserve_exact(capacity - buf.len());
+    }
+    buf.extend_from_slice(bytes);
 }
 
 fn compact_span_fields(
@@ -604,15 +686,11 @@ impl FormatLayer {
     }
 
     fn write_trace_context_fields(&self, id: &Id, line: &mut Bytes) {
-        let Some(dispatch) = self
+        let Some(context) = self
             .trace_dispatch
             .as_ref()
-            .and_then(OnceLock::get)
-            .and_then(WeakDispatch::upgrade)
+            .and_then(|dispatch| dispatch.otel_context(id))
         else {
-            return;
-        };
-        let Some(context) = tracing_opentelemetry::get_otel_context(id, &dispatch) else {
             return;
         };
         let span = context.span();
@@ -642,7 +720,7 @@ where
 {
     fn on_register_dispatch(&self, subscriber: &Dispatch) {
         if let Some(dispatch) = &self.trace_dispatch {
-            let _ = dispatch.set(subscriber.downgrade());
+            dispatch.register(subscriber);
         }
     }
 
@@ -738,14 +816,20 @@ fn write_all_fields(
 ) -> bool {
     let same_key = |a: &Entry, b: &Entry| a.key == b.key;
     let event_fields = event.chunk_by(same_key).filter_map(<[_]>::last);
-    let span_fields = spans
-        .chunk_by(same_key)
-        .filter_map(<[_]>::first)
-        .filter(|field| {
-            event
-                .binary_search_by_key(&field.key, |entry| entry.key)
-                .is_err()
-        });
+    let mut remaining_event = event;
+    let span_fields =
+        spans.chunk_by(same_key).filter_map(<[_]>::first).filter(
+            move |field| match remaining_event.binary_search_by_key(&field.key, |entry| entry.key) {
+                Ok(index) => {
+                    remaining_event = &remaining_event[index + 1..];
+                    false
+                }
+                Err(index) => {
+                    remaining_event = &remaining_event[index..];
+                    true
+                }
+            },
+        );
     for field in event_fields.chain(span_fields) {
         if RESERVED.contains(&field.key) {
             continue;
