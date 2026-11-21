@@ -10,7 +10,6 @@ mod idempotency;
 // template:end http-idempotency-mounted:http-introspection-idempotency-module
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,12 +33,11 @@ use infra_http::{
     Application, Authentication, DelegationCredential, HardenOptions, HttpContract,
     REQUEST_ID_HEADER, VerifiedDelegation, VerifiedPrincipal,
 };
-use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options, Server, TlsOptions};
 use observe_test_support::CumulativeMetrics;
 use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tls_test_support::TlsMaterial;
+use tls_test_support::{HttpsServer, TlsMaterial};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 const BUDGET: Duration = Duration::from_secs(5);
@@ -57,7 +55,7 @@ const SCOPE_A_ONLY: &str = "scope-a-only-token";
 const HELD_PROVIDER: &str = "held-provider-token";
 
 struct Provider {
-    server: Server,
+    server: HttpsServer,
     material: TlsMaterial,
     requests: Arc<AtomicUsize>,
     held: Arc<tokio::sync::Notify>,
@@ -108,23 +106,7 @@ impl Provider {
                 }
             }),
         );
-        let listener =
-            BoundListener::bind((Ipv4Addr::LOCALHOST, 0).into()).expect("the provider listens");
-        let server = listener.serve_tls(
-            router,
-            Http1Options {
-                header_read_timeout: Duration::from_secs(5),
-                max_read_buffer_bytes: 16 * 1024,
-                connections: ConnectionLimits {
-                    max_connections: NonZeroU32::new(16),
-                    max_connection_age: None,
-                },
-            },
-            TlsOptions {
-                config: Arc::new(material.server_config_tls13()),
-                handshake_timeout: Duration::from_secs(5),
-            },
-        );
+        let server = material.serve_http1_tls13(router);
         Self {
             server,
             material,
@@ -165,7 +147,7 @@ impl Provider {
 
     async fn stop(self) {
         self.cancel.cancel();
-        let _ = self.server.drain(WAIT).await;
+        self.server.shutdown().await;
     }
 }
 

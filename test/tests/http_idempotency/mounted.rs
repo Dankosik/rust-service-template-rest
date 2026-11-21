@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +25,6 @@ use infra_http::{
     Authentication, Code, DelegationCredential, HardenOptions, HttpContract, Principal, Problem,
     REQUEST_ID_HEADER, VerifiedDelegation, VerifiedPrincipal,
 };
-use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options, Server, TlsOptions};
 use infra_idempotency_store::Store;
 use infra_postgres::{Pool, test_support::as_sqlx};
 use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
@@ -36,7 +34,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Executor as _, PgPool};
-use tls_test_support::TlsMaterial;
+use tls_test_support::{HttpsServer, TlsMaterial};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use utoipa::ToSchema;
 
@@ -289,7 +287,7 @@ fn forbidden() -> Problem {
 }
 
 struct Provider {
-    server: Server,
+    server: HttpsServer,
     material: TlsMaterial,
     cancel: CancellationToken,
     _cancel_guard: DropGuard,
@@ -318,23 +316,7 @@ impl Provider {
                     .into_response()
             }),
         );
-        let listener =
-            BoundListener::bind((Ipv4Addr::LOCALHOST, 0).into()).expect("the provider listens");
-        let server = listener.serve_tls(
-            router,
-            Http1Options {
-                header_read_timeout: Duration::from_secs(5),
-                max_read_buffer_bytes: 16 * 1024,
-                connections: ConnectionLimits {
-                    max_connections: NonZeroU32::new(16),
-                    max_connection_age: None,
-                },
-            },
-            TlsOptions {
-                config: Arc::new(material.server_config_tls13()),
-                handshake_timeout: Duration::from_secs(5),
-            },
-        );
+        let server = material.serve_http1_tls13(router);
         let cancel = CancellationToken::new();
         let cancel_guard = cancel.clone().drop_guard();
         Self {
@@ -371,7 +353,7 @@ impl Provider {
 
     async fn stop(self) {
         self.cancel.cancel();
-        let _ = self.server.drain(WAIT).await;
+        self.server.shutdown().await;
     }
 }
 

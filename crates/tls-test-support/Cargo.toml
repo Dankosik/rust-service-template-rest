@@ -12,5 +12,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axum = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["service", "tokio"] }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+tokio = { workspace = true, features = ["net", "rt", "macros"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+tokio-util = { workspace = true }
