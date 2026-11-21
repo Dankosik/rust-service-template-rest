@@ -23,7 +23,7 @@ pub(super) fn register(
 ) -> Result<(), jobs_worker::BuildError> {
     let webhooks = registration.outbound_webhooks();
     let mut endpoints = Vec::with_capacity(webhooks.endpoints.len());
-    let mut owners = EndpointKeyOwners::default();
+    let mut owners = EndpointKeyOwners::new();
     for (endpoint_id, endpoint) in &webhooks.endpoints {
         let keys = KeyRing::from_encoded(
             endpoint.secret.expose_secret(),

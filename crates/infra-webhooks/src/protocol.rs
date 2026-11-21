@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use compact_str::CompactString;
 use foldhash::HashMap;
 use http::{HeaderMap, HeaderName, HeaderValue, header::GetAll};
 
@@ -36,7 +37,7 @@ impl SigningKey {
         if !(MIN_ENCODED_KEY_BYTES..=MAX_ENCODED_KEY_BYTES).contains(&encoded.len()) {
             return Err(InvalidKey);
         }
-        let mut decoded = zeroize::Zeroizing::new([0u8; MAX_KEY_BYTES + 2]);
+        let mut decoded = zeroize::Zeroizing::new([0u8; MAX_ENCODED_KEY_BYTES / 4 * 3]);
         let len = STANDARD
             .decode_slice(encoded, &mut *decoded)
             .map_err(|_| InvalidKey)?;
@@ -56,32 +57,44 @@ pub struct KeyRing {
 
 #[derive(Default, derive_more::Debug)]
 #[debug("EndpointKeyOwners([REDACTED])")]
-pub struct EndpointKeyOwners<'a> {
-    owners: HashMap<Box<[u8]>, &'a str>,
+pub struct EndpointKeyOwners {
+    owners: HashMap<[u8; TAG_BYTES], CompactString>,
 }
 
-impl<'a> EndpointKeyOwners<'a> {
-    pub fn register(&mut self, endpoint: &'a str, keys: &KeyRing) -> Result<(), SharedEndpointKey> {
-        let identities = [Some(&keys.active), keys.previous.as_ref()]
-            .map(|key| key.map(|key| hmac::sign(&key.0, b"webhook endpoint key ownership")));
-        for identity in identities.iter().flatten() {
-            if let Some(&owner) = self.owners.get(identity.as_ref())
-                && owner != endpoint
+impl EndpointKeyOwners {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, endpoint: &str, keys: &KeyRing) -> Result<(), SharedEndpointKey> {
+        let fingerprints = [
+            Some(key_fingerprint(&keys.active)),
+            keys.previous.as_ref().map(key_fingerprint),
+        ];
+        for fingerprint in fingerprints.iter().flatten() {
+            if let Some(owner) = self.owners.get(fingerprint)
+                && owner.as_str() != endpoint
             {
                 return Err(SharedEndpointKey {
-                    first: owner.to_owned(),
+                    first: owner.as_str().to_owned(),
                     second: endpoint.to_owned(),
                 });
             }
         }
-        self.owners.extend(
-            identities
-                .into_iter()
-                .flatten()
-                .map(|identity| (Box::<[u8]>::from(identity.as_ref()), endpoint)),
-        );
+        let owner = CompactString::from(endpoint);
+        for fingerprint in fingerprints.into_iter().flatten() {
+            self.owners.insert(fingerprint, owner.clone());
+        }
         Ok(())
     }
+}
+
+fn key_fingerprint(key: &SigningKey) -> [u8; TAG_BYTES] {
+    let tag = hmac::sign(&key.0, b"webhook endpoint key ownership");
+    let mut fingerprint = [0; TAG_BYTES];
+    fingerprint.copy_from_slice(tag.as_ref());
+    fingerprint
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -788,6 +801,30 @@ mod tests {
         let sibling = alphabet.chars().nth(at ^ 1).unwrap();
         let prefix = encoded.strip_suffix(last).unwrap();
         assert!(!accepted(&format!("{prefix}{sibling}=")), "trailing bits");
+    }
+
+    #[test]
+    fn endpoint_key_owners_rejects_shared_keys_atomically_with_owned_names() {
+        let mut owners = super::EndpointKeyOwners::new();
+        assert_eq!(format!("{owners:?}"), "EndpointKeyOwners([REDACTED])");
+        let first = KeyRing::from_encoded(UPSTREAM_KEY, Some(ARBITRARY_BYTES_KEY)).unwrap();
+        let third_key = STANDARD.encode([0x22; 32]);
+        let overlapping = KeyRing::from_encoded(&third_key, Some(ARBITRARY_BYTES_KEY)).unwrap();
+        let independent = KeyRing::from_encoded(&third_key, None).unwrap();
+
+        {
+            let ephemeral = "alpha".to_owned();
+            owners.register(&ephemeral, &first).unwrap();
+        }
+        assert_eq!(
+            owners.register("beta", &overlapping),
+            Err(super::SharedEndpointKey {
+                first: "alpha".to_owned(),
+                second: "beta".to_owned(),
+            })
+        );
+        owners.register("gamma", &independent).unwrap();
+        owners.register("alpha", &first).unwrap();
     }
 
     mod signing_frame {
