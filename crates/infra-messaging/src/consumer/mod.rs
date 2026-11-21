@@ -27,7 +27,7 @@ use crate::registry::Registry;
 use crate::topology::{ConsumerAdmission, bind_durable, durable_contract_error_type};
 use crate::wire;
 
-const ACK_WAIT: Duration = HANDLER_TIMEOUT
+pub const DURABLE_ACK_WAIT: Duration = HANDLER_TIMEOUT
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(BROKER_OPERATION_BUDGET)
@@ -222,7 +222,7 @@ impl Consumer {
             metadata: registry.durable_metadata(&dead_letter.stream, &options.dlq_subject),
             deliver_policy: DeliverPolicy::All,
             ack_policy: AckPolicy::Explicit,
-            ack_wait: ACK_WAIT,
+            ack_wait: DURABLE_ACK_WAIT,
             max_deliver: -1,
             replay_policy: ReplayPolicy::Instant,
             ..Default::default()

@@ -249,8 +249,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
         .publication
         .prepare(&event("event-unknown"))
         .expect("unknown-type fixture starts from a valid production envelope");
-    let mut unknown_headers = infra_messaging::wire::encode_prepared(&unknown)
-        .expect("unknown-type fixture has valid identity headers");
+    let mut unknown_headers = infra_messaging::wire::encode_prepared(&unknown);
     unknown_headers.insert("Event-Type", "test.example.unknown");
     fixture
         .jetstream
@@ -315,15 +314,13 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
         .publication
         .prepare(&event("event-newer-schema"))
         .expect("newer-schema fixture starts from a valid production envelope");
-    let mut newer_headers = infra_messaging::wire::encode_prepared(&newer)
-        .expect("newer-schema fixture has valid identity headers");
+    let mut newer_headers = infra_messaging::wire::encode_prepared(&newer);
     newer_headers.insert("Event-Schema", "v2");
     let undecodable = fixture
         .publication
         .prepare(&event("event-undecodable"))
         .expect("undecodable fixture starts from a valid production envelope");
-    let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable)
-        .expect("undecodable fixture has valid identity headers");
+    let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable);
     let undecodable_payload = Bytes::from_static(br#"{"value":7}"#);
 
     let mut transferred = 0;

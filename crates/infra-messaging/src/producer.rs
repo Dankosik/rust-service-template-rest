@@ -159,7 +159,7 @@ fn publish_message(
     if event.payload.len() > max_payload_bytes {
         return Err(PublishEnvelopeError::PayloadTooLarge.into());
     }
-    let mut headers = encode_publication(event).map_err(PublishEnvelopeError::from)?;
+    let mut headers = encode_publication(event);
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
     validate_header_bytes(&headers)?;

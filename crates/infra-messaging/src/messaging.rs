@@ -57,7 +57,6 @@ pub struct ConsumerOptions {
 #[derive(Clone, Debug)]
 pub struct Messaging {
     pub(crate) shared: Arc<Shared>,
-    topology: TopologyAdmission,
 }
 
 // template:begin outbox:messaging-outbox-producer
@@ -94,6 +93,7 @@ pub(crate) struct Shared {
     pub(crate) source_stream: String,
     pub(crate) max_payload_bytes: usize,
     pub(crate) envelope_limit_bytes: usize,
+    topology: TopologyAdmission,
     draining: AtomicBool,
     failed: AtomicBool,
     pub(crate) publish_metrics: PublishMetrics,
@@ -189,7 +189,8 @@ impl Messaging {
 
     // template:begin outbox:messaging-outbox-producer-access
     pub fn outbox_producer(&self) -> Result<OutboxProducer, MessagingError> {
-        self.topology
+        self.shared
+            .topology
             .outbox_source
             .map_err(|refusal| refusal.report(self.shared.envelope_limit_bytes))?;
         Ok(OutboxProducer(self.producer()))
@@ -212,6 +213,7 @@ impl Messaging {
             return Err(MessagingError::Unavailable);
         }
         let admission = self
+            .shared
             .topology
             .consumer
             .clone()
@@ -273,6 +275,7 @@ impl MessagingStartup {
                 source_stream: config.options.source_stream.clone(),
                 max_payload_bytes: config.options.max_payload_bytes,
                 envelope_limit_bytes: config.envelope_limit_bytes,
+                topology,
                 draining: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
                 publish_metrics: PublishMetrics::register(),
@@ -282,7 +285,6 @@ impl MessagingStartup {
                 ),
                 connection,
             }),
-            topology,
         };
         self.phase = StartupPhase::Admitted(messaging.clone());
         Ok(messaging)

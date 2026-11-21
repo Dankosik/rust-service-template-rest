@@ -3,7 +3,7 @@ use std::fmt;
 use domain_events::{Event, EventPayload};
 use infra_jobs::{JobKind, KindName};
 use infra_messaging::outbox::OutboxEvent;
-use infra_messaging::{PublicationPolicy, PublicationRoute, Registry, RegistryError, Route};
+use infra_messaging::{PublicationRoute, Registry, RegistryError, Route};
 use infra_postgres::{Pool, Tx, TxError, TxMode};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,6 @@ use time::{UtcDateTime, format_description::well_known::Rfc3339};
 pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
 pub const MAX_OPERATION_BYTES: usize = 1024;
-const PUBLICATIONS: PublicationPolicy = PublicationPolicy {
-    max_payload_bytes: MAX_OPERATION_BYTES,
-};
 pub const SUBJECT: &str = "reading.accepted";
 const PUBLISHER_ID: uuid::NonNilUuid = uuid::NonNilUuid::new(uuid::Uuid::from_u128(
     0x2a42fbe7_9da4_48ba_a6e9_84447b8d6310,
@@ -26,7 +23,7 @@ pub fn publication(
     registry: &mut Registry,
     subject: &str,
 ) -> Result<PublicationRoute<Operation>, RegistryError> {
-    PUBLICATIONS.declare(registry, &Route::new(subject))
+    registry.declare_publication(&Route::new(subject), MAX_OPERATION_BYTES)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

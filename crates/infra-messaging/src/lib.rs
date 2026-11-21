@@ -18,7 +18,7 @@ mod trace;
 pub mod wire;
 
 pub use budget::BROKER_OPERATION_BUDGET;
-pub use consumer::{Consumer, ConsumerError, ConsumerHandle};
+pub use consumer::{Consumer, ConsumerError, ConsumerHandle, DURABLE_ACK_WAIT};
 pub use contract::ContractError;
 pub use error::{
     HandlerError, MessagingError, PrepareError, PublishEnvelopeError, PublishError,
@@ -35,6 +35,4 @@ pub use operation_context::{Deadline, OperationContext};
 pub use prepared::PreparedEvent;
 pub use probe::MessagingProbe;
 pub use producer::{Producer, PublishAck};
-pub use registry::{
-    EventHandler, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route, RouteEntry,
-};
+pub use registry::{EventHandler, PublicationRoute, Registry, RegistryError, Route, RouteEntry};
