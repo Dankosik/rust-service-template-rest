@@ -669,7 +669,7 @@ mod tests {
             "the second stop must not restart the deadline"
         );
         background.close_and_wait().await;
-        resources
+        let _ = resources
             .listeners
             .health
             .unwrap()

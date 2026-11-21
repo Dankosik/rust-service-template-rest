@@ -66,7 +66,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
         messaging.consumer(reordered, &admit_context),
     );
     let admitted = first.expect("the first replica admits the durable");
-    second.expect("the second replica admits the same durable");
+    let _ = second.expect("the second replica admits the same durable");
     let prepared = publication
         .prepare(&Event {
             id: "buffered-v2".to_owned(),
