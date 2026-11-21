@@ -7,8 +7,8 @@ use tokio::time::Instant;
 use super::{AttemptId, ClaimFence, execute_before_deadline};
 use crate::engine::{Operation, WorkerGroup, observe_failure};
 use crate::kind::{
-    Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
-    RetryBudget, RetrySchedule, saturating_micros,
+    Completion, Disposition, JobError, KindMode, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES,
+    Policy, RetrySchedule, saturating_micros,
 };
 use crate::state::FailureReason;
 
@@ -310,12 +310,12 @@ pub(super) enum HandlerOutcome {
 pub(super) fn map_outcome(
     attempt: &AttemptId,
     policy: Policy,
-    budget: RetryBudget,
+    mode: KindMode,
     outcome: HandlerOutcome,
 ) -> Transition {
     let number = attempt.number;
     let exhausted = number >= policy.max_attempts;
-    let retry_budget_spent = exhausted && budget.exhausts_transient();
+    let retry_budget_spent = exhausted && mode.exhausts_transient();
     let retry_or_exhaust = |spent: bool, summary, cause, floor_micros| {
         let summary = sanitize_summary(summary);
         if spent {
@@ -443,7 +443,7 @@ mod tests {
         map_outcome(
             &attempt,
             Policy::default(),
-            RetryBudget::Exhaust,
+            KindMode::Ordinary,
             handler_outcome,
         )
     }
@@ -556,14 +556,8 @@ mod tests {
             },
             ..Policy::default()
         };
-        let outcome = |handler_outcome| {
-            map_outcome(
-                &attempt,
-                policy,
-                RetryBudget::PersistTransient,
-                handler_outcome,
-            )
-        };
+        let outcome =
+            |handler_outcome| map_outcome(&attempt, policy, KindMode::Outbox, handler_outcome);
         std::assert_matches!(
             outcome(HandlerOutcome::Timeout),
             Transition::Retry {

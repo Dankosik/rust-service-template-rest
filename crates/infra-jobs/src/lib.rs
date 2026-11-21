@@ -19,8 +19,8 @@ pub use engine::{DrainEnd, DuplicateKind, Engine, LEASE_RESERVE, POLL_INTERVAL, 
 pub use enqueue::outbox;
 // template:end outbox:jobs-outbox-export
 pub use enqueue::{
-    EnqueueError, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES, compare_live_payload,
-    enqueue, enqueue_delayed, enqueue_unique, json_payload_len,
+    EnqueueError, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES, PayloadSizer,
+    compare_live_payload, enqueue, enqueue_delayed, enqueue_unique, json_payload_len,
 };
 pub use infra_postgres::maintenance::CleanupError;
 pub use kind::{

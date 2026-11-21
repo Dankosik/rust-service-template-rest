@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, kind, state, claim_generation::text AS \"version!\", attempts, failure_reason,\n        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"created_at!\",\n        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"not_before!\",\n        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"claim_expires_at?\",\n        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"finished_at?\",\n        jsonb_array_length(recovery_history) AS \"recovery_count!\"\n        FROM background_jobs WHERE id = $1",
+  "query": "SELECT id, kind, state, claim_generation AS version, attempts, failure_reason,\n        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"created_at!\",\n        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"not_before!\",\n        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"claim_expires_at?\",\n        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"finished_at?\",\n        jsonb_array_length(recovery_history) AS \"recovery_count!\"\n        FROM background_jobs WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -38,9 +38,14 @@
       },
       {
         "ordinal": 3,
-        "name": "version!",
-        "type_info": "Text",
-        "origin": "Expression"
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "claim_generation"
+          }
+        }
       },
       {
         "ordinal": 4,
@@ -104,7 +109,7 @@
       false,
       false,
       false,
-      null,
+      false,
       false,
       true,
       null,
@@ -114,5 +119,5 @@
       null
     ]
   },
-  "hash": "0b3e143b6287fbf0790890b646946b863357a54a8340edef921eabf6c158a0cc"
+  "hash": "e7fa6ffb7ad57131767777a12c9ba36c6f67e479b519fc2fca4fff978b036048"
 }

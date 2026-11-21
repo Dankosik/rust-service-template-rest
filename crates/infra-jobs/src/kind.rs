@@ -258,6 +258,16 @@ pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), JobError>> + Send;
 }
 
+impl<K: JobKind, H: TransactionalHandler<K>> TransactionalHandler<K> for Arc<H> {
+    fn run(
+        &self,
+        job: TransactionalJob<K>,
+        tx: &mut Tx<'_>,
+    ) -> impl Future<Output = Result<(), JobError>> + Send {
+        (**self).run(job, tx)
+    }
+}
+
 struct TransactionFailure(JobError);
 
 impl TransactionFailure {
@@ -305,14 +315,29 @@ pub enum RetrySchedule {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetryBudget {
-    Exhaust,
-    PersistTransient,
+pub(crate) enum KindMode {
+    Ordinary,
+    #[allow(
+        dead_code,
+        reason = "only the optional outbox profile constructs KindMode::Outbox outside tests"
+    )]
+    Outbox,
 }
 
-impl RetryBudget {
+impl KindMode {
+    pub(crate) const fn is_outbox(self) -> bool {
+        matches!(self, Self::Outbox)
+    }
+
     pub(crate) const fn exhausts_transient(self) -> bool {
-        matches!(self, Self::Exhaust)
+        matches!(self, Self::Ordinary)
+    }
+
+    pub(crate) const fn missing_payload_error(self) -> Option<JobError> {
+        match self {
+            Self::Outbox => Some(JobError::permanent("outbox_receipt_mismatch")),
+            Self::Ordinary => None,
+        }
     }
 }
 
@@ -352,7 +377,7 @@ impl KindsBuilder {
         self.entries.push(Registered::new(
             K::NAME.as_str(),
             policy,
-            false,
+            KindMode::Ordinary,
             Box::new(OrdinaryHandler {
                 handler,
                 payload: PhantomData,
@@ -369,7 +394,7 @@ impl KindsBuilder {
         self.entries.push(Registered::new(
             K::NAME.as_str(),
             policy,
-            false,
+            KindMode::Ordinary,
             Box::new(TransactionalHandlerEntry {
                 handler,
                 payload: PhantomData,
@@ -413,18 +438,9 @@ fn validate_policy(kind: &'static str, policy: Policy) -> Result<(), KindError> 
 #[warn(clippy::map_err_ignore)]
 async fn run_transactional<K: JobKind>(
     handler: &impl TransactionalHandler<K>,
-    job: Job<K>,
+    pool: Pool,
+    job: TransactionalJob<K>,
 ) -> Result<Completion, JobError> {
-    let Job {
-        attempt,
-        payload,
-        pool,
-    } = job;
-    let job = Job {
-        attempt,
-        payload,
-        pool: (),
-    };
     let fence = job.attempt.fence;
     pool.in_tx_with_acquire_deadline(
         job.deadline(),
@@ -476,7 +492,7 @@ impl Kinds {
             entries: vec![Arc::new(Registered::new(
                 crate::outbox::KIND,
                 policy,
-                true,
+                KindMode::Outbox,
                 Box::new(OrdinaryHandler {
                     handler,
                     payload: PhantomData,
@@ -570,7 +586,7 @@ const fn is_reserved_kind_name(name: &str) -> bool {
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
-    pub(crate) is_outbox: bool,
+    pub(crate) mode: KindMode,
     pub(crate) running_slots: Option<Arc<Semaphore>>,
     pub(crate) handler: Box<dyn ErasedHandler>,
     metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
@@ -580,13 +596,13 @@ impl Registered {
     fn new(
         name: &'static str,
         policy: Policy,
-        is_outbox: bool,
+        mode: KindMode,
         handler: Box<dyn ErasedHandler>,
     ) -> Self {
         Self {
             name,
             policy,
-            is_outbox,
+            mode,
             running_slots: policy
                 .max_running
                 .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
@@ -598,14 +614,6 @@ impl Registered {
     pub(crate) fn metrics(&self) -> &crate::attempt::KindMetrics {
         self.metrics
             .get_or_init(|| crate::attempt::KindMetrics::new(self.name))
-    }
-
-    pub(crate) const fn retry_budget(&self) -> RetryBudget {
-        if self.is_outbox {
-            RetryBudget::PersistTransient
-        } else {
-            RetryBudget::Exhaust
-        }
     }
 }
 
@@ -671,12 +679,12 @@ where
         payload: &[u8],
     ) -> Result<HandlerFuture<'_>, serde_json::Error> {
         let payload = serde_json::from_slice::<K>(payload)?;
-        let job = Job {
+        let job = TransactionalJob {
             attempt,
             payload,
-            pool,
+            pool: (),
         };
-        Ok(Box::pin(run_transactional(&self.handler, job)))
+        Ok(Box::pin(run_transactional(&self.handler, pool, job)))
     }
 }
 
@@ -1024,5 +1032,33 @@ mod tests {
             TxError::CommitUnknown(sqlx::Error::Protocol("private-test-value".to_owned())).into();
         assert_eq!(unknown.disposition, Disposition::Retry);
         assert_eq!(unknown.to_string(), "postgres commit outcome unknown");
+    }
+
+    #[test]
+    fn arc_implements_transactional_handler_and_registers_as_ordinary() {
+        struct SharedHandler;
+
+        impl TransactionalHandler<Alpha> for SharedHandler {
+            fn run(
+                &self,
+                _job: TransactionalJob<Alpha>,
+                _tx: &mut Tx<'_>,
+            ) -> impl Future<Output = Result<(), JobError>> + Send {
+                std::future::ready(Ok(()))
+            }
+        }
+
+        let mut kinds = KindsBuilder::new();
+        kinds.register_transactional(Policy::default(), Arc::new(SharedHandler));
+        let registry = kinds.validate().unwrap();
+        let registered = registry.get(Alpha::NAME.as_str()).unwrap();
+        assert_eq!(registered.mode, KindMode::Ordinary);
+        assert!(!registered.mode.is_outbox());
+        assert!(registered.mode.exhausts_transient());
+        assert_eq!(registered.mode.missing_payload_error(), None);
+        assert_eq!(
+            KindMode::Outbox.missing_payload_error(),
+            Some(JobError::permanent("outbox_receipt_mismatch"))
+        );
     }
 }

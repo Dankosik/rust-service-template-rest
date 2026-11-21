@@ -369,7 +369,7 @@ impl<'a> PolicyBinds<'a> {
                     registered.name,
                     i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX),
                     saturating_micros(lease_offset(registered.policy.timeout)),
-                    registered.is_outbox,
+                    registered.mode.is_outbox(),
                 )
             })
             .collect();
@@ -506,10 +506,10 @@ impl ClaimRow {
         }
         let payload = match self.payload {
             Some(payload) => Ok(payload.into_bytes()),
-            None if registered.is_outbox => {
-                Err(crate::JobError::permanent("outbox_receipt_mismatch"))
-            }
-            None => return Err(ClaimDecodeError::MissingPayload),
+            None => Err(registered
+                .mode
+                .missing_payload_error()
+                .ok_or(ClaimDecodeError::MissingPayload)?),
         };
         Ok(ClaimOutcome::Running {
             lease_offset: lease_offset(registered.policy.timeout),

@@ -314,7 +314,7 @@ struct SnapshotRow {
     id: uuid::Uuid,
     kind: String,
     state: String,
-    version: String,
+    version: i64,
     attempts: i16,
     failure_reason: Option<String>,
     created_at: String,
@@ -328,10 +328,6 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
     type Error = OperatorError;
     fn try_from(row: SnapshotRow) -> Result<Self, Self::Error> {
         let state = JobState::parse(&row.state).ok_or(OperatorError::InvalidStoredState)?;
-        let version = row
-            .version
-            .parse::<i64>()
-            .map_err(|_| OperatorError::InvalidStoredState)?;
         let failure_reason = row
             .failure_reason
             .as_deref()
@@ -341,7 +337,7 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
             id: JobId(row.id),
             kind: row.kind,
             state,
-            version,
+            version: row.version,
             attempts: i32::from(row.attempts),
             failure_reason,
             created_at: row.created_at,
@@ -357,7 +353,7 @@ macro_rules! snapshot_query {
     ($tail:tt $(, $arg:expr)*) => {
         sqlx::query_as!(
             SnapshotRow,
-            r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
+            r#"SELECT id, kind, state, claim_generation AS version, attempts, failure_reason,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
         to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
         to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
@@ -512,30 +508,23 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
     }
 }
 
-struct RedrivenRow {
-    new_version: String,
-}
-
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
     lock_failed_target(tx, target, RecoveryAction::Redrive).await?;
-    let row = observed!(
+    let new_version = observed!(
         "redrive failed job",
-        sqlx::query_as!(
-            RedrivenRow,
-            r#"
-        UPDATE background_jobs SET
-            recovery_history = recovery_history || jsonb_build_array(jsonb_build_object(
-                'version', claim_generation::text, 'attempts', attempts,
-                'failure_reason', failure_reason, 'finished_at', finished_at,
-                'attempted_by', attempted_by, 'error_summary', error_summary,
-                'errors', errors, 'redriven_at', statement_timestamp())),
-            state = 'pending', not_before = statement_timestamp(), attempts = 0,
-            claim_generation = nextval('background_jobs_claim_generation'),
-            claim_expires_at = NULL, attempted_by = NULL, finished_at = NULL,
-            failure_reason = NULL, error_summary = NULL, errors = '[]'
-        WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'
-        RETURNING claim_generation::text AS "new_version!: String"
-        "#,
+        sqlx::query_scalar!(
+            "UPDATE background_jobs SET \
+                recovery_history = recovery_history || jsonb_build_array(jsonb_build_object( \
+                    'version', claim_generation::text, 'attempts', attempts, \
+                    'failure_reason', failure_reason, 'finished_at', finished_at, \
+                    'attempted_by', attempted_by, 'error_summary', error_summary, \
+                    'errors', errors, 'redriven_at', statement_timestamp())), \
+                state = 'pending', not_before = statement_timestamp(), attempts = 0, \
+                claim_generation = nextval('background_jobs_claim_generation'), \
+                claim_expires_at = NULL, attempted_by = NULL, finished_at = NULL, \
+                failure_reason = NULL, error_summary = NULL, errors = '[]' \
+             WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed' \
+             RETURNING claim_generation",
             target.id.0,
             target.kind,
             target.version
@@ -545,10 +534,6 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
     .await
     .map_err(conflict_or_database)?
     .ok_or(OperatorError::Stale)?;
-    let new_version = row
-        .new_version
-        .parse::<i64>()
-        .map_err(|_| OperatorError::InvalidStoredState)?;
     Ok(Redriven { new_version })
 }
 

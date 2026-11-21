@@ -6,7 +6,7 @@ use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use infra_jobs::outbox::{self as job_outbox, Order};
-use infra_jobs::{Handler, Job, JobError, Kinds, Policy, RetrySchedule};
+use infra_jobs::{Handler, Job, JobError, Kinds, PayloadSizer, Policy, RetrySchedule};
 use infra_postgres::{Tx, TxMode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -22,8 +22,6 @@ use crate::wire::CreatedAt;
 use crate::{OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
-const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
-const JSON_STRING_QUOTES_BYTES: usize = "\"\"".len();
 
 const POLICY: Policy = Policy {
     max_attempts: 25,
@@ -270,42 +268,25 @@ impl PreparedEvent {
                 max_bytes: 0,
             });
         }
-        let overhead = self.outbox_metadata_bytes().await?;
-        let max_bytes = raw_payload_capacity(overhead);
+        let sizer = self.outbox_metadata_sizer().await?;
+        let max_bytes = raw_payload_capacity(sizer.total_bytes());
         if self.payload().len() > max_bytes {
             return Err(OutboxEnqueueError::PayloadTooLarge {
                 bytes: self.payload().len(),
                 max_bytes,
             });
         }
-        if overhead > infra_jobs::MAX_PAYLOAD_BYTES {
-            return Err(infra_jobs::EnqueueError::PayloadTooLarge { bytes: overhead }.into());
-        }
+        sizer.check_limit()?;
         Ok(PublishDomainEvent::from(self))
     }
 
-    async fn outbox_metadata_bytes(&self) -> Result<usize, infra_jobs::EnqueueError> {
-        let mut total =
-            infra_jobs::json_payload_len(&PublishDomainEvent::for_metadata_sizing(self))
-                .map_err(infra_jobs::EnqueueError::Serialize)?;
-        let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        for mut rest in self.outbox_text().fields() {
-            while !rest.is_empty() {
-                let end = rest.floor_char_boundary(budget);
-                if end == 0 {
-                    tokio::task::yield_now().await;
-                    budget = PREFLIGHT_BYTES_PER_POLL;
-                    continue;
-                }
-                let (chunk, tail) = rest.split_at(end);
-                total += infra_jobs::json_payload_len(chunk)
-                    .map_err(infra_jobs::EnqueueError::Serialize)?
-                    - JSON_STRING_QUOTES_BYTES;
-                budget -= chunk.len();
-                rest = tail;
-            }
+    async fn outbox_metadata_sizer(&self) -> Result<PayloadSizer, infra_jobs::EnqueueError> {
+        let mut sizer =
+            PayloadSizer::from_skeleton(&PublishDomainEvent::for_metadata_sizing(self))?;
+        for field in self.outbox_text().fields() {
+            sizer.add_str(field).await?;
         }
-        Ok(total)
+        Ok(sizer)
     }
 
     fn outbox_text(&self) -> OutboxText<'_> {
@@ -500,8 +481,7 @@ mod tests {
     use time::UtcDateTime;
 
     use super::{
-        FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
-        raw_payload_capacity,
+        FORMAT_VERSION, OutboxEnqueueError, PayloadSizer, PublishDomainEvent, raw_payload_capacity,
     };
     use crate::prepared::{PreparedEvent, PreparedEventParts};
 
@@ -666,7 +646,7 @@ mod tests {
             assert!(expected > infra_jobs::MAX_PAYLOAD_BYTES);
 
             let (result, polls) = complete(event.prepare_outbox_intent());
-            assert!(polls >= event.subject().len().div_ceil(PREFLIGHT_BYTES_PER_POLL));
+            assert!(polls >= event.subject().len().div_ceil(PayloadSizer::BYTES_PER_POLL));
             std::assert_matches!(
                 result,
                 Err(OutboxEnqueueError::Jobs(infra_jobs::EnqueueError::PayloadTooLarge { bytes }))
@@ -692,15 +672,15 @@ mod tests {
     #[test]
     fn preflight_poll_budget_is_shared_across_metadata_fields() {
         let mut parts = Parts::new(Bytes::new());
-        parts.subject = "s".repeat(PREFLIGHT_BYTES_PER_POLL - 100);
+        parts.subject = "s".repeat(PayloadSizer::BYTES_PER_POLL - 100);
         parts.message_id = "i".repeat(256);
         parts.publication_id = "p".repeat(256);
         parts.event_type = "e".repeat(256);
-        let fields = PREFLIGHT_BYTES_PER_POLL - 100 + 3 * 256;
+        let fields = PayloadSizer::BYTES_PER_POLL - 100 + 3 * 256;
 
         let (result, polls) = complete(parts.event().prepare_outbox_intent());
         assert!(result.is_ok());
-        assert!(polls >= fields.div_ceil(PREFLIGHT_BYTES_PER_POLL));
+        assert!(polls >= fields.div_ceil(PayloadSizer::BYTES_PER_POLL));
     }
 
     #[derive(Default)]
