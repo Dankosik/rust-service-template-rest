@@ -10,13 +10,11 @@ use infra_webhooks::inbound::{
     Verifiers,
 };
 use infra_webhooks::protocol::KeyRing;
+use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault};
+use integration_tests::jobs::EngineRun;
 use integration_tests::{dsn_for, poll_until};
 use sqlx::{PgPool, Row};
 use tokio::sync::Notify;
-use tokio_util::sync::{CancellationToken, DropGuard};
-use tokio_util::task::TaskTracker;
-
-use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const ENDPOINT: &str = "partner/a?#";
 const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
@@ -30,46 +28,6 @@ fn receiver(pool: Pool) -> Receiver {
 
 fn admission_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + infra_postgres::ACQUIRE_TIMEOUT
-}
-
-#[tokio::test(start_paused = true)]
-async fn unfinished_webhook_upload_returns_the_declared_timeout() {
-    use axum::body::{Body, to_bytes};
-    use infra_webhooks::inbound::route::{WebhookState, router};
-    use tower::ServiceExt as _;
-
-    let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
-        .expect("lazy pool");
-    let app = mounted_receiver(receiver(pool), Duration::from_secs(1));
-    let upload =
-        Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
-    let response = app
-        .oneshot(
-            http::Request::post("/webhooks/partner%2Fa%3F%23")
-                .body(upload)
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
-    assert_eq!(
-        response.headers()["content-type"],
-        "application/problem+json"
-    );
-    let bytes = to_bytes(response.into_body(), 4096)
-        .await
-        .expect("problem body");
-    let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("problem JSON");
-    assert_eq!(problem["code"], "request_timeout");
-    let document = router::<WebhookState>()
-        .expect("webhook operation registers")
-        .into_openapi()
-        .expect("valid webhook contract");
-    let document = serde_json::to_value(document).expect("document");
-    assert_eq!(
-        document["paths"]["/webhooks/{endpoint_id}"]["post"]["responses"]["408"]["$ref"],
-        "#/components/responses/RequestTimeout"
-    );
 }
 
 fn mounted_receiver(receiver: Receiver, budget: Duration) -> infra_http::Application {
@@ -152,45 +110,6 @@ async fn job_count(pool: &PgPool) -> i64 {
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, Pool) {
     let (proxy, proxied) = CommitProxy::start_for(pool).await;
     (proxy, super::template_pool(&proxied, 3).await)
-}
-
-#[test]
-fn incoming_preserves_base64_json_bytes_and_decodes_original_body() {
-    for (body, encoded) in [
-        (Vec::new(), String::new()),
-        (vec![0], "AA==".to_owned()),
-        (vec![0, 255], "AP8=".to_owned()),
-        (vec![0, 255, 65], "AP9B".to_owned()),
-        (vec![251, 255], "+/8=".to_owned()),
-        ([0, 255, 65].repeat(21_846), "AP9B".repeat(21_846)),
-        (
-            [[0, 255, 65].repeat(21_846), vec![0]].concat(),
-            format!("{}AA==", "AP9B".repeat(21_846)),
-        ),
-        (
-            [[0, 255, 65].repeat(21_846), vec![0, 255]].concat(),
-            format!("{}AP8=", "AP9B".repeat(21_846)),
-        ),
-    ] {
-        for (content_type, encoded_type) in [
-            (None, "null"),
-            (Some(b"".as_slice()), "\"\""),
-            (Some(b"\xff".as_slice()), "\"/w==\""),
-        ] {
-            let expected = format!(
-                "{{\"version\":1,\"endpoint_id\":\"partner/a?#\",\"message_id\":\"aWSA/w==\",\"content_type\":{encoded_type},\"body\":\"{encoded}\"}}"
-            );
-            let incoming: Incoming = serde_json::from_str(&expected).expect("historical payload");
-            assert_eq!(incoming.endpoint_id(), ENDPOINT);
-            assert_eq!(incoming.message_id(), b"id\x80\xff");
-            assert_eq!(incoming.content_type(), content_type);
-            assert_eq!(incoming.body(), body);
-            assert_eq!(
-                serde_json::to_vec(&incoming).expect("payload bytes"),
-                expected.as_bytes()
-            );
-        }
-    }
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -526,49 +445,29 @@ impl Consumer for EffectConsumer {
     }
 }
 
-struct RunningProcessor {
-    started: infra_jobs::Started,
-    cancel: CancellationToken,
-    tracker: TaskTracker,
-    _cancel_guard: DropGuard,
+fn start_processor(pool: &Pool, consumers: Consumers) -> EngineRun {
+    let mut kinds = KindsBuilder::new();
+    consumers
+        .into_processor([])
+        .expect("webhook processor")
+        .register(&mut kinds);
+    let engine = Engine::new(
+        pool.clone(),
+        kinds.validate().expect("webhook processor registry"),
+        std::num::NonZeroU32::MIN,
+    );
+    EngineRun::start(engine)
 }
 
-impl RunningProcessor {
-    fn start(pool: &Pool, consumers: Consumers) -> Self {
-        let mut kinds = KindsBuilder::new();
-        consumers
-            .into_processor([])
-            .expect("webhook processor")
-            .register(&mut kinds);
-        let engine = Engine::new(
-            pool.clone(),
-            kinds.validate().expect("webhook processor registry"),
-            std::num::NonZeroU32::MIN,
-        );
-        let cancel = CancellationToken::new();
-        let tracker = TaskTracker::new();
-        let started = engine.start(&tracker, &cancel);
-        tracker.close();
-        let cancel_guard = cancel.clone().drop_guard();
-        Self {
-            started,
-            cancel,
-            tracker,
-            _cancel_guard: cancel_guard,
-        }
-    }
+fn start_consumer(pool: &Pool, consumer: impl Consumer) -> EngineRun {
+    let mut consumers = Consumers::new();
+    consumers.bind(ENDPOINT, consumer).expect("first binding");
+    start_processor(pool, consumers)
+}
 
-    fn with_consumer(pool: &Pool, consumer: impl Consumer) -> Self {
-        let mut consumers = Consumers::new();
-        consumers.bind(ENDPOINT, consumer).expect("first binding");
-        Self::start(pool, consumers)
-    }
-
-    async fn close(self, pools: &[&Pool]) {
-        self.cancel.cancel();
-        super::bounded("the processor tasks join", self.tracker.wait()).await;
-        super::close_pools(pools).await;
-    }
+async fn close_processor(run: EngineRun, pools: &[&Pool]) {
+    run.cancel_and_join(super::WAIT).await;
+    super::close_pools(pools).await;
 }
 
 async fn accept_for_processing(pool: &Pool, message_id: &str) {
@@ -607,7 +506,7 @@ async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(po
         .execute(&pool)
         .await
         .expect("two attempts remain");
-    let running = RunningProcessor::with_consumer(&app_pool, EffectConsumer::default());
+    let running = start_consumer(&app_pool, EffectConsumer::default());
     let summary = poll_until(
         "the deadlock schedules a retry",
         super::WAIT,
@@ -654,7 +553,7 @@ async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(po
     assert_eq!(reason, "exhausted");
     assert_eq!(summary, "postgres 23505");
     assert_eq!(errors, ["postgres 40P01", "postgres 23505"]);
-    running.close(&[&app_pool]).await;
+    close_processor(running, &[&app_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -666,7 +565,7 @@ async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
         .expect("consumer effects table");
     accept_for_processing(&app_pool, "message-stale").await;
     let consumer = Arc::new(EffectConsumer::default());
-    let running = RunningProcessor::with_consumer(&app_pool, Arc::clone(&consumer));
+    let running = start_consumer(&app_pool, Arc::clone(&consumer));
     super::bounded(
         "the consumer effect is pending",
         consumer.entered.notified(),
@@ -699,7 +598,7 @@ async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
             .await
             .expect("job state");
     assert_eq!(state, "running");
-    running.close(&[&app_pool]).await;
+    close_processor(running, &[&app_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -732,7 +631,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
         .expect("historical accepted job");
     let (proxy, worker) = proxied_pool(&pool).await;
     let consumer = Arc::new(EffectConsumer::default());
-    let running = RunningProcessor::with_consumer(&worker, Arc::clone(&consumer));
+    let running = start_consumer(&worker, Arc::clone(&consumer));
     super::bounded(
         "the consumer is ready to commit",
         consumer.entered.notified(),
@@ -766,7 +665,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
         "completed"
     );
     assert_eq!(row.try_get::<i16, _>("attempts").expect("attempts"), 1);
-    running.close(&[&app_pool, &worker]).await;
+    close_processor(running, &[&app_pool, &worker]).await;
     proxy.shutdown().await;
 }
 
@@ -778,7 +677,7 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
         .execute(&pool)
         .await
         .expect("historical attempt count");
-    let running = RunningProcessor::start(&app_pool, Consumers::new());
+    let running = start_processor(&app_pool, Consumers::new());
     poll_until(
         "the missing binding spends its retry attempt",
         super::WAIT,
@@ -825,7 +724,7 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
             .expect("failure reason"),
         "exhausted"
     );
-    running.close(&[&app_pool]).await;
+    close_processor(running, &[&app_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1112,7 +1011,7 @@ async fn late_redelivery_after_completed_job_retention_preserves_one_consumer_ef
 
     let consumer = Arc::new(EffectConsumer::default());
     consumer.release.notify_one();
-    let processing = RunningProcessor::with_consumer(&app_pool, consumer);
+    let processing = start_consumer(&app_pool, consumer);
     poll_until(
         "the consumer commits its effect and completes the job",
         super::WAIT,
@@ -1129,9 +1028,9 @@ async fn late_redelivery_after_completed_job_retention_preserves_one_consumer_ef
         },
     )
     .await;
-    processing.close(&[]).await;
+    close_processor(processing, &[]).await;
 
-    let restarted = RunningProcessor::start(&app_pool, Consumers::new());
+    let restarted = start_processor(&app_pool, Consumers::new());
     poll_until(
         "job retention removes the completed work",
         super::WAIT,
@@ -1159,7 +1058,7 @@ async fn late_redelivery_after_completed_job_retention_preserves_one_consumer_ef
         .await
         .expect("committed consumer effects");
     assert_eq!(effects, [id.as_bytes()]);
-    restarted.close(&[&app_pool]).await;
+    close_processor(restarted, &[&app_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

@@ -9,7 +9,6 @@
 )]
 
 use std::{
-    fmt::Write as _,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
@@ -755,44 +754,19 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
     );
 }
 
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<String>>);
-
-struct Fields<'a>(&'a mut String);
-
-impl tracing::field::Visit for Fields<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let _ = write!(self.0, "{}={value:?};", field.name());
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
-    fn on_new_span(
-        &self,
-        attributes: &tracing::span::Attributes<'_>,
-        _: &tracing::span::Id,
-        _: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        attributes.record(&mut Fields(&mut self.0.lock()));
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        event.record(&mut Fields(&mut self.0.lock()));
-    }
-}
-
 #[tokio::test]
 async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() {
     let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
-    let capture = Capture::default();
+    let captured_events = observe_test_support::EventCapture::new();
+    let captured_spans = observe_test_support::SpanCapture::new();
     let subscriber = tracing_subscriber::registry()
-        .with(capture.clone())
+        .with(captured_events.clone())
+        .with(captured_spans.clone())
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-    let _registration_anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let _guard = observe_test_support::install_default(&tracing::Dispatch::new(subscriber));
 
     let keys = Keys::new();
     let echo = Echo::default();
@@ -813,7 +787,11 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
         Drained::Complete
     );
 
-    let logged = capture.0.lock().clone();
+    let logged = format!(
+        "{:?}{:?}",
+        captured_events.snapshot(),
+        captured_spans.snapshot()
+    );
     assert!(
         logged.contains("service_auth_caller_not_admitted"),
         "{logged}"

@@ -1,8 +1,8 @@
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use observe_test_support::EventCapture;
 
 use super::*;
 use crate::maintenance::{MaintenanceFailure, run_scheduled_cleanup};
-use crate::observe::tests::Events;
 
 const TEST_CLEANUP: CleanupName = CleanupName::new("jobs");
 
@@ -47,44 +47,42 @@ fn cleanup_buckets_separate_a_seventeen_second_pass_from_upper_tail_overflow() {
 #[test]
 fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() {
     let recorder = PrometheusBuilder::new().build_recorder();
-    let events = Events::new(tracing::Level::INFO);
+    let events = EventCapture::new();
     let started = tokio::time::Instant::now();
     metrics::with_local_recorder(&recorder, || {
-        tracing::subscriber::with_default(events.clone(), || {
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            let mut completed = CleanupPass::start(TEST_CLEANUP);
-            let mut failed = CleanupPass::start(TEST_CLEANUP);
-            let mut cancelled = CleanupPass::start(TEST_CLEANUP);
-            completed.committed(500);
-            completed.committed(0);
-            failed.committed(500);
-            cancelled.committed(500);
-            let scrape = recorder.handle().render();
-            for line in [
-                "postgres_cleanup_active_passes{cleanup=\"jobs\"} 3",
-                "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 4",
-                "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 1500",
-            ] {
-                assert!(scrape.contains(line), "{line} missing from {scrape}");
-            }
-            assert!(!scrape.contains("postgres_cleanup_passes_total{"));
-            assert!(events.records.lock().unwrap().is_empty());
-            assert_eq!(completed.complete(), 500);
-            assert!(
-                recorder
-                    .handle()
-                    .render()
-                    .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 2")
-            );
-            failed.fail();
-            assert!(
-                recorder
-                    .handle()
-                    .render()
-                    .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 1")
-            );
-            drop(cancelled);
-        });
+        let _guard = events.install_default();
+        let mut completed = CleanupPass::start(TEST_CLEANUP);
+        let mut failed = CleanupPass::start(TEST_CLEANUP);
+        let mut cancelled = CleanupPass::start(TEST_CLEANUP);
+        completed.committed(500);
+        completed.committed(0);
+        failed.committed(500);
+        cancelled.committed(500);
+        let scrape = recorder.handle().render();
+        for line in [
+            "postgres_cleanup_active_passes{cleanup=\"jobs\"} 3",
+            "postgres_cleanup_committed_batches_total{cleanup=\"jobs\"} 4",
+            "postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 1500",
+        ] {
+            assert!(scrape.contains(line), "{line} missing from {scrape}");
+        }
+        assert!(!scrape.contains("postgres_cleanup_passes_total{"));
+        assert!(events.snapshot().is_empty());
+        assert_eq!(completed.complete(), 500);
+        assert!(
+            recorder
+                .handle()
+                .render()
+                .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 2")
+        );
+        failed.fail();
+        assert!(
+            recorder
+                .handle()
+                .render()
+                .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 1")
+        );
+        drop(cancelled);
     });
     let scrape = recorder.handle().render();
     assert!(scrape.contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 0"));
@@ -97,13 +95,15 @@ fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() 
             assert!(scrape.contains(&line), "{line} missing from {scrape}");
         }
     }
-    let events = events.records.lock().unwrap();
-    assert_eq!(events.len(), 3);
-    for (event, (outcome, batches)) in
-        events
+    let captured = events.snapshot();
+    assert_eq!(captured.len(), 3);
+    for (captured_event, (outcome, batches)) in
+        captured
             .iter()
             .zip([("completed", "2"), ("failed", "1"), ("cancelled", "1")])
     {
+        assert_eq!(captured_event.level, tracing::Level::INFO);
+        let event = &captured_event.fields;
         assert_eq!(event["message"], "postgres_cleanup_pass_finished");
         assert_eq!(event["cleanup"], "\"jobs\"");
         assert_eq!(event["outcome"], format!("\"{outcome}\""));

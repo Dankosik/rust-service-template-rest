@@ -721,15 +721,11 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
             "native termination emits its final event without another close request",
             async || {
                 logged
-                    .lock()
-                    .unwrap()
+                    .snapshot()
                     .iter()
-                    .any(|fields| {
-                        fields.iter().any(|(key, value)| {
-                            *key == "message" && value == "messaging_connection"
-                        }) && fields
-                            .iter()
-                            .any(|(key, value)| *key == "result" && value == "closed")
+                    .any(|event| {
+                        event.message() == Some("messaging_connection")
+                            && event.unquoted("result") == Some("closed")
                     })
                     .then_some(())
             },

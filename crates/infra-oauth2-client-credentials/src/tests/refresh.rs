@@ -601,43 +601,25 @@ async fn a_refresh_failure_survives_an_eligible_401_eviction() {
     fixture.finish().await;
 }
 
-#[derive(Clone, Default)]
-struct Events(Arc<Mutex<Vec<String>>>);
-
-impl Events {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        use tracing_subscriber::layer::SubscriberExt as _;
-        tracing::subscriber::set_default(tracing_subscriber::Registry::default().with(self.clone()))
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        struct Fields(Vec<String>);
-        impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                self.0.push(format!("{}={value:?}", field.name()));
-            }
-        }
-        if !event
-            .metadata()
-            .target()
-            .starts_with("infra_oauth2_client_credentials")
-        {
-            return;
-        }
-        let mut fields = Fields(Vec::new());
-        event.record(&mut fields);
-        fields.0.sort();
-        self.0.lock().unwrap().push(fields.0.join(" "));
-    }
+fn formatted_events(events: &observe_test_support::EventCapture) -> Vec<String> {
+    events
+        .snapshot()
+        .into_iter()
+        .map(|event| {
+            event
+                .fields
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
 }
 
 #[tokio::test]
 async fn a_failed_background_refresh_is_logged_with_its_error_type() {
-    let events = Events::default();
-    let _subscriber = events.install();
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let events = observe_test_support::EventCapture::new();
+    let _subscriber = events.install_target_prefix("infra_oauth2_client_credentials");
     let fixture = Fixture::new().await;
     fixture.token_json(
         StatusCode::OK,
@@ -652,7 +634,7 @@ async fn a_failed_background_refresh_is_logged_with_its_error_type() {
     advance(Duration::from_secs(3321)).await;
     fixture.send(&client).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
-        while events.0.lock().unwrap().is_empty() {
+        while events.snapshot().is_empty() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
@@ -660,7 +642,7 @@ async fn a_failed_background_refresh_is_logged_with_its_error_type() {
     .unwrap();
     fixture.finish().await;
     assert_eq!(
-        *events.0.lock().unwrap(),
+        formatted_events(&events),
         [
             r#"error.type="invalid_client" message=oauth2_background_refresh_failed server.address="127.0.0.1""#
         ]
@@ -669,9 +651,8 @@ async fn a_failed_background_refresh_is_logged_with_its_error_type() {
 
 #[tokio::test]
 async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
-    let events = Events::default();
-    let _subscriber = events.install();
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let events = observe_test_support::EventCapture::new();
+    let _subscriber = events.install_target_prefix("infra_oauth2_client_credentials");
     let fixture = Fixture::new().await;
     fixture.token_json(
         StatusCode::OK,
@@ -705,7 +686,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     fixture.send(&client).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
-        while events.0.lock().unwrap().is_empty() {
+        while events.snapshot().is_empty() {
             tokio::task::yield_now().await;
         }
     })
@@ -733,7 +714,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
     );
     fixture.finish().await;
     assert_eq!(
-        *events.0.lock().unwrap(),
+        formatted_events(&events),
         [
             r#"error.type="capacity" message=oauth2_background_refresh_failed server.address="127.0.0.1""#
         ]

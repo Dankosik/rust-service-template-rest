@@ -3,9 +3,18 @@
     reason = "fixture setup failures are test failures"
 )]
 
+use std::sync::Arc;
+
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{
+        self, ClientConfig, RootCertStore, ServerConfig,
+        pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
+    },
 };
 
 #[derive(Debug)]
@@ -20,12 +29,23 @@ pub struct TlsMaterial {
 
 impl TlsMaterial {
     #[must_use]
+    #[track_caller]
     pub fn new(host: &str) -> Self {
-        assert!(!host.is_empty(), "TLS fixture host must not be empty");
+        Self::for_hosts(&[host])
+    }
+
+    #[must_use]
+    #[track_caller]
+    pub fn for_hosts(hosts: &[&str]) -> Self {
+        assert!(!hosts.is_empty(), "TLS fixture hosts must not be empty");
+        assert!(
+            hosts.iter().all(|host| !host.is_empty()),
+            "TLS fixture host must not be empty"
+        );
         let issuer = new_issuer();
         let leaf_key = KeyPair::generate().expect("generate TLS fixture leaf key");
-        let mut leaf =
-            CertificateParams::new(vec![host.to_owned()]).expect("create TLS fixture DNS SAN");
+        let names = hosts.iter().copied().map(str::to_owned).collect::<Vec<_>>();
+        let mut leaf = CertificateParams::new(names).expect("create TLS fixture SANs");
         leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let certificate = leaf
             .signed_by(&leaf_key, &issuer)
@@ -40,9 +60,40 @@ impl TlsMaterial {
             root_pem: issuer.pem(),
         }
     }
+
+    #[must_use]
+    #[track_caller]
+    pub fn server_config(&self) -> ServerConfig {
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()));
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("fixture TLS protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![self.cert.clone().into()], key)
+            .expect("fixture server certificate")
+    }
+
+    #[must_use]
+    #[track_caller]
+    pub fn server_config_tls13(&self) -> ServerConfig {
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()));
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("TLS 1.3 fixture server")
+            .with_no_client_auth()
+            .with_single_cert(vec![self.cert.clone().into()], key)
+            .expect("fixture server certificate")
+    }
+
+    #[must_use]
+    #[track_caller]
+    pub fn acceptor(&self) -> TlsAcceptor {
+        TlsAcceptor::from(Arc::new(self.server_config()))
+    }
 }
 
 #[must_use]
+#[track_caller]
 pub fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -54,28 +105,21 @@ pub fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     .expect("create TLS fixture CA")
 }
 
-// template:begin grpc:tls-fixtures-http-listener-config
 #[must_use]
-pub fn localhost_tls(alpn: &[u8]) -> (rustls::ServerConfig, rustls::ClientConfig) {
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+#[track_caller]
+pub fn localhost_tls(alpn: &[u8]) -> (ServerConfig, ClientConfig) {
     let material = TlsMaterial::new("localhost");
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
-    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut server = rustls::ServerConfig::builder_with_provider(std::sync::Arc::clone(&provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 server")
-        .with_no_client_auth()
-        .with_single_cert(vec![material.cert.into()], key)
-        .expect("fixture server certificate");
+    let mut server = material.server_config_tls13();
     server.alpn_protocols = vec![alpn.to_vec()];
-    let mut roots = rustls::RootCertStore::empty();
+    let mut roots = RootCertStore::empty();
     roots.add(material.root.into()).expect("fixture CA");
-    let mut client = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("TLS 1.3 client")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let mut client = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("TLS 1.3 fixture client")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     client.alpn_protocols = vec![alpn.to_vec()];
     (server, client)
 }
-// template:end grpc:tls-fixtures-http-listener-config

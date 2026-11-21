@@ -14,6 +14,7 @@ from typing import Any
 from scripts import lib
 
 _PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]')
+_INCLUDE_MACRO_RE = re.compile(r'\binclude_(?:bytes|str)!\s*\(\s*"([^"]+)"\s*\)')
 
 
 def check_path_attributes(manifests: Sequence[str], root: Path) -> list[str]:
@@ -27,10 +28,15 @@ def check_path_attributes(manifests: Sequence[str], root: Path) -> list[str]:
         for src in sorted(directory.rglob("*.rs")):
             if "target" in src.relative_to(directory).parts or owner(src) != directory:
                 continue
-            for match in _PATH_ATTR_RE.finditer(src.read_text(encoding="utf-8")):
+            text = src.read_text(encoding="utf-8")
+            rel = src.relative_to(root).as_posix()
+            for match in _PATH_ATTR_RE.finditer(text):
                 if owner((src.parent / match.group(1)).resolve()) != directory:
-                    rel = src.relative_to(root).as_posix()
                     issues.append(f"{rel}: #[path] reaches outside its package ({match.group(1)})")
+            for match in _INCLUDE_MACRO_RE.finditer(text):
+                target_owner = owner((src.parent / match.group(1)).resolve())
+                if target_owner is not None and target_owner != directory:
+                    issues.append(f"{rel}: include_*! reaches into another package ({match.group(1)})")
     return issues
 
 
@@ -67,6 +73,9 @@ def check(metadata: Mapping[str, Any], policy: Mapping[str, Any], root: Path) ->
             target = dir_to_manifest.get(Path(local_path).resolve())
             if target is None or target not in members:
                 issues.append(f"{label}: local dependency outside classified workspace ({local_path})")
+                continue
+            if rule.get("no_workspace_dependencies"):
+                issues.append(f"{label}: {rule['rule']} forbids workspace dependency ({target})")
                 continue
             if kind == "dev" or rule.get("test_only"):
                 continue

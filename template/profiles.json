@@ -250,12 +250,7 @@
     "source-template": {
       "when": false,
       "remove_when_unselected": [
-        "test/tests/utility_async.rs",
-        "test/tests/utility_collections.rs",
-        "test/tests/utility_data.rs",
-        "test/tests/utility_http.rs",
-        "test/tests/utility_text_io.rs",
-        "test/tests/utility_values.rs"
+        "crates/utility-recipes/"
       ]
     },
     "runtime-progress": {
@@ -280,7 +275,7 @@
         "crates/service/src/bootstrap/postgres.rs",
         "test/tests/postgres.rs",
         "test/tests/postgres/",
-        "test/tests/support/commit_proxy.rs",
+        "test/src/commit_proxy.rs",
         "test/fixtures/migrations/",
         "env/pgbouncer/",
         "scripts/checks/migrations.py",
@@ -318,8 +313,13 @@
     "oidc-introspection": {
       "when": {"authn": "oidc-introspection"},
       "remove_when_unselected": [
-        "crates/infra-bearerauthn/src/introspection.rs"
+        "crates/infra-bearerauthn/src/introspection.rs",
+        "crates/infra-http/tests/authn_introspection/"
       ]
+    },
+    "http-tls-fixtures": {
+      "when": {"any": [{"grpc": "enabled"}, {"authn": "oidc-introspection"}]},
+      "remove_when_unselected": []
     },
     "grpc": {
       "when": {"grpc": "enabled"},
@@ -393,7 +393,7 @@
       ]
     },
     "service-test-tls": {
-      "when": {"any": [{"service_auth": "jwt"}, {"outbound_auth": "oauth2-client-credentials"}]},
+      "when": {"any": [{"service_auth": "jwt"}, {"outbound_auth": "oauth2-client-credentials"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "tls-fixtures": {
@@ -428,6 +428,7 @@
     "http-idempotency-mounted": {
       "when": {"all": [{"http_idempotency": "postgres"}, {"authn": "oidc-introspection"}]},
       "remove_when_unselected": [
+        "crates/infra-http/tests/authn_introspection/idempotency.rs",
         "test/tests/http_idempotency/mounted.rs"
       ]
     },

@@ -170,12 +170,12 @@ async fn check_transport_statuses(destination: &str) {
         );
         let response = tokio::time::timeout(WAIT, client.call(request))
             .await
-            .unwrap()
-            .unwrap();
+            .expect("gRPC call completes within budget")
+            .expect("gRPC call returns response");
         if method == "Header" {
             assert_eq!(
                 tonic::Status::from_header_map(response.headers())
-                    .unwrap()
+                    .expect("header-only response carries grpc-status")
                     .code(),
                 expected
             );
@@ -184,16 +184,16 @@ async fn check_transport_statuses(destination: &str) {
             if method == "Trailer" {
                 let data = tokio::time::timeout(WAIT, body.frame())
                     .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap()
+                    .expect("trailer response yields a data frame within budget")
+                    .expect("trailer response stream yields a frame")
+                    .expect("trailer response frame decodes")
                     .into_data()
-                    .unwrap();
+                    .expect("first frame is data");
                 assert_eq!(data, bytes::Bytes::from_static(b"data"));
             }
             let status = tokio::time::timeout(WAIT, trailer_status(&mut body))
                 .await
-                .unwrap();
+                .expect("trailer status arrives within budget");
             assert_eq!(status, expected);
             assert!(body.frame().await.is_none());
         }

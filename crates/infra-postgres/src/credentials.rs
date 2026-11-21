@@ -144,11 +144,10 @@ mod tests {
     )]
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
         use metrics::Key;
-        use metrics_util::debugging::DebuggingRecorder;
+        use observe_test_support::{MetricsCapture, counter};
 
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let metrics = MetricsCapture::new();
+        let _recorder = metrics.install_default();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("password");
         std::fs::write(&file, "first\n").unwrap();
@@ -172,9 +171,8 @@ mod tests {
         assert_eq!(password(&pool).as_deref(), Some("first"));
         assert!(!format!("{:?}", pool.connect_options()).contains("first"));
         assert!(
-            snapshotter
-                .snapshot()
-                .into_vec()
+            metrics
+                .snapshot_vec()
                 .iter()
                 .all(|(key, ..)| key.key().name() != REFRESHES_METRIC)
         );
@@ -205,11 +203,11 @@ mod tests {
         assert!(!refresh.read_error_logged);
         assert_eq!(password(&pool).as_deref(), Some("third"));
         dir.close().unwrap();
-        let snapshot = snapshotter.snapshot().into_hashmap();
+        let snapshot = metrics.snapshot();
         assert_eq!(snapshot.len(), 3, "{snapshot:?}");
         for (outcome, expected) in [("installed", 3), ("read_failed", 3), ("unchanged", 1)] {
             let target = Key::from_parts(REFRESHES_METRIC, &[("outcome", outcome)]);
-            let actual = crate::test_metrics::counter(&snapshot, &target);
+            let actual = counter(&snapshot, &target);
             assert_eq!(actual, Some(expected), "{target}: {snapshot:?}");
         }
         let debug = format!("{snapshot:?}");

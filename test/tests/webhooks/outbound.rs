@@ -12,15 +12,12 @@ use infra_webhooks::{
     outbound::{Dispatcher, JSON_CONTENT_TYPE, OutboundError, Producer},
     protocol::KeyRing,
 };
+use integration_tests::jobs::EngineRun;
 use sqlx::{PgPool, Row};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     task::JoinHandle,
-};
-use tokio_util::{
-    sync::{CancellationToken, DropGuard},
-    task::TaskTracker,
 };
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -91,39 +88,15 @@ async fn job_count(pool: &PgPool) -> i64 {
         .expect("delivery count")
 }
 
-struct RunningDispatcher {
-    cancel: CancellationToken,
-    tracker: TaskTracker,
-    started: infra_jobs::Started,
-    _cancel_guard: DropGuard,
-}
-
-impl RunningDispatcher {
-    fn start(pool: &Pool, dispatcher: Dispatcher, workers: u32) -> Self {
-        let mut kinds = KindsBuilder::new();
-        dispatcher.register(&mut kinds, None);
-        let engine = Engine::new(
-            pool.clone(),
-            kinds.validate().expect("delivery registry"),
-            NonZeroU32::new(workers).expect("at least one worker"),
-        );
-        let cancel = CancellationToken::new();
-        let tracker = TaskTracker::new();
-        let started = engine.start(&tracker, &cancel);
-        tracker.close();
-        let cancel_guard = cancel.clone().drop_guard();
-        Self {
-            cancel,
-            tracker,
-            started,
-            _cancel_guard: cancel_guard,
-        }
-    }
-
-    async fn stop(self) {
-        self.cancel.cancel();
-        super::bounded("the delivery tasks join", self.tracker.wait()).await;
-    }
+fn start_dispatcher(pool: &Pool, dispatcher: Dispatcher, workers: u32) -> EngineRun {
+    let mut kinds = KindsBuilder::new();
+    dispatcher.register(&mut kinds, None);
+    let engine = Engine::new(
+        pool.clone(),
+        kinds.validate().expect("delivery registry"),
+        NonZeroU32::new(workers).expect("at least one worker"),
+    );
+    EngineRun::start(engine)
 }
 
 async fn job_is(pool: &PgPool, id: &str, state: &str, attempts: i16) {
@@ -294,7 +267,7 @@ async fn queued_delivery_finishes_on_headers_and_respects_the_receiver_retry_flo
         let (address, release, peer) = status_peer(head).await;
         let configured = outbound(&["partner"]);
         let id = enqueue(&app_pool, &configured, "partner", b"{\"event\":\"status\"}").await;
-        let running = RunningDispatcher::start(
+        let running = start_dispatcher(
             &app_pool,
             dispatcher(&[("partner", "/events?source=queue")], address),
             1,
@@ -332,7 +305,7 @@ async fn queued_delivery_finishes_on_headers_and_respects_the_receiver_retry_flo
         super::bounded("fixture peer joins", peer)
             .await
             .expect("fixture succeeds");
-        running.stop().await;
+        running.cancel_and_join(super::WAIT).await;
         if expected_state == "pending" {
             sqlx::query(
                 "UPDATE background_jobs SET not_before = statement_timestamp() + interval '1 day' \
@@ -401,8 +374,7 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
     });
     let body = b"{\"event\":\"late-completion\"}";
     let id = enqueue(&app_pool, &outbound(&["partner"]), "partner", body).await;
-    let original =
-        RunningDispatcher::start(&app_pool, dispatcher(&[("partner", "/events")], address), 1);
+    let original = start_dispatcher(&app_pool, dispatcher(&[("partner", "/events")], address), 1);
     let (first_id, first_body) =
         super::bounded("first request reached the receiver", first_received)
             .await
@@ -423,7 +395,7 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
     .await
     .expect("stage expiry while the first response is held");
     let replacement =
-        RunningDispatcher::start(&app_pool, dispatcher(&[("partner", "/events")], address), 1);
+        start_dispatcher(&app_pool, dispatcher(&[("partner", "/events")], address), 1);
     let (second_id, second_body) =
         super::bounded("reclaim delivers before the old response", second_received)
             .await
@@ -463,8 +435,8 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
     super::bounded("both receiver connections join", peer)
         .await
         .expect("receiver succeeds");
-    original.stop().await;
-    replacement.stop().await;
+    original.cancel_and_join(super::WAIT).await;
+    replacement.cancel_and_join(super::WAIT).await;
     super::close_pools(&[&app_pool]).await;
 }
 
@@ -493,7 +465,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
         .mount(&server)
         .await;
     let oversized = format!("/{}", "a".repeat(65_534));
-    let running = RunningDispatcher::start(
+    let running = start_dispatcher(
         &app_pool,
         dispatcher(
             &[
@@ -551,7 +523,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     );
     assert_eq!(request.body, body);
     server.verify().await;
-    running.stop().await;
+    running.cancel_and_join(super::WAIT).await;
     super::close_pools(&[&app_pool]).await;
 }
 
@@ -566,7 +538,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
         .await
         .expect("historical retry position");
 
-    let running = RunningDispatcher::start(&app_pool, Dispatcher::new([]), 1);
+    let running = start_dispatcher(&app_pool, Dispatcher::new([]), 1);
     job_is(&pool, &id, "failed", 20).await;
     let row = sqlx::query(
         "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
@@ -587,7 +559,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
             .as_deref(),
         Some("missing_endpoint")
     );
-    running.stop().await;
+    running.cancel_and_join(super::WAIT).await;
     super::close_pools(&[&app_pool]).await;
 }
 
@@ -602,7 +574,7 @@ async fn an_undecodable_payload_is_retried_not_failed_permanently(pool: PgPool) 
         .execute(&pool)
         .await
         .expect("undecodable payload is stored");
-    let running = RunningDispatcher::start(
+    let running = start_dispatcher(
         &app_pool,
         dispatcher(
             &[("partner", "/never-called")],
@@ -628,6 +600,6 @@ async fn an_undecodable_payload_is_retried_not_failed_permanently(pool: PgPool) 
             .expect("error summary")
             .is_some_and(|summary| summary.contains("does not decode"))
     );
-    running.stop().await;
+    running.cancel_and_join(super::WAIT).await;
     super::close_pools(&[&app_pool]).await;
 }

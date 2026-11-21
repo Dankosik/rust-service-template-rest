@@ -524,35 +524,6 @@ async fn a_slow_probe_does_not_spend_another_probes_budget() {
     assert_eq!(control.reader().verdict(), Ok(()));
 }
 
-#[derive(Clone, Default)]
-struct Events(Arc<std::sync::Mutex<Vec<String>>>);
-
-impl tracing::Subscriber for Events {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Message(String);
-        impl tracing::field::Visit for Message {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = format!("{value:?}");
-                }
-            }
-        }
-        let mut message = Message(String::new());
-        event.record(&mut message);
-        self.0.lock().unwrap().push(message.0);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 fn recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder()
 }
@@ -619,9 +590,8 @@ async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
 
 #[tokio::test(start_paused = true)]
 async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
-    let events = Events::default();
-    let _guard = tracing::subscriber::set_default(events.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let events = observe_test_support::EventCapture::new();
+    let _guard = events.install_default();
     let (readiness, flag, _) = flaky(true);
     let mut refresher = activate(readiness).await;
     flag.store(false, Ordering::Relaxed);
@@ -636,8 +606,13 @@ async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
     tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
     refresher.refresh().await;
 
+    let captured = events.snapshot();
+    let messages: Vec<_> = captured
+        .iter()
+        .map(|event| event.message().unwrap_or_default())
+        .collect();
     assert_eq!(
-        *events.0.lock().unwrap(),
+        messages,
         [
             "readiness_check_failed",
             "readiness_check_failed",
@@ -653,9 +628,8 @@ async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
 
 #[tokio::test(start_paused = true)]
 async fn a_draining_owner_skips_probes_and_logs_no_check_outcome() {
-    let events = Events::default();
-    let _guard = tracing::subscriber::set_default(events.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let events = observe_test_support::EventCapture::new();
+    let _guard = events.install_default();
     let (readiness, flag, calls) = flaky(true);
     let control = readiness.control();
     let mut refresher = activate(readiness).await;
@@ -666,7 +640,8 @@ async fn a_draining_owner_skips_probes_and_logs_no_check_outcome() {
     }
 
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert!(events.0.lock().unwrap().is_empty(), "{:?}", events.0);
+    let captured = events.snapshot();
+    assert!(captured.is_empty(), "{captured:?}");
 }
 
 // template:begin grpc:health-changed-verdict-test

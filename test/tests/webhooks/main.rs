@@ -6,12 +6,6 @@
 )]
 
 // template:begin inbound-webhooks:test-webhooks-inbound-modules
-#[allow(
-    dead_code,
-    reason = "the shared transport also supplies pending-BEGIN cancellation proof to the postgres integration target"
-)]
-#[path = "../support/commit_proxy.rs"]
-mod commit_proxy;
 mod inbound;
 // template:end inbound-webhooks:test-webhooks-inbound-modules
 // template:begin webhooks:test-webhooks-outbound-module

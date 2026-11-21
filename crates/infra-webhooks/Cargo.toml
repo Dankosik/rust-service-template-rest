@@ -52,9 +52,10 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 [dev-dependencies]
 metrics-util = { workspace = true, features = ["debugging"] }
 # template:begin inbound-webhooks:webhooks-inbound-test-dependencies
+futures-util = { workspace = true, features = ["std"] }
 infra-postgres = { workspace = true, features = ["test-support"] }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:webhooks-inbound-test-dependencies
 proptest = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }

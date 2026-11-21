@@ -1000,8 +1000,7 @@ async fn the_span_names_the_region_only_on_amazon() {
         return;
     }
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
 
     let amazon = ObjectStorage::try_new(options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
@@ -1088,64 +1087,48 @@ pub(super) fn in_tracing_child(test_name: &str) -> bool {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Records(Arc<Mutex<Vec<String>>>);
-
-struct Line(String);
-
-impl tracing::field::Visit for Line {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        let _ = write!(self.0, " {}={value}", field.name());
-    }
-
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let _ = write!(self.0, " {}={value:?}", field.name());
-    }
+pub(super) struct Records {
+    spans: observe_test_support::SpanCapture,
+    events: observe_test_support::EventCapture,
 }
 
 impl Records {
-    fn push(&self, line: Line) {
-        self.0.lock().unwrap().push(line.0);
+    pub(super) fn install_default(&self) -> observe_test_support::ScopedDispatch {
+        observe_test_support::install_spans_and_events(&self.spans, &self.events)
     }
 
     pub(super) fn matching(&self, kind: &str, field: &str) -> Vec<String> {
-        let lines = self.0.lock().unwrap();
+        let render = |prefix: &str, fields: &observe_test_support::FieldMap| {
+            let mut line = prefix.to_owned();
+            for (name, value) in fields {
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(value);
+                let _ = write!(line, " {name}={value}");
+            }
+            line
+        };
+        let lines: Vec<String> = match kind {
+            "span" => self
+                .spans
+                .snapshot()
+                .into_iter()
+                .map(|span| render("span", &span.fields))
+                .collect(),
+            "event" => self
+                .events
+                .snapshot()
+                .into_iter()
+                .map(|event| render("event", &event.fields))
+                .collect(),
+            _ => Vec::new(),
+        };
         lines
-            .iter()
-            .filter(|line| line.starts_with(kind) && line.contains(field))
-            .cloned()
+            .into_iter()
+            .filter(|line| line.contains(field))
             .collect()
     }
-}
-
-impl tracing::Subscriber for Records {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        let mut line = Line("span".to_owned());
-        span.record(&mut line);
-        self.push(line);
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-        let mut line = Line("span".to_owned());
-        values.record(&mut line);
-        self.push(line);
-    }
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut line = Line("event".to_owned());
-        event.record(&mut line);
-        self.push(line);
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 #[tokio::test]
@@ -1171,8 +1154,7 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     .await;
     let storage = stub.storage(|_| {});
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
 
     assert_eq!(
         storage.head(&parent, &key()).await,
@@ -1515,22 +1497,8 @@ impl aws_smithy_runtime_api::client::dns::ResolveDns for FixtureResolver {
 }
 
 fn tls_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, String) {
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-
     let material = tls_test_support::TlsMaterial::new(host);
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
-    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(vec![material.cert.into()], key)
-    .unwrap();
-    (
-        tokio_rustls::TlsAcceptor::from(Arc::new(server)),
-        material.root_pem,
-    )
+    (material.acceptor(), material.root_pem)
 }
 
 async fn answer_tls_s3(mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>) {

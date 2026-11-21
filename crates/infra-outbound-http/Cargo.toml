@@ -37,6 +37,7 @@ tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["htt
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
+observe-test-support = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 tls-test-support = { workspace = true }

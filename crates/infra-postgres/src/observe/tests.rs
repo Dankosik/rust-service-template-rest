@@ -1,59 +1,17 @@
 use metrics::Key;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use metrics_util::debugging::DebuggingRecorder;
+use observe_test_support::{EventCapture, MetricsCapture, gauge, histogram_len};
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
 use crate::Dsn;
 
-pub(crate) type EventFields = std::collections::BTreeMap<String, String>;
-
-#[derive(Clone)]
-pub(crate) struct Events {
-    pub(crate) records: std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>,
-    level: tracing::Level,
-}
-
-impl Events {
-    pub(crate) fn new(level: tracing::Level) -> Self {
-        Self {
-            records: std::sync::Arc::default(),
-            level,
-        }
-    }
-}
-
-impl tracing::Subscriber for Events {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Fields(EventFields);
-        impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                self.0.insert(field.name().to_owned(), format!("{value:?}"));
-            }
-        }
-        assert_eq!(*event.metadata().level(), self.level);
-        let mut fields = Fields(std::collections::BTreeMap::new());
-        event.record(&mut fields);
-        self.records.lock().unwrap().push(fields.0);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 #[tokio::test(start_paused = true)]
 async fn acquisition_reports_only_slow_success_and_native_timeout() {
-    let events = Events::new(tracing::Level::WARN);
+    let events = EventCapture::new();
     let started = tokio::time::Instant::now();
-    let _subscriber = tracing::subscriber::set_default(events.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = events.install_default();
     let budget = Duration::from_millis(2500);
     assert_eq!(
         observe_acquisition("fast", budget, async { Ok(7) })
@@ -93,9 +51,15 @@ async fn acquisition_reports_only_slow_success_and_native_timeout() {
         .await
         .is_err()
     );
-    let events = events.records.lock().unwrap();
-    assert_eq!(events.len(), 2, "{events:?}");
-    let slow = &events[0];
+    let captured = events.snapshot();
+    assert_eq!(captured.len(), 2, "{captured:?}");
+    assert!(
+        captured
+            .iter()
+            .all(|event| event.level == tracing::Level::WARN),
+        "{captured:?}"
+    );
+    let slow = &captured[0].fields;
     assert_eq!(slow["message"], "postgres_pool_acquire_slow");
     assert_eq!(slow["operation"], "\"slow\"");
     assert_eq!(slow["pool"], "\"postgres\"");
@@ -103,7 +67,7 @@ async fn acquisition_reports_only_slow_success_and_native_timeout() {
     let elapsed = slow["elapsed_seconds"].parse::<f64>().unwrap();
     assert!(elapsed > 1.0 && elapsed <= started.elapsed().as_secs_f64());
     assert_eq!(slow.len(), 5, "no additional disclosure fields");
-    let timeout = &events[1];
+    let timeout = &captured[1].fields;
     assert_eq!(timeout["message"], "postgres_pool_acquire_timeout");
     assert_eq!(timeout["operation"], "\"failed\"");
     assert_eq!(timeout["pool"], "\"postgres\"");
@@ -128,9 +92,8 @@ fn every_boundary_failure_has_its_own_outcome() {
 
 #[tokio::test]
 async fn separate_pools_report_their_own_limits() {
-    let recorder = DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let metrics = MetricsCapture::new();
+    let _recorder = metrics.install_default();
     let pool = |max_connections| {
         Pool::from_test_pool(
             PgPoolOptions::new()
@@ -140,13 +103,13 @@ async fn separate_pools_report_their_own_limits() {
     };
     pool(5).record_metrics("write");
     pool(20).record_metrics("read");
-    let snapshot = snapshotter.snapshot().into_hashmap();
+    let snapshot = metrics.snapshot();
     for (pool_name, expected) in [("write", 5.0), ("read", 20.0)] {
         let target = Key::from_parts(
             CONNECTION_MAX_METRIC,
             &[("db.client.connection.pool.name", pool_name)],
         );
-        let actual = crate::test_metrics::gauge(&snapshot, &target);
+        let actual = gauge(&snapshot, &target);
         assert_eq!(actual, Some(expected), "{target}: {snapshot:?}");
     }
 }
@@ -306,16 +269,8 @@ async fn a_prepared_pool_records_wait_and_outcome_through_cached_metrics() {
         TRANSACTION_DURATION_METRIC,
         &[("outcome", "acquire_failed")],
     );
-    assert_eq!(
-        crate::test_metrics::histogram_len(&snapshot, &wait),
-        Some(2),
-        "{snapshot:?}"
-    );
-    assert_eq!(
-        crate::test_metrics::histogram_len(&snapshot, &duration),
-        Some(2),
-        "{snapshot:?}"
-    );
+    assert_eq!(histogram_len(&snapshot, &wait), Some(2), "{snapshot:?}");
+    assert_eq!(histogram_len(&snapshot, &duration), Some(2), "{snapshot:?}");
 }
 
 #[tokio::test]
@@ -421,21 +376,14 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
         ],
     );
     {
-        let next_recorder = DebuggingRecorder::new();
-        let _recorder = metrics::set_default_local_recorder(&next_recorder);
+        let next = MetricsCapture::new();
+        let _recorder = next.install_default();
         assert_eq!(read_widget().await.unwrap(), 7);
-        let snapshot = next_recorder.snapshotter().snapshot().into_hashmap();
-        assert_eq!(
-            crate::test_metrics::histogram_len(&snapshot, &success),
-            Some(1)
-        );
+        assert_eq!(next.histogram_len(&success), Some(1));
     }
 
     let snapshot = snapshotter.snapshot().into_hashmap();
-    assert_eq!(
-        crate::test_metrics::histogram_len(&snapshot, &success),
-        Some(2)
-    );
+    assert_eq!(histogram_len(&snapshot, &success), Some(2));
     for target in [
         Key::from_parts(
             OPERATION_DURATION_METRIC,
@@ -462,7 +410,7 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
             ],
         ),
     ] {
-        let count = crate::test_metrics::histogram_len(&snapshot, &target);
+        let count = histogram_len(&snapshot, &target);
         assert_eq!(count, Some(1), "{target} is missing from {snapshot:?}");
     }
     assert_eq!(snapshot.len(), 4, "{snapshot:?}");

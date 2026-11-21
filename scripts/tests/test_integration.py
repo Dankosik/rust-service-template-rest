@@ -34,14 +34,29 @@ class _FakeStack:
 
 
 class IntegrationRunnerTests(unittest.TestCase):
-    def test_db_test_args_selects_only_retained_db_targets(self) -> None:
+    def test_db_test_args_selects_only_integration_manifest_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "test/tests/jobs").mkdir(parents=True)
-            (root / "test/tests/postgres.rs").write_text("", encoding="utf-8")
-            (root / "test/tests/jobs/main.rs").write_text("", encoding="utf-8")
-            (root / "test/tests/utility_values.rs").write_text("", encoding="utf-8")
-            self.assertEqual(integration._db_test_args(root), ["--test", "postgres", "--test", "jobs"])
+            (root / "test").mkdir(parents=True)
+            (root / "test/Cargo.toml").write_text(
+                """
+                [[test]]
+                name = "postgres"
+                path = "tests/postgres.rs"
+                required-features = ["integration"]
+
+                [[test]]
+                name = "orders"
+                path = "tests/orders.rs"
+                required-features = ["integration"]
+
+                [[test]]
+                name = "outbound_http"
+                path = "tests/outbound_http.rs"
+                """,
+                encoding="utf-8",
+            )
+            self.assertEqual(integration._db_test_args(root), ["--test", "postgres", "--test", "orders"])
 
     def test_cmd_db_uses_unified_nextest_overlaps_startup_and_reuses_postgres_for_sqlx_check(self) -> None:
         if not (lib.ROOT / "crates/infra-postgres").is_dir():

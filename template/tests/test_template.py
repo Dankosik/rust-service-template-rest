@@ -79,7 +79,7 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(pg_only["integration_object_storage"])
         self.assertFalse(pg_only["integration_messaging"])
 
-        util_test = DETECT.classify(ROOT, ["test/tests/utility_values.rs"])
+        util_test = DETECT.classify(ROOT, ["crates/utility-recipes/tests/utility_values.rs"])
         self.assertTrue(util_test["rust"])
         self.assertFalse(util_test["integration"])
         self.assertFalse(util_test["integration_db"])

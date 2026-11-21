@@ -15,15 +15,12 @@ fn handle<T: EventPayload + serde::de::DeserializeOwned + 'static>(
     registry.declare(route).unwrap().handle(accept);
 }
 
+#[track_caller]
 fn assert_durable_refusal(logged: &Logged, operation: &str, error_type: &str) {
     assert!(
-        logged.lock().unwrap().iter().any(|event| {
-            event
-                .iter()
-                .any(|(name, value)| *name == "operation" && value == operation)
-                && event
-                    .iter()
-                    .any(|(name, value)| *name == "error.type" && value == error_type)
+        logged.snapshot().iter().any(|event| {
+            event.unquoted("operation") == Some(operation)
+                && event.unquoted("error.type") == Some(error_type)
         }),
         "{operation} must report {error_type}"
     );

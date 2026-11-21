@@ -10,16 +10,16 @@ use infra_jobs::{
     compare_live_payload, enqueue, enqueue_delayed, enqueue_unique,
 };
 use infra_postgres::{Dsn, Pool, SslPolicy, Tx, TxError, TxOptions};
-use integration_tests::jobs::{self, Probe, ProbeAction};
+use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault};
+use integration_tests::jobs::{self, EngineRun, Probe, ProbeAction};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 use tokio::sync::{Notify, watch};
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::AttemptError;
-use super::commit_proxy::{Boundary, CommitProxy, Fault};
 
 const POLL: Duration = Duration::from_millis(50);
 const RELEASE_BUDGET: Duration = Duration::from_secs(2);
@@ -64,6 +64,7 @@ impl JobKind for NumericPayload {
     const NAME: KindName = KindName::new("test.numeric_payload");
 }
 
+#[track_caller]
 fn must<T>(result: Result<T, AttemptError>, what: &str) -> T {
     result.unwrap_or_else(|err| panic!("{what}: {err}"))
 }
@@ -82,13 +83,6 @@ struct JobView {
     claim_expires_us: Option<i64>,
     created_at_us: i64,
     attempted_by: Option<String>,
-}
-
-struct EngineRun {
-    started: infra_jobs::Started,
-    tracker: TaskTracker,
-    cancel: CancellationToken,
-    _cancel_guard: DropGuard,
 }
 
 fn probe_registry(max_attempts: u16, timeout: Duration) -> infra_jobs::Kinds {
@@ -125,17 +119,7 @@ fn start(pool: &Pool, registry: infra_jobs::Kinds, workers: u32) -> EngineRun {
         registry,
         NonZeroU32::new(workers).expect("at least one worker"),
     );
-    let tracker = TaskTracker::new();
-    let cancel = CancellationToken::new();
-    let started = engine.start(&tracker, &cancel);
-    tracker.close();
-    let cancel_guard = cancel.clone().drop_guard();
-    EngineRun {
-        started,
-        tracker,
-        cancel,
-        _cancel_guard: cancel_guard,
-    }
+    EngineRun::start(engine)
 }
 
 async fn open(pool: &PgPool, workers: u32) -> Pool {

@@ -15,6 +15,8 @@ pub mod reading_counter;
 
 // template:end jobs-reference:test-lib-reading-counter
 // template:begin postgres:test-lib-postgres-helpers
+pub mod commit_proxy;
+
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -95,6 +97,7 @@ pub async fn close_pools(pools: &[&Pool]) {
     }
 }
 
+#[track_caller]
 pub fn propagate_join_panic(result: Result<(), tokio::task::JoinError>) {
     if let Err(error) = result
         && let Ok(payload) = error.try_into_panic()

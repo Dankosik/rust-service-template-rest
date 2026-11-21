@@ -5,13 +5,6 @@
     reason = "integration tests are test code; the production levels for unwrap, expect and panic do not apply"
 )]
 
-#[allow(
-    dead_code,
-    reason = "shared transport across postgres, http_idempotency, webhooks, messaging_recovery, and jobs integration targets"
-)]
-#[path = "support/commit_proxy.rs"]
-mod commit_proxy;
-
 #[path = "postgres/operational_recovery.rs"]
 mod operational_recovery;
 
@@ -20,13 +13,13 @@ use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use backon::{ConstantBuilder, Retryable};
-use commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::test_support::PASSWORD_REFRESH_INTERVAL;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, Pool, PoolOptions, PostgresProbe,
     SessionSettingsSource, SslPolicy, TxError, TxOptions, sqlstate,
 };
+use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
 use integration_tests::{
     DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, propagate_join_panic, url_for,
 };
@@ -35,14 +28,11 @@ use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{AssertSqlSafe, Connection, Executor, PgPool};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
-use tracing_subscriber::layer::SubscriberExt as _;
 
 const APP: &str = "integration-tests";
 
-type EventFields = std::collections::BTreeMap<String, String>;
-
 #[derive(Clone, Default)]
-struct PoolEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
+struct PoolEvents(observe_test_support::EventCapture);
 
 impl PoolEvents {
     fn subscriber(&self) -> tracing::Dispatch {
@@ -50,36 +40,15 @@ impl PoolEvents {
     }
 
     fn subscriber_for(&self, targets: &'static [&'static str]) -> tracing::Dispatch {
-        let filter =
-            tracing_subscriber::filter::filter_fn(move |meta| targets.contains(&meta.target()));
-        tracing::Dispatch::new(
-            tracing_subscriber::Registry::default()
-                .with(self.clone())
-                .with(filter),
-        )
+        self.0.dispatch_for_targets(targets)
     }
 
-    fn take(&self) -> Vec<EventFields> {
-        std::mem::take(&mut *self.0.lock().unwrap())
-    }
-}
-
-impl<S> tracing_subscriber::Layer<S> for PoolEvents
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _context: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut fields = EventFields::new();
-        event.record(
-            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                fields.insert(field.name().to_owned(), format!("{value:?}"));
-            },
-        );
-        self.0.lock().unwrap().push(fields);
+    fn take(&self) -> Vec<observe_test_support::FieldMap> {
+        self.0
+            .take()
+            .into_iter()
+            .map(|event| event.fields)
+            .collect()
     }
 }
 
@@ -2126,24 +2095,11 @@ struct PostgresTlsMaterial {
 
 impl PostgresTlsMaterial {
     fn new() -> Self {
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-        use tokio_rustls::rustls;
-
         let material = tls_test_support::TlsMaterial::new("localhost");
-        let tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(material.cert)],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
-        )
-        .unwrap();
+        let acceptor = material.acceptor();
         Self {
             root: material.root_pem,
-            acceptor: tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls)),
+            acceptor,
         }
     }
 }

@@ -127,12 +127,12 @@ time = { workspace = true, features = ["std"] }
 # template:end runtime-progress:service-runtime-progress-dependencies
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies
 # The process test (tests/grpc_process.rs). The runtime-progress proof implies
-# this profile and also uses rcgen and tokio-rustls.
+# this profile and also uses infra-bearerauthn test-support and tokio-rustls.
+infra-bearerauthn = { workspace = true, features = ["test-support"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 tonic-health = { workspace = true }
 opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "trace"] }
 prost = { workspace = true }
-rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
 # template:begin service-auth:service-service-auth-test-dependency

@@ -533,9 +533,15 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFi
         values: &tracing::span::Record<'_>,
         _: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut fields = FieldVisitor(SpanFields::new());
-        values.record(&mut fields);
-        if fields.0.contains_key("outbound.outcome") {
+        let mut finished = false;
+        values.record(
+            &mut |field: &tracing::field::Field, _: &dyn std::fmt::Debug| {
+                if field.name() == "outbound.outcome" {
+                    finished = true;
+                }
+            },
+        );
+        if finished {
             tokio::time::pause();
             let mut advance = std::pin::pin!(tokio::time::advance(Duration::from_secs(20)));
             let _ = std::future::Future::poll(
@@ -548,14 +554,21 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFi
 
 #[tokio::test]
 async fn terminal_observation_preserves_the_timely_operation_result_once() {
+    use observe_test_support::{SpanCapture, install_default};
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
+    let diagnostics = SpanCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber =
-        tracing::subscriber::set_default(diagnostics.clone().with(AdvanceOnAttemptFinish));
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry()
+            .with(diagnostics.clone())
+            .with(AdvanceOnAttemptFinish)
+            .with(tracing_subscriber::filter::filter_fn(|meta| {
+                meta.is_span() && meta.name() == "outbound_http"
+            })),
+    );
+    let _subscriber = install_default(&dispatch);
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
@@ -580,9 +593,9 @@ async fn terminal_observation_preserves_the_timely_operation_result_once() {
         recorded_count(&scrape, &["outbound_outcome=\"response\""]),
         1
     );
-    let spans = diagnostics.0.lock().unwrap();
+    let spans = diagnostics.snapshot();
     assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0]["outbound.outcome"], "\"response\"");
+    assert_eq!(spans[0].field("outbound.outcome"), Some("\"response\""));
 }
 
 struct ResponseWake(tokio::sync::Notify);

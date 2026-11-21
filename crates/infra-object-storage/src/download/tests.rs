@@ -300,8 +300,7 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
         return;
     }
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
     let cases = [
         (
             Some(Duration::from_secs(2)),
@@ -602,8 +601,7 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
         return;
     }
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
     let (body, destroyed) = body(None);
     let (mut download, slots) = open(body, 4, Duration::from_mins(1));
     download.timer.abort();

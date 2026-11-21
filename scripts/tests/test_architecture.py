@@ -37,6 +37,59 @@ class ArchitectureTests(unittest.TestCase):
             self.assertTrue(any("forbids crates/b/Cargo.toml" in i for i in issues))
             self.assertTrue(any("#[path] reaches outside its package" in i for i in issues))
 
+    def test_rejects_test_support_workspace_dep_and_cross_package_include(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "crates/helper/src").mkdir(parents=True)
+            (root / "crates/owner/src").mkdir(parents=True)
+            (root / "crates/owner/tests/fixtures").mkdir(parents=True)
+            (root / "api").mkdir(parents=True)
+            (root / "api/shared.yaml").write_text("ok: true\n", encoding="utf-8")
+            (root / "crates/owner/tests/fixtures/secret.der").write_bytes(b"der")
+            (root / "crates/helper/src/lib.rs").write_text(
+                'const OK: &str = include_str!("../../../api/shared.yaml");\n'
+                'const LEAK: &[u8] = include_bytes!("../../owner/tests/fixtures/secret.der");\n',
+                encoding="utf-8",
+            )
+            (root / "crates/owner/src/lib.rs").write_text("", encoding="utf-8")
+            policy = {
+                "roles": {
+                    "leaf": {"rule": "leaf-only"},
+                    "test-support": {
+                        "rule": "test-support-no-workspace-dependencies",
+                        "test_only": True,
+                        "no_workspace_dependencies": True,
+                    },
+                },
+                "members": {
+                    "crates/helper/Cargo.toml": {"role": "test-support"},
+                    "crates/owner/Cargo.toml": {"role": "leaf"},
+                },
+            }
+            meta = {
+                "workspace_members": ["helper", "owner"],
+                "packages": [
+                    {
+                        "id": "helper",
+                        "name": "helper",
+                        "manifest_path": str(root / "crates/helper/Cargo.toml"),
+                        "dependencies": [
+                            {"name": "owner", "kind": None, "optional": False, "path": str(root / "crates/owner")}
+                        ],
+                    },
+                    {
+                        "id": "owner",
+                        "name": "owner",
+                        "manifest_path": str(root / "crates/owner/Cargo.toml"),
+                        "dependencies": [],
+                    },
+                ],
+            }
+            issues = architecture.check(meta, policy, root)
+            self.assertTrue(any("forbids workspace dependency (crates/owner/Cargo.toml)" in i for i in issues))
+            self.assertTrue(any("include_*! reaches into another package" in i for i in issues))
+            self.assertFalse(any("api/shared.yaml" in i for i in issues))
+
     def test_allow_all_dependents_and_stale_allowances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

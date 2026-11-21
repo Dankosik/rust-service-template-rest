@@ -46,12 +46,7 @@ pub(crate) use unit::*;
 
 #[cfg(test)]
 mod unit {
-    use std::{
-        collections::BTreeMap,
-        net::SocketAddr,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::{net::SocketAddr, time::Duration};
 
     use bytes::Bytes;
     use http::Request;
@@ -63,14 +58,7 @@ mod unit {
         sync::oneshot,
         task::JoinHandle,
     };
-    use tokio_rustls::{
-        TlsAcceptor,
-        rustls::{
-            ServerConfig,
-            pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-        },
-        server::TlsStream,
-    };
+    use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
     use tls_test_support::TlsMaterial;
 
@@ -83,50 +71,6 @@ mod unit {
 
     pub(crate) const FIXTURE_HOST: &str = "provider.fixture.test";
     pub(crate) const FIXTURE_URL: &str = "https://provider.fixture.test/fixture";
-
-    pub(crate) type SpanFields = BTreeMap<&'static str, String>;
-
-    #[derive(Clone, Default)]
-    pub(crate) struct SpanDiagnostics(pub(crate) Arc<Mutex<Vec<SpanFields>>>);
-
-    pub(crate) struct FieldVisitor(pub(crate) SpanFields);
-
-    impl tracing::field::Visit for FieldVisitor {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.insert(field.name(), format!("{value:?}"));
-        }
-    }
-
-    impl tracing::Subscriber for SpanDiagnostics {
-        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            metadata.name() == "outbound_http"
-        }
-
-        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            let mut fields = FieldVisitor(SpanFields::new());
-            attributes.record(&mut fields);
-            let mut spans = self.0.lock().expect("span diagnostic lock");
-            spans.push(fields.0);
-            tracing::span::Id::from_u64(spans.len() as u64)
-        }
-
-        fn record(&self, id: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-            let mut fields = FieldVisitor(SpanFields::new());
-            values.record(&mut fields);
-            self.0
-                .lock()
-                .expect("span diagnostic lock")
-                .get_mut(usize::try_from(id.into_u64() - 1).expect("span index"))
-                .expect("outbound span exists")
-                .extend(fields.0);
-        }
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, _: &tracing::Event<'_>) {}
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
 
     pub(crate) fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
         PrometheusBuilder::new()
@@ -222,18 +166,7 @@ mod unit {
     }
 
     pub(crate) fn fixture_acceptor(material: &TlsMaterial) -> TlsAcceptor {
-        let config = ServerConfig::builder_with_provider(Arc::new(
-            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("fixture TLS protocol versions")
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(material.cert.clone())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
-        )
-        .expect("fixture certificate and key");
-        TlsAcceptor::from(Arc::new(config))
+        material.acceptor()
     }
 
     pub(crate) async fn read_request_headers<S: tokio::io::AsyncRead + Unpin>(

@@ -889,53 +889,12 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct SpanFields(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
-
-    struct Collect<'a>(&'a mut std::collections::BTreeMap<String, String>);
-
-    impl tracing::field::Visit for Collect<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.insert(field.name().to_owned(), format!("{value:?}"));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.insert(field.name().to_owned(), value.to_owned());
-        }
-    }
-
-    impl tracing::Subscriber for SpanFields {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            let mut spans = self.0.lock().unwrap();
-            let mut fields = std::collections::BTreeMap::new();
-            attributes.record(&mut Collect(&mut fields));
-            spans.push(fields);
-            tracing::span::Id::from_u64(spans.len() as u64)
-        }
-
-        fn record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-            let index = usize::try_from(span.into_u64()).unwrap() - 1;
-            values.record(&mut Collect(&mut self.0.lock().unwrap()[index]));
-        }
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, _: &tracing::Event<'_>) {}
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     #[test]
     fn the_attempt_span_is_named_for_its_kind_and_carries_the_outcome() {
         let id = JobId(uuid::Uuid::try_parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap());
-        let spans = SpanFields::default();
-        tracing::subscriber::with_default(spans.clone(), || {
+        let spans = observe_test_support::SpanCapture::new();
+        {
+            let _guard = spans.install_default();
             for handler_outcome in [
                 HandlerOutcome::Success(Completion::Pending),
                 HandlerOutcome::Error(JobError::retryable("fail")),
@@ -962,14 +921,14 @@ mod tests {
                     ),
                 );
             }
-        });
-        let spans = spans.0.lock().unwrap();
+        }
+        let spans = spans.snapshot();
         let seen: Vec<_> = spans
             .iter()
-            .map(|fields| {
+            .map(|span| {
                 (
-                    fields["outcome"].as_str(),
-                    fields.get("otel.status_code").map(String::as_str),
+                    span.unquoted("outcome").unwrap(),
+                    span.unquoted("otel.status_code"),
                 )
             })
             .collect();
@@ -983,10 +942,13 @@ mod tests {
             ]
         );
         let first = &spans[0];
-        assert_eq!(first["otel.name"], "process sample");
-        assert_eq!(first["otel.kind"], "consumer");
-        assert_eq!(first["job.kind"], "sample");
-        assert_eq!(first["job.id"], "01234567-89ab-cdef-fedc-ba9876543210");
-        assert_eq!(first["job.attempt"], "3");
+        assert_eq!(first.unquoted("otel.name"), Some("process sample"));
+        assert_eq!(first.unquoted("otel.kind"), Some("consumer"));
+        assert_eq!(first.unquoted("job.kind"), Some("sample"));
+        assert_eq!(
+            first.unquoted("job.id"),
+            Some("01234567-89ab-cdef-fedc-ba9876543210")
+        );
+        assert_eq!(first.unquoted("job.attempt"), Some("3"));
     }
 }

@@ -268,6 +268,7 @@ nix = { version = "0.31.3", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
+observe-test-support = { path = "crates/observe-test-support" }
 # template:begin tls-fixtures:workspace-tls-fixtures
 tls-test-support = { path = "crates/tls-test-support" }
 # template:end tls-fixtures:workspace-tls-fixtures

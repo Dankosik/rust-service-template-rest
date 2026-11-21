@@ -5,12 +5,6 @@
     reason = "a broken fixture or setup fails the test"
 )]
 
-#[allow(
-    dead_code,
-    reason = "the shared transport also supplies faults to other integration targets"
-)]
-#[path = "../support/commit_proxy.rs"]
-mod commit_proxy;
 // template:begin http-idempotency-mounted:http-idempotency-mounted-module
 mod mounted;
 // template:end http-idempotency-mounted:http-idempotency-mounted-module
@@ -40,7 +34,7 @@ use sqlx::{Executor as _, PgPool};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use commit_proxy::{CommitProxy, ReadyBoundary};
+use integration_tests::commit_proxy::{CommitProxy, ReadyBoundary};
 
 type Outcome<R> = Result<Attempted<R>, AttemptError>;
 

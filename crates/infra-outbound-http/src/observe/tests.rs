@@ -1,10 +1,8 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
+use observe_test_support::{EventCapture, SpanCapture};
 use operation_context::OperationContext;
 
 use tls_test_support::TlsMaterial;
@@ -123,10 +121,9 @@ async fn exercise_completed_attempts() {
 #[tokio::test]
 async fn observation_records_polled_attempts_once_without_request_data() {
     let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
+    let diagnostics = SpanCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = diagnostics.install_name("outbound_http");
     exercise_completed_attempts().await;
 
     let scrape = recorder.handle().render();
@@ -178,7 +175,7 @@ async fn observation_records_polled_attempts_once_without_request_data() {
         "a request without a template has no template label"
     );
 
-    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    let spans = diagnostics.snapshot();
     assert_eq!(
         spans.len(),
         5,
@@ -186,29 +183,28 @@ async fn observation_records_polled_attempts_once_without_request_data() {
     );
     let body_failure = spans
         .iter()
-        .find(|fields| {
-            fields
-                .get("error.type")
+        .find(|span| {
+            span.field("error.type")
                 .is_some_and(|value| value.contains("response_body_too_large"))
         })
         .expect("body-limit attempt span");
     assert!(
         body_failure
-            .get("http.response.status_code")
+            .field("http.response.status_code")
             .is_some_and(|value| value.contains("502"))
     );
     assert!(
         body_failure
-            .get("http.request.method")
+            .field("http.request.method")
             .is_some_and(|value| value.contains("_OTHER"))
     );
     assert!(
         body_failure
-            .get("otel.status_code")
+            .field("otel.status_code")
             .is_some_and(|value| value.contains("ERROR"))
     );
-    for fields in spans.iter() {
-        let fields = format!("{fields:?}");
+    for span in &spans {
+        let fields = format!("{:?}", span.fields);
         for secret in REQUEST_SENTINELS {
             assert!(!fields.contains(secret), "span disclosed request data");
         }
@@ -344,10 +340,9 @@ async fn exercise_stalled_attempts(material: &TlsMaterial) {
 #[tokio::test]
 async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
+    let diagnostics = SpanCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = diagnostics.install_name("outbound_http");
     let material = TlsMaterial::new(FIXTURE_HOST);
     exercise_stalled_attempts(&material).await;
 
@@ -375,47 +370,19 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     );
     assert_eq!(recorded_count(&scrape, &[]), 3);
     assert!(!scrape.contains("error_type=\"cancelled\""));
-    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    let spans = diagnostics.snapshot();
     assert_eq!(spans.len(), 3);
     assert_eq!(
         spans
             .iter()
-            .filter(|fields| {
-                fields
-                    .get("outbound.outcome")
+            .filter(|span| {
+                span.field("outbound.outcome")
                     .is_some_and(|value| value.contains("cancelled"))
-                    && !fields.contains_key("error.type")
+                    && span.field("error.type").is_none()
             })
             .count(),
         2
     );
-}
-
-type EventFields = (Option<&'static str>, SpanFields);
-
-#[derive(Clone, Default)]
-struct EventDiagnostics(Arc<Mutex<Vec<EventFields>>>);
-
-impl<S> tracing_subscriber::Layer<S> for EventDiagnostics
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        context: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        if !event.metadata().target().starts_with("infra_outbound_http") {
-            return;
-        }
-        let mut fields = FieldVisitor(SpanFields::new());
-        event.record(&mut fields);
-        let span = context.event_span(event).map(|span| span.name());
-        self.0
-            .lock()
-            .expect("event diagnostic lock")
-            .push((span, fields.0));
-    }
 }
 
 async fn exercise_transport_failures() -> Vec<String> {
@@ -506,14 +473,10 @@ async fn exercise_transport_failures() -> Vec<String> {
 
 #[tokio::test]
 async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_span() {
-    use tracing_subscriber::layer::SubscriberExt as _;
-
     let recorder = observation_recorder();
-    let diagnostics = EventDiagnostics::default();
+    let diagnostics = EventCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(diagnostics.clone()));
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = diagnostics.install_target_prefix("infra_outbound_http");
     let roots = exercise_transport_failures().await;
 
     let scrape = recorder.handle().render();
@@ -539,13 +502,13 @@ async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_
         );
     }
 
-    let events = diagnostics.0.lock().expect("event diagnostic lock");
+    let events = diagnostics.snapshot();
     let causes: Vec<&str> = events
         .iter()
-        .map(|(span, fields)| {
-            assert_eq!(*span, Some("outbound_http"));
-            assert_eq!(fields["message"], "outbound_http_transport_failed");
-            fields["error"].as_str()
+        .map(|event| {
+            assert_eq!(event.span, Some("outbound_http"));
+            assert_eq!(event.message(), Some("outbound_http_transport_failed"));
+            event.fields["error"].as_str()
         })
         .collect();
     let [tls, connect, _protocol, _transport] = causes.as_slice() else {

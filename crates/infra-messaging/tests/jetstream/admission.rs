@@ -1,22 +1,21 @@
 use super::*;
 
 fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> {
-    let field = |event: &[(&'static str, String)], name: &str| {
-        event
-            .iter()
-            .find(|(field, _)| *field == name)
-            .map(|(_, value)| value.clone())
-    };
     logged
-        .lock()
-        .expect("log lock")
-        .iter()
-        .filter(|event| field(event, "message").as_deref() == Some("messaging_admission_failed"))
+        .snapshot()
+        .into_iter()
+        .filter(|event| event.message() == Some("messaging_admission_failed"))
         .map(|event| {
             (
-                field(event, "error.type").expect("refusal names its error type"),
-                field(event, "required_bytes").expect("refusal names the delivery size"),
-                field(event, "limit_bytes"),
+                event
+                    .unquoted("error.type")
+                    .expect("refusal names its error type")
+                    .to_owned(),
+                event
+                    .unquoted("required_bytes")
+                    .expect("refusal names the delivery size")
+                    .to_owned(),
+                event.unquoted("limit_bytes").map(str::to_owned),
             )
         })
         .collect()
@@ -87,11 +86,12 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
             } else {
                 "source_stream"
             };
-            assert!(logged.lock().unwrap().iter().any(|event| {
-                event
+            assert!(
+                logged
+                    .snapshot()
                     .iter()
-                    .any(|(name, value)| *name == "operation" && value == role)
-            }));
+                    .any(|event| event.unquoted("operation") == Some(role))
+            );
             assert_eq!(
                 fixture
                     .jetstream

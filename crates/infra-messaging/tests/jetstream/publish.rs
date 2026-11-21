@@ -83,12 +83,12 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
             PublishEnvelopeError::PayloadTooLarge
         )))
     );
-    assert!(logged.lock().unwrap().iter().any(|fields| {
-        fields.contains(&("message", "messaging_publish_failed".to_owned()))
-            && fields.contains(&("outcome", "rejected".to_owned()))
-            && fields.iter().any(|(name, value)| {
-                *name == "reason" && value.contains("payload exceeds configured maximum")
-            })
+    assert!(logged.snapshot().iter().any(|event| {
+        event.message() == Some("messaging_publish_failed")
+            && event.unquoted("outcome") == Some("rejected")
+            && event
+                .field("reason")
+                .is_some_and(|value| value.contains("payload exceeds configured maximum"))
     }));
     let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     assert_eq!(source.info().await.unwrap().state.messages, 0);

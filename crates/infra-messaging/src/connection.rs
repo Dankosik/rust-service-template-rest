@@ -286,9 +286,8 @@ pub(crate) fn describe_metrics() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use async_nats::{ClientError, ConnectError, Event, ServerError};
+    use observe_test_support::{CapturedEvent, EventCapture};
 
     use super::*;
 
@@ -324,52 +323,13 @@ mod tests {
         }
     }
 
-    type Logged = Vec<(&'static str, String)>;
-
-    #[derive(Clone, Default)]
-    struct Events(Arc<Mutex<Vec<Logged>>>);
-
-    struct Fields(Logged);
-
-    impl tracing::field::Visit for Fields {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push((field.name(), format!("{value:?}")));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.push((field.name(), value.to_owned()));
-        }
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            let mut fields = Fields(Vec::new());
-            event.record(&mut fields);
-            self.0.lock().expect("event lock").push(fields.0);
-        }
-    }
-
-    fn logged(test: impl FnOnce()) -> Vec<Logged> {
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        let events = Events::default();
-        let subscriber = tracing_subscriber::registry().with(events.clone());
-        tracing::subscriber::with_default(subscriber, || {
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    fn logged(test: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = EventCapture::new();
+        {
+            let _guard = events.install_default();
             test();
-        });
-        events.0.lock().expect("event lock").clone()
-    }
-
-    fn field<'a>(event: &'a Logged, name: &str) -> Option<&'a str> {
-        event
-            .iter()
-            .find(|(field, _)| *field == name)
-            .map(|(_, value)| value.as_str())
+        }
+        events.snapshot()
     }
 
     #[test]
@@ -392,10 +352,15 @@ mod tests {
 
         assert_eq!(events.len(), stages.len());
         for (event, (_, error_type)) in events.iter().zip(stages) {
-            assert_eq!(field(event, "message"), Some("messaging_admission_failed"));
-            assert_eq!(field(event, "operation"), Some("connect"));
-            assert_eq!(field(event, "error.type"), Some(error_type));
-            assert!(event.iter().all(|(_, value)| !value.contains("sentinel")));
+            assert_eq!(event.message(), Some("messaging_admission_failed"));
+            assert_eq!(event.unquoted("operation"), Some("connect"));
+            assert_eq!(event.unquoted("error.type"), Some(error_type));
+            assert!(
+                event
+                    .fields
+                    .values()
+                    .all(|value| !value.contains("sentinel"))
+            );
         }
     }
 
@@ -431,11 +396,16 @@ mod tests {
         let logged: Vec<_> = events
             .iter()
             .map(|event| {
-                assert_eq!(field(event, "message"), Some("messaging_connection"));
-                assert!(event.iter().all(|(_, value)| !value.contains("sentinel")));
+                assert_eq!(event.message(), Some("messaging_connection"));
+                assert!(
+                    event
+                        .fields
+                        .values()
+                        .all(|value| !value.contains("sentinel"))
+                );
                 (
-                    field(event, "result").expect("result"),
-                    field(event, "error.type"),
+                    event.unquoted("result").expect("result"),
+                    event.unquoted("error.type"),
                 )
             })
             .collect();

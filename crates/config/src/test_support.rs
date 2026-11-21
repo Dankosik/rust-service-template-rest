@@ -52,6 +52,7 @@ mod unit {
         commit: "abc123",
     };
 
+    #[track_caller]
     #[expect(
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
@@ -69,16 +70,19 @@ mod unit {
             .collect()
     }
 
+    #[track_caller]
     pub(crate) fn load_env(pairs: &[(&str, &str)]) -> Config {
         load_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
     }
 
     // template:begin worker:test-support-worker
+    #[track_caller]
     pub(crate) fn load_worker_env(pairs: &[(&str, &str)]) -> crate::WorkerConfig {
         crate::load::load_worker_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
     }
     // template:end worker:test-support-worker
 
+    #[track_caller]
     #[allow(
         dead_code,
         reason = "removing every profile with secret fields leaves this assertion without a caller"
@@ -103,6 +107,7 @@ mod unit {
     }
 
     // template:begin cache:test-support-unknown-env-key
+    #[track_caller]
     pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
         assert_matches!(
             load_from(&LoadOptions::default(), BUILD, env(&[(variable, "x")])),
