@@ -72,7 +72,7 @@ permitted continuation). Apply [Context And Lifetime](../agent-harness.md#contex
 and [Nested Execution](../agent-harness.md#nested-execution): retain returned
 session IDs before waiting (missing identity is a carrier failure) and omit
 `task_id` on new lanes and every review (including Delta Recheck). Spawned
-children lack `question`; the root primary (`build` or `orchestrator`) prefers
-plain-text rounds under [Grilling](../spec-first-workflow/shared/grilling.md)
-and uses `question` only when it preserves full trade-off context and free-form
-qualification.
+children lack `question`; the root primary (`build` or `orchestrator`) follows
+[Grilling](../spec-first-workflow/shared/grilling.md) (plain-text rounds by
+default, using `question` only when the user asks for it and it preserves full
+trade-off context and free-form input).

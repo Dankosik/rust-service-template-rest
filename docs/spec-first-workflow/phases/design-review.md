@@ -43,8 +43,11 @@ and `docs/backend-library-selection.md` override generic taste.
 ### Axis 1 — Behavior, System Crossings & Rollout
 
 1. **Spec fidelity & behavioral loopholes:**
-   - Verify every `R<n>`, `G<n>`, and non-goal maps to a real technical owner
-     without altering confirmed behavior or leaking non-goals.
+   - Verify every `R<n>`, `G<n>`, `Must not` prohibition, and `Non-goal` maps
+     to a real technical owner without altering confirmed behavior or leaking
+     non-goals; verify autonomous choices under user-delegated boundaries
+     recorded in `spec.md` stay within stated limits rather than flagging them
+     as `UPSTREAM_GAP`.
    - Attack `spec.md` for malicious compliance, external two-implementation
      divergence, tautological falsifiers, and missed [Behavioral
      Probes](specification/behavioral-probes.md).

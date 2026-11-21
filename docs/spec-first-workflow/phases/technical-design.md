@@ -53,11 +53,12 @@ Leave internals behind one module's seam open to Implementation.
        listed in the Boundary rule above.
    - **Fast path for lightweight architecture:** when **none** of the [Design
      Review Gate](#design-review-gate) triggers hold and zero open forks
-     remain, record the forced owners and pinned identifiers in a compact
-     `## Architecture` section inside `spec.md` (`status: draft`) and proceed
-     directly to [Planning](planning.md).
-   - *Done when:* every `R<n>` and `G<n>` maps to a verified forced owner or an
-     explicit open fork tagged `one-way door` or `two-way door`.
+     remain, record the forced owners, pinned identifiers, and any durable doc
+     updates in a compact `## Architecture` section inside `spec.md` (`status:
+     draft`) and proceed directly to [Planning](planning.md).
+   - *Done when:* every `R<n>`, `G<n>`, and `Must not` prohibition maps to a
+     verified forced owner or an explicit open fork tagged `one-way door` or
+     `two-way door`.
 
 3. **Close open forks across triggered branches.**
    - Load only the branches whose observable trigger fires:
@@ -159,8 +160,9 @@ so IDs never collide across files.
     obsolete tests to delete; `api/`, `.sqlx/`, `crates/grpc-contracts`.
   - **Durable doc updates:** `docs/decisions/` (add a new ADR only when hard to
     reverse, surprising without context, and the result of a real trade-off, or
-    when overturning a rejected choice), `docs/repo-architecture.md`,
-    `docs/production-contract.md`, or `docs/backend-library-selection.md`.
+    when overturning a rejected choice), `docs/repo-architecture.md` (including
+    `Domain Vocabulary`), `docs/production-contract.md`, or
+    `docs/backend-library-selection.md`.
   - **Execution risks & staging:** unverified compile/integration assumptions
     (`-> [integration-first]`), wide-refactor blast radius
     (`-> expand–migrate–contract`), and multi-release boundaries.

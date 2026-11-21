@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: "Interview the requester relentlessly in frontier rounds until every branch of a plan, design, spec, or idea is resolved."
+description: "Stress-test a plan, spec, design, or idea through structured interview rounds until every open decision is resolved. Stops at a confirmed decision summary unless you choose to proceed."
 metadata:
   invocation: user
   kind: workflow
@@ -9,6 +9,23 @@ disable-model-invocation: true
 
 # Grill
 
-Apply [Grilling](../../../docs/spec-first-workflow/shared/grilling.md) standalone to stress-test the proposal, plan, specification, design, or idea in front of you. Continue independent authorized work while waiting for decisions that block the rest.
+Apply [Grilling](../../../docs/spec-first-workflow/shared/grilling.md) standalone
+to stress-test the proposal, plan, specification, technical design, or idea in
+front of you until every open branch is resolved.
 
-Once the **frontier** is empty, summarize the settled decisions (including rejected alternatives and why), labeled assumptions with `Reopen if` triggers, and residual risks, then wait for explicit confirmation before acting or launching any workflow phase—unless the user explicitly scoped this run as grill-only. If the user confirms and wants to enter structured planning, carry the settled branches straight into [Intake](../../../docs/spec-first-workflow/phases/intake.md) without re-asking them.
+- **Scope to the subject:** when the user invokes `/grilling` on a technical
+  design, ADR, or refactor plan, those technical choices are in scope; on a
+  product idea or feature request, keep out-of-scope technical internals off
+  the frontier under [Decision Ownership](../../../AGENTS.md#decision-ownership).
+- **Do not act mid-interview:** run read-only fact-finding to verify claims
+  against primary sources, but make no file edits and start no downstream
+  workflow phase until the frontier is empty and the user confirms shared
+  understanding.
+- **Stop or transition cleanly:** once the user confirms the final summary from
+  [Grilling](../../../docs/spec-first-workflow/shared/grilling.md#closing-and-escape-hatch),
+  stop if scoped as grill-only (or if the user just wanted a sharpened decision
+  record). If the user confirms and wants structured preparation, carry every
+  settled choice, rejected alternative, constraint, labeled `A<n>` assumption,
+  and delegated boundary straight into
+  [Intake](../../../docs/spec-first-workflow/phases/intake.md) without
+  re-asking them.
