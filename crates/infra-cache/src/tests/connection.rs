@@ -695,10 +695,12 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
             })
         },
         &during_build,
+        None,
+        crate::connection::AfterReply::KeepConfirmed,
     );
     assert!(matches!(
         write.await,
-        Err(crate::connection::WireFailure::NotApplied(
+        Err(crate::connection::DispatchError::NotApplied(
             crate::error::UnknownCause::Stopped(Stopped::Cancelled)
         ))
     ));
@@ -935,7 +937,7 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    use crate::connection::WireFailure;
+    use crate::connection::{AfterReply, DispatchError};
     use crate::error::{ErrorType, UnknownCause};
 
     let caller = OperationContext::unbounded();
@@ -976,10 +978,12 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         .dispatch::<(), std::future::Ready<redis::RedisResult<()>>>(
             |_| panic!("a refused command must not be built"),
             &caller,
+            None,
+            AfterReply::KeepConfirmed,
         );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(WireFailure::NotApplied(UnknownCause::Failed(
+        Poll::Ready(Err(DispatchError::NotApplied(UnknownCause::Failed(
             ErrorType::Other
         ))))
     ));
@@ -1488,6 +1492,42 @@ async fn acknowledged_write_keeps_its_result_after_cancellation_and_disconnect()
         .await;
 
     assert_eq!(write.await, Ok(()));
+}
+
+#[tokio::test]
+async fn cancelled_mutation_with_ready_error_reply_still_reports_cancellation() {
+    let caller = OperationContext::unbounded();
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .await
+    .expect("start cache");
+    let namespace = cache.namespace(namespace!("cancelled_mutation_error"));
+    assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
+
+    server
+        .observed
+        .answer_next("SET", b"-NOPERM access denied\r\n");
+    let context = OperationContext::unbounded();
+    let write = namespace.set(&context, "key", b"value", Duration::from_secs(10));
+    tokio::pin!(write);
+    assert!(futures_util::poll!(write.as_mut()).is_pending());
+    server
+        .wait_for(Duration::from_secs(1), "SET was not sent", || {
+            server.command_count("SET", Some("cancelled_mutation_error:key")) == 1
+        })
+        .await;
+    assert_eq!(namespace.get(&caller, "fence").await, Ok(None));
+
+    context.cancel();
+    assert_eq!(
+        write.await,
+        Err(MutationError::NotApplied(MutationFailure::Stopped(
+            Stopped::Cancelled
+        )))
+    );
 }
 
 #[tokio::test]
