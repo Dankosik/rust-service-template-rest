@@ -116,15 +116,13 @@ whether the enclosing task continues. Preserve specialist rigor while keeping
 technical-policy resolution with the responsible agent.
 
 `AGENTS.md` owns global authority, safety, Direct Work eligibility, and the local
-validation budget; [Workflow Router](spec-first-workflow.md) owns structured
-phases and shared workflow contracts; [Prompt Composition](prompt-composition.md)
-owns task messages; `.agents/roles/` and `.agents/skills/` own role scopes and
-domain judgment; and code, OpenAPI, tests, and generated sources own
-repository/runtime facts.
+validation budget; [Workflow Router](spec-first-workflow.md) owns the structured
+workflow; [Prompt Composition](prompt-composition.md) owns task messages;
+`.agents/roles/` and `.agents/skills/` own role scopes and domain judgment; and
+code, OpenAPI, tests, and generated sources own repository/runtime facts.
 
 [Skill Authoring](skill-authoring.md) owns skill invocation, metadata,
-body/reference boundaries, and catalog constraints. Propagation to derived
-repositories follows the portable-adoption policy when that lifecycle is in use.
+body/reference boundaries, and catalog constraints.
 
 ## Change And Proof
 

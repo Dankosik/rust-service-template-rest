@@ -1,7 +1,7 @@
 # Conditional Planning Branches
 
 Load only when one of these execution shapes applies (or is flagged in
-`design/design.md` `Planning hooks`).
+`spec.md` / `design.md` `Execution risks & staging`).
 
 ## Integration-first slice
 
@@ -13,11 +13,12 @@ slices plus an integrated check in `tasks.md`'s `Completion`.
 - Wire real production code through the seam (doubles belong only behind an
   accepted seam; stubs or test-only wiring fail). State the observable seam
   behavior `T<ID>` exercises locally instead of deferring it to `unverified`.
-- **Gate risk-dependent slices:** add coding edge `T<ID>` (`T<ID> — retires
+- **Gate risk-dependent slices:** add `Depends on: T<ID>` (`T<ID> — retires
   <assumption>`) on every task whose work would be discarded if the seam
   falsifies; keep independent tasks unblocked.
-- Record the exact assumption and upstream reopen owner (`Technical Design` or
-  `Specification`) in `Reopen if`.
+- Record the exact assumption and upstream reopen owner ([Spec And
+  Design](../spec-and-design.md) or the user for a product/risk trade-off) in
+  `Reopen if`.
 
 ## Wide refactor (expand–migrate–contract)
 
@@ -32,10 +33,10 @@ wide for one atomic green task, sequence `expand -> migrate -> contract`:
 3. **Contract (`Shape: contract`):** remove the old form and temporary shim
    once every consumer moved, blocked on **every** `Migrate` batch.
 
-- **Preserve `rollout.md` deploy boundaries:** when mixed-version deploys
+- **Preserve rollout deploy boundaries:** when mixed-version deploys
   separate `Expand` and `Contract` across releases, keep post-deploy `Contract`
   outside Release 1's ledger (record it in `Boundary -> Out of scope` citing
-  `rollout.md`).
+  the Rollout section of `spec.md` / `design.md`).
 
 ## Claim Rules
 

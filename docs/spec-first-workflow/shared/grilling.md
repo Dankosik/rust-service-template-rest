@@ -34,7 +34,7 @@ Work the **design tree** in **rounds**. The **frontier** is every requester-owne
 Wait for the user's answers before advancing dependent branches. Handle partial or ambiguous replies explicitly:
 
 - **Skipped question:** silence in a partial reply is never `"yes"`; re-surface the skipped item or ask explicitly whether to convert it into an assumption (`A<n>`) or delegation.
-- **Vague reply:** distinguish *explicit delegation* ("your call within X" → record in `Delegated decisions` with explicit bounds and echo the boundary in one sentence) from *unbound qualifiers* ("fast", "safe", "reliable" → offer concrete observable thresholds or policies and clarify before closing).
+- **Vague reply:** distinguish *explicit delegation* ("your call within X" → record it as a delegated boundary with explicit limits and echo it in one sentence) from *unbound qualifiers* ("fast", "safe", "reliable" → offer concrete observable thresholds or policies and clarify before closing).
 - **Contradiction with a settled branch:** stop and surface the conflict immediately (revise the earlier decision or narrow the new one) rather than silently overwriting or keeping both.
 
 Each answered round reshapes the **design tree**: echo any non-obvious settled consequence in one sentence so a misreading surfaces immediately, prune invalidated sub-branches, recompute the **frontier**, and ask the next round. Keep any question that depends on an open question in this round for a later round.

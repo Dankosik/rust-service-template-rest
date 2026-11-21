@@ -129,9 +129,9 @@ evidence changes phase, risk, ownership, proof, or harness control.
   [Implementation](docs/spec-first-workflow/phases/implementation.md#carrier).
 - **Clear, local, reversible, single-owner change** →
   [Direct Work](#direct-work).
-- **Ambiguous, multi-owner, or hard-to-reverse change** → Intake and
-  [Workflow Router](docs/spec-first-workflow.md#macro-phases) through Planning
-  (the user starts implementation in a new session).
+- **Ambiguous, multi-owner, or hard-to-reverse change** →
+  [Workflow Router](docs/spec-first-workflow.md#macro-phases) (Intake through
+  Planning in one session, then hand off Implementation to a fresh session).
 
 ### Direct Work
 
@@ -139,12 +139,10 @@ Execute directly without workflow artifacts or a ledger, finish under
 [Validation budget](#validation-budget), and report outcome, executed checks,
 and material limitations. If even a small request leaves user-owned decisions
 ambiguous, close them first via short
-[Grilling](docs/spec-first-workflow/shared/grilling.md) (escalating to
-[Workflow Router](docs/spec-first-workflow.md) if scope outgrows Direct Work)
-rather than assuming product behavior. Keep active ledger tasks under their
-ledger owner, and escalate to [Workflow Router](docs/spec-first-workflow.md)
-when scope outgrows Direct Work (beyond an unavailable optional environment
-alone).
+[Grilling](docs/spec-first-workflow/shared/grilling.md) rather than assuming
+product behavior. Keep active ledger tasks under their ledger owner, and
+escalate to [Workflow Router](docs/spec-first-workflow.md) whenever scope
+outgrows Direct Work (beyond an unavailable optional environment alone).
 
 Before finishing Direct Work, load
 [Review](docs/spec-first-workflow/shared/review.md#trigger) when either gate
@@ -166,7 +164,7 @@ fires:
 | Agent instructions, tool descriptions, roles, or skills | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; run `just check-instructions` (source template) |
 | Compaction, interruption, or handoff resume | [Resume](docs/spec-first-workflow/shared/resume.md) |
 | Prompt for another session, phase, or entry skill | [Prompt Composition](docs/prompt-composition.md) |
-| Role carriers, multi-phase delegation, durable Goals, or model/effort tiers | [Agent Harness](docs/agent-harness.md) |
+| Role carriers, subagent delegation, durable Goals, or model/effort tiers | [Agent Harness](docs/agent-harness.md) |
 | Slow builds, worktree `target/` layout, or build caching | [Build Speed](docs/build-speed.md) |
 | Editing from a `main` checkout, isolating unrelated dirty files, or creating, syncing, integrating, or retiring branches or Git worktrees | [Branches and Worktrees](docs/worktrees.md) |
 | Generated contracts (OpenAPI, gRPC, migrations, `.sqlx/`), gate or lint waivers, or container linters beyond [Validation budget](#validation-budget) | [Validation Routing](docs/validation-routing.md) |

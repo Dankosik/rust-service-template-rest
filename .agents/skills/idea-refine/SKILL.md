@@ -31,7 +31,6 @@ success determines MVP correctness.
 
 Disposition alternatives as selected, eliminated with evidence, or blocked by
 one named open decision. Hand off the converged problem-and-MVP direction to
-[Intake](../../../docs/spec-first-workflow/phases/intake.md) to capture as
-[Intent](../../../docs/spec-first-workflow/interfaces/intent.md) (leaving
-architecture, schema, API, and task breakdowns to downstream phases), or return
+[Intake](../../../docs/spec-first-workflow/phases/intake.md) (leaving
+architecture, schema, API, and task breakdowns to downstream stages), or return
 the material decision blocking convergence.
