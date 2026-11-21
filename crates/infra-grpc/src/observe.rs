@@ -122,22 +122,26 @@ impl Call {
     }
     // template:end authn:grpc-observe-scope-refusal
 
-    pub(crate) fn record_failure(&self, failure: service_failure::Code) {
+    fn record_failure(&self, failure: service_failure::Code) {
         self.0
             .span()
             .set_attribute("failure.code", failure.as_str());
         self.0.metrics().record_failure(failure);
     }
 
-    pub(crate) fn finish(self, code: tonic::Code) {
+    fn finish(self, code: tonic::Code) {
         self.0.finish(code);
     }
 
-    pub(crate) fn finish_status(self, status: &tonic::Status) {
-        if let Some(failure) = crate::status::catalog_code(status) {
+    pub(crate) fn finish_with_failure(
+        self,
+        code: tonic::Code,
+        failure: Option<service_failure::Code>,
+    ) {
+        if let Some(failure) = failure {
             self.record_failure(failure);
         }
-        self.finish(status.code());
+        self.finish(code);
     }
 }
 

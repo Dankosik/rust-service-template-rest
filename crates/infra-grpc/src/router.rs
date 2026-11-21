@@ -22,11 +22,13 @@ use tonic::server::NamedService as _;
 use tower::Layer as _;
 use tracing::Instrument as _;
 
-use crate::call::{ServerCustody, ServerStop, check_open, stopped_status, wrap_response};
+use crate::call::{
+    ServerCustody, ServerOutcome, ServerStop, check_open, stopped_status, wrap_response,
+};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::services::{BuiltServices, ListenerLayer, ListenerService, Method, MethodKind, Methods};
-use crate::status::{FixedFailure, internal_status};
+use crate::status::{ClassifiedStatus, FixedFailure};
 use crate::{Error, ResponseContext, Services, TlsRequiredError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +56,7 @@ pub enum Authentication {
 }
 
 struct AdmissionPermits {
-    opening: Arc<Semaphore>,
+    opening: Semaphore,
     call: Arc<Semaphore>,
     max_wait: Duration,
 }
@@ -67,14 +69,14 @@ struct BusinessState {
 }
 
 pub(crate) enum Rejection {
-    Status(tonic::Status),
+    Status(ClassifiedStatus),
     // template:begin authn:grpc-rejection-insufficient-scope
-    InsufficientScope(tonic::Status),
+    InsufficientScope(ClassifiedStatus),
     // template:end authn:grpc-rejection-insufficient-scope
 }
 
-impl From<tonic::Status> for Rejection {
-    fn from(status: tonic::Status) -> Self {
+impl From<ClassifiedStatus> for Rejection {
+    fn from(status: ClassifiedStatus) -> Self {
         Self::Status(status)
     }
 }
@@ -142,7 +144,7 @@ pub(crate) fn build(
     let admission = limits.max_in_flight.map(|count| {
         let count = count.get() as usize;
         AdmissionPermits {
-            opening: Arc::new(Semaphore::new(count)),
+            opening: Semaphore::new(count),
             call: Arc::new(Semaphore::new(count)),
             max_wait: limits.max_admission_wait,
         }
@@ -368,7 +370,11 @@ async fn business_call(
         },
         started.call.span(),
         started.fallback.as_ref(),
-        || Err(Rejection::from(internal_status())),
+        || {
+            Err(Rejection::from(ClassifiedStatus::fixed(
+                FixedFailure::Internal,
+            )))
+        },
     )
     .await;
 
@@ -397,6 +403,9 @@ async fn open_business(
         &mut remaining_wait,
         opening_context,
         request,
+        |permits, wait| {
+            infra_http_transport::acquire_borrowed_within(permits, wait, observe::admission_waiting)
+        },
     )
     .await?;
     let authenticated: Result<_, Rejection> = match &state.authentication {
@@ -431,7 +440,7 @@ async fn open_business(
     };
     let request = authenticated?;
     if !method.kind.is_registered() {
-        let status = tonic::Status::unimplemented("");
+        let status = ClassifiedStatus::plain(tonic::Status::unimplemented(""));
         return Err(reject_with_budget(opening_context, request, status)
             .await
             .into());
@@ -441,6 +450,9 @@ async fn open_business(
         &mut remaining_wait,
         opening_context,
         request,
+        |permits, wait| {
+            infra_http_transport::acquire_within(permits, wait, observe::admission_waiting)
+        },
     )
     .await?;
     let response = next.run(request.map(without_trailer_credentials)).await;
@@ -450,35 +462,41 @@ async fn open_business(
     })
 }
 
-async fn acquire_permit(
-    permits: Option<&Arc<Semaphore>>,
+async fn acquire_permit<S, P, F>(
+    permits: Option<S>,
     remaining_wait: &mut Duration,
     opening_context: &OperationContext,
     request: Request,
-) -> Result<(Option<OwnedSemaphorePermit>, Request), tonic::Status> {
+    acquire: impl FnOnce(S, Duration) -> F,
+) -> Result<(Option<P>, Request), ClassifiedStatus>
+where
+    F: Future<Output = infra_http_transport::Admission<P>>,
+{
     let Some(permits) = permits else {
         return Ok((None, request));
     };
     let wait = admission_wait(*remaining_wait, opening_context);
-    let permit =
-        match infra_http_transport::acquire_within(permits, wait, observe::admission_waiting).await
-        {
-            infra_http_transport::Admission::Immediate(permit) => permit,
-            infra_http_transport::Admission::Waited { permit, waited } => {
-                *remaining_wait = remaining_wait.saturating_sub(waited);
-                permit
-            }
-            infra_http_transport::Admission::Shed { waited: _ } => {
-                check_open(opening_context)?;
-                return Err(reject_shed(opening_context, request).await);
-            }
-        };
+    let permit = match acquire(permits, wait).await {
+        infra_http_transport::Admission::Immediate(permit) => permit,
+        infra_http_transport::Admission::Waited { permit, waited } => {
+            *remaining_wait = remaining_wait.saturating_sub(waited);
+            permit
+        }
+        infra_http_transport::Admission::Shed { waited: _ } => {
+            check_open(opening_context)?;
+            return Err(reject_shed(opening_context, request).await);
+        }
+    };
     Ok((Some(permit), request))
 }
 
-async fn reject_shed(opening_context: &OperationContext, request: Request) -> tonic::Status {
-    let status =
-        reject_with_budget(opening_context, request, FixedFailure::AtCapacity.status()).await;
+async fn reject_shed(opening_context: &OperationContext, request: Request) -> ClassifiedStatus {
+    let status = reject_with_budget(
+        opening_context,
+        request,
+        ClassifiedStatus::fixed(FixedFailure::AtCapacity),
+    )
+    .await;
     if let Some(reason) = opening_context.stopped() {
         return stopped_status(reason);
     }
@@ -506,24 +524,30 @@ async fn health_call(
         .extensions_mut()
         .remove::<infra_http_transport::ConnectionInfo>();
     let started = start_call(&mut request, &methods, request_timeout);
-    let (response, response_deadline) = run_in_span(
+    let fixed = |failure: FixedFailure, response_deadline| {
+        (
+            failure.status().into_http(),
+            Some(ServerOutcome::fixed(failure)),
+            response_deadline,
+        )
+    };
+    let (response, known_outcome, response_deadline) = run_in_span(
         async {
-            let expired = || (FixedFailure::Deadline.status().into_http(), None);
             tokio::select! {
                 biased;
-                () = started.opening_deadline.wait() => expired(),
+                () = started.opening_deadline.wait() => fixed(FixedFailure::Deadline, None),
                 response = next.run(request) => {
                     if started.opening_deadline.expired() {
-                        expired()
+                        fixed(FixedFailure::Deadline, None)
                     } else {
-                        (response, started.response_deadline)
+                        (response, None, started.response_deadline)
                     }
                 }
             }
         },
         started.call.span(),
         started.fallback.as_ref(),
-        || (internal_status().into_http(), started.response_deadline),
+        || fixed(FixedFailure::Internal, started.response_deadline),
     )
     .await;
 
@@ -532,6 +556,7 @@ async fn health_call(
         started.call,
         started.fallback,
         ServerCustody::deadline(response_deadline),
+        known_outcome,
     )
 }
 
@@ -601,6 +626,7 @@ fn finish_call(
                 cancel_on_drop: Some(cancel_on_drop),
                 stop,
             },
+            None,
         ),
         // template:begin authn:grpc-router-scope-refusal-span
         Err(Rejection::InsufficientScope(status)) => {
@@ -613,13 +639,13 @@ fn finish_call(
 }
 
 fn finish_rejected(
-    status: tonic::Status,
+    status: ClassifiedStatus,
     call: observe::Call,
     cancel_on_drop: DropGuard,
 ) -> Response {
     drop(cancel_on_drop);
-    call.finish_status(&status);
-    status.into_http()
+    call.finish_with_failure(status.code(), status.failure());
+    status.into_status().into_http()
 }
 
 const REJECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
@@ -628,8 +654,8 @@ const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 pub(crate) async fn reject_with_budget(
     opening_context: &OperationContext,
     request: Request,
-    status: tonic::Status,
-) -> tonic::Status {
+    status: ClassifiedStatus,
+) -> ClassifiedStatus {
     let timeout = opening_context
         .remaining()
         .map_or(REJECT_DRAIN_TIMEOUT, |remaining| {
@@ -676,8 +702,12 @@ mod tests {
         });
         let request = Request::new(axum::body::Body::from_stream(body));
         let context = OperationContext::unbounded();
-        let status =
-            reject_with_budget(&context, request, tonic::Status::unavailable("closed")).await;
+        let status = reject_with_budget(
+            &context,
+            request,
+            ClassifiedStatus::plain(tonic::Status::unavailable("closed")),
+        )
+        .await;
         assert_eq!(status.code(), tonic::Code::Unavailable);
         assert_eq!(frames.load(Ordering::SeqCst), 4);
     }

@@ -156,6 +156,7 @@ async fn run_admitted(
             match infra_http_transport::acquire_borrowed_within(
                 &admission.permits,
                 admission.max_wait,
+                || (),
             )
             .await
             {

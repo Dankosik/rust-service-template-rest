@@ -8,6 +8,7 @@ use operation_context::OperationContext;
 use crate::Failure;
 use crate::call::check_open;
 use crate::router::{Rejection, reject_with_budget};
+use crate::status::ClassifiedStatus;
 
 pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:begin oidc-jwt:grpc-verifier-setting-jwt
@@ -61,14 +62,16 @@ pub(crate) async fn authenticate(
         }
     };
     let Some(requirement) = requirement else {
-        return Err(
-            reject_with_budget(context, request, tonic::Status::unimplemented(""))
-                .await
-                .into(),
-        );
+        return Err(reject_with_budget(
+            context,
+            request,
+            ClassifiedStatus::plain(tonic::Status::unimplemented("")),
+        )
+        .await
+        .into());
     };
     if !principal.has_scopes(requirement.scopes.iter()) {
-        let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
+        let status = Failure::new(service_failure::Code::Forbidden).into_classified_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
         );
@@ -88,7 +91,7 @@ pub(crate) async fn authenticate(
     Ok(request)
 }
 
-fn authentication_status(failure: AuthFailure) -> tonic::Status {
+fn authentication_status(failure: AuthFailure) -> ClassifiedStatus {
     Failure::new(match failure {
         AuthFailure::Missing => service_failure::Code::AuthenticationRequired,
         AuthFailure::Malformed => service_failure::Code::AuthenticationMalformed,

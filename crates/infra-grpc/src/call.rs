@@ -1,12 +1,12 @@
-use http::HeaderMap;
-use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
+use http::{HeaderMap, HeaderValue};
+use infra_grpc_core::protocol::STATUS_HEADERS;
 use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody};
 use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::observe::Call;
-use crate::status::FixedFailure;
+use crate::status::{ClassifiedStatus, FixedFailure};
 
 pub(crate) struct ServerCustody {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
@@ -40,37 +40,42 @@ impl ServerCustody {
     }
 }
 
-pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
+pub(crate) fn stopped_status(reason: Stopped) -> ClassifiedStatus {
     match reason {
-        Stopped::Deadline => FixedFailure::Deadline.status(),
-        Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
+        Stopped::Deadline => ClassifiedStatus::fixed(FixedFailure::Deadline),
+        Stopped::Cancelled => {
+            ClassifiedStatus::plain(tonic::Status::cancelled("request cancelled"))
+        }
     }
 }
 
-pub(crate) fn check_open(context: &OperationContext) -> Result<(), tonic::Status> {
+pub(crate) fn check_open(context: &OperationContext) -> Result<(), ClassifiedStatus> {
     context.check().map_err(stopped_status)
 }
 
 const MIN_HEADERS_FOR_STATUS_PROJECTION: usize = 32;
 
-fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
-    headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
+fn header_catalog_code(
+    headers: &HeaderMap,
+    status_header: &HeaderValue,
+) -> Option<service_failure::Code> {
+    let details = headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
     let status = if headers.len() < MIN_HEADERS_FOR_STATUS_PROJECTION {
         tonic::Status::from_header_map(headers)
     } else {
         let mut fields = HeaderMap::with_capacity(STATUS_HEADERS.len());
-        for name in STATUS_HEADERS {
-            if let Some(value) = headers.get(&name) {
-                fields.insert(name, value.clone());
-            }
+        fields.insert(tonic::Status::GRPC_STATUS, status_header.clone());
+        if let Some(message) = headers.get(tonic::Status::GRPC_MESSAGE) {
+            fields.insert(tonic::Status::GRPC_MESSAGE, message.clone());
         }
+        fields.insert(tonic::Status::GRPC_STATUS_DETAILS, details.clone());
         tonic::Status::from_header_map(&fields)
     }?;
     crate::status::catalog_code(&status)
 }
 
 #[derive(Clone, Copy)]
-struct ServerOutcome {
+pub(crate) struct ServerOutcome {
     code: tonic::Code,
     failure: Option<service_failure::Code>,
 }
@@ -83,6 +88,13 @@ impl ServerOutcome {
         }
     }
 
+    pub(crate) fn fixed(failure: FixedFailure) -> Self {
+        Self {
+            code: failure.template().code(),
+            failure: Some(failure.catalog_code()),
+        }
+    }
+
     fn from_status(status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
@@ -91,9 +103,10 @@ impl ServerOutcome {
     }
 
     fn from_headers(headers: &HeaderMap) -> Option<Self> {
+        let status_header = headers.get(tonic::Status::GRPC_STATUS)?;
         Some(Self {
-            code: header_status_code(headers)?,
-            failure: header_catalog_code(headers),
+            code: tonic::Code::from_bytes(status_header.as_bytes()),
+            failure: header_catalog_code(headers, status_header),
         })
     }
 
@@ -106,31 +119,43 @@ impl ServerOutcome {
     }
 }
 
-struct LocalStatus {
-    status: tonic::Status,
-    failure: Option<service_failure::Code>,
+#[derive(Clone, Copy)]
+enum LocalStatus {
+    Failure {
+        status: &'static tonic::Status,
+        failure: service_failure::Code,
+    },
+    Drained,
 }
 
 impl LocalStatus {
     fn failure(failure: FixedFailure) -> Self {
-        Self {
-            status: failure.status(),
-            failure: Some(failure.catalog_code()),
+        Self::Failure {
+            status: failure.template(),
+            failure: failure.catalog_code(),
         }
     }
 
-    fn drained() -> Self {
-        Self {
-            status: tonic::Status::ok(""),
-            failure: None,
-        }
+    const fn drained() -> Self {
+        Self::Drained
     }
 
     fn write_headers(self, headers: &mut HeaderMap) -> ServerOutcome {
-        let _ = self.status.add_header(headers);
-        ServerOutcome {
-            code: self.status.code(),
-            failure: self.failure,
+        match self {
+            Self::Failure { status, failure } => {
+                let _ = status.add_header(headers);
+                ServerOutcome {
+                    code: status.code(),
+                    failure: Some(failure),
+                }
+            }
+            Self::Drained => {
+                headers.insert(tonic::Status::GRPC_STATUS, HeaderValue::from_static("0"));
+                ServerOutcome {
+                    code: tonic::Code::Ok,
+                    failure: None,
+                }
+            }
         }
     }
 }
@@ -187,10 +212,7 @@ impl<E> StreamHooks<E> for ServerHooks {
     }
 
     fn emit(self, outcome: ServerOutcome) -> ServerGuards {
-        if let Some(failure) = outcome.failure {
-            self.call.record_failure(failure);
-        }
-        self.call.finish(outcome.code);
+        self.call.finish_with_failure(outcome.code, outcome.failure);
         ServerGuards {
             _permit: self.permit,
             _cancel_on_drop: self.cancel_on_drop,
@@ -236,12 +258,13 @@ pub(crate) fn wrap_response(
     call: Call,
     fallback: Option<opentelemetry::Context>,
     custody: ServerCustody,
+    known_outcome: Option<ServerOutcome>,
 ) -> axum::response::Response {
     let (hooks, stop) = custody.into_hooks(call, fallback);
     WatchedBody::attach_response(
         response,
         hooks,
-        |_, response| ServerOutcome::from_response(response),
+        |_, response| known_outcome.or_else(|| ServerOutcome::from_response(response)),
         move |_| stop.map(wait_server_stop),
         axum::body::Body::new,
     )
@@ -259,6 +282,7 @@ mod tests {
     use bytes::Bytes;
     use http_body::{Body, Frame};
     use http_body_util::BodyExt as _;
+    use infra_grpc_core::protocol::header_status_code;
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     };
@@ -307,6 +331,99 @@ mod tests {
         let outcome = ServerOutcome::from_headers(&trailers).unwrap();
         assert_eq!(outcome.code, tonic::Code::DeadlineExceeded);
         assert_eq!(outcome.failure, Some(service_failure::Code::GatewayTimeout));
+
+        let mut malformed = HeaderMap::new();
+        malformed.insert(
+            tonic::Status::GRPC_STATUS,
+            http::HeaderValue::from_static("8"),
+        );
+        malformed.insert(
+            tonic::Status::GRPC_STATUS_DETAILS,
+            http::HeaderValue::from_static("!"),
+        );
+        for _ in 0..64 {
+            malformed.append("custom", http::HeaderValue::from_static("metadata"));
+        }
+        let malformed_outcome = ServerOutcome::from_headers(&malformed).unwrap();
+        assert_eq!(malformed_outcome.code, tonic::Code::ResourceExhausted);
+        assert_eq!(malformed_outcome.failure, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_status_matches_tonic_headers_and_expired_deadline_overrides_known_outcome() {
+        let mut drained = HeaderMap::new();
+        let drained_outcome = LocalStatus::drained().write_headers(&mut drained);
+        let mut tonic_ok = HeaderMap::new();
+        tonic::Status::ok("").add_header(&mut tonic_ok).unwrap();
+        assert_eq!(drained, tonic_ok);
+        assert_eq!(drained_outcome.code, tonic::Code::Ok);
+        assert_eq!(drained_outcome.failure, None);
+
+        for failure in [FixedFailure::Deadline, FixedFailure::Internal] {
+            let mut local = HeaderMap::new();
+            let outcome = LocalStatus::failure(failure).write_headers(&mut local);
+            let mut expected = HeaderMap::new();
+            failure.status().add_header(&mut expected).unwrap();
+            assert_eq!(local, expected);
+            assert_eq!(outcome.code, failure.template().code());
+            assert_eq!(outcome.failure, Some(failure.catalog_code()));
+        }
+
+        for (failure, grpc_code, failure_code) in [
+            (FixedFailure::Internal, "Internal", "internal_error"),
+            (
+                FixedFailure::Deadline,
+                "DeadlineExceeded",
+                "gateway_timeout",
+            ),
+        ] {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _recorder = metrics::set_default_local_recorder(&recorder);
+            let _ = wrap_response(
+                http::Response::new(axum::body::Body::empty()),
+                server_call(),
+                None,
+                ServerCustody::deadline(None),
+                Some(ServerOutcome::fixed(failure)),
+            );
+            let rendered = handle.render();
+            assert!(
+                rendered.contains(&format!("grpc_code=\"{grpc_code}\"}} 1")),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("failure_code=\"{failure_code}\"}} 1")),
+                "{rendered}"
+            );
+        }
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let response = wrap_response(
+            FixedFailure::Internal.status().into_http(),
+            server_call(),
+            None,
+            ServerCustody::deadline(Some(Deadline::after(Duration::ZERO))),
+            Some(ServerOutcome::fixed(FixedFailure::Internal)),
+        );
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            crate::status::catalog_code(&status),
+            Some(service_failure::Code::GatewayTimeout)
+        );
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("grpc_code=\"DeadlineExceeded\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("failure_code=\"gateway_timeout\"} 1"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("grpc_code=\"Internal\""), "{rendered}");
     }
 
     fn budget_deadline() -> Deadline {
@@ -678,12 +795,17 @@ mod tests {
         let deadline = stopped_status(Stopped::Deadline);
         assert_eq!(deadline.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
-            crate::status::catalog_code(&deadline),
+            deadline.failure(),
+            Some(service_failure::Code::GatewayTimeout)
+        );
+        assert_eq!(
+            crate::status::catalog_code(deadline.status()),
             Some(service_failure::Code::GatewayTimeout)
         );
         let cancelled = stopped_status(Stopped::Cancelled);
         assert_eq!(cancelled.code(), tonic::Code::Cancelled);
-        assert_eq!(crate::status::catalog_code(&cancelled), None);
+        assert_eq!(cancelled.failure(), None);
+        assert_eq!(crate::status::catalog_code(cancelled.status()), None);
     }
 
     #[tokio::test]
