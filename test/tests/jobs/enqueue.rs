@@ -667,7 +667,7 @@ async fn polling_only_producer_commits_without_sending_a_notification(pool: PgPo
         const NAME: KindName = KindName::new("test.wake.poll.only");
     }
 
-    let jobs = Pool::prepare(
+    let jobs = Pool::connect(
         &dsn_for(&pool).await,
         &infra_postgres::PoolOptions {
             max_connections: std::num::NonZeroU32::MIN,
@@ -677,7 +677,9 @@ async fn polling_only_producer_commits_without_sending_a_notification(pool: PgPo
             wait_order: infra_postgres::WaitOrder::Arrival,
             notifications: false,
         },
-    );
+    )
+    .await
+    .unwrap();
     let mut listener = PgListener::connect_with(&pool).await.unwrap();
     listener.listen("background_jobs").await.unwrap();
     let id = created(write(&jobs, Isolation::ReadCommitted, &PollOnly, None).await);

@@ -1,7 +1,9 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_postgres::{Dsn, DsnError, Pool, PoolOptions, SessionSettingsSource, SslPolicy};
+use infra_postgres::{
+    Dsn, DsnError, Pool, PoolOptions, PoolStartup, SessionSettingsSource, SslPolicy,
+};
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
@@ -36,7 +38,7 @@ pub(super) async fn admit_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
     background: &mut Background,
-    retained: &mut Option<Pool>,
+    retained: &mut Option<PoolStartup>,
 ) -> Result<Pool, WorkerError> {
     let dsn = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
@@ -57,7 +59,7 @@ async fn open_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
     background: &mut Background,
-    retained: &mut Option<Pool>,
+    retained: &mut Option<PoolStartup>,
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
 ) -> Result<Pool, WorkerError> {
     let dsn = prepare_dsn(prepare).await?;
@@ -68,8 +70,10 @@ async fn open_pool(
         &application_name,
         postgres.notifications,
     );
-    let pool = retained.insert(Pool::prepare(&dsn, &options)).clone();
-    pool.admit().await?;
+    let pool = retained
+        .insert(Pool::prepare(&dsn, &options))
+        .admit()
+        .await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),

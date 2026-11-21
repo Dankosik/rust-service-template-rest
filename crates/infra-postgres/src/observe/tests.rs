@@ -283,7 +283,8 @@ async fn a_prepared_pool_records_wait_and_outcome_through_cached_metrics() {
             wait_order: crate::WaitOrder::Arrival,
             notifications: true,
         },
-    );
+    )
+    .pool;
     for _ in 0..2 {
         let expired: Result<(), Box<dyn std::error::Error>> = pool
             .in_tx_with_deadline(

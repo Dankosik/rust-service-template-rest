@@ -58,5 +58,8 @@ tracing = { workspace = true, features = ["std"] }
 tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
+# template:begin jobs:worker-postgres-test-dependency
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end jobs:worker-postgres-test-dependency
 service-config = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
