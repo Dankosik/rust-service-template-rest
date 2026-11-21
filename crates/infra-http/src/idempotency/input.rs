@@ -7,7 +7,7 @@ use http_body_util::Collected;
 use infra_idempotency_store::RequestFingerprint;
 use serde::de::DeserializeOwned;
 
-use super::identity::request_fingerprint;
+use super::identity::capture_fingerprint;
 use crate::Problem;
 use crate::extract::{Path, decode_json, decode_query, require_json_content_type};
 
@@ -28,10 +28,6 @@ impl CommandInput {
         if let Some(original) = parts.extensions.remove::<OriginalUri>() {
             parts.uri = original.0;
         }
-        parts.headers = select_sensitive_headers(
-            &parts.headers,
-            std::iter::once(&CONTENT_TYPE).chain(fingerprint_headers),
-        );
         let trailers = collected.trailers().map_or_else(HeaderMap::new, |fields| {
             let mut trailers = fields.clone();
             for value in trailers.values_mut() {
@@ -39,13 +35,18 @@ impl CommandInput {
             }
             trailers
         });
-        let input = Self {
-            parts,
-            body: collected.to_bytes(),
-            trailers,
-        };
-        let fingerprint = request_fingerprint(&input, fingerprint_headers);
-        (input, fingerprint)
+        let body = collected.to_bytes();
+        let (headers, fingerprint) =
+            capture_fingerprint(&parts, fingerprint_headers, &body, &trailers);
+        parts.headers = headers;
+        (
+            Self {
+                parts,
+                body,
+                trailers,
+            },
+            fingerprint,
+        )
     }
 
     #[must_use]
@@ -92,21 +93,6 @@ impl CommandInput {
         require_json_content_type(self.parts.headers.get(CONTENT_TYPE))?;
         decode_json(&self.body)
     }
-}
-
-fn select_sensitive_headers<'a>(
-    source: &HeaderMap,
-    names: impl IntoIterator<Item = &'a HeaderName>,
-) -> HeaderMap {
-    let mut selected = HeaderMap::new();
-    for name in names {
-        for value in source.get_all(name) {
-            let mut value = value.clone();
-            value.set_sensitive(true);
-            selected.append(name.clone(), value);
-        }
-    }
-    selected
 }
 
 #[cfg(test)]

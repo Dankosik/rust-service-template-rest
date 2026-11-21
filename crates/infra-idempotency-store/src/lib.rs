@@ -2,6 +2,7 @@ mod attempt;
 mod maintenance;
 mod record;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::{Isolation, Pool, TxOptions};
@@ -27,6 +28,11 @@ const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
 
 #[derive(Clone, Debug)]
 pub struct Store {
+    inner: Arc<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
     pool: Pool,
     retention: Duration,
 }
@@ -41,8 +47,10 @@ impl Store {
             return Err(InvalidRetention);
         }
         Ok(Self {
-            pool,
-            retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
+            inner: Arc::new(Inner {
+                pool,
+                retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
+            }),
         })
     }
 }

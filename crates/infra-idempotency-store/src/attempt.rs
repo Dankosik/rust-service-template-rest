@@ -204,7 +204,8 @@ impl Store {
     {
         scope.validate_caller()?;
         attempted(
-            self.pool
+            self.inner
+                .pool
                 .in_tx_with(READ_COMMITTED, async |tx| {
                     self.work_in_tx(tx, scope, fingerprint, work).await
                 })
@@ -225,7 +226,8 @@ impl Store {
     {
         scope.validate_caller()?;
         attempted(
-            self.pool
+            self.inner
+                .pool
                 .in_tx_with_deadline(deadline, READ_COMMITTED, async |tx| {
                     self.work_in_tx(tx, scope, fingerprint, work).await
                 })
@@ -270,7 +272,14 @@ impl Store {
                 }
             }
         };
-        write(tx, scope, fingerprint, written.record(), self.retention).await?;
+        write(
+            tx,
+            scope,
+            fingerprint,
+            written.record(),
+            self.inner.retention,
+        )
+        .await?;
         Ok(written)
     }
 }

@@ -231,15 +231,20 @@ fn set_uncoded_content_type(
     headers: &mut HeaderMap,
     media_type: &'static str,
 ) -> Result<(), ReplayError> {
-    if headers
-        .get_all(CONTENT_ENCODING)
-        .iter()
-        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
-        .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
-    {
-        return Err(ReplayError(ReplayErrorKind::ContentEncoding));
+    let mut has_encoding = false;
+    for value in headers.get_all(CONTENT_ENCODING) {
+        has_encoding = true;
+        if value
+            .as_bytes()
+            .split(|&byte| byte == b',')
+            .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
+        {
+            return Err(ReplayError(ReplayErrorKind::ContentEncoding));
+        }
     }
-    headers.remove(CONTENT_ENCODING);
+    if has_encoding {
+        headers.remove(CONTENT_ENCODING);
+    }
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(media_type));
     Ok(())
 }

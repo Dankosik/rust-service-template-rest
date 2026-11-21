@@ -695,6 +695,12 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
         ),
         (
             "UPDATE http_idempotency_records SET headers = \
+             ARRAY[ROW('x-unreplayable-long-header-name', 'secret'::bytea)::http_idempotency_header_pair] \
+             WHERE scope_key = $1",
+            false,
+        ),
+        (
+            "UPDATE http_idempotency_records SET headers = \
              ARRAY[]::http_idempotency_header_pair[], body = NULL WHERE scope_key = $1",
             false,
         ),

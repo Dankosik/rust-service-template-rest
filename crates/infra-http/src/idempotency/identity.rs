@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 
 use axum::http::header::CONTENT_TYPE;
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName};
 use infra_idempotency_store::{CallerIdentity, CallerKind, RequestFingerprint};
 use itertools::Itertools as _;
 use sha2::{Digest as _, Sha256};
 
-use super::CommandInput;
 use crate::PrincipalIdentity;
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
@@ -61,10 +61,12 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-pub(super) fn request_fingerprint(
-    input: &CommandInput,
+pub(super) fn capture_fingerprint(
+    parts: &Parts,
     fingerprint_headers: &[HeaderName],
-) -> RequestFingerprint {
+    body: &[u8],
+    trailers: &HeaderMap,
+) -> (HeaderMap, RequestFingerprint) {
     let mut hasher = Sha256::new();
     hasher.update(if fingerprint_headers.is_empty() {
         REQUEST_DOMAIN
@@ -72,25 +74,30 @@ pub(super) fn request_fingerprint(
         REQUEST_WITH_HEADERS_DOMAIN
     });
     hasher.update([0]);
-    frame(&mut hasher, input.method().as_str().as_bytes());
-    frame(&mut hasher, input.raw_path().as_bytes());
-    match input.raw_query() {
+    frame(&mut hasher, parts.method.as_str().as_bytes());
+    frame(&mut hasher, parts.uri.path().as_bytes());
+    match parts.uri.query() {
         Some(query) => {
             hasher.update([1]);
             frame(&mut hasher, query.as_bytes());
         }
         None => hasher.update([0]),
     }
-    frame_header_values(&mut hasher, input.headers(), &CONTENT_TYPE);
+    let mut selected_headers = HeaderMap::new();
+    select_and_frame_header(
+        &mut hasher,
+        &parts.headers,
+        &mut selected_headers,
+        &CONTENT_TYPE,
+    );
     if !fingerprint_headers.is_empty() {
         hasher.update((fingerprint_headers.len() as u64).to_be_bytes());
         for name in fingerprint_headers {
             frame(&mut hasher, name.as_str().as_bytes());
-            frame_header_values(&mut hasher, input.headers(), name);
+            select_and_frame_header(&mut hasher, &parts.headers, &mut selected_headers, name);
         }
     }
-    frame(&mut hasher, input.body());
-    let trailers = input.trailers();
+    frame(&mut hasher, body);
     if !trailers.is_empty() {
         hasher.update(b"trailers/v1\0");
         let mut names = trailers
@@ -104,19 +111,27 @@ pub(super) fn request_fingerprint(
             }
         }
     }
-    RequestFingerprint::from_bytes(hasher.finalize().into())
+    (
+        selected_headers,
+        RequestFingerprint::from_bytes(hasher.finalize().into()),
+    )
 }
 
-fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderName) {
-    let values = headers.get_all(name);
-    let iter = values.iter();
-    let (lower, upper) = iter.size_hint();
-    let count = if upper == Some(lower) {
-        lower
-    } else {
-        iter.count()
-    };
-    hasher.update((count as u64).to_be_bytes());
+fn select_and_frame_header(
+    hasher: &mut Sha256,
+    source: &HeaderMap,
+    selected: &mut HeaderMap,
+    name: &HeaderName,
+) {
+    let values = source.get_all(name);
+    let mut count = 0_u64;
+    for value in &values {
+        let mut copy = value.clone();
+        copy.set_sensitive(true);
+        selected.append(name.clone(), copy);
+        count += 1;
+    }
+    hasher.update(count.to_be_bytes());
     for value in values {
         frame(hasher, value.as_bytes());
     }
@@ -135,6 +150,7 @@ mod tests {
     use http_body_util::{BodyExt as _, Full};
     use infra_idempotency_store::Digest;
 
+    use super::super::CommandInput;
     use super::*;
 
     fn legacy_fingerprint(
