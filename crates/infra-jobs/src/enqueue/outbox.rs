@@ -2,7 +2,10 @@ use infra_postgres::{Tx, TxMode, observed};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{EnqueueError, encode_payload, is_valid_unique_key, notify_workers_after_commit};
+use super::{
+    EnqueueError, MAX_UNIQUE_KEY_BYTES, encode_payload, is_valid_unique_key,
+    notify_workers_after_commit,
+};
 use crate::{Handler, JobId, KindError, Kinds, Policy, trace_context};
 
 pub(crate) const KIND: &str = "publish_domain_event";
@@ -42,7 +45,7 @@ pub enum OutboxEnqueueError {
     #[error("outbox aggregate version is occupied or its predecessor is missing")]
     OrderConflict,
     #[error(
-        "outbox order requires a 1..=255 byte key without control characters and a positive version"
+        "outbox order requires a 1..={MAX_UNIQUE_KEY_BYTES} byte key without control characters and a positive version"
     )]
     InvalidOrder,
     #[error(transparent)]
@@ -236,7 +239,8 @@ mod tests {
         let kinds = publisher_kinds(Policy::default(), |_: Job<Intent>| async { Ok(()) }).unwrap();
         assert_eq!(kinds.names().collect::<Vec<_>>(), [KIND]);
         let registered = kinds.get(KIND).unwrap();
-        assert!(registered.is_outbox);
-        assert!(!registered.retry_budget().exhausts_transient());
+        assert_eq!(registered.mode, crate::kind::KindMode::Outbox);
+        assert!(registered.mode.is_outbox());
+        assert!(!registered.mode.exhausts_transient());
     }
 }

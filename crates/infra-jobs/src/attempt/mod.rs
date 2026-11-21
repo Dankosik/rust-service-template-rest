@@ -207,13 +207,10 @@ pub(crate) fn record_exhausted(handles: &KindMetrics, attempt: &AttemptId, summa
 }
 
 fn observe_attempt(handles: &KindMetrics, attempt: &AttemptId, transition: &Transition) {
-    if matches!(transition, Transition::Fail { .. }) {
-        return;
-    }
     let outcome = transition.outcome();
     let label = outcome.label();
-    handles.attempt(outcome).increment(1);
     match transition {
+        Transition::Fail { .. } => return,
         Transition::Complete(_) => {
             tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, "job_attempt_completed");
         }
@@ -226,8 +223,8 @@ fn observe_attempt(handles: &KindMetrics, attempt: &AttemptId, transition: &Tran
         Transition::Retry { summary, .. } => {
             log_attempt_failed(attempt, label, summary);
         }
-        Transition::Fail { .. } => {}
     }
+    handles.attempt(outcome).increment(1);
 }
 
 fn observe_terminal_failure(
@@ -347,32 +344,17 @@ impl AttemptRun<'_> {
         let transition = map_outcome(
             &self.attempt,
             self.registered.policy,
-            self.registered.retry_budget(),
+            self.registered.mode,
             handler_outcome,
         );
         let handles = self.registered.metrics();
         self.observe_outcome(handles, &transition, handler_duration);
         let Some(plan) = write_of(&transition) else {
-            self.observe_acknowledged(handles, Operation::Record, Written::Applied, false);
+            self.observe_acknowledged(handles, Operation::Record, Written::Applied);
             return;
         };
         let written = self.persist(plan).await;
-        match written {
-            Some(written) => self.observe_acknowledged(
-                handles,
-                plan.operation(),
-                written,
-                matches!(transition, Transition::Release),
-            ),
-            None => self.observe_uncertain(),
-        }
-        if let Transition::Fail { reason, summary } = &transition {
-            if written == Some(Written::Applied) {
-                observe_terminal_failure(handles, &self.attempt, *reason, summary);
-            } else {
-                log_attempt_failed(&self.attempt, transition.label(), summary);
-            }
-        }
+        self.finish_persistence(handles, &transition, plan.operation(), written);
     }
 
     async fn execute_handler(
@@ -489,13 +471,27 @@ impl AttemptRun<'_> {
         observe_attempt(handles, &self.attempt, transition);
     }
 
-    fn observe_acknowledged(
+    fn finish_persistence(
         &self,
         handles: &KindMetrics,
+        transition: &Transition,
         operation: Operation,
-        written: Written,
-        released: bool,
+        written: Option<Written>,
     ) {
+        match written {
+            Some(written) => self.observe_acknowledged(handles, operation, written),
+            None => self.observe_uncertain(),
+        }
+        if let Transition::Fail { reason, summary } = transition {
+            if written == Some(Written::Applied) {
+                observe_terminal_failure(handles, &self.attempt, *reason, summary);
+            } else {
+                log_attempt_failed(&self.attempt, transition.label(), summary);
+            }
+        }
+    }
+
+    fn observe_acknowledged(&self, handles: &KindMetrics, operation: Operation, written: Written) {
         observe_recovery(self.group, operation);
         let persistence = Persistence::acknowledged(written);
         handles.persistence(persistence).increment(1);
@@ -506,7 +502,7 @@ impl AttemptRun<'_> {
             disposition = persistence.label(),
             "job_persistence_finished"
         );
-        if written == Written::Applied && released {
+        if written == Written::Applied && operation == Operation::Release {
             self.group
                 .lifecycle
                 .counters

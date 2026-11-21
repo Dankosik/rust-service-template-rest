@@ -1665,7 +1665,7 @@ fn grace_registry(gate: Arc<GraceState>, reaction: Reaction) -> infra_jobs::Kind
     kinds.validate().expect("the grace registry")
 }
 
-impl infra_jobs::TransactionalHandler<TransactionGate> for Arc<TransactionGateState> {
+impl infra_jobs::TransactionalHandler<TransactionGate> for TransactionGateState {
     async fn run(
         &self,
         job: infra_jobs::TransactionalJob<TransactionGate>,

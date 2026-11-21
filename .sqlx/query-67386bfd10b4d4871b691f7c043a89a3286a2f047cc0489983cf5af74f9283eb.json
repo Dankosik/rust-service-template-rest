@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, kind, state, claim_generation::text AS \"version!\", attempts, failure_reason,\n        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"created_at!\",\n        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"not_before!\",\n        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"claim_expires_at?\",\n        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"finished_at?\",\n        jsonb_array_length(recovery_history) AS \"recovery_count!\"\n        FROM background_jobs WHERE id > $1 ORDER BY id LIMIT $2",
+  "query": "SELECT id, kind, state, claim_generation AS version, attempts, failure_reason,\n        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"created_at!\",\n        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"not_before!\",\n        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"claim_expires_at?\",\n        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS \"finished_at?\",\n        jsonb_array_length(recovery_history) AS \"recovery_count!\"\n        FROM background_jobs WHERE id > $1 ORDER BY id LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -38,9 +38,14 @@
       },
       {
         "ordinal": 3,
-        "name": "version!",
-        "type_info": "Text",
-        "origin": "Expression"
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "claim_generation"
+          }
+        }
       },
       {
         "ordinal": 4,
@@ -105,7 +110,7 @@
       false,
       false,
       false,
-      null,
+      false,
       false,
       true,
       null,
@@ -115,5 +120,5 @@
       null
     ]
   },
-  "hash": "468a0c2d9693154caa26bd0334d4e45a2cd2191129cbdecf0a5789c48424a4fd"
+  "hash": "67386bfd10b4d4871b691f7c043a89a3286a2f047cc0489983cf5af74f9283eb"
 }

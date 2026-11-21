@@ -12,6 +12,72 @@ pub mod outbox;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
+const JSON_STRING_QUOTES_BYTES: usize = "\"\"".len();
+
+#[derive(Debug)]
+pub struct PayloadSizer {
+    bytes: usize,
+    poll_budget: usize,
+}
+
+impl PayloadSizer {
+    pub const BYTES_PER_POLL: usize = 4096;
+
+    #[must_use]
+    pub const fn with_base(bytes: usize) -> Self {
+        Self {
+            bytes,
+            poll_budget: Self::BYTES_PER_POLL,
+        }
+    }
+
+    pub fn from_skeleton<T: serde::Serialize + ?Sized>(value: &T) -> Result<Self, EnqueueError> {
+        Ok(Self::with_base(
+            json_payload_len(value).map_err(EnqueueError::Serialize)?,
+        ))
+    }
+
+    pub async fn add_str_with<E: From<EnqueueError>>(
+        &mut self,
+        field: &str,
+        mut admit: impl FnMut(&str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut rest = field;
+        while !rest.is_empty() {
+            let end = rest.floor_char_boundary(self.poll_budget);
+            if end == 0 {
+                tokio::task::yield_now().await;
+                self.poll_budget = Self::BYTES_PER_POLL;
+                continue;
+            }
+            let (fragment, tail) = rest.split_at(end);
+            admit(fragment)?;
+            let escaped = json_payload_len(fragment).map_err(EnqueueError::Serialize)?
+                - JSON_STRING_QUOTES_BYTES;
+            self.bytes = checked_serialized_len(self.bytes, escaped)
+                .map_err(|error| EnqueueError::Serialize(serde_json::Error::io(error)))?;
+            self.poll_budget -= end;
+            rest = tail;
+        }
+        Ok(())
+    }
+
+    pub async fn add_str(&mut self, field: &str) -> Result<(), EnqueueError> {
+        self.add_str_with(field, |_| Ok(())).await
+    }
+
+    #[must_use]
+    pub const fn total_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub const fn check_limit(&self) -> Result<(), EnqueueError> {
+        if self.bytes > MAX_PAYLOAD_BYTES {
+            return Err(EnqueueError::PayloadTooLarge { bytes: self.bytes });
+        }
+        Ok(())
+    }
+}
 
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,7 +320,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{EnqueueError, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, prepare};
+    use super::{EnqueueError, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadSizer, prepare};
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
     use crate::{JobKind, KindName};
     use serde::ser::Error as _;
@@ -478,5 +544,118 @@ mod tests {
             }
             assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
         }
+    }
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl std::task::Wake for WakeCount {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn poll_to_completion<T>(future: impl Future<Output = T>) -> (T, usize) {
+        let wakes = std::sync::Arc::new(WakeCount::default());
+        let waker = std::task::Waker::from(std::sync::Arc::clone(&wakes));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        for polls in 1..=1024 {
+            let previous = wakes.0.load(Ordering::Relaxed);
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(value) => return (value, polls),
+                std::task::Poll::Pending => assert!(
+                    wakes.0.load(Ordering::Relaxed) > previous,
+                    "a bounded preflight poll must schedule its next wakeup"
+                ),
+            }
+        }
+        panic!("bounded future did not complete");
+    }
+
+    #[test]
+    fn payload_sizer_matches_json_bytes_across_utf8_boundaries_and_shared_budget() {
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            first: &'a str,
+            second: &'a str,
+        }
+
+        let first = format!(
+            "{}é😀\\\"\u{0001}",
+            "x".repeat(PayloadSizer::BYTES_PER_POLL - 1)
+        );
+        let second = "y".repeat(256);
+        let expected = serde_json::to_vec(&Envelope {
+            first: &first,
+            second: &second,
+        })
+        .unwrap()
+        .len();
+
+        let (result, polls) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::from_skeleton(&Envelope {
+                first: "",
+                second: "",
+            })?;
+            sizer.add_str(&first).await?;
+            sizer.add_str(&second).await?;
+            Ok::<_, EnqueueError>(sizer)
+        });
+        let sizer = result.unwrap();
+        assert_eq!(sizer.total_bytes(), expected);
+        assert!(polls >= 2);
+        assert!(sizer.check_limit().is_ok());
+
+        assert!(
+            PayloadSizer::with_base(MAX_PAYLOAD_BYTES)
+                .check_limit()
+                .is_ok()
+        );
+        std::assert_matches!(
+            PayloadSizer::with_base(MAX_PAYLOAD_BYTES + 1).check_limit(),
+            Err(EnqueueError::PayloadTooLarge { bytes }) if bytes == MAX_PAYLOAD_BYTES + 1
+        );
+
+        let (overflow, _) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(usize::MAX);
+            sizer.add_str("a").await
+        });
+        std::assert_matches!(overflow, Err(EnqueueError::Serialize(_)));
+    }
+
+    #[test]
+    fn payload_sizer_admit_rejects_fragments_after_yielding() {
+        #[derive(Debug)]
+        enum Reject {
+            Disallowed,
+            Enqueue(EnqueueError),
+        }
+
+        impl From<EnqueueError> for Reject {
+            fn from(error: EnqueueError) -> Self {
+                Self::Enqueue(error)
+            }
+        }
+
+        let field = format!("{}\n", "x".repeat(PayloadSizer::BYTES_PER_POLL * 2));
+        let (result, polls) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(0);
+            sizer
+                .add_str_with(&field, |fragment| {
+                    if fragment.contains('\n') {
+                        Err(Reject::Disallowed)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+        });
+        assert!(polls >= 3);
+        std::assert_matches!(result, Err(Reject::Disallowed));
     }
 }
