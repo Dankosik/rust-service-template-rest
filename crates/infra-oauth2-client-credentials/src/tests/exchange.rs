@@ -211,15 +211,19 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
         provider_concurrency: nonzero(2),
         ..fixture.options()
     });
-    let exchange_tokens = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap();
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let exchange_tokens = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap();
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     fixture.drive(driver);
     let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     fixture.send_exchange(&client, "cached").await.unwrap();
@@ -280,15 +284,19 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
         provider_concurrency: nonzero(1),
         ..fixture.options()
     });
-    let exchange_tokens = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap();
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let exchange_tokens = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap();
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     fixture.drive(driver);
     let client = exchange_tokens.http(fixture.resource_client()).unwrap();
     let service_client = service_tokens.http(fixture.resource_client()).unwrap();

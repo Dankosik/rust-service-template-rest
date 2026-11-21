@@ -28,8 +28,12 @@ async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
         .await
         .unwrap();
     for scope in ["catalog", "billing"] {
-        let (tokens, driver) =
-            registration.service_tokens(service_target(&[scope]), provider.resource_origin());
+        let (tokens, driver) = service_tokens_http(
+            &registration,
+            service_target(&[scope]),
+            provider.resource_origin(),
+        )
+        .unwrap();
         provider.drive(driver);
         let client = tokens.http(provider.resource_client()).unwrap();
         assert_eq!(

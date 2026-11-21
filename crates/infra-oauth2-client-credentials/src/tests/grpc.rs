@@ -23,6 +23,7 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
+use infra_outbound_http::Origin;
 use operation_context::OperationContext;
 use tls_test_support::TlsMaterial;
 use tokio::{
@@ -38,7 +39,10 @@ use tokio_rustls::{
 use tonic::{Code, Request, Response, Status, body::Body};
 use tower::{Service as _, service_fn};
 
-use super::{Fixture, acquisition_deadline, nonzero, prepare_registration, subject, token_context};
+use super::{
+    Fixture, acquisition_deadline, exchange_tokens_http, nonzero, prepare_registration, subject,
+    token_context,
+};
 use crate::{AcquisitionError, ExchangeTokenTarget, Rejection, ServiceTokenTarget, ServiceTokens};
 
 #[derive(Clone)]
@@ -117,12 +121,17 @@ struct Resource {
 }
 
 impl Resource {
-    fn origin(&self) -> http::Uri {
-        format!("https://{}", self.address).parse().unwrap()
+    fn origin(&self) -> Origin {
+        Origin::parse_https(&format!("https://{}", self.address)).unwrap()
     }
 
     fn credentials(&self, tokens: &Fixture) -> ServiceTokens {
-        tokens.service_tokens_with(tokens.options(), &[], self.origin())
+        let registration = prepare_registration(tokens.options());
+        let (credentials, driver) =
+            registration.service_tokens(ServiceTokenTarget::default(), self.origin());
+        tokens.drive(driver);
+        tokens.registrations.lock().unwrap().push(registration);
+        credentials
     }
 
     async fn new() -> Self {
@@ -638,15 +647,15 @@ async fn provider_capacity_is_unavailable_with_typed_source_before_resource_disp
     let (credentials, driver) =
         registration.service_tokens(ServiceTokenTarget::default(), resource.origin());
     tokens.drive(driver);
-    let http = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            tokens.resource_origin(),
-            nonzero(1),
-        )
-        .unwrap()
-        .http(tokens.resource_client())
-        .unwrap();
+    let http = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        tokens.resource_origin(),
+        nonzero(1),
+    )
+    .unwrap()
+    .http(tokens.resource_client())
+    .unwrap();
     let gate = tokens.block_tokens();
     let active_subject = subject("active");
     let context = OperationContext::with_timeout(Duration::from_secs(10));

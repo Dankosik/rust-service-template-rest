@@ -23,7 +23,7 @@ impl BackgroundRegistration<'_> {
         &mut self,
         registration: impl Into<std::sync::Arc<infra_oauth2_client_credentials::Registration>>,
         target: infra_oauth2_client_credentials::ServiceTokenTarget,
-        origin: axum::http::Uri,
+        origin: infra_outbound_http::Origin,
     ) -> infra_oauth2_client_credentials::ServiceTokens {
         let registration = registration.into();
         let (tokens, driver) = registration.service_tokens(target, origin);

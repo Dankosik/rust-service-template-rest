@@ -148,11 +148,64 @@ async fn only_the_exchange_source_requires_a_valid_cache_capacity() {
     let error = registration
         .exchange_tokens(
             ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
+            Origin::parse_https("https://resource.example").unwrap(),
             nonzero(65_537),
         )
         .unwrap_err();
     assert_eq!(error.key, "exchange_cache_capacity");
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn test_http_token_sources_require_a_loopback_http_origin() {
+    let fixture = Fixture::new().await;
+    let registration = prepare_registration(fixture.options());
+    for invalid in [
+        "https://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://10.0.0.1:8080",
+        "http://user@127.0.0.1:8080",
+        "http://127.0.0.1:8080/path",
+        "http://127.0.0.1:8080/.",
+        "http://127.0.0.1:8080?x=1",
+    ] {
+        assert_eq!(
+            service_tokens_http(&registration, ServiceTokenTarget::default(), invalid)
+                .unwrap_err()
+                .key,
+            "resource_origin",
+            "{invalid}"
+        );
+        assert_eq!(
+            exchange_tokens_http(
+                &registration,
+                ExchangeTokenTarget::default(),
+                invalid,
+                EXCHANGE_CAPACITY,
+            )
+            .unwrap_err()
+            .key,
+            "resource_origin",
+            "{invalid}"
+        );
+    }
+    assert!(
+        service_tokens_http(
+            &registration,
+            ServiceTokenTarget::default(),
+            "http://[::1]:8080",
+        )
+        .is_ok()
+    );
+    assert!(
+        exchange_tokens_http(
+            &registration,
+            ExchangeTokenTarget::default(),
+            "http://[::1]:8080",
+            EXCHANGE_CAPACITY,
+        )
+        .is_ok()
+    );
     fixture.finish().await;
 }
 

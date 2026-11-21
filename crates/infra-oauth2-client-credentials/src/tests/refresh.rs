@@ -179,18 +179,22 @@ async fn short_lived_background_replacements_get_their_own_early_refresh() {
 async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     let service = service_tokens.http(fixture.resource_client()).unwrap();
-    let exchange = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap()
-        .http(fixture.resource_client())
-        .unwrap();
+    let exchange = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap()
+    .http(fixture.resource_client())
+    .unwrap();
     let driver = tokio::spawn(driver.run(std::future::pending()));
     let mut response = exchange_response("warm-token");
     response["expires_in"] = 3600.into();
@@ -226,8 +230,12 @@ async fn dropping_registration_stops_inflight_refresh_and_closes_warm_clients() 
 async fn dropping_registration_stops_a_bound_http_call_during_token_acquisition() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let (credentials, _driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let (credentials, _driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     let client = credentials.http(fixture.resource_client()).unwrap();
     let context = OperationContext::unbounded();
     let _gate = fixture.block_tokens();
@@ -255,17 +263,21 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
     let registration = prepare_registration(fixture.options());
-    let (service, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
-    let exchange = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap()
-        .http(fixture.resource_client())
-        .unwrap();
+    let (service, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
+    let exchange = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap()
+    .http(fixture.resource_client())
+    .unwrap();
     let client = service.http(fixture.resource_client()).unwrap();
     fixture.send(&client).await.unwrap();
     fixture.token_received().await;
@@ -324,18 +336,22 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
 async fn dropping_the_service_driver_closes_only_service_clients() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     let service = service_tokens.http(fixture.resource_client()).unwrap();
-    let exchange = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap()
-        .http(fixture.resource_client())
-        .unwrap();
+    let exchange = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap()
+    .http(fixture.resource_client())
+    .unwrap();
     fixture.send(&service).await.unwrap();
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture.send_exchange(&exchange, "warm").await.unwrap();
@@ -424,8 +440,12 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 3600}),
     );
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     service_tokens
         .service_token(acquisition_deadline(&token_context()))
         .await
@@ -640,22 +660,26 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         provider_concurrency: nonzero(1),
         ..fixture.options()
     });
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     fixture.drive(driver);
     let client = service_tokens.http(fixture.resource_client()).unwrap();
     fixture.send(&client).await.unwrap();
     advance(Duration::from_secs(3321)).await;
     let gate = fixture.block_tokens();
-    let exchange_client = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap()
-        .http(fixture.resource_client())
-        .unwrap();
+    let exchange_client = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap()
+    .http(fixture.resource_client())
+    .unwrap();
     let mut exchange = Box::pin(fixture.send_exchange(&exchange_client, "active"));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     fixture.send(&client).await.unwrap();

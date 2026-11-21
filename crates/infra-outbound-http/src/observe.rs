@@ -1,6 +1,6 @@
 use std::{error::Error as StdError, fmt, mem::DropGuard, sync::Arc, time::Instant};
 
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, Method, Request, StatusCode};
 use metrics::{Label, SharedString, Unit};
 use operation_context::{OperationContext, Stopped};
 use tracing::Span;
@@ -65,6 +65,14 @@ impl Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrlTemplate(pub &'static str);
+
+impl UrlTemplate {
+    #[must_use]
+    pub fn attach<B>(self, mut request: Request<B>) -> Request<B> {
+        request.extensions_mut().insert(self);
+        request
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Server {

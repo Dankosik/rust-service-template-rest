@@ -54,10 +54,12 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
         }),
     );
     let registration = prepare_registration(fixture.options());
-    let (service_tokens, driver) = registration.service_tokens(
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
         service_target(&["write", "read+all", "write"]),
         fixture.resource_origin(),
-    );
+    )
+    .unwrap();
     fixture.drive(driver);
     let response = service_tokens
         .http(fixture.resource_client())
@@ -79,22 +81,22 @@ async fn each_grant_encodes_its_own_target_in_the_token_request() {
     );
 
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    registration
-        .exchange_tokens(
-            exchange_target(&["read"], Some("https://api.example/é?a=b&c=d")),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap()
-        .http(fixture.resource_client())
-        .unwrap()
-        .execute(
-            &timeout_context(Duration::from_secs(10)),
-            fixture.request(),
-            &subject("subject+/="),
-        )
-        .await
-        .unwrap();
+    exchange_tokens_http(
+        &registration,
+        exchange_target(&["read"], Some("https://api.example/é?a=b&c=d")),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap()
+    .http(fixture.resource_client())
+    .unwrap()
+    .execute(
+        &timeout_context(Duration::from_secs(10)),
+        fixture.request(),
+        &subject("subject+/="),
+    )
+    .await
+    .unwrap();
     let token_request = fixture.token_requests().pop().unwrap();
     assert_eq!(token_request.target, TOKEN_PATH);
     assert!(token_request.header("authorization").is_none());
@@ -119,16 +121,20 @@ async fn two_targets_on_one_registration_keep_each_grants_tokens_separate() {
     let registration = prepare_registration(fixture.options());
     let bindings =
         [("catalog", "catalog-scope"), ("billing", "billing-scope")].map(|(audience, scope)| {
-            let (service, driver) =
-                registration.service_tokens(service_target(&[scope]), fixture.resource_origin());
+            let (service, driver) = service_tokens_http(
+                &registration,
+                service_target(&[scope]),
+                fixture.resource_origin(),
+            )
+            .unwrap();
             fixture.drive(driver);
-            let exchange = registration
-                .exchange_tokens(
-                    exchange_target(&[], Some(audience)),
-                    fixture.resource_origin(),
-                    EXCHANGE_CAPACITY,
-                )
-                .unwrap();
+            let exchange = exchange_tokens_http(
+                &registration,
+                exchange_target(&[], Some(audience)),
+                fixture.resource_origin(),
+                EXCHANGE_CAPACITY,
+            )
+            .unwrap();
             (
                 audience,
                 service.http(fixture.resource_client()).unwrap(),
@@ -657,19 +663,23 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         provider_concurrency: nonzero(1),
         ..fixture.options()
     });
-    let (service_tokens, driver) =
-        registration.service_tokens(ServiceTokenTarget::default(), fixture.resource_origin());
+    let (service_tokens, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
     fixture.drive(driver);
     let dropped_client = service_tokens.http(fixture.resource_client()).unwrap();
-    let exchange_client = registration
-        .exchange_tokens(
-            ExchangeTokenTarget::default(),
-            fixture.resource_origin(),
-            EXCHANGE_CAPACITY,
-        )
-        .unwrap()
-        .http(fixture.resource_client())
-        .unwrap();
+    let exchange_client = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        fixture.resource_origin(),
+        EXCHANGE_CAPACITY,
+    )
+    .unwrap()
+    .http(fixture.resource_client())
+    .unwrap();
     let mut dropped = Box::pin(dropped_client.execute(&far, fixture.request()));
     fixture.drive_until_token_received(dropped.as_mut()).await;
     captured.drain(&snapshotter);
