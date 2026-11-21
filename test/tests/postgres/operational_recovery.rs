@@ -279,7 +279,12 @@ impl Instance {
                 .unwrap(),
             Drained::Complete
         );
-        assert_eq!(self.pool.as_sqlx().options().get_max_connections(), 1);
+        assert_eq!(
+            infra_postgres::test_support::as_sqlx(&self.pool)
+                .options()
+                .get_max_connections(),
+            1
+        );
         assert_eq!(self.pool.close(CALL).await, CloseOutcome::Complete);
     }
 }
@@ -392,7 +397,10 @@ async fn consumers_recover_from_local_pressure_shared_interruption_and_admission
     a.useful("initial").await;
     b.useful("initial").await;
 
-    let mut held = a.pool.as_sqlx().acquire().await.unwrap();
+    let mut held = infra_postgres::test_support::as_sqlx(&a.pool)
+        .acquire()
+        .await
+        .unwrap();
     let started = Instant::now();
     a.state(false).await;
     assert_eq!(

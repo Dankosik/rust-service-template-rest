@@ -37,6 +37,12 @@ fn is_valid(key: &str) -> bool {
     })
 }
 
+impl std::borrow::Borrow<str> for ObjectKey {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl AsRef<str> for ObjectKey {
     fn as_ref(&self) -> &str {
         self.as_str()

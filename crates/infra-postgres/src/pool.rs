@@ -142,6 +142,7 @@ impl fmt::Debug for Pool {
     }
 }
 
+#[must_use = "admit or close PoolStartup explicitly"]
 #[derive(Debug)]
 pub struct PoolStartup {
     pub(crate) pool: Pool,
@@ -168,8 +169,7 @@ impl PoolStartup {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn from_test_pool(pool: Pool) -> Self {
+    pub(crate) fn from_test_pool(pool: Pool) -> Self {
         Self {
             pool,
             default_isolation: Isolation::ServerDefault,
@@ -250,7 +250,6 @@ impl ListenerPool {
 }
 
 impl Pool {
-    #[must_use]
     pub fn prepare(dsn: &Dsn, options: &PoolOptions<'_>) -> PoolStartup {
         crate::observe::describe();
         let mut settings = Vec::new();
@@ -407,7 +406,7 @@ impl Pool {
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn from_test_pool(inner: PgPool) -> Self {
+    pub(crate) fn from_test_pool(inner: PgPool) -> Self {
         Self {
             inner,
             policy: Arc::new(PoolPolicy {
@@ -419,7 +418,7 @@ impl Pool {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn connect_lazy_for_test(url: &str) -> Result<Self, sqlx::Error> {
+    pub(crate) fn connect_lazy_for_test(url: &str) -> Result<Self, sqlx::Error> {
         PgPoolOptions::new()
             .connect_lazy(url)
             .map(Self::from_test_pool)
@@ -427,7 +426,7 @@ impl Pool {
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub fn as_sqlx(&self) -> &PgPool {
+    pub(crate) fn as_sqlx(&self) -> &PgPool {
         &self.inner
     }
 

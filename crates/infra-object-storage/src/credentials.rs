@@ -8,7 +8,7 @@ use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_sdk_s3::config::{Credentials, Region, SharedCredentialsProvider, SharedHttpClient};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::error::ConfigError;
+use crate::error::ConfigErrorKind;
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("AccessKey")]
@@ -25,12 +25,14 @@ pub enum AmazonCredentials {
 }
 
 impl AccessKey {
-    pub(crate) fn credentials_provider(&self) -> Result<SharedCredentialsProvider, ConfigError> {
+    pub(crate) fn credentials_provider(
+        &self,
+    ) -> Result<SharedCredentialsProvider, ConfigErrorKind> {
         if self.access_key_id.trim().is_empty() {
-            return Err(ConfigError::AccessKeyId);
+            return Err(ConfigErrorKind::AccessKeyId);
         }
         if self.secret_access_key.expose_secret().trim().is_empty() {
-            return Err(ConfigError::SecretAccessKey);
+            return Err(ConfigErrorKind::SecretAccessKey);
         }
         Ok(SharedCredentialsProvider::new(Credentials::new(
             &self.access_key_id,
@@ -47,7 +49,7 @@ impl AmazonCredentials {
         &self,
         region: &str,
         http_client: &SharedHttpClient,
-    ) -> Result<SharedCredentialsProvider, ConfigError> {
+    ) -> Result<SharedCredentialsProvider, ConfigErrorKind> {
         match self {
             Self::AccessKey(access_key) => access_key.credentials_provider(),
             Self::WorkloadIdentity => Ok(SharedCredentialsProvider::new(workload_identity(
@@ -63,11 +65,11 @@ const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
 fn web_identity_configured(
     role_arn: Option<&OsStr>,
     token_file: Option<&OsStr>,
-) -> Result<bool, ConfigError> {
+) -> Result<bool, ConfigErrorKind> {
     match (role_arn, token_file) {
         (None, None) => Ok(false),
         (Some(role), Some(file)) if [role, file].into_iter().all(nonblank_unicode) => Ok(true),
-        _ => Err(ConfigError::WebIdentity),
+        _ => Err(ConfigErrorKind::WebIdentity),
     }
 }
 
@@ -78,7 +80,7 @@ fn nonblank_unicode(value: &OsStr) -> bool {
 fn workload_identity(
     region: &str,
     http_client: SharedHttpClient,
-) -> Result<CredentialsProviderChain, ConfigError> {
+) -> Result<CredentialsProviderChain, ConfigErrorKind> {
     let config = ProviderConfig::without_region()
         .with_region(Some(Region::new(region.to_owned())))
         .with_http_client(http_client);
@@ -130,7 +132,7 @@ mod tests {
         ] {
             assert_eq!(
                 web_identity_configured(role, file),
-                Err(ConfigError::WebIdentity)
+                Err(ConfigErrorKind::WebIdentity)
             );
         }
     }

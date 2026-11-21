@@ -70,6 +70,12 @@ impl KindName {
     }
 }
 
+impl std::borrow::Borrow<str> for KindName {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
 impl AsRef<str> for KindName {
     fn as_ref(&self) -> &str {
         self.0
@@ -728,7 +734,7 @@ mod tests {
     }
 
     fn lazy_pool() -> Pool {
-        Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap()
+        infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap()
     }
 
     proptest::proptest! {

@@ -64,6 +64,7 @@ pub struct Messaging {
 pub struct OutboxProducer(pub(crate) Producer);
 // template:end outbox:messaging-outbox-producer
 
+#[must_use = "admit or close MessagingStartup explicitly"]
 #[derive(Debug)]
 pub struct MessagingStartup {
     phase: StartupPhase,
@@ -122,6 +123,7 @@ impl Shared {
     }
 }
 
+#[must_use = "inspect close outcome to log or handle incomplete drain"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
     Complete,
@@ -236,11 +238,7 @@ impl MessagingStartup {
     }
 
     async fn admit_inner(&mut self) -> Result<Messaging, MessagingError> {
-        crate::producer::describe_metrics();
-        crate::probe::describe_metrics();
-        crate::connection::describe_metrics();
-        crate::consumer::describe_metrics();
-        crate::credentials::describe_metrics();
+        crate::observe::describe_metrics();
         let StartupPhase::Starting { config, connection } = &mut self.phase else {
             return Err(MessagingError::Configuration(
                 "messaging is already admitted",

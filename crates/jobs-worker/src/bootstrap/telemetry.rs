@@ -36,6 +36,9 @@ pub(super) async fn install_observability(
             // template:begin outbound-http:worker-bootstrap-outbound-histogram
             infra_outbound_http::HISTOGRAMS,
             // template:end outbound-http:worker-bootstrap-outbound-histogram
+            // template:begin messaging:worker-bootstrap-messaging-histograms
+            infra_messaging::HISTOGRAMS,
+            // template:end messaging:worker-bootstrap-messaging-histograms
         ]
         .concat(),
     )?;

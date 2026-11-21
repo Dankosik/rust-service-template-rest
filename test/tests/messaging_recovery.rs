@@ -1,4 +1,3 @@
-#![cfg(feature = "integration")]
 #![expect(
     clippy::expect_used,
     clippy::unwrap_used,

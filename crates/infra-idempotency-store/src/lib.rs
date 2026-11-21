@@ -36,7 +36,7 @@ pub struct Store {
 pub struct InvalidRetention;
 
 impl Store {
-    pub fn new(pool: Pool, retention: Duration) -> Result<Self, InvalidRetention> {
+    pub fn try_new(pool: Pool, retention: Duration) -> Result<Self, InvalidRetention> {
         if !(Duration::from_micros(1)..=MAX_RETENTION).contains(&retention) {
             return Err(InvalidRetention);
         }
@@ -53,11 +53,11 @@ mod tests {
 
     #[tokio::test]
     async fn retention_is_bounded_before_the_store_can_run_work() {
-        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let max = Duration::from_hours(36_500 * 24);
-        assert!(Store::new(pool.clone(), max).is_ok());
-        assert!(Store::new(pool.clone(), Duration::from_micros(1)).is_ok());
+        assert!(Store::try_new(pool.clone(), max).is_ok());
+        assert!(Store::try_new(pool.clone(), Duration::from_micros(1)).is_ok());
         for invalid in [
             Duration::ZERO,
             Duration::from_nanos(999),
@@ -65,7 +65,7 @@ mod tests {
             Duration::from_micros(i64::MAX.unsigned_abs()),
             Duration::from_secs(10_000_000_000_000),
         ] {
-            let rejected = Store::new(pool.clone(), invalid);
+            let rejected = Store::try_new(pool.clone(), invalid);
             assert_eq!(rejected.unwrap_err(), InvalidRetention);
         }
         let _ = pool.close(Duration::from_secs(1)).await;

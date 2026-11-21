@@ -353,12 +353,14 @@ pub struct ReadinessControl {
     policy: RefreshPolicy,
 }
 
+#[must_use = "activate PreparedReadiness to publish readiness state"]
 #[derive(Debug)]
 pub struct PreparedReadiness {
     readiness: Readiness,
     checked_at: Instant,
 }
 
+#[must_use = "run ReadinessRefresher to keep readiness fresh"]
 #[derive(Debug)]
 pub struct ReadinessRefresher {
     readiness: Readiness,

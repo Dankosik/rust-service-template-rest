@@ -601,7 +601,8 @@ impl Mounted {
         let widgets = Arc::new(SqlWidgets {
             hold: Arc::clone(&hold),
         });
-        let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+        let store =
+            Store::try_new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
         let contract = widget_contract();
         let mounted = HttpContract::application(bearer_document())
             .unwrap()
@@ -1082,9 +1083,9 @@ async fn missing_delegation(_: VerifiedDelegation) -> Result<MissingDelegationCo
 #[tokio::test]
 async fn idempotent_verified_delegation_without_route_opt_in_is_a_sanitized_internal_failure() {
     let provider = Provider::start().await;
-    let pool =
-        Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool does no I/O");
-    let store = Store::new(pool, RETENTION).expect("retention fits PostgreSQL");
+    let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
+        .expect("lazy pool does no I/O");
+    let store = Store::try_new(pool, RETENTION).expect("retention fits PostgreSQL");
     let app = HttpContract::application(bearer_document())
         .unwrap()
         .merge(
@@ -1731,8 +1732,9 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
     verify_fixture_authorization(&verifier, authorization.as_bytes())
         .await
         .unwrap();
-    let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool");
-    let store = Store::new(pool, RETENTION).unwrap();
+    let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
+        .expect("lazy pool");
+    let store = Store::try_new(pool, RETENTION).unwrap();
     let contract = HttpContract::application(bearer_document())
         .unwrap()
         .merge(widget_contract())
@@ -2044,7 +2046,10 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         until_free(|| mounted.create(ALICE, "k-handler", &input, "req-recovered")).await;
     created(&stored, "req-recovered");
     let mut connections = Vec::new();
-    for _ in 0..mounted.store_pool.as_sqlx().options().get_max_connections() {
+    for _ in 0..infra_postgres::test_support::as_sqlx(&mounted.store_pool)
+        .options()
+        .get_max_connections()
+    {
         connections.push(
             mounted
                 .store_pool
@@ -2220,9 +2225,7 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
         .await
         .unwrap();
 
-    mounted
-        .store_pool
-        .as_sqlx()
+    infra_postgres::test_support::as_sqlx(&mounted.store_pool)
         .execute("SET statement_timeout = '150ms'")
         .await
         .unwrap();
@@ -2241,9 +2244,7 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
         150
     );
 
-    mounted
-        .store_pool
-        .as_sqlx()
+    infra_postgres::test_support::as_sqlx(&mounted.store_pool)
         .execute("SET statement_timeout = '8s'")
         .await
         .unwrap();

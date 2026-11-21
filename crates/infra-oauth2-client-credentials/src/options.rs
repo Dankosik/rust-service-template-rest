@@ -136,6 +136,14 @@ impl FromStr for IssuerUrl {
     }
 }
 
+impl TryFrom<&str> for IssuerUrl {
+    type Error = ConfigurationError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
 #[derive(Clone, Eq, Hash, PartialEq, derive_more::Debug)]
 #[debug("TokenUrl([REDACTED])")]
 pub struct TokenUrl(ParsedUrl);
@@ -175,6 +183,14 @@ impl FromStr for TokenUrl {
     type Err = ConfigurationError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl TryFrom<&str> for TokenUrl {
+    type Error = ConfigurationError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
         Self::parse(raw)
     }
 }

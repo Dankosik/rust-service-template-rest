@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use infra_outbound_http::{
-    Bytes, Client, InvalidOrigin, Limits, OperationContext, Origin, Request, TestBuildError,
-};
+use infra_outbound_http::test_support::{TestBuildError, client_http, client_https};
+use infra_outbound_http::{Bytes, InvalidOrigin, Limits, OperationContext, Origin, Request};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -20,8 +19,7 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
         .mount(&mock)
         .await;
 
-    let client =
-        Client::try_new_for_test_http(&mock.uri(), limits()).expect("loopback mock client");
+    let client = client_http(&mock.uri(), limits()).expect("loopback mock client");
     let request = Request::get(client.uri("/provider/items").unwrap())
         .body(Bytes::new())
         .unwrap();
@@ -49,13 +47,12 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
         "http://127.0.0.1:8080/path",
     ] {
         std::assert_matches!(
-            Client::try_new_for_test_http(base, limits()),
+            client_http(base, limits()),
             Err(TestBuildError::InvalidOrigin(_)),
             "{base} must be refused"
         );
     }
-    let http_client =
-        Client::try_new_for_test_http("http://127.0.0.1:8080", limits()).expect("test http client");
+    let http_client = client_http("http://127.0.0.1:8080", limits()).expect("test http client");
     assert_eq!(http_client.host(), "127.0.0.1");
     assert_eq!(http_client.port(), 8080);
     assert_eq!(
@@ -64,7 +61,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
     );
     let https_origin = Origin::parse_https("https://provider.example").unwrap();
     std::assert_matches!(
-        Client::try_new_for_test_https(
+        client_https(
             https_origin.clone(),
             limits(),
             b"not-der",
@@ -73,7 +70,7 @@ fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
         Err(TestBuildError::InvalidOrigin(_))
     );
     std::assert_matches!(
-        Client::try_new_for_test_https(
+        client_https(
             https_origin,
             limits(),
             b"not-der",

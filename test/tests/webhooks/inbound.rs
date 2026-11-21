@@ -38,7 +38,8 @@ async fn unfinished_webhook_upload_returns_the_declared_timeout() {
     use infra_webhooks::inbound::route::{WebhookState, router};
     use tower::ServiceExt as _;
 
-    let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool");
+    let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
+        .expect("lazy pool");
     let app = mounted_receiver(receiver(pool), Duration::from_secs(1));
     let upload =
         Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
@@ -194,7 +195,7 @@ fn incoming_preserves_base64_json_bytes_and_decodes_original_body() {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let receiver = receiver(app_pool.clone());
     let body = b"\0{\"event\":\"created\"}\xff";
@@ -304,7 +305,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let first = receiver(app_pool.clone());
     let second = receiver(app_pool.clone());
@@ -384,7 +385,7 @@ async fn a_blocked_enqueue_expires_and_the_same_delivery_commits_once(pool: PgPo
     use sqlx::Connection as _;
     use tokio::time::Instant;
 
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let mut connection = app_pool.acquire("hold webhook enqueue").await.unwrap();
     let mut holder = connection.begin().await.unwrap();
     sqlx::query("LOCK TABLE background_jobs IN SHARE MODE")
@@ -447,7 +448,7 @@ async fn a_blocked_enqueue_expires_and_the_same_delivery_commits_once(pool: PgPo
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_converges(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let body = b"{\"lost_ack\":true}";
     for (fault, message_id, committed, retry_outcome) in [
@@ -589,7 +590,7 @@ async fn accept_for_processing(pool: &Pool, message_id: &str) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     sqlx::raw_sql(
         "CREATE TABLE webhook_effects (message_id bytea PRIMARY KEY, content_type bytea);
          INSERT INTO webhook_effects (message_id) VALUES ('private-message-id');
@@ -658,7 +659,7 @@ async fn consumer_sql_errors_preserve_safe_codes_through_retry_and_exhaustion(po
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     sqlx::query("CREATE TABLE webhook_effects (message_id bytea NOT NULL, content_type bytea)")
         .execute(&pool)
         .await
@@ -703,7 +704,7 @@ async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     sqlx::query("CREATE TABLE webhook_effects (message_id bytea NOT NULL, content_type bytea)")
         .execute(&pool)
         .await
@@ -771,7 +772,7 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     accept_for_processing(&app_pool, "message-missing-consumer").await;
     sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = 'webhooks.process'")
         .execute(&pool)
@@ -852,8 +853,7 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
     let _local = metrics::set_default_local_recorder(&recorder);
     // template:end http-idempotency:test-webhook-cutoff-metric-recorder
     let writer = super::template_pool(&dsn_for(&pool).await, 1).await;
-    let held = writer
-        .as_sqlx()
+    let held = infra_postgres::test_support::as_sqlx(&writer)
         .acquire()
         .await
         .expect("occupy the only permit");
@@ -951,7 +951,7 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let mut verifiers = Verifiers::new();
     verifiers
@@ -1015,7 +1015,7 @@ impl Verifier for TokenVerifier {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     let mut verifiers = Verifiers::new();
     verifiers
@@ -1098,7 +1098,7 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn late_redelivery_after_completed_job_retention_preserves_one_consumer_effect(pool: PgPool) {
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let id = "redelivery-after-retention";
     sqlx::query("CREATE TABLE webhook_effects (message_id bytea NOT NULL, content_type bytea)")
         .execute(&pool)
@@ -1167,7 +1167,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let app = mounted_receiver(receiver(app_pool.clone()), Duration::from_secs(8));
     let keys = KeyRing::from_encoded(KEY, None).expect("key");
     for (id, body, content_type, status) in [
@@ -1287,7 +1287,7 @@ async fn a_server_limit_below_the_webhook_limit_answers_413_without_content_leng
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt as _;
 
-    let app_pool = Pool::from_test_pool(pool.clone());
+    let app_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let app = mounted_receiver_with_limit(receiver(app_pool.clone()), Duration::from_secs(8), 16);
     let body = Body::from_stream(futures_util::stream::once(async {
         Ok::<Bytes, std::io::Error>(Bytes::from_static(&[b'x'; 32]))
@@ -1401,7 +1401,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
         .bind(before).fetch_one(&pool).await.expect("migration timestamp approximation");
     assert!(approximation);
     assert_eq!(
-        receiver(Pool::from_test_pool(pool.clone()))
+        receiver(infra_postgres::test_support::pool_from_sqlx(pool.clone()))
             .receive(
                 ENDPOINT,
                 &unsigned_headers(&legacy),

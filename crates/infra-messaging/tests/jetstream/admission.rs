@@ -773,7 +773,7 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
                 0
             );
         } else {
-            admitted.unwrap();
+            let _ = admitted.unwrap();
         }
         close(messaging).await;
         fixture.cleanup().await;

@@ -225,7 +225,7 @@ impl Fixture {
     }
 
     fn resource_client(&self) -> Client {
-        Client::try_new_for_test_http(self.origin.as_str(), TOKEN_LIMITS).unwrap()
+        infra_outbound_http::test_support::client_http(self.origin.as_str(), TOKEN_LIMITS).unwrap()
     }
 
     fn service_client(&self) -> ServiceHttpClient {

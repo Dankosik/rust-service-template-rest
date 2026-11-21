@@ -469,7 +469,7 @@ mod tests {
                 panic!("an oversized body never reaches the verifier")
             }
         }
-        let pool = Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unreachable")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");
         let mut verifiers = Verifiers::new();
         verifiers.bind("provider", Arc::new(MustNotAuthenticate));

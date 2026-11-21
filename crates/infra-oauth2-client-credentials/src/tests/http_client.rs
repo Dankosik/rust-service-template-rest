@@ -184,7 +184,7 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
     let client = fixture
         .service_tokens(&[])
         .http(
-            Client::try_new_for_test_http(
+            infra_outbound_http::test_support::client_http(
                 fixture.origin.as_str(),
                 TOKEN_LIMITS
                     .with_operation_timeout(Duration::from_secs(3))
@@ -448,7 +448,7 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
     let client = fixture
         .service_tokens(&[])
         .http(
-            Client::try_new_for_test_http(
+            infra_outbound_http::test_support::client_http(
                 fixture.origin.as_str(),
                 TOKEN_LIMITS.with_response_body_bytes(8).unwrap(),
             )

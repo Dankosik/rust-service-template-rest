@@ -96,6 +96,7 @@ pub enum AcceptFailure {
     Panicked,
 }
 
+#[must_use = "inspect drain outcome to detect timed-out shutdown"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drained {
     Complete,
@@ -112,6 +113,7 @@ pub struct DrainResidue {
     pub remaining_delegated_tasks: usize,
 }
 
+#[must_use = "dropping Server aborts the HTTP accept loop immediately"]
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
@@ -202,20 +204,17 @@ impl BoundListener {
         })
     }
 
-    #[must_use]
     pub fn serve(self, app: Router, options: Http1Options) -> Server {
         let (driver, delegated) = http1_driver(options);
         serve_plaintext(self, app, options.connections, driver, delegated)
     }
 
     // template:begin grpc:http-bound-listener-tls
-    #[must_use]
     pub fn serve_tls(self, app: Router, options: Http1Options, tls: TlsOptions) -> Server {
         let (driver, delegated) = http1_driver(options);
         serve_tls(self, app, options.connections, driver, delegated, tls)
     }
 
-    #[must_use]
     pub fn serve_h2(self, app: Router, options: Http2Options, tls: Option<TlsOptions>) -> Server {
         let (driver, delegated) = http2_driver(options);
         match tls {

@@ -709,7 +709,7 @@ mod tests {
             .get(<DecodeProbe as crate::JobKind>::NAME.as_str())
             .unwrap();
         let pool =
-            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let attempt = || Attempt {
             fence: ClaimFence {
                 job_id: ID,

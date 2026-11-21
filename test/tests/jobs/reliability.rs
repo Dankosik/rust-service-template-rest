@@ -49,7 +49,7 @@ async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
     use tokio::process::Command;
 
     const LIMIT: usize = 128 * 1024 + 256;
-    reading::migrate(&Pool::from_test_pool(pool.clone()))
+    reading::migrate(&infra_postgres::test_support::pool_from_sqlx(pool.clone()))
         .await
         .unwrap();
     let db = integration_tests::url_for(&pool, integration_tests::DATABASE_URL).await;

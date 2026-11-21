@@ -80,7 +80,7 @@ impl Endpoint {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn with_client(
+    pub(crate) fn with_client(
         destination: Url,
         client: Client,
         keys: KeyRing,

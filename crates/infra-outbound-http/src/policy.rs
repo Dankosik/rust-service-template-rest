@@ -118,6 +118,14 @@ impl FromStr for Origin {
     }
 }
 
+impl TryFrom<&str> for Origin {
+    type Error = InvalidOrigin;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::parse_https(raw)
+    }
+}
+
 impl TryFrom<&Uri> for Origin {
     type Error = InvalidOrigin;
 

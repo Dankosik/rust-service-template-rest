@@ -533,7 +533,7 @@ mod tests {
     fn grace_covers_the_whole_tail_including_equality() {
         super::super::test_config(&[]);
         super::super::test_config(&[("APP__HTTP__GRACE_PERIOD", "43.5s")]);
-        let refused = service_config::fixtures::service(
+        let refused = service_config::test_support::service(
             &[("APP__HTTP__GRACE_PERIOD", "43.499999999s")],
             super::super::BUILD_INFO,
             TAIL,
@@ -654,8 +654,10 @@ mod tests {
         let held = Arc::new(Mutex::new(held));
         let mut dependencies = Dependencies::default();
         let pool =
-            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
-        dependencies.postgres = Some(PoolStartup::from_test_pool(pool.clone()));
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
+        dependencies.postgres = Some(infra_postgres::test_support::startup_from_pool(
+            pool.clone(),
+        ));
         let handler = {
             let entered = entered.clone();
             let dropping = dropping.clone();
@@ -717,9 +719,12 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                tokio::time::timeout(Duration::from_millis(30), pool.as_sqlx().close_event())
-                    .await
-                    .is_err()
+                tokio::time::timeout(
+                    Duration::from_millis(30),
+                    infra_postgres::test_support::as_sqlx(&pool).close_event(),
+                )
+                .await
+                .is_err()
             );
             release.send(()).unwrap();
         };

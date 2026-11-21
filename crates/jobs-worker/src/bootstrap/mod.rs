@@ -570,7 +570,7 @@ mod tests {
     ) -> super::PreparedReadiness {
         use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
-        let config = service_config::fixtures::worker(
+        let config = service_config::test_support::worker(
             &[
                 ("APP__HTTP__ADDR", "127.0.0.1:0"),
                 ("APP__OBSERVABILITY__METRICS__ADDR", ""),
@@ -669,7 +669,7 @@ mod tests {
             "the second stop must not restart the deadline"
         );
         background.close_and_wait().await;
-        resources
+        let _ = resources
             .listeners
             .health
             .unwrap()
@@ -733,7 +733,7 @@ mod tests {
         use futures_util::FutureExt;
 
         let config =
-            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+            service_config::test_support::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
         let mut signals = super::Signals::install().unwrap();
         let mut deadline = None;
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn invalid_shutdown_budget_names_the_failed_check() {
-        let refused = service_config::fixtures::worker(
+        let refused = service_config::test_support::worker(
             &[("APP__HTTP__GRACE_PERIOD", "30s")],
             crate::BUILD_INFO,
             crate::shutdown::TAIL,

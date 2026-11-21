@@ -333,7 +333,7 @@ async fn silent_client_is_closed_after_the_header_timeout() {
         Ok(Ok(0)),
         "expected EOF from the server, got {closed:?}"
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -347,7 +347,7 @@ async fn an_http1_listener_opens_no_http2_connection() {
         let peer = TcpStream::connect(server.local_addr()).await.unwrap();
         assert_http2_rejected(peer, sent).await;
     }
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 const HTTP2_CLIENT_PREFACE: &[u8] =
@@ -388,7 +388,7 @@ async fn an_http1_listener_reads_the_first_request_head_under_one_timeout() {
         Ok(Ok(0)),
         "expected EOF one timeout after accept, got {closed:?}"
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -427,7 +427,7 @@ async fn oversized_header_is_431() {
         "{}",
         text.get(..text.floor_char_boundary(80)).unwrap_or(&text)
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -439,7 +439,7 @@ async fn connection_cap_refuses_the_excess() {
     let second = TcpStream::connect(server.local_addr()).await.unwrap();
     assert_peer_closed(second).await;
     drop(first);
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -485,7 +485,7 @@ async fn bind_failure_is_reported() {
     let err =
         Server::bind(occupied.local_addr(), app(), options()).expect_err("second bind must fail");
     assert_eq!(err.addr(), occupied.local_addr(), "{err}");
-    occupied.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = occupied.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 // template:begin grpc:http-server-tls-test
@@ -704,7 +704,7 @@ async fn an_http2_tls_connection_serves_requests_after_the_preface_deadline() {
     tokio::time::advance(options.preface_timeout * 2).await;
     tokio::time::resume();
     check_request(&mut sender).await;
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -730,7 +730,7 @@ async fn an_http2_tls_listener_requires_h2_alpn() {
         );
     }
     assert_peer_closed(tls).await;
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -759,7 +759,7 @@ async fn an_http1_tls_listener_rejects_http2_and_allows_absent_alpn() {
     let response = fetch_http1(tls, "/ok").await;
     assert!(response.starts_with("HTTP/1.1 200 "));
     assert!(response.ends_with("ok"));
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 async fn read_http2_frame(peer: &mut TcpStream) -> ([u8; 9], Vec<u8>) {
@@ -811,7 +811,7 @@ async fn an_http2_listener_negotiates_a_segmented_preface_and_advertises_the_hea
     .await
     .expect("the server did not acknowledge the client's SETTINGS");
     drop(peer);
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -830,7 +830,7 @@ async fn stalled_http2_prefaces_close_after_the_preface_timeout() {
     for peer in peers {
         assert_peer_closed(peer).await;
     }
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -871,7 +871,7 @@ async fn an_http2_only_listener_answers_no_http1_request() {
         "an HTTP/1 response was sent: {:?}",
         String::from_utf8_lossy(&response)
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 // template:end grpc:http-server-tls-test
 

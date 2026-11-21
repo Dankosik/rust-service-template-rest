@@ -5,6 +5,8 @@ pub mod outbound;
 // template:begin inbound-webhooks:webhooks-inbound-module
 pub mod inbound;
 // template:end inbound-webhooks:webhooks-inbound-module
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub(crate) mod base64_bytes {
     use std::fmt;

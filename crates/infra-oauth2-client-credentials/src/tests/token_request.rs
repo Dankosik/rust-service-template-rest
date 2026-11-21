@@ -352,7 +352,7 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
 async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchange-token"));
-    let resource = Client::try_new_for_test_http(
+    let resource = infra_outbound_http::test_support::client_http(
         fixture.origin.as_str(),
         TOKEN_LIMITS
             .with_operation_timeout(Duration::from_secs(20))

@@ -31,6 +31,7 @@ pub struct Engine {
     additional_groups: Vec<Arc<WorkerGroup>>,
 }
 
+#[must_use = "dropping Started cancels background job tasks immediately"]
 pub struct Started {
     lifecycle: Arc<AttemptLifecycle>,
     _background: tokio_util::sync::DropGuard,
@@ -51,6 +52,7 @@ impl EngineSignals {
     }
 }
 
+#[must_use = "inspect DrainEnd to detect incomplete job shutdown"]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainEnd {
     pub known_results: usize,
@@ -189,7 +191,6 @@ impl Engine {
         sample_gauges
     }
 
-    #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         let kinds: Vec<_> = self.kind_names().collect();
         let gauges = self.init_metrics(&kinds);
@@ -292,7 +293,6 @@ impl Started {
         self.lifecycle.drain.wait().await;
     }
 
-    #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
         let deadline = self.lifecycle.cleanup.begin(budget);
@@ -703,7 +703,8 @@ mod tests {
 
     #[tokio::test]
     async fn engine_debug_shows_registered_kinds_and_worker_limit() {
-        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let mut kinds = crate::KindsBuilder::new();
         kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
             Ok(())
@@ -725,7 +726,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_suspended_attempt_keeps_the_first_stop_reason() {
         for (force_before_timeout, expected) in [(true, (0, 1)), (false, (1, 0))] {
-            let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+            let pool =
+                infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
             let _ = pool.close(Duration::from_secs(1)).await;
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(
@@ -804,7 +806,8 @@ mod tests {
         for (exit_after, observe_timeout_first, timed_out) in
             [(1, false, false), (2, true, true), (3, false, true)]
         {
-            let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+            let pool =
+                infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -851,7 +854,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_groups_cannot_claim_the_same_kind() {
-        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let kinds = || {
             let mut registry = crate::KindsBuilder::new();
             registry.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
@@ -874,7 +878,8 @@ mod tests {
                 .build()
                 .unwrap();
             let _entered = runtime.enter();
-            let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+            let pool =
+                infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -940,7 +945,8 @@ mod tests {
     async fn supervisor_custody_survives_unpolled_drop_and_abort() {
         let gauges = Gauges::default();
         let _local = metrics::set_default_local_recorder(gauges.recorder());
-        let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let entered = Arc::new(Notify::new());
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut kinds = crate::KindsBuilder::new();

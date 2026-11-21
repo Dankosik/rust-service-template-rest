@@ -66,7 +66,11 @@ pub enum MutationFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ConfigError {
+#[error(transparent)]
+pub struct ConfigError(pub(crate) ConfigErrorKind);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ConfigErrorKind {
     #[error("object_storage.bucket is not a valid dotless bucket name")]
     Bucket,
     #[error("object_storage.region is not valid for the provider")]

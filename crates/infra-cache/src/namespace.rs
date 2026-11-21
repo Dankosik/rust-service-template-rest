@@ -19,7 +19,7 @@ pub struct Namespace(&'static str);
 
 impl Namespace {
     #[must_use]
-    pub const fn new(name: &'static str) -> Option<Self> {
+    pub const fn try_new(name: &'static str) -> Option<Self> {
         if valid_namespace(name) {
             Some(Self(name))
         } else {
@@ -30,6 +30,12 @@ impl Namespace {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for Namespace {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -55,7 +61,7 @@ impl std::fmt::Display for Namespace {
 macro_rules! namespace {
     ($name:literal) => {
         const {
-            $crate::Namespace::new($name)
+            $crate::Namespace::try_new($name)
                 .expect("cache namespace must match ^[a-z][a-z0-9_]{0,63}$")
         }
     };

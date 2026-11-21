@@ -181,3 +181,43 @@ path = "src/bin/reading_counter_fixture.rs"
 required-features = ["integration"]
 test = false
 # template:end jobs-reference:test-reading-counter-fixture
+
+# template:begin postgres:test-postgres-integration-target
+[[test]]
+name = "postgres"
+path = "tests/postgres.rs"
+required-features = ["integration"]
+# template:end postgres:test-postgres-integration-target
+
+# template:begin http-idempotency:test-http-idempotency-integration-target
+[[test]]
+name = "http_idempotency"
+path = "tests/http_idempotency/main.rs"
+required-features = ["integration"]
+# template:end http-idempotency:test-http-idempotency-integration-target
+
+# template:begin jobs:test-jobs-integration-target
+[[test]]
+name = "jobs"
+path = "tests/jobs/main.rs"
+required-features = ["integration"]
+# template:end jobs:test-jobs-integration-target
+
+# template:begin webhooks-common:test-webhooks-integration-target
+[[test]]
+name = "webhooks"
+path = "tests/webhooks/main.rs"
+required-features = ["integration"]
+# template:end webhooks-common:test-webhooks-integration-target
+
+# template:begin outbox:test-outbox-integration-targets
+[[test]]
+name = "messaging_outbox"
+path = "tests/messaging_outbox.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "messaging_recovery"
+path = "tests/messaging_recovery.rs"
+required-features = ["integration"]
+# template:end outbox:test-outbox-integration-targets

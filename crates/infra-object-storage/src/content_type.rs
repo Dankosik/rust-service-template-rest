@@ -41,6 +41,12 @@ impl std::fmt::Display for ContentType {
     }
 }
 
+impl std::borrow::Borrow<str> for ContentType {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl std::str::FromStr for ContentType {
     type Err = InvalidContentType;
 
