@@ -957,7 +957,7 @@ mod tests {
                     &map_outcome(
                         &attempt,
                         Policy::default(),
-                        crate::kind::RetryBudget::Exhaust,
+                        crate::kind::KindMode::Ordinary,
                         handler_outcome,
                     ),
                 );

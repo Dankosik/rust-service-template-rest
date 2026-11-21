@@ -611,6 +611,20 @@ mod tests {
         assert!(polls >= 2);
         assert!(sizer.check_limit().is_ok());
 
+        let left = "a".repeat(PayloadSizer::BYTES_PER_POLL - 100);
+        let right = "b".repeat(256);
+        let (shared_result, shared_polls) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(0);
+            sizer.add_str(&left).await?;
+            sizer.add_str(&right).await?;
+            Ok::<_, EnqueueError>(sizer.total_bytes())
+        });
+        assert_eq!(shared_result.unwrap(), left.len() + right.len());
+        assert!(
+            shared_polls >= 2,
+            "fields individually within BYTES_PER_POLL must still share the poll budget"
+        );
+
         assert!(
             PayloadSizer::with_base(MAX_PAYLOAD_BYTES)
                 .check_limit()
@@ -657,5 +671,11 @@ mod tests {
         });
         assert!(polls >= 3);
         std::assert_matches!(result, Err(Reject::Disallowed));
+
+        let (overflow, _) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(usize::MAX);
+            sizer.add_str_with("a", |_| Ok::<_, Reject>(())).await
+        });
+        std::assert_matches!(overflow, Err(Reject::Enqueue(EnqueueError::Serialize(_))));
     }
 }
