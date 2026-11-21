@@ -694,7 +694,7 @@ fn bearer_document() -> utoipa::openapi::OpenApi {
 async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
     let malformed_key = "\"k-1";
@@ -768,7 +768,7 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
 async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
     let long = "k".repeat(256);
@@ -826,7 +826,7 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
 async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
     let wrong_media_type = mounted
@@ -947,7 +947,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
 async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
     let first_resource = mounted
@@ -1024,7 +1024,7 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_a_serialization_failure_rolls_back_the_widget_and_releases_the_key(pool: PgPool) {
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
     let failed = mounted
         .create(
             ALICE,
@@ -1118,7 +1118,7 @@ async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
 async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
 
     let reserved = json!({"name": RESERVED_NAME, "color": "red"});
     for request_id in ["req-reserved", "req-reserved-again"] {
@@ -1194,7 +1194,7 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
 async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET);
+    let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
     let changed = json!({"name": "gizmo", "color": "blue"});
 
