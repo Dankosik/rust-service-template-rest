@@ -132,6 +132,13 @@ impl Call {
     pub(crate) fn finish(self, code: tonic::Code) {
         self.0.finish(code);
     }
+
+    pub(crate) fn finish_status(self, status: &tonic::Status) {
+        if let Some(failure) = crate::status::catalog_code(status) {
+            self.record_failure(failure);
+        }
+        self.finish(status.code());
+    }
 }
 
 pub(crate) fn attach_parent_or_fallback(

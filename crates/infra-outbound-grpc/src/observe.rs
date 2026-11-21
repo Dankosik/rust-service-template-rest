@@ -40,7 +40,7 @@ impl Destination {
         let host = uri
             .host()
             .filter(|host| !host.is_empty() && host.len() <= DIAGNOSTIC_BYTES)?;
-        let address = crate::protocol::unbracket_host(host);
+        let address = crate::client::unbracket_host(host);
         Some(Self {
             address: Arc::from(address),
             port: uri.port_u16(),

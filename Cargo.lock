@@ -2883,7 +2883,6 @@ dependencies = [
  "derive_more",
  "enum-map",
  "foldhash",
- "futures-util",
  "grpc-contracts",
  "http",
  "hyper",
