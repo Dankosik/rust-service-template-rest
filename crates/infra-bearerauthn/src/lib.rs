@@ -27,7 +27,9 @@ mod verifier;
 pub use authenticate::Transport;
 pub(crate) use bearer::parse_bearer;
 pub use bearer::{DelegationCredential, PresentedToken};
+// template:begin oidc-jwt:authn-jwt-json-object-reexport
 pub(crate) use claims::JsonObject;
+// template:end oidc-jwt:authn-jwt-json-object-reexport
 // template:begin oidc-introspection:authn-introspection-error-export
 pub use error::InvalidCacheOptions;
 // template:end oidc-introspection:authn-introspection-error-export
