@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use bytesize::{ByteSize, GIB, MIB};
@@ -8,8 +8,7 @@ use serde::Deserialize;
 use crate::app::local_development_only;
 use crate::de::{BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
-    Rejected, ValidationError, Violations, duration_range, int_range, non_blank,
-    nonzero_usize_range, required,
+    Rejected, ValidationError, Violations, duration_range, non_blank, nonzero_usize_range, required,
 };
 
 const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
@@ -149,7 +148,7 @@ impl ObjectStorageProvider {
 pub struct ObjectStorageConfig {
     pub provider: ObjectStorageProvider,
     pub bucket: String,
-    pub max_object_bytes: ByteSize,
+    pub max_object_bytes: NonZeroU64,
     pub max_concurrency: NonZeroUsize,
     pub operation_timeout: Duration,
 }
@@ -391,11 +390,19 @@ impl ObjectStorageInput {
             max_concurrency,
             operation_timeout,
         } = self;
-        v.check(int_range(
-            "object_storage.max_object_bytes",
-            max_object_bytes.as_u64(),
-            1..=MAX_OBJECT_BYTES_CEILING,
-        ));
+        let max_object_bytes = v.record(
+            NonZeroU64::new(max_object_bytes.as_u64())
+                .filter(|bytes| bytes.get() <= MAX_OBJECT_BYTES_CEILING)
+                .ok_or_else(|| {
+                    ValidationError::new(
+                        "object_storage.max_object_bytes",
+                        format!(
+                            "must be between 1 and {MAX_OBJECT_BYTES_CEILING}, got {}",
+                            max_object_bytes.as_u64()
+                        ),
+                    )
+                }),
+        );
         let max_concurrency = v.record(nonzero_usize_range(
             "object_storage.max_concurrency",
             max_concurrency,
@@ -433,7 +440,7 @@ impl ObjectStorageInput {
         Ok(Some(ObjectStorageConfig {
             provider: provider?,
             bucket,
-            max_object_bytes,
+            max_object_bytes: max_object_bytes?,
             max_concurrency: max_concurrency?,
             operation_timeout,
         }))

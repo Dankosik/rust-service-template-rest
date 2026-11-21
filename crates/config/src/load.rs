@@ -68,7 +68,7 @@ pub struct Error(pub(crate) ErrorKind);
 
 impl Error {
     #[must_use]
-    pub fn validation_errors(&self) -> Option<&ValidationErrors> {
+    pub const fn validation_errors(&self) -> Option<&ValidationErrors> {
         match &self.0 {
             ErrorKind::Validate(errors) => Some(errors),
             _ => None,
