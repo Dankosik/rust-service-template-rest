@@ -5,11 +5,10 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::rejection::BytesRejection;
-use axum::extract::{FromRequest, FromRequestParts, Request, State};
+use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::header::CONNECTION;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Version};
-use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 use http_body::{Body as _, Frame};
 use http_body_util::BodyExt as _;
@@ -19,8 +18,7 @@ use http_body_util::Collected;
 use operation_context::{Deadline, OperationContext, Stopped};
 use tower_http::request_id::RequestId;
 
-use crate::body::hold_guard_until_end;
-use crate::problem::{Code, Problem, complete_problem, sanitized_problem};
+use crate::problem::{Code, Problem, complete_problem, pending_problem, sanitized_problem};
 use crate::request_id::REQUEST_ID_HEADER;
 
 #[derive(Clone, Debug)]
@@ -97,10 +95,10 @@ impl RequestContext {
             .and_then(|tracking| tracking.put_outcomes.get())
             .is_some_and(infra_object_storage::PutOutcomes::has_unconfirmed_write)
         {
-            return crate::object_storage::unconfirmed_write(problem).into_response();
+            return pending_problem(crate::object_storage::unconfirmed_write(problem));
         }
         // template:end object-storage:http-stopped-put-outcome
-        problem.into_response()
+        pending_problem(problem)
     }
 }
 
@@ -120,23 +118,7 @@ pub(crate) async fn collect_body(
 
 pub(crate) struct BodyReadTracker {
     target: Option<(Arc<RequestTracking>, Deadline)>,
-    pending: Option<PendingRead>,
-}
-
-struct PendingRead {
-    tracking: Arc<RequestTracking>,
-    deadline: Deadline,
-}
-
-impl Drop for PendingRead {
-    fn drop(&mut self) {
-        if self.deadline.expired() {
-            self.tracking
-                .pending_at_deadline
-                .store(true, Ordering::Relaxed);
-        }
-        self.tracking.pending.fetch_sub(1, Ordering::Release);
-    }
+    pending: bool,
 }
 
 impl BodyReadTracker {
@@ -145,27 +127,42 @@ impl BodyReadTracker {
             context.and_then(|context| context.tracking.clone().zip(context.operation.deadline()));
         Self {
             target,
-            pending: None,
+            pending: false,
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        if self.pending {
+            self.pending = false;
+            if let Some((tracking, deadline)) = &self.target {
+                if deadline.expired() {
+                    tracking.pending_at_deadline.store(true, Ordering::Relaxed);
+                }
+                tracking.pending.fetch_sub(1, Ordering::Release);
+            }
         }
     }
 
     pub(crate) fn poll_with<T>(&mut self, poll: impl FnOnce() -> Poll<T>) -> Poll<T> {
         let polled = poll();
         if polled.is_pending() {
-            if self.pending.is_none()
+            if !self.pending
                 && let Some((tracking, deadline)) = &self.target
                 && !deadline.expired()
             {
                 tracking.pending.fetch_add(1, Ordering::Relaxed);
-                self.pending = Some(PendingRead {
-                    tracking: Arc::clone(tracking),
-                    deadline: *deadline,
-                });
+                self.pending = true;
             }
         } else {
-            self.pending = None;
+            self.clear_pending();
         }
         polled
+    }
+}
+
+impl Drop for BodyReadTracker {
+    fn drop(&mut self) {
+        self.clear_pending();
     }
 }
 
@@ -282,70 +279,70 @@ pub(crate) fn missing_extension<T>() -> Response {
     missing_extension_problem::<T>().into_response()
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Arrival(pub(crate) tokio::time::Instant);
+pub(crate) type CancelGuard = std::mem::DropGuard<OperationContext, fn(OperationContext)>;
 
-pub(crate) async fn finish_response(mut request: Request, next: Next) -> Response {
-    let id = request.extensions().get::<RequestId>().cloned();
-    let context = OperationContext::unbounded();
-    let guard = context.cancellation().clone().drop_guard();
-    request.extensions_mut().insert(ResponseContext(context));
-    let mut response = next.run(request).await;
+pub(crate) fn attach_request_id(response: &mut Response, id: Option<RequestId>) {
+    complete_problem(response, id.as_ref().map(RequestId::header_value));
     if let Some(id) = id {
-        complete_problem(&mut response, id.header_value());
         response
             .headers_mut()
             .insert(REQUEST_ID_HEADER, id.header_value().clone());
         response.extensions_mut().insert(id);
     }
-    response.map(|body| hold_guard_until_end(body, guard))
 }
 
-pub(crate) async fn enforce_request_budget(
-    State(budget): State<Duration>,
+pub(crate) async fn enforce_request_budget<P, F, Fut>(
+    budget: Duration,
+    arrived: Option<tokio::time::Instant>,
+    permit: Option<P>,
     mut request: Request,
-    next: Next,
-) -> Response {
-    let Some(response_context) = request.extensions().get::<ResponseContext>() else {
-        return missing_extension::<ResponseContext>();
-    };
-    let origin = request
-        .extensions()
-        .get::<Arrival>()
-        .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
+    run: F,
+) -> (Response, Option<CancelGuard>)
+where
+    F: FnOnce(Request) -> Fut,
+    Fut: Future<Output = Response>,
+{
+    let response_context = OperationContext::unbounded();
+    let cancel_guard: CancelGuard =
+        std::mem::DropGuard::new(response_context.clone(), |context| context.cancel());
+    let origin = arrived.unwrap_or_else(tokio::time::Instant::now);
     let deadline = Deadline::new(origin, budget);
     let track_request = !request.body().is_end_stream();
     // template:begin object-storage:http-opening-put-outcomes
     let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
     let context = RequestContext {
-        operation: OperationContext::new(
-            Some(deadline),
-            response_context.operation().cancellation().clone(),
-        ),
+        operation: OperationContext::new(Some(deadline), response_context.cancellation().clone()),
         tracking: track_request.then(Arc::default),
         // template:begin request-budget:http-request-deadline-field-init
         deadline: RequestDeadline::from_deadline(deadline, budget),
         // template:end request-budget:http-request-deadline-field-init
     };
     let version = request.version();
+    request
+        .extensions_mut()
+        .insert(ResponseContext(response_context));
     request.extensions_mut().insert(context.clone());
-    let stop = |reason| {
-        context.operation.cancel();
-        context.stopped_response(reason, version)
+    let outcome = {
+        let _permit = permit;
+        context.operation.run(run(request)).await
     };
-    context
-        .operation
-        .run(next.run(request))
-        .await
-        .unwrap_or_else(stop)
+    match outcome {
+        Ok(response) => (response, Some(cancel_guard)),
+        Err(reason) => {
+            context.operation.cancel();
+            let _ = std::mem::DropGuard::dismiss(cancel_guard);
+            (context.stopped_response(reason, version), None)
+        }
+    }
 }
 
 fn upload_timeout_response(version: Version) -> Response {
     // RFC 9110 §15.5.9
-    let mut response = Problem::new(Code::RequestTimeout)
-        .detail_static("request body was not received within the request budget")
-        .into_response();
+    let mut response = pending_problem(
+        Problem::new(Code::RequestTimeout)
+            .detail_static("request body was not received within the request budget"),
+    );
     if version < Version::HTTP_2 {
         response
             .headers_mut()
@@ -391,13 +388,19 @@ mod tests {
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
         )]
-        let app = axum::Router::new()
-            .route("/", get(handler))
-            .layer(axum::middleware::from_fn_with_state(
-                Duration::from_secs(1),
-                enforce_request_budget,
-            ))
-            .layer(axum::middleware::from_fn(finish_response));
+        let routes = axum::Router::new().route("/", get(handler));
+        let app = crate::harden::harden(
+            routes,
+            &crate::HardenOptions {
+                max_body_bytes: 1024,
+                request_timeout: Duration::from_secs(1),
+                max_in_flight: None,
+                admission_wait: Duration::ZERO,
+                log_health_probes: false,
+                trust_trace_context: false,
+                draining: None,
+            },
+        );
         let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
         let (opening, continuing) = receive.await.unwrap();
         assert_eq!(

@@ -1,6 +1,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 
+use axum::Extension;
 use axum::routing::get;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -258,7 +259,7 @@ async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_conne
 #[tokio::test]
 async fn accept_panic_after_stop_is_still_observed() {
     #[derive(Debug)]
-    struct PanicOnClone(Arc<std::sync::OnceLock<CancellationToken>>);
+    struct PanicOnClone(Arc<std::sync::OnceLock<Arc<CancellationToken>>>);
     impl Clone for PanicOnClone {
         fn clone(&self) -> Self {
             self.0.get().unwrap().cancel();

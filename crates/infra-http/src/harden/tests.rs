@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicUsize;
 
 use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request as HttpRequest};
+use axum::response::IntoResponse as _;
 use axum::routing::{get, post};
 use axum_test::TestServer;
 use http_body_util::BodyExt;
@@ -237,6 +238,29 @@ async fn not_found_and_method_not_allowed_are_problems_with_allow() {
     let allow = response.header(ALLOW);
     assert!(allow.to_str().unwrap().contains("GET"), "{allow:?}");
     assert_eq!(response.json::<Value>()["code"], "method_not_allowed");
+
+    let head = app(&options())
+        .oneshot(request(Method::HEAD, "/missing"))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::NOT_FOUND);
+    assert_eq!(head.headers()[CONTENT_TYPE], "application/problem+json");
+    assert!(
+        head.headers()[CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -583,6 +607,57 @@ async fn a_request_is_shed_after_the_admission_wait_while_its_budget_is_still_op
     assert_eq!(served.await.unwrap().status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn admission_permit_releases_at_headers_while_response_context_lives_until_body_drop() {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(std::sync::Mutex::new(Some(send)));
+    let stream_handler = move |response: crate::ResponseContext| {
+        let sender = Arc::clone(&sender);
+        async move {
+            sender
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(response)
+                .unwrap();
+            Body::from_stream(futures_util::stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >())
+        }
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    let routes = Router::new()
+        .route("/stream", get(stream_handler))
+        .route("/ok", get(|| async { "ok" }));
+    let app = harden(
+        routes,
+        &HardenOptions {
+            max_in_flight: NonZeroU32::new(1),
+            admission_wait: Duration::ZERO,
+            ..options()
+        },
+    );
+
+    let streaming = app
+        .clone()
+        .oneshot(request(Method::GET, "/stream"))
+        .await
+        .unwrap();
+    assert_eq!(streaming.status(), StatusCode::OK);
+    let response_context = receive.await.unwrap();
+    assert!(!response_context.operation().cancellation().is_cancelled());
+
+    let second = app.oneshot(request(Method::GET, "/ok")).await.unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    drop(streaming);
+    assert!(response_context.operation().cancellation().is_cancelled());
+}
+
 async fn ready_control() -> health::ReadinessControl {
     let readiness = health::Readiness::new(
         Vec::new(),
@@ -654,19 +729,15 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     )]
     let routes = Router::new().route("/hold", get(handler_1));
     let patience = Duration::from_millis(100);
-    let app = routes
-        .layer(middleware::from_fn_with_state(
-            Arc::new(Admission {
-                permits: Semaphore::new(1),
-                max_wait: patience,
-                probes: ProbeRoutes::default(),
-            }),
-            admit,
-        ))
-        .layer(middleware::from_fn_with_state(
-            Observer::new(false, false, ProbeRoutes::default()),
-            observe::observe,
-        ));
+    let app = harden(
+        routes,
+        &HardenOptions {
+            max_in_flight: NonZeroU32::new(1),
+            admission_wait: patience,
+            request_timeout: Duration::from_secs(10),
+            ..options()
+        },
+    );
     let events = EventCapture::new();
     let subscriber = events.dispatch_for(&[concat!(env!("CARGO_CRATE_NAME"), "::observe")]);
 

@@ -7,6 +7,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::{BufMut as _, BytesMut};
 use compact_str::CompactString;
+use http_body::Body as _;
 use serde::Serialize;
 pub use service_failure::Code;
 pub use service_failure::SANITIZED_DETAIL;
@@ -274,14 +275,20 @@ pub(crate) fn pending_problem(problem: Problem) -> Response {
     problem.attach_to(Response::new(Body::empty()))
 }
 
-pub(crate) fn complete_problem(response: &mut Response, request_id: &HeaderValue) {
+pub(crate) fn complete_problem(response: &mut Response, request_id: Option<&HeaderValue>) {
+    if response.extensions().get::<Problem>().is_none() {
+        return;
+    }
+    let id = request_id.and_then(|value| value.to_str().ok());
+    if id.is_none() && !response.body().is_end_stream() {
+        return;
+    }
     let Some(problem) = response.extensions_mut().get_mut::<Problem>() else {
         return;
     };
-    let Ok(id) = request_id.to_str() else {
-        return;
-    };
-    problem.request_id = Some(CompactString::from(id));
+    if let Some(id) = id {
+        problem.request_id = Some(CompactString::from(id));
+    }
     let Some(body) = problem.encode_body() else {
         return;
     };
