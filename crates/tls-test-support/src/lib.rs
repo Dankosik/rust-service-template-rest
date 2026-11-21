@@ -3,12 +3,18 @@
     reason = "fixture setup failures are test failures"
 )]
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use axum::Router;
+use hyper::server::conn::http1;
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
 };
+use tokio::net::TcpSocket;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
@@ -16,6 +22,35 @@ use tokio_rustls::{
         pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
     },
 };
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug)]
+#[must_use]
+pub struct HttpsServer {
+    local_addr: SocketAddr,
+    shutdown: CancellationToken,
+    task: Option<JoinHandle<()>>,
+}
+
+impl HttpsServer {
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub async fn shutdown(mut self) {
+        self.shutdown.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for HttpsServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
 
 #[derive(Debug)]
 pub struct TlsMaterial {
@@ -89,6 +124,62 @@ impl TlsMaterial {
     #[track_caller]
     pub fn acceptor(&self) -> TlsAcceptor {
         TlsAcceptor::from(Arc::new(self.server_config()))
+    }
+
+    #[track_caller]
+    pub fn serve_http1_tls13(&self, router: Router) -> HttpsServer {
+        let socket = TcpSocket::new_v4().expect("create loopback fixture socket");
+        socket
+            .bind((Ipv4Addr::LOCALHOST, 0).into())
+            .expect("bind loopback fixture socket");
+        let listener = socket
+            .listen(128)
+            .expect("listen on loopback fixture socket");
+        let local_addr = listener.local_addr().expect("fixture listener address");
+        let acceptor = TlsAcceptor::from(Arc::new(self.server_config_tls13()));
+        let shutdown = CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                let accepted = tokio::select! {
+                    biased;
+                    () = task_shutdown.cancelled() => break,
+                    Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((stream, _)) = accepted else {
+                    continue;
+                };
+                let acceptor = acceptor.clone();
+                let router = router.clone();
+                let cancel = task_shutdown.clone();
+                connections.spawn(async move {
+                    let accepted = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return,
+                        accepted = acceptor.accept(stream) => accepted,
+                    };
+                    let Ok(stream) = accepted else {
+                        return;
+                    };
+                    let connection = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), TowerToHyperService::new(router));
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {}
+                        _ = connection => {}
+                    }
+                });
+            }
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+        });
+        HttpsServer {
+            local_addr,
+            shutdown,
+            task: Some(task),
+        }
     }
 }
 
