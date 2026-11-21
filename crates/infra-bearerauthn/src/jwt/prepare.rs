@@ -6,10 +6,12 @@ use tokio::time::Instant;
 use super::{JwtVerifier, TokenProfile};
 pub use crate::refresh::RefreshDriver;
 use crate::{
-    DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError,
-    PreparationPhase, ProviderFailure, Verifier,
+    DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, OptionsError,
+    PreparationError, PreparationPhase, ProviderFailure, Verifier,
     claims::ClaimPolicy,
-    jwks::{JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure, allowed_algorithms},
+    jwks::{
+        AllowedAlgorithms, JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure, allowed_algorithms,
+    },
     provider::{Document, ProviderClient},
     refresh::KeyStore,
 };
@@ -20,19 +22,43 @@ const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("JwtOptions([REDACTED])")]
 pub struct JwtOptions {
-    pub issuer: IssuerUrl,
-    pub audiences: Vec<String>,
-    pub token_profile: TokenProfile,
-    pub algorithms: Vec<JwtAlgorithm>,
-    pub jwks_uri: Option<EndpointUrl>,
-    pub jwks_max_age: Duration,
+    issuer: IssuerUrl,
+    claim_policy: ClaimPolicy,
+    token_profile: TokenProfile,
+    algorithms: AllowedAlgorithms,
+    jwks_uri: Option<EndpointUrl>,
+    jwks_max_age: Duration,
+}
+
+impl JwtOptions {
+    pub fn try_new(
+        issuer: IssuerUrl,
+        audiences: Vec<String>,
+        token_profile: TokenProfile,
+        algorithms: &[JwtAlgorithm],
+        jwks_uri: Option<EndpointUrl>,
+        jwks_max_age: Duration,
+    ) -> Result<Self, OptionsError> {
+        if algorithms.is_empty() || jwks_max_age < shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE {
+            return Err(OptionsError);
+        }
+        let claim_policy = ClaimPolicy::try_new(issuer.as_str(), audiences)?;
+        Ok(Self {
+            issuer,
+            claim_policy,
+            token_profile,
+            algorithms: allowed_algorithms(algorithms),
+            jwks_uri,
+            jwks_max_age,
+        })
+    }
 }
 
 pub async fn prepare_jwt(
     options: JwtOptions,
 ) -> Result<(Verifier, RefreshDriver), PreparationError> {
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let provider = ProviderClient::try_new();
+    let provider = ProviderClient::try_new().map_err(PreparationError::from);
     let provider = enforce_startup_deadline(startup_deadline, PreparationPhase::Client, provider)?;
     prepare_with_provider(options, provider, startup_deadline).await
 }
@@ -46,19 +72,17 @@ async fn prepare_with_provider(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
     );
-    let algorithms = allowed_algorithms(&options.algorithms);
-    let claim_policy = if options.algorithms.is_empty()
-        || options.jwks_max_age < shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE
-    {
-        Err(PreparationError::invalid_options())
-    } else {
-        ClaimPolicy::try_new(options.issuer.as_str(), options.audiences)
-    };
-    let claim_policy =
-        enforce_startup_deadline(startup_deadline, PreparationPhase::Options, claim_policy)?;
-    let source = match options.jwks_uri {
+    let JwtOptions {
+        issuer,
+        claim_policy,
+        token_profile,
+        algorithms,
+        jwks_uri,
+        jwks_max_age,
+    } = options;
+    let source = match jwks_uri {
         Some(uri) => JwksSource::Configured(uri),
-        None => JwksSource::Discovery(options.issuer),
+        None => JwksSource::Discovery(issuer),
     };
     let key_set = source
         .fetch(&provider, algorithms, startup_deadline)
@@ -79,18 +103,12 @@ async fn prepare_with_provider(
     let key_store = KeyStore::new(key_set);
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
-        options.token_profile,
+        token_profile,
         algorithms,
         key_store.clone(),
-        options.jwks_max_age,
+        jwks_max_age,
     ));
-    let refresh_driver = RefreshDriver::new(
-        key_store,
-        provider,
-        source,
-        algorithms,
-        options.jwks_max_age,
-    );
+    let refresh_driver = RefreshDriver::new(key_store, provider, source, algorithms, jwks_max_age);
     enforce_startup_deadline(
         startup_deadline,
         PreparationPhase::Jwks,
@@ -319,6 +337,49 @@ mod tests {
         (address, root, requests)
     }
 
+    #[test]
+    fn jwt_options_validate_audiences_algorithms_and_max_age_at_construction() {
+        let issuer = crate::IssuerUrl::parse("https://issuer.example").unwrap();
+        let valid_age = shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE;
+        assert!(
+            super::JwtOptions::try_new(
+                issuer.clone(),
+                vec!["api".to_owned()],
+                TokenProfile::ResourceServer,
+                &[JwtAlgorithm::Rs256],
+                None,
+                valid_age,
+            )
+            .is_ok()
+        );
+        for (audiences, algorithms, max_age) in [
+            (Vec::new(), [JwtAlgorithm::Rs256].as_slice(), valid_age),
+            (
+                vec![" \t".to_owned()],
+                [JwtAlgorithm::Rs256].as_slice(),
+                valid_age,
+            ),
+            (vec!["api".to_owned()], [].as_slice(), valid_age),
+            (
+                vec!["api".to_owned()],
+                [JwtAlgorithm::Rs256].as_slice(),
+                valid_age - Duration::from_secs(1),
+            ),
+        ] {
+            assert_eq!(
+                super::JwtOptions::try_new(
+                    issuer.clone(),
+                    audiences,
+                    TokenProfile::ResourceServer,
+                    algorithms,
+                    None,
+                    max_age,
+                ),
+                Err(crate::OptionsError)
+            );
+        }
+    }
+
     async fn prepare(
         address: std::net::SocketAddr,
         root: &[u8],
@@ -326,15 +387,15 @@ mod tests {
     ) -> Result<(crate::Verifier, super::RefreshDriver), crate::PreparationError> {
         let startup_deadline = tokio::time::Instant::now() + super::STARTUP_BUDGET;
         let origin = format!("https://{FIXTURE_HOST}:{}", address.port());
-        let options = super::JwtOptions {
-            issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
-            audiences: vec!["api".to_owned()],
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
-            jwks_max_age: Duration::from_hours(1),
-            jwks_uri: jwks_uri
-                .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
-        };
+        let options = super::JwtOptions::try_new(
+            crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
+            vec!["api".to_owned()],
+            TokenProfile::ResourceServer,
+            &[JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
+            jwks_uri.map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
+            Duration::from_hours(1),
+        )
+        .unwrap();
         let provider = crate::provider::new_fixture_client(
             FIXTURE_HOST,
             address,

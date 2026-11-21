@@ -99,7 +99,7 @@ pub(crate) enum BootstrapError {
         mode: &'static str,
         key: &'static str,
         #[source]
-        source: infra_bearerauthn::PreparationError,
+        source: authn::AuthnPreparationError,
     },
     // template:end authn:bootstrap-authn-errors
     #[error(transparent)]

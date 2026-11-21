@@ -1,3 +1,12 @@
+#[cfg(feature = "test-support")]
+pub async fn verify_fixture_authorization(
+    verifier: &crate::Verifier,
+    authorization: &[u8],
+) -> Result<crate::Principal, crate::Failure> {
+    let token = crate::parse_bearer([authorization])?;
+    verifier.verify(&token).await
+}
+
 // template:begin oidc-jwt:authn-jwt-test-support
 #[cfg(feature = "test-support")]
 pub use crate::jwt::JwtFixture;
@@ -6,7 +15,7 @@ pub use crate::jwt::JwtFixture;
 // template:begin oidc-introspection:authn-introspection-test-support
 use tokio_util::sync::CancellationToken;
 
-use crate::{PreparationError, provider};
+use crate::{ClientBuildError, provider};
 
 pub use crate::introspection::prepare_introspection_with_fixture;
 
@@ -22,7 +31,7 @@ impl FixtureTransport {
         fixture_addr: std::net::SocketAddr,
         fixture_root_der: &[u8],
         cancel: CancellationToken,
-    ) -> Result<Self, PreparationError> {
+    ) -> Result<Self, ClientBuildError> {
         provider::new_fixture_client(fixture_host, fixture_addr, fixture_root_der, cancel)
             .map(|provider| Self { provider })
     }

@@ -245,7 +245,7 @@ impl Echo {
         );
         let had_identity = verified.is_some();
         if let Some(principal) = verified {
-            let delegation = request.delegation_credential().cloned();
+            let delegation = request.delegation_credential().ok().cloned();
             self.identities.lock().push((principal, delegation));
         }
         // template:end authn:grpc-transport-test-seen-principal
@@ -3985,22 +3985,22 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         FixtureTransport::try_new("provider.test", address, &pki.ca_der, cancel.child_token())
             .unwrap();
     let verifier = prepare_introspection_with_fixture(
-        IntrospectionOptions {
-            issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
-            audiences: vec!["api".to_owned()],
-            endpoint: EndpointUrl::parse(&format!(
+        IntrospectionOptions::try_new(
+            &IssuerUrl::parse("https://issuer.example").unwrap(),
+            vec!["api".to_owned()],
+            EndpointUrl::parse(&format!(
                 "https://provider.test:{}/introspect",
                 address.port()
             ))
             .unwrap(),
-            client_id: "fixture".to_owned(),
-            client_secret: SecretString::from("fixture"),
-            provider_concurrency: const { std::num::NonZeroUsize::new(32).expect("32 is nonzero") },
-            cache: Some(IntrospectionCacheOptions::try_new(16, Duration::from_mins(1)).unwrap()),
-        },
+            "fixture".to_owned(),
+            SecretString::from("fixture"),
+            const { std::num::NonZeroUsize::new(32).expect("32 is nonzero") },
+            Some(IntrospectionCacheOptions::try_new(16, Duration::from_mins(1)).unwrap()),
+        )
+        .unwrap(),
         fixture,
-    )
-    .unwrap();
+    );
     (
         verifier,
         ProviderFixture {

@@ -15,7 +15,7 @@ use shared_rules::{rfc9110, uri};
 use tracing::Instrument as _;
 use url::Url;
 
-use crate::{InvalidUrl, PreparationError};
+use crate::{ClientBuildError, InvalidUrl};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -273,8 +273,8 @@ pub(crate) struct ProviderClient {
 }
 
 impl ProviderClient {
-    pub(crate) fn try_new() -> Result<Self, PreparationError> {
-        Self::from_builder(client_builder()).map_err(|_| PreparationError::ClientBuild)
+    pub(crate) fn try_new() -> Result<Self, ClientBuildError> {
+        Self::from_builder(client_builder()).map_err(|_| ClientBuildError)
     }
 
     fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
@@ -527,19 +527,19 @@ mod fixture {
     use tokio_util::sync::CancellationToken;
 
     use super::{ProviderClient, client_builder};
-    use crate::PreparationError;
+    use crate::ClientBuildError;
 
     pub(crate) fn new_fixture_client(
         fixture_host: &str,
         fixture_addr: std::net::SocketAddr,
         fixture_root_der: &[u8],
         cancel: CancellationToken,
-    ) -> Result<ProviderClient, PreparationError> {
+    ) -> Result<ProviderClient, ClientBuildError> {
         if fixture_host.is_empty() || !fixture_addr.ip().is_loopback() {
-            return Err(PreparationError::invalid_options());
+            return Err(ClientBuildError);
         }
-        let root = reqwest::Certificate::from_der(fixture_root_der)
-            .map_err(|_| PreparationError::ClientBuild)?;
+        let root =
+            reqwest::Certificate::from_der(fixture_root_der).map_err(|_| ClientBuildError)?;
         let resolver = std::sync::Arc::new(FixtureResolver {
             host: fixture_host.to_owned(),
             address: fixture_addr,
@@ -550,7 +550,7 @@ mod fixture {
                 .dns_resolver(resolver)
                 .tls_certs_only([root]),
         )
-        .map_err(|_| PreparationError::ClientBuild)
+        .map_err(|_| ClientBuildError)
     }
 
     #[derive(Clone)]

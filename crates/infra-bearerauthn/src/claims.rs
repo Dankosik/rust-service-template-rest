@@ -1,5 +1,5 @@
 use crate::{
-    Actor, PreparationError, Principal, VerificationError, VerificationReason,
+    Actor, OptionsError, Principal, VerificationError, VerificationReason,
     principal::{Identifiers, Identity},
 };
 use compact_str::CompactString;
@@ -39,19 +39,16 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> 
 /// RFC 7519 §4.1.4
 const LEEWAY: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ClaimPolicy {
     issuer: Arc<str>,
     audiences: Vec<String>,
 }
 
 impl ClaimPolicy {
-    pub(crate) fn try_new(
-        issuer: &str,
-        mut audiences: Vec<String>,
-    ) -> Result<Self, PreparationError> {
+    pub(crate) fn try_new(issuer: &str, mut audiences: Vec<String>) -> Result<Self, OptionsError> {
         if audiences.is_empty() || audiences.iter().any(|audience| audience.trim().is_empty()) {
-            return Err(PreparationError::invalid_options());
+            return Err(OptionsError);
         }
         audiences.sort_unstable();
         Ok(Self {

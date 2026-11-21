@@ -198,9 +198,9 @@ impl ParsedKeySet {
 fn parse_jwks_entries(
     bytes: &[u8],
     configured: AllowedAlgorithms,
-) -> Result<ParsedKeySet, KeySetFailure> {
-    let JsonObject(raw) = serde_json::from_slice::<JsonObject<RawJwks>>(bytes)
-        .map_err(|_| KeySetFailure::Jwks(JwksError::Parse))?;
+) -> Result<ParsedKeySet, JwksError> {
+    let JsonObject(raw) =
+        serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| JwksError::Parse)?;
     let mut rejected = EnumMap::<KeyRejection, u64>::default();
     let mut keys = Vec::new();
     for value in raw.keys {
@@ -232,7 +232,7 @@ fn parse_jwks_entries(
     Ok(ParsedKeySet { keys, rejected })
 }
 
-fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, KeySetFailure> {
+fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, JwksError> {
     for (reason, &count) in &parsed.rejected {
         if count == 0 {
             continue;
@@ -245,7 +245,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
     if parsed.has_non_encryption_rejections_without_keys() {
-        return Err(KeySetFailure::Jwks(JwksError::NoUsableKeys));
+        return Err(JwksError::NoUsableKeys);
     }
     let mut by_algorithm = EnumMap::<JwtAlgorithm, AlgorithmKeys>::default();
     for key in parsed.keys {
@@ -263,7 +263,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
+fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, JwksError> {
     let parsed = parse_jwks_entries(bytes, allowed_algorithms(configured))?;
     build_key_set(parsed, Instant::now())
 }
@@ -537,9 +537,7 @@ impl JwksSource {
             Self::Configured(uri) => (Cow::Borrowed(uri), None),
             Self::Discovery(issuer) => {
                 let started = Instant::now();
-                let discovered = discover_jwks_uri(provider, issuer, deadline)
-                    .await
-                    .map_err(KeySetFailure::Discovery)?;
+                let discovered = discover_jwks_uri(provider, issuer, deadline).await?;
                 if Instant::now() >= deadline {
                     return Err(KeySetFailure::DiscoveryTimeout);
                 }
@@ -549,7 +547,7 @@ impl JwksSource {
         let bytes = provider
             .get_document(uri.url(), Document::Jwks, Some(deadline))
             .await
-            .map_err(|failure| KeySetFailure::Jwks(JwksError::Fetch(failure)))?;
+            .map_err(JwksError::Fetch)?;
         let parsed = parse_jwks_entries(&bytes, algorithms)?;
         let keys = build_key_set(parsed, acquired_at.unwrap_or_else(Instant::now))?;
         Ok(Arc::new(keys))
@@ -561,6 +559,18 @@ pub(crate) enum KeySetFailure {
     Discovery(DiscoveryError),
     DiscoveryTimeout,
     Jwks(JwksError),
+}
+
+impl From<DiscoveryError> for KeySetFailure {
+    fn from(error: DiscoveryError) -> Self {
+        Self::Discovery(error)
+    }
+}
+
+impl From<JwksError> for KeySetFailure {
+    fn from(error: JwksError) -> Self {
+        Self::Jwks(error)
+    }
 }
 
 impl From<KeySetFailure> for PreparationError {
@@ -637,8 +647,7 @@ pub(crate) mod tests {
         JWT_SIGNING_DER, ensure_crypto_provider, jwk, key_set, rsa_signing,
     };
     use super::{
-        JwksError, JwtAlgorithm, KeySetFailure, SignatureInput, SignatureVerificationError,
-        parse_key_set,
+        JwksError, JwtAlgorithm, SignatureInput, SignatureVerificationError, parse_key_set,
     };
     use crate::test_metrics::{Diagnostics, labeled};
 
@@ -818,7 +827,7 @@ pub(crate) mod tests {
                 if withdrawn {
                     Ok(true)
                 } else {
-                    Err(KeySetFailure::Jwks(JwksError::NoUsableKeys))
+                    Err(JwksError::NoUsableKeys)
                 },
                 "{metadata}"
             );
@@ -829,7 +838,7 @@ pub(crate) mod tests {
         ]});
         assert_eq!(
             parse_key_set(&serde_json::to_vec(&keys).unwrap(), &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::Jwks(JwksError::NoUsableKeys))
+            Some(JwksError::NoUsableKeys)
         );
     }
 
@@ -845,12 +854,12 @@ pub(crate) mod tests {
             (
                 serde_json::json!({"use":"enc", "kty":"EC","crv":"P-256","x":ec["x"],"y":ec["y"]}),
                 "ES512",
-                Err(KeySetFailure::Jwks(JwksError::NoUsableKeys)),
+                Err(JwksError::NoUsableKeys),
             ),
             (
                 serde_json::json!({"kty":"OKP","crv":"X25519","x":"!"}),
                 "ECDH-ES",
-                Err(KeySetFailure::Jwks(JwksError::NoUsableKeys)),
+                Err(JwksError::NoUsableKeys),
             ),
         ] {
             key["alg"] = algorithm.into();
@@ -892,7 +901,7 @@ pub(crate) mod tests {
     fn an_unreadable_key_set_is_refused() {
         assert_eq!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::Jwks(JwksError::Parse))
+            Some(JwksError::Parse)
         );
     }
 
@@ -909,10 +918,7 @@ pub(crate) mod tests {
                 parse_key_set(&bytes, &[JwtAlgorithm::Rs256])
             })
         });
-        assert_eq!(
-            parsed.err(),
-            Some(KeySetFailure::Jwks(JwksError::NoUsableKeys))
-        );
+        assert_eq!(parsed.err(), Some(JwksError::NoUsableKeys));
         let counters = diagnostics.take_counters();
         assert!(
             counters.iter().any(|(key, value)| {

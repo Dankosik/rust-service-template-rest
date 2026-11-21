@@ -32,9 +32,9 @@ pub(crate) use claims::JsonObject;
 pub use error::InvalidCacheOptions;
 // template:end oidc-introspection:authn-introspection-error-export
 // template:begin oidc-jwt:authn-jwt-error-exports
-pub use error::{DiscoveryError, JwksError};
+pub use error::{DiscoveryError, JwksError, PreparationError, PreparationPhase};
 // template:end oidc-jwt:authn-jwt-error-exports
-pub use error::{Failure, InvalidUrl, OptionsError, PreparationError, PreparationPhase};
+pub use error::{ClientBuildError, Failure, InvalidUrl, OptionsError};
 pub(crate) use error::{VerificationError, VerificationReason};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
