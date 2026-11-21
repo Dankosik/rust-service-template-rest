@@ -321,7 +321,7 @@ async fn a_cancelled_body_read_does_not_turn_a_handler_timeout_into_408() {
 #[tokio::test(start_paused = true)]
 async fn panic_is_a_sanitized_500_problem() {
     let events = EventCapture::new();
-    let subscriber = events.dispatch_for(&[module_path!().trim_suffix("::tests")]);
+    let subscriber = events.dispatch_for(&["infra_http::harden"]);
     let response = app(&options())
         .oneshot(HttpRequest::get("/panic").body(Body::empty()).unwrap())
         .with_subscriber(subscriber)

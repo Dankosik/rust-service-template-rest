@@ -504,16 +504,23 @@ struct ClosedEventGate {
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ClosedEventGate {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let mut fields = LoggedFields(Vec::new());
-        event.record(&mut fields);
-        let message = fields
-            .0
-            .iter()
-            .any(|(key, value)| *key == "message" && value == "messaging_connection");
-        let closed = fields
-            .0
-            .iter()
-            .any(|(key, value)| *key == "result" && value == "closed");
+        let mut message = false;
+        let mut closed = false;
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                let raw = format!("{value:?}");
+                let rendered = raw
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(&raw);
+                if field.name() == "message" && rendered == "messaging_connection" {
+                    message = true;
+                }
+                if field.name() == "result" && rendered == "closed" {
+                    closed = true;
+                }
+            },
+        );
         if !message || !closed {
             return;
         }

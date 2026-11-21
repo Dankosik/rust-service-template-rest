@@ -452,10 +452,10 @@ impl Mounted {
     async fn on(pool: &PgPool, budget: Duration) -> Self {
         create_widgets(pool).await;
         let store_pool = template_pool(&dsn_for(pool).await, 4).await;
-        Self::new(store_pool, budget).await
+        Self::new(store_pool, budget)
     }
 
-    async fn new(store_pool: Pool, budget: Duration) -> Self {
+    fn new(store_pool: Pool, budget: Duration) -> Self {
         let provider = Provider::start();
         let hold = Arc::new(Hold::default());
         let widgets = Arc::new(SqlWidgets {
@@ -694,7 +694,7 @@ fn bearer_document() -> utoipa::openapi::OpenApi {
 async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
 
     let malformed_key = "\"k-1";
@@ -768,7 +768,7 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
 async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
 
     let long = "k".repeat(256);
@@ -826,7 +826,7 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
 async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
 
     let wrong_media_type = mounted
@@ -947,7 +947,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
 async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
 
     let first_resource = mounted
@@ -1024,7 +1024,7 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_a_serialization_failure_rolls_back_the_widget_and_releases_the_key(pool: PgPool) {
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
     let failed = mounted
         .create(
             ALICE,
@@ -1070,7 +1070,7 @@ async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
         .await
         .unwrap();
     let (proxy, proxied) = CommitProxy::start_for(&pool).await;
-    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET);
     let input = json!({"name": "taken", "color": "unique"});
     let key = "k-refused";
 
@@ -1118,7 +1118,7 @@ async fn terminal_refusal_survives_a_changed_business_condition(pool: PgPool) {
 async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
 
     let reserved = json!({"name": RESERVED_NAME, "color": "red"});
     for request_id in ["req-reserved", "req-reserved-again"] {
@@ -1194,7 +1194,7 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
 async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
-    let mounted = Mounted::on(&pool, BUDGET).await;
+    let mounted = Mounted::on(&pool, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
     let changed = json!({"name": "gizmo", "color": "blue"});
 
@@ -1313,7 +1313,7 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
     create_widgets(&pool).await;
     make_read_only(&pool).await;
     let store_pool = template_pool(&dsn_for(&pool).await, 4).await;
-    let mounted = Mounted::new(store_pool, BUDGET).await;
+    let mounted = Mounted::new(store_pool, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
 
     let refused = mounted
@@ -1351,7 +1351,7 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
         )))
         .await
         .expect("set the timeout for new sessions");
-        let mounted = Mounted::new(template_pool(&dsn, 1).await, BUDGET).await;
+        let mounted = Mounted::new(template_pool(&dsn, 1).await, BUDGET);
         let captured = CumulativeMetrics::new();
         let _local = captured.install_default();
 
@@ -1410,7 +1410,7 @@ async fn a_locked_command_keeps_its_timeout_response_and_a_tighter_server_limit(
     )
     .await
     .unwrap();
-    let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET).await;
+    let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET);
     let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
     let mut connection = pool.acquire().await.unwrap();
     let mut holder = sqlx::Connection::begin(&mut *connection).await.unwrap();
@@ -1487,7 +1487,7 @@ async fn p9_business_insert_errors_are_classified_and_release_the_key(pool: PgPo
     )
     .await
     .expect("set the lock timeout for writer sessions");
-    let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET).await;
+    let mounted = Mounted::new(template_pool(&dsn_for(&pool).await, 1).await, BUDGET);
     let captured = CumulativeMetrics::new();
     let _local = captured.install_default();
     let failures = observe_test_support::EventCapture::new();
@@ -1580,7 +1580,7 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
     let _local = captured.install_default();
     create_widgets(&pool).await;
     let (proxy, proxied) = CommitProxy::start_for(&pool).await;
-    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET);
     let input = json!({"name": "gizmo", "color": "red"});
 
     proxy.arm(fault, Boundary::Commit(None));
@@ -1659,7 +1659,7 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
 async fn p9_a_command_timeout_awaiting_commit_ack_replays_the_committed_effect(pool: PgPool) {
     create_widgets(&pool).await;
     let (proxy, proxied) = CommitProxy::start_for(&pool).await;
-    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
+    let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET);
     let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
 
     proxy.arm_ready_hold(ReadyBoundary::Commit);

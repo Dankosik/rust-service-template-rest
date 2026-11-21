@@ -67,7 +67,7 @@ fn cleanup_reports_live_progress_and_one_payload_free_terminal_event_per_pass() 
             assert!(scrape.contains(line), "{line} missing from {scrape}");
         }
         assert!(!scrape.contains("postgres_cleanup_passes_total{"));
-        assert!(events.snapshot().is_empty());
+        assert_eq!(events.snapshot(), []);
         assert_eq!(completed.complete(), 500);
         assert!(
             recorder

@@ -222,8 +222,6 @@ fn readiness_reader() -> health::ReadinessReader {
             Duration::from_secs(1),
             Duration::from_secs(1),
             NonZeroU32::MIN,
-            NonZeroU32::MIN,
-            Duration::from_secs(5),
         )
         .expect("probe policy"),
     )
