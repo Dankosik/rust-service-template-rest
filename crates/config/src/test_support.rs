@@ -36,6 +36,9 @@ pub fn worker(
 // template:end worker:config-worker-fixture
 
 #[cfg(test)]
+pub(crate) use unit::*;
+
+#[cfg(test)]
 mod unit {
     use std::assert_matches;
     use std::ffi::OsString;
@@ -108,6 +111,3 @@ mod unit {
     }
     // template:end cache:test-support-unknown-env-key
 }
-
-#[cfg(test)]
-pub(crate) use unit::*;

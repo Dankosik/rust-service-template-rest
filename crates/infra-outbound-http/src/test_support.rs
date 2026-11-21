@@ -42,6 +42,9 @@ pub fn client_https(
 }
 
 #[cfg(test)]
+pub(crate) use unit::*;
+
+#[cfg(test)]
 mod unit {
     use std::{
         collections::BTreeMap,
@@ -349,6 +352,3 @@ mod unit {
         .await
     }
 }
-
-#[cfg(test)]
-pub(crate) use unit::*;

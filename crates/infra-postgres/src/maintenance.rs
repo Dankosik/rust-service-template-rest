@@ -55,13 +55,16 @@ impl CleanupSchedule {
     }
 }
 
-pub async fn run_scheduled_cleanup<E>(
+pub async fn run_scheduled_cleanup<E, P, S>(
     cleanup: CleanupName,
     runs_metric: Option<&'static str>,
     cancel: &CancellationToken,
-    mut pass: impl AsyncFnMut() -> Result<PassEnd, E>,
-    mut sample: impl AsyncFnMut() -> Result<PopulationSample, MaintenanceFailure>,
-) {
+    mut pass: impl FnMut() -> P,
+    mut sample: impl FnMut() -> S,
+) where
+    P: Future<Output = Result<PassEnd, E>>,
+    S: Future<Output = Result<PopulationSample, MaintenanceFailure>>,
+{
     if cancel.is_cancelled() {
         return;
     }
