@@ -35,7 +35,7 @@ pub enum StartupError {
 impl Store {
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         let writable = observed!("check idempotency session", async {
-            let mut connection = self.pool.acquire("check idempotency startup").await?;
+            let mut connection = self.inner.pool.acquire("check idempotency startup").await?;
             sqlx::query_scalar!(
                 "SELECT NOT pg_is_in_recovery() \
                  AND current_setting('transaction_read_only') = 'off' AS \"writable!\""
@@ -71,7 +71,7 @@ impl Store {
     ) -> Result<CleanupPassResult, CleanupError> {
         CleanupPass::start(CLEANUP)
             .run_until_short_batch(
-                &self.pool,
+                &self.inner.pool,
                 cancel,
                 &EXPIRED_RECORDS_BATCH,
                 Self::delete_expired_batch,
@@ -122,7 +122,7 @@ impl Store {
     }
 
     async fn sample_expired_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
-        in_observation_tx(&self.pool, async |tx| {
+        in_observation_tx(&self.inner.pool, async |tx| {
             observed!(
                 "observe expired idempotency records",
                 sqlx::query_as!(

@@ -6,11 +6,12 @@ use http::header::{
     LOCATION,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
-use sqlx::{Postgres, Type};
+use sqlx::postgres::{PgHasArrayType, PgTypeInfo, PgValueRef};
+use sqlx::{Decode, Postgres, Type};
 
 pub const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;
+const HEADER_PAIR_TYPE: &str = "http_idempotency_header_pair";
 
 static REPLAYABLE: [HeaderName; 7] = [
     CONTENT_TYPE,
@@ -22,13 +23,53 @@ static REPLAYABLE: [HeaderName; 7] = [
     LAST_MODIFIED,
 ];
 
-#[derive(PartialEq, Eq, derive_more::Debug, sqlx::Type)]
-#[sqlx(type_name = "http_idempotency_header_pair")]
+#[derive(Clone, Copy)]
+struct StoredHeaderName(Option<&'static HeaderName>);
+
+impl StoredHeaderName {
+    fn parse(name: &str) -> Self {
+        Self(
+            REPLAYABLE
+                .iter()
+                .find(|candidate| candidate.as_str() == name),
+        )
+    }
+}
+
+impl Type<Postgres> for StoredHeaderName {
+    fn type_info() -> PgTypeInfo {
+        <str as Type<Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <str as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl Decode<'_, Postgres> for StoredHeaderName {
+    fn decode(value: PgValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
+        Ok(Self::parse(value.as_str()?))
+    }
+}
+
+#[derive(derive_more::Debug, sqlx::Decode)]
 pub(crate) struct HeaderPair {
     #[debug(skip)]
-    name: String,
+    name: StoredHeaderName,
     #[debug(skip)]
     value: Vec<u8>,
+}
+
+impl Type<Postgres> for HeaderPair {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name(HEADER_PAIR_TYPE)
+    }
+}
+
+impl PgHasArrayType for HeaderPair {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::array_of(HEADER_PAIR_TYPE)
+    }
 }
 
 #[derive(sqlx::Encode)]
@@ -246,10 +287,7 @@ fn decode_headers(headers: Vec<HeaderPair>) -> Result<HeaderMap, Undecodable> {
     let mut admitted = HeaderMap::new();
     let mut size = 0_usize;
     for HeaderPair { name, value } in headers {
-        let name = REPLAYABLE
-            .iter()
-            .find(|candidate| candidate.as_str() == name)
-            .ok_or(Undecodable::HeaderName)?;
+        let name = name.0.ok_or(Undecodable::HeaderName)?;
         let value = HeaderValue::try_from(value).map_err(|_| Undecodable::HeaderValue)?;
         size = size.saturating_add(header_size(name, &value));
         if size <= MAX_TOTAL_STORED_HEADER_BYTES {
@@ -283,7 +321,7 @@ mod tests {
 
     fn pair(name: &str, value: &[u8]) -> HeaderPair {
         HeaderPair {
-            name: name.to_owned(),
+            name: StoredHeaderName::parse(name),
             value: value.to_vec(),
         }
     }
@@ -303,19 +341,23 @@ mod tests {
 
         assert_eq!(record.encode_status(), 201);
         assert_eq!(record.body(), b"stored");
-        let stored_headers: Vec<_> = record
+        let encoded: Vec<_> = record
             .encode_headers()
-            .map(|header| pair(header.name, header.value))
+            .map(|header| (header.name, header.value))
             .collect();
         assert_eq!(
-            stored_headers,
+            encoded,
             [
-                pair("content-type", &[0xff]),
-                pair("content-language", b"en"),
-                pair("content-language", b"fr"),
-                pair("etag", b"\"v1\""),
+                ("content-type", [0xff].as_slice()),
+                ("content-language", b"en".as_slice()),
+                ("content-language", b"fr".as_slice()),
+                ("etag", b"\"v1\"".as_slice()),
             ]
         );
+        let stored_headers = encoded
+            .into_iter()
+            .map(|(name, value)| pair(name, value))
+            .collect();
         let (status, headers, body) = Record::decode(record.encode_status(), stored_headers, body)
             .unwrap()
             .into_parts();
@@ -351,6 +393,12 @@ mod tests {
                 Undecodable::HeaderName,
             ),
             (
+                200,
+                vec![pair("x-unreplayable-long-header-name", b"value")],
+                Bytes::new(),
+                Undecodable::HeaderName,
+            ),
+            (
                 204,
                 vec![pair("content-type", b"\n")],
                 Bytes::from_static(b"legacy body"),
@@ -358,10 +406,10 @@ mod tests {
             ),
             (
                 200,
-                vec![HeaderPair {
-                    name: "content-type".to_owned(),
-                    value: vec![b'a'; MAX_TOTAL_STORED_HEADER_BYTES],
-                }],
+                vec![pair(
+                    "content-type",
+                    &vec![b'a'; MAX_TOTAL_STORED_HEADER_BYTES],
+                )],
                 Bytes::new(),
                 Undecodable::HeaderLimit,
             ),
