@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{Extensions, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::{BufMut as _, BytesMut};
 use compact_str::CompactString;
@@ -11,6 +11,7 @@ use http_body::Body as _;
 use serde::Serialize;
 pub use service_failure::Code;
 pub use service_failure::SANITIZED_DETAIL;
+use tower_http::request_id::RequestId;
 use utoipa::openapi::{RefOr, Schema};
 use utoipa::{PartialSchema, ToSchema};
 
@@ -209,11 +210,17 @@ impl Problem {
         self
     }
 
-    #[cfg(test)]
     #[must_use]
-    fn with_request_id(mut self, id: &str) -> Self {
-        self.request_id = Some(CompactString::from(id));
+    pub(crate) fn with_request_id(mut self, request_id: Option<&RequestId>) -> Self {
+        if let Some(id) = request_id.and_then(|value| value.header_value().to_str().ok()) {
+            self.request_id = Some(CompactString::from(id));
+        }
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_request_id_from(self, extensions: &Extensions) -> Self {
+        self.with_request_id(extensions.get::<RequestId>())
     }
 
     #[must_use]
@@ -245,7 +252,7 @@ impl IntoResponse for Problem {
 
 impl Problem {
     fn encode_body(&self) -> Option<Body> {
-        let mut writer = BytesMut::with_capacity(128).writer();
+        let mut writer = BytesMut::with_capacity(256).writer();
         if serde_json::to_writer(&mut writer, self).is_err() {
             tracing::error!(
                 code = self.code.as_str(),
@@ -276,11 +283,11 @@ pub(crate) fn pending_problem(problem: Problem) -> Response {
 }
 
 pub(crate) fn complete_problem(response: &mut Response, request_id: Option<&HeaderValue>) {
-    if response.extensions().get::<Problem>().is_none() {
+    let Some(problem) = response.extensions().get::<Problem>() else {
         return;
-    }
+    };
     let id = request_id.and_then(|value| value.to_str().ok());
-    if id.is_none() && !response.body().is_end_stream() {
+    if !response.body().is_end_stream() && (id.is_none() || problem.request_id.as_deref() == id) {
         return;
     }
     let Some(problem) = response.extensions_mut().get_mut::<Problem>() else {
@@ -417,9 +424,10 @@ mod tests {
 
     #[tokio::test]
     async fn renders_problem_json_with_optional_members() {
+        let request_id = RequestId::new(HeaderValue::from_static("req-1"));
         let problem = Problem::new(Code::ServiceUnavailable)
             .detail(service_failure::AT_CAPACITY_DETAIL)
-            .with_request_id("req-1")
+            .with_request_id(Some(&request_id))
             .retry_after(Duration::from_millis(200));
         let response = problem.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -441,6 +449,38 @@ mod tests {
         assert_eq!(json["type"], "about:blank");
         assert!(json.get("invalid_params").is_none());
         assert!(json.get("instance").is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_problem_reuses_encoded_body_when_request_id_matches_and_rewrites_otherwise() {
+        use http_body_util::BodyExt as _;
+
+        let req_1 = HeaderValue::from_static("req-1");
+        let req_2 = HeaderValue::from_static("req-2");
+        let request_id = RequestId::new(req_1.clone());
+
+        let mut already_encoded = Problem::new(Code::BadRequest)
+            .with_request_id(Some(&request_id))
+            .attach_to(Response::new(Body::from("pre-encoded")));
+        complete_problem(&mut already_encoded, Some(&req_1));
+        let bytes = already_encoded
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"pre-encoded");
+
+        let mut stale_id = Problem::new(Code::BadRequest)
+            .with_request_id(Some(&request_id))
+            .attach_to(Response::new(Body::from("pre-encoded")));
+        complete_problem(&mut stale_id, Some(&req_2));
+        assert_eq!(body_json(stale_id).await["request_id"], "req-2");
+
+        let mut pending =
+            pending_problem(Problem::new(Code::BadRequest).with_request_id(Some(&request_id)));
+        complete_problem(&mut pending, Some(&req_1));
+        assert_eq!(body_json(pending).await["request_id"], "req-1");
     }
 
     #[test]

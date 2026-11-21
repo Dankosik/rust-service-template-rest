@@ -54,6 +54,9 @@ impl Deadline {
 
     #[must_use]
     pub fn earlier(self, other: Self) -> Self {
+        if self.origin <= other.origin && self.budget <= other.budget {
+            return self;
+        }
         let now = Instant::now();
         std::cmp::min_by_key(self, other, |deadline| deadline.remaining_at(now))
     }
@@ -444,5 +447,47 @@ mod tests {
         assert_eq!(locally_limited.wait_stopped().await, BoundedStop::Timeout);
         assert_eq!(long_parent.check(), Ok(()));
         assert_eq!(unbounded_limited.check(), Err(BoundedStop::Timeout));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn earlier_preserves_order_and_ties_for_dominated_expired_and_saturated_deadlines() {
+        let start = Instant::now();
+        let parent = Deadline::new(start, Duration::from_secs(5));
+        let later_same_budget =
+            Deadline::new(start + Duration::from_secs(2), Duration::from_secs(5));
+        let later_larger_budget =
+            Deadline::new(start + Duration::from_secs(2), Duration::from_secs(10));
+        let shorter_later = Deadline::new(start + Duration::from_secs(1), Duration::from_secs(2));
+
+        assert_eq!(parent.earlier(parent).instant(), parent.instant());
+        assert_eq!(
+            parent.earlier(later_same_budget).instant(),
+            parent.instant()
+        );
+        assert_eq!(
+            parent.earlier(later_larger_budget).instant(),
+            parent.instant()
+        );
+        assert_eq!(
+            parent.earlier(shorter_later).instant(),
+            shorter_later.instant()
+        );
+
+        let saturated_a = Deadline::new(start + Duration::from_secs(5), Duration::MAX);
+        let saturated_b = Deadline::new(start, Duration::MAX);
+        assert_eq!(saturated_a.earlier(saturated_b).origin, saturated_a.origin);
+        assert_eq!(saturated_b.earlier(saturated_a).origin, saturated_b.origin);
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let expired_late = Deadline::new(start + Duration::from_secs(5), Duration::from_secs(5));
+        let expired_early = Deadline::new(start, Duration::from_secs(1));
+        assert_eq!(
+            expired_late.earlier(expired_early).instant(),
+            expired_late.instant()
+        );
+        assert_eq!(
+            expired_early.earlier(expired_late).instant(),
+            expired_early.instant()
+        );
     }
 }

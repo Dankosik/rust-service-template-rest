@@ -1,3 +1,4 @@
+use axum::RequestExt as _;
 use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
@@ -11,8 +12,10 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
-use crate::context::read_request_bytes;
-use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_problem};
+use crate::context::{RequestContext, read_request_bytes};
+use crate::problem::{
+    Code, Problem, body_too_large, body_unreadable, caused_by_length_limit, sanitized_problem,
+};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
@@ -35,16 +38,21 @@ where
     type Rejection = Problem;
 
     async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
-        require_json_content_type(request.headers().get(CONTENT_TYPE))?;
-        let bytes =
-            read_request_bytes(request)
-                .await
-                .map_err(|rejection| match rejection.status() {
-                    StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
-                    StatusCode::BAD_REQUEST => body_unreadable(),
-                    _ => wiring_failure("json"),
-                })?;
-        decode_json(&bytes).map(Self)
+        if let Err(problem) = require_json_content_type(request.headers().get(CONTENT_TYPE)) {
+            return Err(problem.with_request_id_from(request.extensions()));
+        }
+        let (parts, body) = request.with_limited_body().into_parts();
+        let attach = |problem: Problem| problem.with_request_id_from(&parts.extensions);
+        let bytes = read_request_bytes(parts.extensions.get::<RequestContext>(), body)
+            .await
+            .map_err(|error| {
+                attach(if caused_by_length_limit(&error) {
+                    body_too_large()
+                } else {
+                    body_unreadable()
+                })
+            })?;
+        decode_json(&bytes).map(Self).map_err(attach)
     }
 }
 
@@ -126,7 +134,11 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(decode_query(parts.uri.query().unwrap_or_default()).map(Self))
+        std::future::ready(
+            decode_query(parts.uri.query().unwrap_or_default())
+                .map(Self)
+                .map_err(|problem| problem.with_request_id_from(&parts.extensions)),
+        )
     }
 }
 
@@ -152,10 +164,13 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(TrackedPath(Ok(value)))) => Ok(Self(value)),
-            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => {
-                Err(issue.problem(parts, state).await)
-            }
-            Err(rejection) => Err(path_problem(&rejection, parts, state).await),
+            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => Err(issue
+                .problem(parts, state)
+                .await
+                .with_request_id_from(&parts.extensions)),
+            Err(rejection) => Err(path_problem(&rejection, parts, state)
+                .await
+                .with_request_id_from(&parts.extensions)),
         }
     }
 }
@@ -682,6 +697,19 @@ mod tests {
             "request_entity_too_large",
         )
         .await;
+
+        let failing = futures_util::stream::once(async {
+            Err::<axum::body::Bytes, _>(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reset",
+            ))
+        });
+        let response = app()
+            .oneshot(post_json(Body::from_stream(failing)))
+            .await
+            .unwrap();
+        let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
+        assert_eq!(body["detail"], "request body could not be read");
     }
 
     #[tokio::test]

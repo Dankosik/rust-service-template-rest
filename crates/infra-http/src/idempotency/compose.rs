@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::RequestExt;
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRef, Request, State};
-use axum::http::HeaderValue;
+use axum::http::{Extensions, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::on;
 use compact_str::CompactString;
@@ -371,9 +371,9 @@ async fn capture_attempt(
     )
     .map(|key| ScopeKey::new(caller, &key)) else {
         route.record(Outcome::InvalidKey);
-        return Err(invalid_key(route.rules_link.clone()));
+        return Err(invalid_key(route.rules_link.clone(), &parts.extensions));
     };
-    let collected = buffer_body(parts.extensions.get::<RequestContext>(), body)
+    let collected = buffer_body(&parts.extensions, body)
         .await
         .inspect_err(|_| route.record(Outcome::NotStored))?;
     let (input, fingerprint) = CommandInput::capture(parts, &route.fingerprint_headers, collected);
@@ -391,27 +391,27 @@ async fn capture_attempt(
     clippy::result_large_err,
     reason = "the error is the refusal response the middleware returns"
 )]
-async fn buffer_body(
-    context: Option<&RequestContext>,
-    body: Body,
-) -> Result<Collected<Bytes>, Response> {
-    collect_body(context, body).await.map_err(|error| {
-        let problem = if caused_by_length_limit(&error) {
-            body_too_large()
-        } else {
-            body_unreadable()
-        };
-        problem.into_response()
-    })
+async fn buffer_body(extensions: &Extensions, body: Body) -> Result<Collected<Bytes>, Response> {
+    collect_body(extensions.get::<RequestContext>(), body)
+        .await
+        .map_err(|error| {
+            let problem = if caused_by_length_limit(&error) {
+                body_too_large()
+            } else {
+                body_unreadable()
+            };
+            problem.with_request_id_from(extensions).into_response()
+        })
 }
 
-fn invalid_key(rules_link: HeaderValue) -> Response {
+fn invalid_key(rules_link: HeaderValue, extensions: &Extensions) -> Response {
     let problem = Problem::new(Code::BadRequest)
         .detail_static(INVALID_KEY_DETAIL)
         .invalid_param(
             CompactString::const_new(INVALID_KEY_PARAM_NAME),
             CompactString::const_new(INVALID_KEY_PARAM_REASON),
-        );
+        )
+        .with_request_id_from(extensions);
     ([(axum::http::header::LINK, rules_link)], problem).into_response()
 }
 
