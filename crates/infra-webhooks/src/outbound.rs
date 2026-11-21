@@ -1,13 +1,11 @@
 mod producer;
 
 use std::{
-    fmt::Write as _,
     num::NonZeroU32,
     sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use arrayvec::ArrayString;
 use bytes::Bytes;
 use compact_str::CompactString;
 use enum_map::{Enum, EnumMap};
@@ -49,8 +47,17 @@ const LIMITS: Limits = Limits::new(
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Endpoint([REDACTED])")]
-pub struct Endpoint {
-    destination: Option<Uri>,
+pub struct Endpoint(EndpointTarget);
+
+#[derive(Clone)]
+enum EndpointTarget {
+    Ready(Box<ReadyEndpoint>),
+    DestinationTooLong,
+}
+
+#[derive(Clone)]
+struct ReadyEndpoint {
+    destination: Uri,
     client: Client,
     keys: KeyRing,
 }
@@ -85,11 +92,32 @@ impl Endpoint {
     }
 
     fn from_destination(destination: Url, client: Client, keys: KeyRing) -> Self {
-        Self {
-            destination: Uri::try_from(String::from(destination)).ok(),
-            client,
-            keys,
+        Self(match Uri::try_from(String::from(destination)) {
+            Ok(destination) => EndpointTarget::Ready(Box::new(ReadyEndpoint {
+                destination,
+                client,
+                keys,
+            })),
+            Err(_) => EndpointTarget::DestinationTooLong,
+        })
+    }
+
+    fn ready(&self) -> Option<&ReadyEndpoint> {
+        match &self.0 {
+            EndpointTarget::Ready(ready) => Some(ready.as_ref()),
+            EndpointTarget::DestinationTooLong => None,
         }
+    }
+
+    #[cfg(test)]
+    fn signed_request(
+        &self,
+        delivery: &Delivery,
+        message_id: &str,
+        timestamp: i64,
+    ) -> Option<Request<Bytes>> {
+        self.ready()?
+            .signed_request(delivery, message_id, timestamp)
     }
 }
 
@@ -178,23 +206,19 @@ impl Handler<Delivery> for Dispatcher {
         let Some(timestamp) = unix_timestamp(SystemTime::now()) else {
             return Err(outcomes.fail(FailureKind::ClockUnavailable));
         };
-        let Some(request) = format_message_id(job.id())
-            .and_then(|message_id| endpoint.signed_request(delivery, &message_id, timestamp))
-        else {
+        let Some(ready) = endpoint.ready() else {
             return Err(outcomes.fail(FailureKind::InvalidPayload));
         };
-        let response = endpoint
+        let message_id = job.id().to_string();
+        let Some(request) = ready.signed_request(delivery, &message_id, timestamp) else {
+            return Err(outcomes.fail(FailureKind::InvalidPayload));
+        };
+        let response = ready
             .client
             .execute_for_headers(&job.context(), request)
             .await;
         outcomes.finish_attempt(response)
     }
-}
-
-fn format_message_id(job_id: infra_jobs::JobId) -> Option<ArrayString<36>> {
-    let mut message_id = ArrayString::new();
-    write!(message_id, "{job_id}").ok()?;
-    Some(message_id)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -315,6 +339,17 @@ impl AttemptFailure {
             error: kind.into_job_error(),
         }
     }
+
+    fn with_retry_after(status: StatusCode, delay: Duration) -> Self {
+        match JobError::retry_after_at_least(FailureKind::ResponseStatus.reason(), delay) {
+            Ok(error) => Self {
+                kind: FailureKind::ResponseStatus,
+                status: Some(status),
+                error,
+            },
+            Err(_) => Self::new(FailureKind::RetryAfterExceedsMaxDelay, Some(status)),
+        }
+    }
 }
 
 struct EndpointOutcomes {
@@ -416,26 +451,10 @@ fn classify_response(
         )),
         Ok(response) => {
             let status = response.status;
-            let Some(delay) = retry_after(&response.headers, SystemTime::now()) else {
-                return Err(AttemptFailure::new(
-                    FailureKind::ResponseStatus,
-                    Some(status),
-                ));
-            };
-            if let Ok(error) =
-                JobError::retry_after_at_least(FailureKind::ResponseStatus.reason(), delay)
-            {
-                Err(AttemptFailure {
-                    kind: FailureKind::ResponseStatus,
-                    status: Some(status),
-                    error,
-                })
-            } else {
-                Err(AttemptFailure::new(
-                    FailureKind::RetryAfterExceedsMaxDelay,
-                    Some(status),
-                ))
-            }
+            Err(match retry_after(&response.headers, SystemTime::now()) {
+                Some(delay) => AttemptFailure::with_retry_after(status, delay),
+                None => AttemptFailure::new(FailureKind::ResponseStatus, Some(status)),
+            })
         }
         Err(error) => Err(AttemptFailure::new(
             FailureKind::from_http_error(&error),
@@ -444,15 +463,14 @@ fn classify_response(
     }
 }
 
-impl Endpoint {
+impl ReadyEndpoint {
     fn signed_request(
         &self,
         delivery: &Delivery,
         message_id: &str,
         timestamp: i64,
     ) -> Option<Request<Bytes>> {
-        let destination = self.destination.clone()?;
-        let mut request = Request::post(destination)
+        let mut request = Request::post(self.destination.clone())
             .header(header::CONTENT_TYPE, delivery.content_type.as_str())
             .body(delivery.body.clone())
             .ok()?;

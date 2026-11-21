@@ -17,7 +17,7 @@ pub(super) fn prepare(
     }
     let pool = postgres_pool.ok_or(BootstrapError::InboundWebhooksWithoutPostgres)?;
     let mut verifiers = Verifiers::new();
-    let mut owners = EndpointKeyOwners::default();
+    let mut owners = EndpointKeyOwners::new();
     for (endpoint_id, endpoint) in webhooks {
         let active = signing_key(endpoint_id, &endpoint.active_key)?;
         let previous = endpoint

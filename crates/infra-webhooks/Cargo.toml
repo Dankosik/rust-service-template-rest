@@ -35,7 +35,6 @@ tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 enum-map = { workspace = true, features = ["derive"] }
 # template:begin webhooks:webhooks-outbound-dependencies
-arrayvec = { workspace = true }
 httpdate = { workspace = true }
 infra-outbound-http = { workspace = true }
 shared-rules = { workspace = true }
