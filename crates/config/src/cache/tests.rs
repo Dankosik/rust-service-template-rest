@@ -162,8 +162,8 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
     assert_eq!(cache.dsn.expose_secret(), CACHE_DSN_ENV.1);
     assert_eq!(cache.command_timeout, Duration::from_millis(200));
     assert_eq!(cache.max_concurrency.get(), 2);
-    assert_eq!(cache.max_key_bytes, ByteSize::kib(3));
-    assert_eq!(cache.max_value_bytes, ByteSize::kib(17));
+    assert_eq!(cache.max_key_bytes.get(), 3 * 1024);
+    assert_eq!(cache.max_value_bytes.get(), 17 * 1024);
     assert!(!format!("{cfg:?}").contains("hunter2"));
 }
 

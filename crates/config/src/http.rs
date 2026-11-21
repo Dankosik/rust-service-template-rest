@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use bytesize::ByteSize;
@@ -11,7 +11,10 @@ use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
     DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
 };
-use crate::validate::{ValidationError, Violations, duration_range, int_range};
+use crate::validate::{Rejected, ValidationError, Violations, duration_range, nonzero_usize_range};
+
+const MAX_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_BODY_BYTES: usize = 1024 * 1024 * 1024;
 
 pub(crate) type HttpInput = HttpFields;
 
@@ -116,8 +119,8 @@ pub struct HttpListenerConfig {
     pub addr: SocketAddr,
     pub header_read_timeout: Duration,
     pub request_timeout: Duration,
-    pub max_header_bytes: ByteSize,
-    pub max_body_bytes: ByteSize,
+    pub max_header_bytes: NonZeroUsize,
+    pub max_body_bytes: NonZeroUsize,
     pub max_in_flight: Option<NonZeroU32>,
     pub admission_wait: Duration,
     pub max_connections: Option<NonZeroU32>,
@@ -201,21 +204,21 @@ impl<Propagation: Mode> HttpFields<Propagation> {
         &self,
         drain_budget: Option<Duration>,
         v: &mut Violations,
-    ) -> HttpListenerConfig {
+    ) -> Result<HttpListenerConfig, Rejected> {
         v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
             Duration::from_millis(100)..=Duration::from_mins(15),
         ));
-        v.check(int_range(
+        let max_header_bytes = v.record(nonzero_usize_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
-            u64::from(HTTP1_MIN_READ_BUFFER_BYTES)..=ByteSize::mib(1).as_u64(),
+            usize::from(HTTP1_MIN_READ_BUFFER_BYTES)..=MAX_HEADER_BYTES,
         ));
-        v.check(int_range(
+        let max_body_bytes = v.record(nonzero_usize_range(
             "http.max_body_bytes",
             self.max_body_bytes.as_u64(),
-            1..=ByteSize::gib(1).as_u64(),
+            1..=MAX_BODY_BYTES,
         ));
         let limits = RawListenerLimits {
             request_timeout: self.request_timeout,
@@ -225,19 +228,19 @@ impl<Propagation: Mode> HttpFields<Propagation> {
             max_connection_age: self.max_connection_age,
         }
         .admit("http", drain_budget, "requests", v);
-        HttpListenerConfig {
+        Ok(HttpListenerConfig {
             addr: self.addr,
             header_read_timeout: self.header_read_timeout,
             request_timeout: limits.request_timeout,
-            max_header_bytes: self.max_header_bytes,
-            max_body_bytes: self.max_body_bytes,
+            max_header_bytes: max_header_bytes?,
+            max_body_bytes: max_body_bytes?,
             max_in_flight: limits.max_in_flight,
             admission_wait: limits.admission_wait,
             max_connections: limits.max_connections,
             max_connection_age: limits.max_connection_age,
             access_log_health_probes: self.access_log_health_probes,
             trust_trace_context: self.trust_trace_context,
-        }
+        })
     }
 }
 
@@ -246,7 +249,7 @@ impl HttpInput {
         self,
         tail: Option<ShutdownTail>,
         v: &mut Violations,
-    ) -> (HttpConfig, Option<Duration>) {
+    ) -> (Result<HttpConfig, Rejected>, Option<Duration>) {
         let drain_basis = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
         let readiness_propagation_delay = self.readiness_propagation_delay;
         let drain_budget = match drain_basis {
@@ -267,13 +270,14 @@ impl HttpInput {
                     .saturating_sub(readiness_propagation_delay),
             ),
         };
-        let listener = self.admit_listener(drain_budget, v);
-        let config = HttpConfig {
-            listener,
-            grace_period: self.grace_period,
-            drain_timeout: self.drain_timeout,
-            readiness_propagation_delay,
-        };
+        let config = self
+            .admit_listener(drain_budget, v)
+            .map(|listener| HttpConfig {
+                listener,
+                grace_period: self.grace_period,
+                drain_timeout: self.drain_timeout,
+                readiness_propagation_delay,
+            });
         (config, drain_budget)
     }
 }
@@ -296,14 +300,18 @@ impl WorkerHttpConfig {
 }
 
 impl WorkerHttpInput {
-    pub(crate) fn admit(self, tail: Option<ShutdownTail>, v: &mut Violations) -> WorkerHttpConfig {
+    pub(crate) fn admit(
+        self,
+        tail: Option<ShutdownTail>,
+        v: &mut Violations,
+    ) -> Result<WorkerHttpConfig, Rejected> {
         let _ = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
-        let listener = self.admit_listener(None, v);
-        WorkerHttpConfig {
+        let listener = self.admit_listener(None, v)?;
+        Ok(WorkerHttpConfig {
             listener,
             grace_period: self.grace_period,
             drain_timeout: self.drain_timeout,
-        }
+        })
     }
 }
 // template:end worker:worker-http-config
@@ -315,7 +323,7 @@ mod tests {
     use crate::validate::admit_with;
 
     fn admit(input: HttpInput) -> Result<HttpConfig, ValidationErrors> {
-        admit_with(|v| Ok(input.admit(None, v).0))
+        admit_with(|v| input.admit(None, v).0)
     }
 
     #[test]
@@ -350,7 +358,7 @@ mod tests {
             drain_timeout: Duration::from_secs(25),
             ..HttpInput::default()
         };
-        let errors = admit_with(|v| Ok(tight.admit(Some(tail), v).0)).unwrap_err();
+        let errors = admit_with(|v| tight.admit(Some(tail), v).0).unwrap_err();
         assert!(errors.names("http.grace_period"), "{errors}");
         assert!(
             errors
@@ -474,7 +482,7 @@ mod tests {
     fn worker_http_ignores_shared_propagation_delay_in_toml_and_rejects_unknown_keys() {
         let ignored = "drain_timeout = \"10s\"\nreadiness_propagation_delay = { bad = 1 }\n";
         let input: WorkerHttpInput = toml::from_str(ignored).unwrap();
-        let worker = admit_with(|v| Ok(input.admit(None, v))).unwrap();
+        let worker = admit_with(|v| input.admit(None, v)).unwrap();
         assert_eq!(worker.drain_timeout, Duration::from_secs(10));
         assert!(toml::from_str::<HttpInput>(ignored).is_err());
         assert!(toml::from_str::<WorkerHttpInput>("bogus = 1\n").is_err());
