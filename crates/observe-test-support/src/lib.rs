@@ -27,7 +27,6 @@ pub struct ScopedDispatch {
     _anchor: Dispatch,
 }
 
-#[must_use]
 pub fn install_default(dispatch: &Dispatch) -> ScopedDispatch {
     let anchor = Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let guard = tracing::dispatcher::set_default(dispatch);
@@ -42,7 +41,6 @@ pub fn dispatch_spans_and_events(spans: &SpanCapture, events: &EventCapture) -> 
     Dispatch::new(Registry::default().with(spans.clone()).with(events.clone()))
 }
 
-#[must_use]
 pub fn install_spans_and_events(spans: &SpanCapture, events: &EventCapture) -> ScopedDispatch {
     install_default(&dispatch_spans_and_events(spans, events))
 }
@@ -108,17 +106,14 @@ impl EventCapture {
         Dispatch::new(Registry::default().with(self.clone()).with(filter))
     }
 
-    #[must_use]
     pub fn install_default(&self) -> ScopedDispatch {
         install_default(&self.dispatch())
     }
 
-    #[must_use]
     pub fn install_for(&self, targets: &'static [&'static str]) -> ScopedDispatch {
         install_default(&self.dispatch_for(targets))
     }
 
-    #[must_use]
     pub fn install_target_prefix(&self, prefix: &'static str) -> ScopedDispatch {
         install_default(&self.dispatch_target_prefix(prefix))
     }
@@ -204,12 +199,10 @@ impl SpanCapture {
         Dispatch::new(Registry::default().with(self.clone()).with(filter))
     }
 
-    #[must_use]
     pub fn install_default(&self) -> ScopedDispatch {
         install_default(&self.dispatch())
     }
 
-    #[must_use]
     pub fn install_name(&self, name: &'static str) -> ScopedDispatch {
         install_default(&self.dispatch_name(name))
     }

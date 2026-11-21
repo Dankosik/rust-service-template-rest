@@ -40,7 +40,7 @@ impl PoolEvents {
     }
 
     fn subscriber_for(&self, targets: &'static [&'static str]) -> tracing::Dispatch {
-        self.0.dispatch_for_targets(targets)
+        self.0.dispatch_for(targets)
     }
 
     fn take(&self) -> Vec<observe_test_support::FieldMap> {
