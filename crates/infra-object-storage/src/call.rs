@@ -75,8 +75,9 @@ pub(crate) async fn within_mutation<T>(
     context: &BoundedContext,
     future: impl std::future::Future<Output = T>,
 ) -> Result<(T, Option<BoundedStop>), Interrupted> {
+    let mut future = std::pin::pin!(future);
     within(context, async {
-        let reply = future.await;
+        let reply = future.as_mut().await;
         (reply, context.stopped())
     })
     .await
