@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use domain_events::{Event, EventPayload};
 use infra_jobs::outbox::{self as job_outbox, Order};
 use infra_jobs::{Handler, Job, JobError, Kinds, PayloadSizer, Policy, RetrySchedule};
 use infra_postgres::{Tx, TxMode};
+use operation_context::{Deadline, OperationContext};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::UtcDateTime;
@@ -22,6 +24,8 @@ use crate::wire::CreatedAt;
 use crate::{OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
+static EMPTY_SUBJECT: Subject = Subject::from_static("");
+static EMPTY_BYTES: Bytes = Bytes::new();
 
 const POLICY: Policy = Policy {
     max_attempts: 25,
@@ -208,12 +212,23 @@ pub fn kinds(producer: OutboxProducer) -> Result<Kinds, infra_jobs::KindError> {
     job_outbox::publisher_kinds(POLICY, producer)
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy)]
 struct OutboxText<'a> {
-    subject: &'a str,
+    subject: &'a Subject,
     message_id: &'a str,
     publication_id: &'a str,
     event_type: &'a str,
+}
+
+impl Default for OutboxText<'static> {
+    fn default() -> Self {
+        Self {
+            subject: &EMPTY_SUBJECT,
+            message_id: "",
+            publication_id: "",
+            event_type: "",
+        }
+    }
 }
 
 impl<'a> OutboxText<'a> {
@@ -224,7 +239,7 @@ impl<'a> OutboxText<'a> {
             publication_id,
             event_type,
         } = self;
-        [subject, message_id, publication_id, event_type]
+        [subject.as_str(), message_id, publication_id, event_type]
     }
 }
 
@@ -261,7 +276,7 @@ impl PreparedEvent {
         Ok(job_outbox::reconcile(tx, &intent, order).await?)
     }
 
-    async fn prepare_outbox_intent(&self) -> Result<PublishDomainEvent, OutboxEnqueueError> {
+    async fn prepare_outbox_intent(&self) -> Result<PublishDomainEvent<'_>, OutboxEnqueueError> {
         if self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES && !self.payload().is_empty() {
             return Err(OutboxEnqueueError::PayloadTooLarge {
                 bytes: self.payload().len(),
@@ -291,7 +306,7 @@ impl PreparedEvent {
 
     fn outbox_text(&self) -> OutboxText<'_> {
         OutboxText {
-            subject: self.subject(),
+            subject: self.nats_subject(),
             message_id: self.message_id(),
             publication_id: self.publication_id(),
             event_type: self.event_type(),
@@ -299,14 +314,13 @@ impl PreparedEvent {
     }
 }
 
-impl Handler<PublishDomainEvent> for OutboxProducer {
-    async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
+impl Handler<PublishDomainEvent<'static>> for OutboxProducer {
+    async fn run(&self, job: Job<PublishDomainEvent<'static>>) -> Result<(), JobError> {
         let Self(producer) = self;
         let stored = job.payload();
         let (created_at, payload) = stored.validate().map_err(JobError::permanent)?;
-        let subject = Subject::from(stored.subject.as_str());
         let event = Publication {
-            subject: &subject,
+            subject: &stored.subject,
             message_id: &stored.message_id,
             publication_id: &stored.publication_id,
             event_type: &stored.event_type,
@@ -314,7 +328,9 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
             created_at: created_at.as_str(),
             payload,
         };
-        let context = job.context().child(BROKER_OPERATION_BUDGET);
+        let deadline =
+            Deadline::at(job.deadline()).earlier(Deadline::after(BROKER_OPERATION_BUDGET));
+        let context = OperationContext::new(Some(deadline), job.cancellation());
         let admission = crate::topology::recheck_outbox_source(&producer.shared, &context);
         producer
             .publish_after_admission(&event, &context, admission)
@@ -345,6 +361,7 @@ fn publication_job_error(error: PublishError) -> JobError {
 struct InvalidBase64;
 
 mod base64_payload {
+    use std::borrow::Cow;
     use std::fmt;
 
     use base64::alphabet::STANDARD;
@@ -362,18 +379,18 @@ mod base64_payload {
     );
 
     pub(super) fn serialize<S: Serializer>(
-        source: &Result<Bytes, InvalidBase64>,
+        source: &Result<Cow<'_, Bytes>, InvalidBase64>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match source {
-            Ok(bytes) => serializer.collect_str(&Base64Display::new(bytes, &ENGINE)),
+            Ok(bytes) => serializer.collect_str(&Base64Display::new(bytes.as_ref(), &ENGINE)),
             Err(InvalidBase64) => Err(serde::ser::Error::custom("payload is not base64")),
         }
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(super) fn deserialize<'de, 'a, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<Result<Bytes, InvalidBase64>, D::Error> {
+    ) -> Result<Result<Cow<'a, Bytes>, InvalidBase64>, D::Error> {
         struct PayloadVisitor;
 
         impl Visitor<'_> for PayloadVisitor {
@@ -391,53 +408,58 @@ mod base64_payload {
             }
         }
 
-        deserializer.deserialize_str(PayloadVisitor)
+        deserializer
+            .deserialize_str(PayloadVisitor)
+            .map(|decoded| decoded.map(Cow::Owned))
     }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[cfg_attr(test, derive(Debug))]
-struct PublishDomainEvent {
+struct PublishDomainEvent<'a> {
     #[serde(rename = "version")]
     format_version: u8,
-    subject: String,
-    message_id: String,
-    publication_id: String,
-    event_type: String,
+    subject: Cow<'a, Subject>,
+    message_id: Cow<'a, str>,
+    publication_id: Cow<'a, str>,
+    event_type: Cow<'a, str>,
     schema_version: u16,
     occurred_at_unix_seconds: i64,
     occurred_at_nanosecond: u32,
     #[serde(rename = "payload_base64", with = "base64_payload")]
-    payload: Result<Bytes, InvalidBase64>,
+    payload: Result<Cow<'a, Bytes>, InvalidBase64>,
 }
 
-impl From<&PreparedEvent> for PublishDomainEvent {
-    fn from(event: &PreparedEvent) -> Self {
+impl<'a> From<&'a PreparedEvent> for PublishDomainEvent<'a> {
+    fn from(event: &'a PreparedEvent) -> Self {
         Self {
-            payload: Ok(event.payload().clone()),
-            ..Self::without_payload(event, &event.outbox_text())
+            payload: Ok(Cow::Borrowed(event.payload())),
+            ..Self::without_payload(event, event.outbox_text())
         }
     }
 }
 
-impl PublishDomainEvent {
+impl PublishDomainEvent<'static> {
     fn for_metadata_sizing(event: &PreparedEvent) -> Self {
-        Self::without_payload(event, &OutboxText::default())
+        Self::without_payload(event, OutboxText::default())
     }
+}
 
-    fn without_payload(event: &PreparedEvent, text: &OutboxText<'_>) -> Self {
+impl<'a> PublishDomainEvent<'a> {
+    fn without_payload(event: &PreparedEvent, text: OutboxText<'a>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            subject: text.subject.to_owned(),
-            message_id: text.message_id.to_owned(),
-            publication_id: text.publication_id.to_owned(),
-            event_type: text.event_type.to_owned(),
+            subject: Cow::Borrowed(text.subject),
+            message_id: Cow::Borrowed(text.message_id),
+            publication_id: Cow::Borrowed(text.publication_id),
+            event_type: Cow::Borrowed(text.event_type),
             schema_version: event.schema_version(),
             occurred_at_unix_seconds: event.occurred_at().unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at().nanosecond(),
-            payload: Ok(Bytes::new()),
+            payload: Ok(Cow::Borrowed(&EMPTY_BYTES)),
         }
     }
+
     fn validate(&self) -> Result<(CreatedAt, &Bytes), &'static str> {
         if self.format_version != FORMAT_VERSION {
             return Err("outbox_format_unsupported");
@@ -448,6 +470,7 @@ impl PublishDomainEvent {
         let payload = self
             .payload
             .as_ref()
+            .map(Cow::as_ref)
             .map_err(|InvalidBase64| "outbox_base64_invalid")?;
         let json = simdutf8::compat::from_utf8(payload).map_err(|_| "outbox_json_invalid")?;
         if !payload_depth_allowed(payload) {
@@ -455,7 +478,7 @@ impl PublishDomainEvent {
         }
         serde_json::from_str::<serde::de::IgnoredAny>(json).map_err(|_| "outbox_json_invalid")?;
         let created_at = validate_reconstructed_envelope(
-            &self.subject,
+            self.subject.as_str(),
             &self.message_id,
             &self.publication_id,
             &self.event_type,
@@ -473,10 +496,12 @@ fn raw_payload_capacity(overhead: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
+    use async_nats::Subject;
     use bytes::Bytes;
     use time::UtcDateTime;
 
@@ -525,7 +550,13 @@ mod tests {
     #[test]
     fn storage_preserves_exact_padded_base64_payload_bytes() {
         let event = prepared(Bytes::from_static(br#"{"escaped":"\\\\u0000","n":1.0}"#));
-        let encoded = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
+        let intent = PublishDomainEvent::from(&event);
+        assert!(matches!(intent.subject, Cow::Borrowed(_)));
+        assert!(matches!(intent.message_id, Cow::Borrowed(_)));
+        assert!(matches!(intent.publication_id, Cow::Borrowed(_)));
+        assert!(matches!(intent.event_type, Cow::Borrowed(_)));
+        assert!(matches!(intent.payload, Ok(Cow::Borrowed(_))));
+        let encoded = serde_json::to_vec(&intent).unwrap();
         let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
 
         assert_eq!(wire["version"], FORMAT_VERSION);
@@ -533,38 +564,36 @@ mod tests {
             wire["payload_base64"],
             "eyJlc2NhcGVkIjoiXFxcXHUwMDAwIiwibiI6MS4wfQ=="
         );
-        let stored: PublishDomainEvent = serde_json::from_slice(&encoded).unwrap();
+        let stored: PublishDomainEvent<'static> = serde_json::from_slice(&encoded).unwrap();
         let (occurred_at, payload) = stored.validate().expect("stored immutable intent is valid");
         assert_eq!(payload, event.payload());
         assert_eq!(occurred_at.instant(), event.occurred_at());
-        assert_eq!(stored.subject, event.subject());
+        assert_eq!(stored.subject.as_str(), event.subject());
         assert_eq!(stored.message_id, event.message_id());
         assert_eq!(stored.publication_id, event.publication_id());
     }
 
     #[test]
     fn stored_intent_rejects_invalid_base64_before_broker_dispatch() {
-        let baseline = serde_json::to_value(PublishDomainEvent::from(&prepared(
-            Bytes::from_static(b"{}"),
-        )))
-        .unwrap();
+        let event = prepared(Bytes::from_static(b"{}"));
+        let baseline = serde_json::to_value(PublishDomainEvent::from(&event)).unwrap();
 
         let mut unpadded = baseline.clone();
         unpadded["payload_base64"] = serde_json::Value::String("e30".to_owned());
-        let stored: PublishDomainEvent =
+        let stored: PublishDomainEvent<'static> =
             serde_json::from_value(unpadded).expect("unpadded base64 decodes as an outbox job");
         let (_, payload) = stored.validate().expect("unpadded base64 remains valid");
         assert_eq!(payload.as_ref(), b"{}");
 
         let mut corrupt = baseline.clone();
         corrupt["payload_base64"] = serde_json::Value::String("not-base64".to_owned());
-        let stored: PublishDomainEvent =
+        let stored: PublishDomainEvent<'static> =
             serde_json::from_value(corrupt).expect("corrupt base64 still decodes as an outbox job");
         std::assert_matches!(stored.validate(), Err("outbox_base64_invalid"));
 
         let mut non_string = baseline;
         non_string["payload_base64"] = serde_json::Value::Null;
-        assert!(serde_json::from_value::<PublishDomainEvent>(non_string).is_err());
+        assert!(serde_json::from_value::<PublishDomainEvent<'static>>(non_string).is_err());
     }
 
     #[test]
@@ -574,7 +603,7 @@ mod tests {
         let event = parts.event();
 
         let encoded = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
-        let stored = serde_json::from_slice::<PublishDomainEvent>(&encoded).unwrap();
+        let stored = serde_json::from_slice::<PublishDomainEvent<'static>>(&encoded).unwrap();
         stored.validate().expect("stored redrive intent is valid");
 
         assert_eq!(stored.message_id, "logical-id");
@@ -583,17 +612,18 @@ mod tests {
 
     #[test]
     fn payload_limit_fits_exact_base64_boundary_for_varied_metadata() {
-        let compact = PublishDomainEvent::from(&prepared(Bytes::from_static(b"{}")));
+        let compact_event = prepared(Bytes::from_static(b"{}"));
+        let compact = PublishDomainEvent::from(&compact_event);
         let wide = PublishDomainEvent {
             format_version: FORMAT_VERSION,
-            subject: "s".repeat(256),
-            message_id: "i".repeat(256),
-            publication_id: "p".repeat(256),
-            event_type: "e".repeat(256),
+            subject: Cow::Owned(Subject::from("s".repeat(256))),
+            message_id: Cow::Owned("i".repeat(256)),
+            publication_id: Cow::Owned("p".repeat(256)),
+            event_type: Cow::Owned("e".repeat(256)),
             schema_version: u16::MAX,
             occurred_at_unix_seconds: 253_402_300_799,
             occurred_at_nanosecond: 999_999_999,
-            payload: Ok(Bytes::new()),
+            payload: Ok(Cow::Owned(Bytes::new())),
         };
 
         for intent in [compact, wide] {
@@ -678,7 +708,8 @@ mod tests {
         parts.event_type = "e".repeat(256);
         let fields = PayloadSizer::BYTES_PER_POLL - 100 + 3 * 256;
 
-        let (result, polls) = complete(parts.event().prepare_outbox_intent());
+        let event = parts.event();
+        let (result, polls) = complete(event.prepare_outbox_intent());
         assert!(result.is_ok());
         assert!(polls >= fields.div_ceil(PayloadSizer::BYTES_PER_POLL));
     }
@@ -714,14 +745,14 @@ mod tests {
         panic!("bounded fixture did not complete");
     }
 
-    fn outbox_raw_capacity(intent: &PublishDomainEvent) -> usize {
+    fn outbox_raw_capacity(intent: &PublishDomainEvent<'_>) -> usize {
         let overhead = serialized_len(intent, 0);
         raw_payload_capacity(overhead)
     }
 
-    fn serialized_len(intent: &PublishDomainEvent, payload_bytes: usize) -> usize {
+    fn serialized_len(intent: &PublishDomainEvent<'_>, payload_bytes: usize) -> usize {
         let mut candidate = intent.clone();
-        candidate.payload = Ok(Bytes::from(vec![0; payload_bytes]));
+        candidate.payload = Ok(Cow::Owned(Bytes::from(vec![0; payload_bytes])));
         serde_json::to_vec(&candidate)
             .expect("primitive intent serializes")
             .len()

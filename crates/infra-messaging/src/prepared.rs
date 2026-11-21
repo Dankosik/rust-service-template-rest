@@ -146,6 +146,9 @@ impl PreparedEvent {
     pub fn subject(&self) -> &str {
         &self.subject
     }
+    pub(crate) const fn nats_subject(&self) -> &Subject {
+        &self.subject
+    }
     #[must_use]
     pub fn message_id(&self) -> &str {
         &self.message_id

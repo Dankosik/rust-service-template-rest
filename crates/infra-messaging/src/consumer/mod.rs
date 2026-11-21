@@ -310,19 +310,21 @@ impl Consumer {
     ) -> Result<(), ConsumerError> {
         let concurrency = self.concurrency.get();
         let mut mode = PullMode::Normal;
+        let drained = drain.cancelled();
+        tokio::pin!(drained);
         'pulls: loop {
             while deliveries.len() == concurrency
                 || (mode == PullMode::SingleRetainedMessage && !deliveries.is_empty())
             {
                 tokio::select! {
                     biased;
-                    () = drain.cancelled() => break 'pulls,
+                    () = &mut drained => break 'pulls,
                     Some(joined) = deliveries.join_next() => check_delivery_task_result(joined)?,
                 }
             }
             let status = tokio::select! {
                 biased;
-                () = drain.cancelled() => break 'pulls,
+                () = &mut drained => break 'pulls,
                 status = self.refresh_durable_status() => status,
             };
             let limits = match status {
@@ -417,11 +419,12 @@ impl Consumer {
                 .expires(budget.expires)
                 .messages(),
         );
-        tokio::pin!(request);
+        let drained = drain.cancelled();
+        tokio::pin!(request, drained);
         let result = loop {
             tokio::select! {
                 biased;
-                () = drain.cancelled() => return Ok(BatchOpen::Stop),
+                () = &mut drained => return Ok(BatchOpen::Stop),
                 Some(joined) = deliveries.join_next(), if !deliveries.is_empty() => {
                     check_delivery_task_result(joined)?;
                 }
@@ -565,10 +568,11 @@ impl Consumer {
         drain: &CancellationToken,
         budget: &PullLimits,
     ) -> Result<BatchEnd, ConsumerError> {
-        let expires = Instant::now() + budget.expires + PULL_EXPIRY_GRACE;
         let mut remaining = budget.messages;
         let drained = drain.cancelled();
-        tokio::pin!(drained);
+        let deadline =
+            tokio::time::sleep_until(Instant::now() + budget.expires + PULL_EXPIRY_GRACE);
+        tokio::pin!(drained, deadline);
         while remaining > 0 {
             let message = tokio::select! {
                 biased;
@@ -577,10 +581,10 @@ impl Consumer {
                     check_delivery_task_result(joined)?;
                     continue;
                 },
-                next = tokio::time::timeout_at(expires, messages.next()) => match next {
-                    Ok(Some(Ok(message))) => message,
-                    Ok(None) => return Ok(BatchEnd::Incomplete(BatchIncomplete::Closed)),
-                    Ok(Some(Err(error))) => {
+                next = messages.next() => match next {
+                    Some(Ok(message)) => message,
+                    None => return Ok(BatchEnd::Incomplete(BatchIncomplete::Closed)),
+                    Some(Err(error)) => {
                         let failure = classify_batch_receive_error(&error);
                         if remaining == budget.messages
                             && matches!(failure, BatchReceiveError::MaxBytesExceeded)
@@ -594,11 +598,11 @@ impl Consumer {
                             error_kind: failure.label(),
                         }));
                     }
-                    Err(_) => return Ok(BatchEnd::Incomplete(BatchIncomplete::Failed {
-                        phase: "batch_receive",
-                        error_kind: "local_timeout",
-                    })),
-                }
+                },
+                () = &mut deadline => return Ok(BatchEnd::Incomplete(BatchIncomplete::Failed {
+                    phase: "batch_receive",
+                    error_kind: "local_timeout",
+                })),
             };
             if remaining == budget.messages {
                 let status = tokio::select! {

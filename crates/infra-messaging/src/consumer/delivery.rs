@@ -328,13 +328,8 @@ impl DeliveryHandler {
             Some(Deadline::after(BROKER_OPERATION_BUDGET)),
             self.abort.clone(),
         );
-        let result = send_publication(
-            &self.shared,
-            self.dead_letter_subject.clone(),
-            message,
-            &context,
-        )
-        .await;
+        let result =
+            send_publication(&self.shared, &self.dead_letter_subject, message, &context).await;
         let outcome = match &result {
             Ok(_) => "accepted",
             Err(PublishError::Ambiguous) => "ambiguous",
@@ -423,11 +418,14 @@ async fn run_handler(
 
 async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
     let span = settlement_span(filter_subject, "ack");
-    let error_type = if let Some(reply) = source.reply.clone() {
+    let error_type = if let Some(reply) = source.reply.as_ref() {
         let request = Request::new().timeout(None).payload(AckKind::Ack.into());
-        match tokio::time::timeout(BROKER_OPERATION_BUDGET, client.send_request(reply, request))
-            .instrument(span.clone())
-            .await
+        match tokio::time::timeout(
+            BROKER_OPERATION_BUDGET,
+            client.send_request(wire::BorrowedSubject(reply), request),
+        )
+        .instrument(span.clone())
+        .await
         {
             Ok(Ok(_)) => {
                 record_span_outcome(&span, "confirmed", None);

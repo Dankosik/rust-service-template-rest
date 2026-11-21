@@ -244,6 +244,14 @@ impl InboundEnvelope {
     }
 }
 
+pub(crate) struct BorrowedSubject<'a>(pub(crate) &'a async_nats::Subject);
+
+impl async_nats::ToSubject for BorrowedSubject<'_> {
+    fn to_subject(&self) -> async_nats::Subject {
+        self.0.clone()
+    }
+}
+
 pub(crate) fn valid_subject(subject: &str) -> bool {
     let mut at_token_start = true;
     for byte in subject.bytes() {

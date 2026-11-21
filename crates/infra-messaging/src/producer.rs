@@ -1,7 +1,7 @@
 use std::error::Error as _;
 use std::sync::Arc;
 
-use async_nats::ToSubject;
+use async_nats::Subject;
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
@@ -14,7 +14,7 @@ use crate::error::{PublishEnvelopeError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{Outcomes, record_span_outcome};
 use crate::prepared::{PreparedEvent, Publication};
-use crate::wire::{encode_publication, validate_header_bytes};
+use crate::wire::{BorrowedSubject, encode_publication, validate_header_bytes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum)]
 enum PublishOutcome {
@@ -88,10 +88,9 @@ impl Producer {
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
         let subject = event.subject.as_str();
-        let span_name = compact_str::format_compact!("publish {subject}");
         let span = tracing::info_span!(
             "messaging_publish",
-            otel.name = span_name.as_str(),
+            otel.name = compact_str::format_compact!("publish {subject}").as_str(),
             otel.kind = "producer",
             messaging.system.name = "nats",
             messaging.operation.type = "send",
@@ -146,7 +145,7 @@ impl Producer {
             self.shared.max_payload_bytes,
         )?;
         admission.await?;
-        send_publication(&self.shared, event.subject.clone(), message, context).await
+        send_publication(&self.shared, event.subject, message, context).await
     }
 }
 
@@ -170,7 +169,7 @@ fn publish_message(
 
 pub(crate) async fn send_publication(
     shared: &Shared,
-    subject: impl ToSubject,
+    subject: &Subject,
     message: PublishMessage,
     context: &OperationContext,
 ) -> Result<PublishAck, PublishError> {
@@ -182,7 +181,7 @@ pub(crate) async fn send_publication(
     let exchange = async {
         let ack = shared
             .jetstream
-            .send_publish(subject, message)
+            .send_publish(BorrowedSubject(subject), message)
             .await
             .map_err(|error| classify_publish(&error))?
             .await
