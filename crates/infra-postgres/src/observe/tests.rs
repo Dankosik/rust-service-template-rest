@@ -1,7 +1,7 @@
 use metrics::Key;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use metrics_util::debugging::DebuggingRecorder;
-use observe_test_support::{EventCapture, MetricsCapture, gauge, histogram_len};
+use observe_test_support::{EventCapture, MetricsCapture, SpanCapture, gauge, histogram_len};
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
@@ -417,5 +417,66 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     assert!(
         !format!("{snapshot:?}").contains("db.internal"),
         "{snapshot:?}"
+    );
+}
+
+#[tokio::test]
+async fn transaction_span_keeps_target_after_password_rotation_and_statement_span_follows_parent() {
+    let dsn = Dsn::admit_with_environment(
+        "postgres://app:pw@127.0.0.1:5433/orders?sslmode=disable",
+        |_| false,
+    )
+    .expect("the dsn is admitted");
+    let pool = Pool::prepare(
+        &dsn,
+        &crate::PoolOptions {
+            max_connections: std::num::NonZeroU32::MIN,
+            application_name: "svc",
+            default_isolation: crate::Isolation::ServerDefault,
+            session_settings_source: crate::SessionSettingsSource::Startup,
+            wait_order: crate::WaitOrder::Arrival,
+            notifications: true,
+        },
+    )
+    .pool;
+    pool.set_password("rotated");
+
+    let spans = SpanCapture::new();
+    let _subscriber = spans.install_default();
+
+    assert_eq!(
+        crate::observed!("outside parent", async { Ok::<_, sqlx::Error>(1) })
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(spans.take(), []);
+
+    let parent = transaction_span(&pool);
+    assert_eq!(
+        crate::observed!("inside parent", async { Ok::<_, sqlx::Error>(2) })
+            .instrument(parent)
+            .await
+            .unwrap(),
+        2
+    );
+
+    let captured = spans.take();
+    assert_eq!(captured.len(), 2, "{captured:?}");
+    let tx = &captured[0];
+    assert_eq!(tx.name, "postgres_transaction");
+    assert_eq!(tx.unquoted("db.namespace"), Some("orders"));
+    assert_eq!(tx.unquoted("server.address"), Some("127.0.0.1"));
+    assert_eq!(tx.field("server.port"), Some("5433"));
+    let statement = &captured[1];
+    assert_eq!(statement.name, "postgres_statement");
+    assert_eq!(
+        statement.unquoted("db.query.summary"),
+        Some("inside parent")
+    );
+    let debug = format!("{captured:?}");
+    assert!(
+        !debug.contains("pw") && !debug.contains("rotated"),
+        "{debug}"
     );
 }

@@ -206,9 +206,9 @@ pub async fn observed_statement<T>(
     success_key: &'static metrics::Key,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, sqlx::Error> {
-    let span = if Span::current().is_none() {
-        Span::none()
-    } else {
+    let has_parent =
+        tracing::dispatcher::get_default(|dispatch| dispatch.current_span().id().is_some());
+    let span = if has_parent {
         tracing::info_span!(
             "postgres_statement",
             otel.name = summary,
@@ -219,6 +219,8 @@ pub async fn observed_statement<T>(
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         )
+    } else {
+        Span::none()
     };
     let guard = DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
         record_statement_error(started, &span, summary, SharedString::const_str(CANCELLED));
@@ -323,14 +325,14 @@ impl PoolMetrics {
 }
 
 pub(crate) fn transaction_span(pool: &Pool) -> Span {
-    let target = pool.connect_options();
+    let target = pool.target();
     tracing::info_span!(
         "postgres_transaction",
         otel.kind = "client",
         db.system.name = "postgresql",
-        db.namespace = target.get_database(),
-        server.address = target.get_host(),
-        server.port = target.get_port(),
+        db.namespace = target.database(),
+        server.address = target.host(),
+        server.port = target.port(),
         postgres.transaction.outcome = tracing::field::Empty,
         error.type = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,

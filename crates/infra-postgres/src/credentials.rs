@@ -60,8 +60,7 @@ impl Refresh {
             metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
             return;
         }
-        let options = (*pool.connect_options()).clone().password(&password);
-        pool.set_connect_options(options);
+        pool.set_password(&password);
         if self.last_installed.replace(password).is_some() {
             tracing::info!("postgres_password_reloaded");
         }

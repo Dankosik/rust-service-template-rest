@@ -44,9 +44,10 @@ impl RegularQueue {
         active.waiters.insert(id, grant);
     }
 
-    fn is_standing(&self) -> bool {
+    fn newest_first(&self) -> bool {
         self.0.as_ref().is_some_and(|active| {
-            Instant::now().saturating_duration_since(active.since) > STANDING_AFTER
+            active.waiters.len() > 1
+                && Instant::now().saturating_duration_since(active.since) > STANDING_AFTER
         })
     }
 
@@ -129,7 +130,7 @@ impl Slots {
                 return;
             }
         }
-        let newest_first = state.regular.is_standing();
+        let newest_first = state.regular.newest_first();
         while let Some(grant) = state.regular.pop(newest_first) {
             if grant.send(()).is_ok() {
                 return;
@@ -297,5 +298,27 @@ mod tests {
         };
         drop(oldest_slot);
         assert!(poll(pin!(take(&slots, Queue::Regular))).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_standing_waiter_receives_the_slot_and_resets_queue_age() {
+        let slots = Slots::new(1);
+        let held = take(&slots, Queue::Regular).await;
+        let mut lone = pin!(take(&slots, Queue::Regular));
+        assert!(poll(lone.as_mut()).is_pending());
+        tokio::time::advance(STANDING_AFTER * 2).await;
+
+        drop(held);
+        let Poll::Ready(lone_slot) = poll(lone.as_mut()) else {
+            panic!("the single standing waiter was not served");
+        };
+
+        let mut older = pin!(take(&slots, Queue::Regular));
+        let mut newer = pin!(take(&slots, Queue::Regular));
+        assert!(poll(older.as_mut()).is_pending());
+        assert!(poll(newer.as_mut()).is_pending());
+        drop(lone_slot);
+        assert!(poll(newer.as_mut()).is_pending());
+        assert!(poll(older.as_mut()).is_ready());
     }
 }
