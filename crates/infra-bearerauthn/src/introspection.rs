@@ -18,8 +18,8 @@ use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
 
 use crate::{
-    InvalidCacheOptions, PreparationError, PresentedToken, Principal, ProviderFailure,
-    VerificationError, VerificationReason, Verifier,
+    ClientBuildError, InvalidCacheOptions, OptionsError, PresentedToken, Principal,
+    ProviderFailure, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedClaims, validate_introspection_claims},
     provider::{ProviderClient, StopProbe},
 };
@@ -35,13 +35,37 @@ impl From<ProviderFailure> for VerificationError {
 #[derive(Clone, derive_more::Debug)]
 #[debug("IntrospectionOptions([REDACTED])")]
 pub struct IntrospectionOptions {
-    pub issuer: crate::IssuerUrl,
-    pub audiences: Vec<String>,
-    pub endpoint: crate::EndpointUrl,
-    pub client_id: String,
-    pub client_secret: secrecy::SecretString,
-    pub provider_concurrency: NonZeroUsize,
-    pub cache: Option<IntrospectionCacheOptions>,
+    claim_policy: ClaimPolicy,
+    endpoint: crate::EndpointUrl,
+    client_id: String,
+    client_secret: secrecy::SecretString,
+    provider_concurrency: NonZeroUsize,
+    cache: Option<IntrospectionCacheOptions>,
+}
+
+impl IntrospectionOptions {
+    pub fn try_new(
+        issuer: &crate::IssuerUrl,
+        audiences: Vec<String>,
+        endpoint: crate::EndpointUrl,
+        client_id: String,
+        client_secret: secrecy::SecretString,
+        provider_concurrency: NonZeroUsize,
+        cache: Option<IntrospectionCacheOptions>,
+    ) -> Result<Self, OptionsError> {
+        if provider_concurrency.get() > Semaphore::MAX_PERMITS {
+            return Err(OptionsError);
+        }
+        let claim_policy = ClaimPolicy::try_new(issuer.as_str(), audiences)?;
+        Ok(Self {
+            claim_policy,
+            endpoint,
+            client_id,
+            client_secret,
+            provider_concurrency,
+            cache,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,16 +83,20 @@ impl IntrospectionCacheOptions {
     }
 }
 
-pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
-    IntrospectionVerifier::try_new(options, ProviderClient::try_new()?).map(Verifier::introspection)
+pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, ClientBuildError> {
+    Ok(Verifier::introspection(IntrospectionVerifier::new(
+        options,
+        ProviderClient::try_new()?,
+    )))
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[must_use]
 pub fn prepare_introspection_with_fixture(
     options: IntrospectionOptions,
     fixture: crate::test_support::FixtureTransport,
-) -> Result<Verifier, PreparationError> {
-    IntrospectionVerifier::try_new(options, fixture.into_provider()).map(Verifier::introspection)
+) -> Verifier {
+    Verifier::introspection(IntrospectionVerifier::new(options, fixture.into_provider()))
 }
 
 #[derive(derive_more::Debug)]
@@ -160,19 +188,12 @@ enum Fill {
 }
 
 impl IntrospectionVerifier {
-    fn try_new(
-        options: IntrospectionOptions,
-        provider: ProviderClient,
-    ) -> Result<Arc<Self>, PreparationError> {
-        let policy = ClaimPolicy::try_new(options.issuer.as_str(), options.audiences)?;
-        if options.provider_concurrency.get() > Semaphore::MAX_PERMITS {
-            return Err(PreparationError::invalid_options());
-        }
-        Ok(Arc::new(Self {
+    fn new(options: IntrospectionOptions, provider: ProviderClient) -> Arc<Self> {
+        Arc::new(Self {
             endpoint: options.endpoint,
             client_id: options.client_id,
             client_secret: options.client_secret,
-            policy,
+            policy: options.claim_policy,
             provider,
             permits: Semaphore::new(options.provider_concurrency.get()),
             cache: options.cache.map(|cache| PositiveCache {
@@ -182,7 +203,7 @@ impl IntrospectionVerifier {
                     .build_with_hasher(foldhash::quality::RandomState::default()),
                 fills: Mutex::default(),
             }),
-        }))
+        })
     }
 
     pub(crate) async fn verify(
@@ -330,7 +351,7 @@ mod tests {
         MAX_RETAINED_PAYLOAD_BYTES, retention,
     };
     use crate::{
-        EndpointUrl, Failure, IssuerUrl, PreparationError,
+        EndpointUrl, Failure, IssuerUrl, OptionsError,
         claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
         provider::{ProviderClient, fixture_acceptor, new_fixture_client},
@@ -504,19 +525,20 @@ mod tests {
         }
 
         fn options(&self, cache: Option<IntrospectionCacheOptions>) -> IntrospectionOptions {
-            IntrospectionOptions {
-                issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
-                audiences: vec!["api".to_owned()],
-                endpoint: self.endpoint.clone(),
-                client_id: "fixture-client".to_owned(),
-                client_secret: secrecy::SecretString::from("fixture-secret"),
-                provider_concurrency: NonZeroUsize::MIN,
+            IntrospectionOptions::try_new(
+                &IssuerUrl::parse("https://issuer.example").unwrap(),
+                vec!["api".to_owned()],
+                self.endpoint.clone(),
+                "fixture-client".to_owned(),
+                secrecy::SecretString::from("fixture-secret"),
+                NonZeroUsize::MIN,
                 cache,
-            }
+            )
+            .unwrap()
         }
 
         fn verifier(&self, cache: Option<IntrospectionCacheOptions>) -> Arc<IntrospectionVerifier> {
-            IntrospectionVerifier::try_new(self.options(cache), self.provider.clone()).unwrap()
+            IntrospectionVerifier::new(self.options(cache), self.provider.clone())
         }
 
         fn prepared(&self, cache: Option<IntrospectionCacheOptions>) -> crate::Verifier {
@@ -556,10 +578,17 @@ mod tests {
     #[tokio::test]
     async fn the_request_form_encodes_client_credentials_and_sends_the_token_only_in_the_body() {
         let fixture = Fixture::new().await;
-        let mut options = fixture.options(None);
-        options.client_id = "a:b".to_owned();
-        options.client_secret = secrecy::SecretString::from("c d");
-        let verifier = IntrospectionVerifier::try_new(options, fixture.provider.clone()).unwrap();
+        let options = IntrospectionOptions::try_new(
+            &IssuerUrl::parse("https://issuer.example").unwrap(),
+            vec!["api".to_owned()],
+            fixture.endpoint.clone(),
+            "a:b".to_owned(),
+            secrecy::SecretString::from("c d"),
+            NonZeroUsize::MIN,
+            None,
+        )
+        .unwrap();
+        let verifier = IntrospectionVerifier::new(options, fixture.provider.clone());
         verify(&verifier, b"Bearer a+b/=").await.unwrap();
         let requests = fixture.requests();
         assert_eq!(requests.len(), 1);
@@ -634,36 +663,43 @@ mod tests {
         fixture.finish().await;
     }
 
-    #[tokio::test]
-    async fn provider_concurrency_above_the_semaphore_limit_is_an_invalid_option() {
-        let fixture = Fixture::new().await;
-        let mut options = fixture.options(None);
-        options.provider_concurrency = const {
-            NonZeroUsize::new(Semaphore::MAX_PERMITS + 1).expect("one past the limit is nonzero")
-        };
-        let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
-            panic!("an over-limit concurrency was accepted");
-        };
-        assert_eq!(
-            error,
-            PreparationError::Options(crate::OptionsError::InvalidOption)
-        );
-        fixture.finish().await;
+    #[test]
+    fn provider_concurrency_above_the_semaphore_limit_is_an_invalid_option() {
+        let issuer = IssuerUrl::parse("https://issuer.example").unwrap();
+        let endpoint = EndpointUrl::parse("https://provider.test/introspect").unwrap();
+        let error = IntrospectionOptions::try_new(
+            &issuer,
+            vec!["api".to_owned()],
+            endpoint,
+            "fixture-client".to_owned(),
+            secrecy::SecretString::from("fixture-secret"),
+            const {
+                NonZeroUsize::new(Semaphore::MAX_PERMITS + 1)
+                    .expect("one past the limit is nonzero")
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, OptionsError);
     }
 
-    #[tokio::test]
-    async fn a_blank_audience_is_an_invalid_option_as_in_configuration() {
-        let fixture = Fixture::new().await;
-        let mut options = fixture.options(None);
-        options.audiences = vec![" \t".to_owned()];
-        let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
-            panic!("a blank audience was accepted");
-        };
-        assert_eq!(
-            error,
-            PreparationError::Options(crate::OptionsError::InvalidOption)
-        );
-        fixture.finish().await;
+    #[test]
+    fn a_blank_audience_is_an_invalid_option_as_in_configuration() {
+        let issuer = IssuerUrl::parse("https://issuer.example").unwrap();
+        let endpoint = EndpointUrl::parse("https://provider.test/introspect").unwrap();
+        for audiences in [Vec::new(), vec![" \t".to_owned()]] {
+            let error = IntrospectionOptions::try_new(
+                &issuer,
+                audiences,
+                endpoint.clone(),
+                "fixture-client".to_owned(),
+                secrecy::SecretString::from("fixture-secret"),
+                NonZeroUsize::MIN,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error, OptionsError);
+        }
     }
 
     #[tokio::test]
@@ -760,10 +796,17 @@ mod tests {
             Some("subject")
         );
         assert_eq!(fixture.calls(), 5);
-        let mut options = fixture.options(Some(cache_options(2)));
-        options.audiences = vec!["other".to_owned()];
-        let changed_context =
-            IntrospectionVerifier::try_new(options, fixture.provider.clone()).unwrap();
+        let options = IntrospectionOptions::try_new(
+            &IssuerUrl::parse("https://issuer.example").unwrap(),
+            vec!["other".to_owned()],
+            fixture.endpoint.clone(),
+            "fixture-client".to_owned(),
+            secrecy::SecretString::from("fixture-secret"),
+            NonZeroUsize::MIN,
+            Some(cache_options(2)),
+        )
+        .unwrap();
+        let changed_context = IntrospectionVerifier::new(options, fixture.provider.clone());
         assert_eq!(
             verify(&changed_context, b"Bearer first").await.err(),
             Some(Failure::Invalid)
@@ -1416,10 +1459,6 @@ mod tests {
         ] {
             let error = IntrospectionCacheOptions::try_new(capacity, ttl).unwrap_err();
             assert_eq!(error, crate::InvalidCacheOptions);
-            assert_eq!(
-                PreparationError::from(error).phase(),
-                crate::PreparationPhase::Options
-            );
         }
         for (capacity, ttl) in [(1, Duration::from_secs(1)), (1024, Duration::from_mins(5))] {
             let options = IntrospectionCacheOptions::try_new(capacity, ttl).unwrap();

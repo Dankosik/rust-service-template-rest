@@ -120,15 +120,6 @@ impl Verifier {
         &self.0.counters.transport
     }
 
-    #[cfg(feature = "test-support")]
-    pub async fn verify_fixture_authorization(
-        &self,
-        authorization: &[u8],
-    ) -> Result<Principal, Failure> {
-        let token = crate::parse_bearer([authorization])?;
-        self.verify(&token).await
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn verify(&self, token: &PresentedToken<'_>) -> Result<Principal, Failure> {
         self.verify_with_context(

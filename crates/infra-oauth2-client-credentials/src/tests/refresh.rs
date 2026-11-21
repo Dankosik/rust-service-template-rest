@@ -333,6 +333,27 @@ async fn the_last_service_handle_stops_inflight_refresh_while_exchange_stays_ope
 }
 
 #[tokio::test]
+async fn dropping_the_last_service_handle_stops_an_idle_driver() {
+    let fixture = Fixture::new().await;
+    let registration = prepare_registration(fixture.options());
+    let (service, driver) = service_tokens_http(
+        &registration,
+        ServiceTokenTarget::default(),
+        fixture.resource_origin(),
+    )
+    .unwrap();
+    let mut driver = Box::pin(tokio::spawn(driver.run(std::future::pending())));
+    poll_pending(driver.as_mut()).await;
+    drop(service);
+    tokio::time::timeout(Duration::from_secs(2), driver)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(registration);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn dropping_the_service_driver_closes_only_service_clients() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());

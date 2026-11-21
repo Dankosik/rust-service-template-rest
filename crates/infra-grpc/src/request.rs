@@ -25,7 +25,7 @@ pub trait RequestExt: sealed::Sealed {
     // template:begin authn:grpc-request-ext-authn
     fn principal(&self) -> Result<&crate::Principal, tonic::Status>;
 
-    fn delegation_credential(&self) -> Option<&crate::DelegationCredential>;
+    fn delegation_credential(&self) -> Result<&crate::DelegationCredential, tonic::Status>;
     // template:end authn:grpc-request-ext-authn
 
     // template:begin service-auth:grpc-request-ext-service-auth
@@ -47,8 +47,8 @@ impl<T> RequestExt for tonic::Request<T> {
         self.extensions().get().ok_or_else(internal_status)
     }
 
-    fn delegation_credential(&self) -> Option<&crate::DelegationCredential> {
-        self.extensions().get()
+    fn delegation_credential(&self) -> Result<&crate::DelegationCredential, tonic::Status> {
+        self.extensions().get().ok_or_else(internal_status)
     }
     // template:end authn:grpc-request-ext-authn-impl
 
@@ -77,5 +77,18 @@ mod tests {
             Some(service_failure::Code::InternalServerError)
         );
         assert!(request.response_context().is_ok());
+        // template:begin authn:grpc-request-ext-authn-test
+        for status in [
+            request.principal().unwrap_err(),
+            request.delegation_credential().unwrap_err(),
+        ] {
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert_eq!(status.message(), service_failure::SANITIZED_DETAIL);
+            assert_eq!(
+                crate::status::catalog_code(&status),
+                Some(service_failure::Code::InternalServerError)
+            );
+        }
+        // template:end authn:grpc-request-ext-authn-test
     }
 }

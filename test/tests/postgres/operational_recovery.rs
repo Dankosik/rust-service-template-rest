@@ -761,22 +761,22 @@ mod grpc {
         )
         .unwrap();
         let verifier = prepare_introspection_with_fixture(
-            IntrospectionOptions {
-                issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
-                audiences: vec!["api".to_owned()],
-                endpoint: EndpointUrl::parse(&format!(
+            IntrospectionOptions::try_new(
+                &IssuerUrl::parse("https://issuer.example").unwrap(),
+                vec!["api".to_owned()],
+                EndpointUrl::parse(&format!(
                     "https://provider.test:{}/introspect",
                     server.local_addr().port()
                 ))
                 .unwrap(),
-                client_id: "fixture".to_owned(),
-                client_secret: secrecy::SecretString::from("fixture"),
-                provider_concurrency: const { NonZeroUsize::new(16).expect("16 is nonzero") },
-                cache: None,
-            },
+                "fixture".to_owned(),
+                secrecy::SecretString::from("fixture"),
+                const { NonZeroUsize::new(16).expect("16 is nonzero") },
+                None,
+            )
+            .unwrap(),
             fixture,
-        )
-        .unwrap();
+        );
         (verifier, server, cancel)
     }
     // template:end postgres-grpc-auth:recovery-provider

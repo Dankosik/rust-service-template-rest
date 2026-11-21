@@ -34,12 +34,12 @@ pub struct InvalidCacheOptions;
 // template:end oidc-introspection:authn-introspection-cache-options-error
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum OptionsError {
-    #[error("invalid authentication option")]
-    InvalidOption,
-    #[error(transparent)]
-    InvalidUrl(#[from] InvalidUrl),
-}
+#[error("invalid authentication option")]
+pub struct OptionsError;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("authentication preparation failed during Client: ClientBuild")]
+pub struct ClientBuildError;
 
 // template:begin oidc-jwt:authn-jwt-preparation-errors
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -77,66 +77,44 @@ pub enum JwksError {
     #[error("NoUsableKeys")]
     NoUsableKeys,
 }
-// template:end oidc-jwt:authn-jwt-preparation-errors
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationPhase {
-    Options,
     Client,
-    // template:begin oidc-jwt:authn-jwt-preparation-phases
     Discovery,
     Jwks,
-    // template:end oidc-jwt:authn-jwt-preparation-phases
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreparationError {
-    #[error("authentication preparation failed during Options: {0}")]
-    Options(#[from] OptionsError),
     #[error("authentication preparation failed during Client: ClientBuild")]
     ClientBuild,
-    // template:begin oidc-jwt:authn-jwt-preparation-variants
     #[error("authentication preparation failed during Discovery: {0}")]
     Discovery(#[from] DiscoveryError),
     #[error("authentication preparation failed during Jwks: {0}")]
     Jwks(#[from] JwksError),
     #[error("authentication preparation failed during {0:?}: Timeout")]
     Timeout(PreparationPhase),
-    // template:end oidc-jwt:authn-jwt-preparation-variants
 }
 
-impl From<InvalidUrl> for PreparationError {
-    fn from(error: InvalidUrl) -> Self {
-        Self::Options(OptionsError::from(error))
+impl From<ClientBuildError> for PreparationError {
+    fn from(_: ClientBuildError) -> Self {
+        Self::ClientBuild
     }
 }
-
-// template:begin oidc-introspection:authn-introspection-cache-options-from
-impl From<InvalidCacheOptions> for PreparationError {
-    fn from(_: InvalidCacheOptions) -> Self {
-        Self::Options(OptionsError::InvalidOption)
-    }
-}
-// template:end oidc-introspection:authn-introspection-cache-options-from
 
 impl PreparationError {
-    pub(crate) const fn invalid_options() -> Self {
-        Self::Options(OptionsError::InvalidOption)
-    }
-
     #[must_use]
     pub const fn phase(&self) -> PreparationPhase {
         match self {
-            Self::Options(_) => PreparationPhase::Options,
             Self::ClientBuild => PreparationPhase::Client,
-            // template:begin oidc-jwt:authn-jwt-preparation-phase-arms
             Self::Discovery(_) => PreparationPhase::Discovery,
             Self::Jwks(_) => PreparationPhase::Jwks,
             Self::Timeout(phase) => *phase,
-            // template:end oidc-jwt:authn-jwt-preparation-phase-arms
         }
     }
 }
+// template:end oidc-jwt:authn-jwt-preparation-errors
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum VerificationReason {

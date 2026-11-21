@@ -16,7 +16,9 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum_test::{TestRequest, TestResponse, TestServer};
 use health::{Readiness, RefreshPolicy};
-use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_with_fixture};
+use infra_bearerauthn::test_support::{
+    FixtureTransport, prepare_introspection_with_fixture, verify_fixture_authorization,
+};
 use infra_bearerauthn::{
     EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
 };
@@ -357,19 +359,19 @@ impl Provider {
         )
         .expect("the fixture transport");
         prepare_introspection_with_fixture(
-            IntrospectionOptions {
-                issuer: IssuerUrl::parse(ISSUER).expect("fixture issuer URL"),
-                audiences: vec![AUDIENCE.to_owned()],
-                endpoint: EndpointUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
+            IntrospectionOptions::try_new(
+                &IssuerUrl::parse(ISSUER).expect("fixture issuer URL"),
+                vec![AUDIENCE.to_owned()],
+                EndpointUrl::parse(&format!("https://{FIXTURE_HOST}/introspect"))
                     .expect("fixture endpoint URL"),
-                client_id: "fixture-client".to_owned(),
-                client_secret: SecretString::from("fixture-secret"),
-                provider_concurrency: const { NonZeroUsize::new(16).expect("16 is nonzero") },
+                "fixture-client".to_owned(),
+                SecretString::from("fixture-secret"),
+                const { NonZeroUsize::new(16).expect("16 is nonzero") },
                 cache,
-            },
+            )
+            .expect("the introspection options"),
             transport,
         )
-        .expect("the introspection verifier")
     }
 
     async fn stop(mut self) {
@@ -1145,8 +1147,7 @@ async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
         IntrospectionCacheOptions::try_new(16, Duration::from_secs(30)).unwrap(),
     ));
     let authorization = format!("Bearer {ALICE}");
-    verifier
-        .verify_fixture_authorization(authorization.as_bytes())
+    verify_fixture_authorization(&verifier, authorization.as_bytes())
         .await
         .unwrap();
     assert_eq!(provider.requests.load(Ordering::Relaxed), 1);
@@ -1727,8 +1728,7 @@ async fn p9_unfinished_authenticated_upload_returns_the_declared_timeout() {
         IntrospectionCacheOptions::try_new(16, Duration::from_secs(30)).unwrap(),
     ));
     let authorization = format!("Bearer {ALICE}");
-    verifier
-        .verify_fixture_authorization(authorization.as_bytes())
+    verify_fixture_authorization(&verifier, authorization.as_bytes())
         .await
         .unwrap();
     let pool = Pool::connect_lazy_for_test("postgres://localhost/unused").expect("lazy pool");
