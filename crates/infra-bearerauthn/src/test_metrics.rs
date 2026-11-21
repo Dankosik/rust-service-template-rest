@@ -5,7 +5,7 @@ use std::{
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use observe_test_support::{
-    EventCapture, FieldMap, MetricsCapture, SpanCapture, dispatch_spans_and_events,
+    CapturedSpan, EventCapture, FieldMap, MetricsCapture, SpanCapture, dispatch_spans_and_events,
 };
 
 pub(crate) use observe_test_support::labeled;
@@ -131,5 +131,13 @@ impl Diagnostics {
             .into_iter()
             .map(|span| render_fields(&format!("span={};", span.name), &span.fields))
             .collect()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the introspection-only profile uses string-rendered span assertions"
+    )]
+    pub(crate) fn take_captured_spans(&self) -> Vec<CapturedSpan> {
+        self.spans.take()
     }
 }

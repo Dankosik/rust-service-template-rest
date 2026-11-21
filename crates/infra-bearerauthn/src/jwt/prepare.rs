@@ -827,20 +827,31 @@ mod tests {
                 "operation=jwks,outcome=success",
             ]
         );
-        let spans = diagnostics.take_spans();
-        let server = format!("server.address=\"{FIXTURE_HOST}\";server.port={port};");
-        let client = format!(
-            "span=authn_provider;otel.name=\"GET\";otel.kind=\"client\";http.request.method=\"GET\";{server}"
-        );
+        let spans: Vec<_> = diagnostics
+            .take_captured_spans()
+            .into_iter()
+            .map(|span| (span.name, span.fields))
+            .collect();
+        let base = |operation: &str, status: &str| {
+            observe_test_support::FieldMap::from([
+                ("otel.name", "\"GET\"".to_owned()),
+                ("otel.kind", "\"client\"".to_owned()),
+                ("http.request.method", "\"GET\"".to_owned()),
+                ("server.address", format!("\"{FIXTURE_HOST}\"")),
+                ("server.port", port.to_string()),
+                ("authn.operation", format!("\"{operation}\"")),
+                ("http.response.status_code", status.to_owned()),
+            ])
+        };
+        let mut not_found = base("discovery", "404");
+        not_found.insert("error.type", "\"provider_status_4xx\"".to_owned());
+        not_found.insert("otel.status_code", "\"ERROR\"".to_owned());
         assert_eq!(
             spans,
             [
-                format!(
-                    "{client}authn.operation=\"discovery\";http.response.status_code=404;\
-                     error.type=\"provider_status_4xx\";otel.status_code=\"ERROR\";"
-                ),
-                format!("{client}authn.operation=\"discovery\";http.response.status_code=200;"),
-                format!("{client}authn.operation=\"jwks\";http.response.status_code=200;"),
+                ("authn_provider", not_found),
+                ("authn_provider", base("discovery", "200")),
+                ("authn_provider", base("jwks", "200")),
             ]
         );
     }
@@ -886,14 +897,13 @@ mod tests {
             });
         });
         let samples = diagnostics.take_histograms();
-        let spans = diagnostics.take_spans();
+        let spans = diagnostics.take_captured_spans();
         assert_eq!(samples.len(), 2);
         assert_eq!(spans.len(), 2);
         for (index, outcome) in ["cancelled", "provider_timeout"].into_iter().enumerate() {
             assert!(labeled(&samples[index], &[("outcome", outcome)]));
-            assert!(spans[index].ends_with(&format!(
-                "error.type=\"{outcome}\";otel.status_code=\"ERROR\";"
-            )));
+            assert_eq!(spans[index].unquoted("error.type"), Some(outcome));
+            assert_eq!(spans[index].unquoted("otel.status_code"), Some("ERROR"));
         }
     }
 }
