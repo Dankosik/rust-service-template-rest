@@ -19,8 +19,8 @@ Classify every change from current primary evidence:
   dependency changes span live versions.
 
 For any change touching persisted state, wire contracts, or multiple binaries,
-prove rolling mixed-version survival across `crates/migrate`, `crates/service`,
-and `crates/jobs-worker`:
+prove rolling mixed-version survival across retained binaries (`crates/migrate`,
+`crates/service`, `crates/jobs-worker`):
 
 - **Lock-safe DDL (`rust-sqlx`):** migrations must run safely while old and new
   replicas execute concurrently.

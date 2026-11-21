@@ -97,7 +97,10 @@ Leave internals behind one module's seam open to Implementation.
        primary code, repair confirmed defects in place, record any bounded
        `CONCERNS` in `design.md`'s `## Assumptions & reopen triggers`, flip
        `spec.md` and `design.md` to `status: ready` with `Design review: PASS |
-       CONCERNS`, and continue into [Planning](planning.md).
+       CONCERNS`, and continue into [Planning](planning.md) (if heavy design
+       exploration and review pushed context past the **smart zone**, compact
+       around the ready `spec.md`, `design.md`, and non-obvious Intake *why*
+       before slicing tasks).
      - **Lightweight architecture:** record a compact inline `## Architecture`
        in `spec.md` (`status: draft`) and proceed directly to
        [Planning](planning.md), where [Plan Review](plan-review.md) audits the

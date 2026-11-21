@@ -36,9 +36,14 @@ Apply four seam rules:
    timeout, or cancellation path. If the caller must coordinate magic call
    order, hold `&mut Tx<'_>` across network `.await`, or match internal storage
    errors, deepen the seam.
-4. **Replace, don't layer:** keep the public interface as the proving surface
-   (internal seams stay private behind the module) and list superseded shallow
-   modules, wrappers, and internal-only tests to delete.
+4. **Replace, don't layer — and keep seams deterministically provable:** keep
+   the public interface as the proving surface (internal seams stay private
+   behind the module), drive time and expiry through `tokio::time::pause` or
+   plain `now` parameters rather than hidden `SystemTime::now()`, verify
+   external wire seams can inject every designed timeout or failure mode
+   locally (reusing existing `crates/*-test-support` harnesses without
+   mock-only traits), and list superseded shallow modules, wrappers, and
+   internal-only tests to delete.
 
 ## Dependency Categories
 

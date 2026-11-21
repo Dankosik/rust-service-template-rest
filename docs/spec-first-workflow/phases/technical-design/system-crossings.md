@@ -37,7 +37,11 @@ opens an unresolved decision.
      outside any DB transaction (**zero network I/O inside an open tx or held
      pool connection**)?
    - Which exact `PK`/`UNIQUE`/`FK`/`CHECK` constraints, nullability/defaults,
-     and indexes back each query?
+     composite index order, and row-locking shape (`FOR UPDATE SKIP LOCKED`,
+     optimistic version, append-only insert, keyset cursor) back hot queries
+     without sequential scans or hot-row lock queues?
+   - What bounds table, bucket, or queue growth (retention, lock-safe batch
+     pruning, or TTL)?
    - When `infra-cache` is used, what pins tenant-isolated keys, TTL,
      invalidation, and cache-down fallback?
 2. **Trust & attacker paths** *(load `rust-security`)*:

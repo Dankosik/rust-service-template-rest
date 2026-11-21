@@ -26,11 +26,16 @@ Lifecycle](../shared/review.md#lifecycle).
 
 ## Checks
 
-Report under explicit check headings, recording inspected primary files,
-symbols, and `Cargo.lock` sources in `evidence_boundary`. On a clearing check
-write `none — attacked <strongest loophole, crossing, or anchor>; closed by
-<clause or locator>`. On a failing check give anchor, concrete witness,
-classification (`PHASE_DEFECT` or `UPSTREAM_GAP`), and smallest owner.
+Keep findings compact (**target `≤400` words per axis**) under explicit check
+headings, recording inspected primary files, symbols, and `Cargo.lock` sources
+in `evidence_boundary`:
+
+```text
+## Check <N> — <Check Name>
+- none — attacked <strongest loophole, crossing, or anchor>; closed by <clause or locator>
+# OR per finding:
+- [<PHASE_DEFECT | UPSTREAM_GAP | CONCERN>] <anchor> — violated: <rule>; witness: <concrete failure or counterexample>; owner: <smallest owner>
+```
 
 Repo standards in `AGENTS.md`, `docs/repo-architecture.md`, `docs/decisions/`,
 and `docs/backend-library-selection.md` override generic taste.

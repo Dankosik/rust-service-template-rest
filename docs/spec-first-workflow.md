@@ -20,11 +20,11 @@ The human defines **what** we are building once during Intake; from that point
 on, the agent owns **how** to specify, design, plan, and implement autonomously
 without asking the user to drive steps or make technical choices.
 
-Keep preparation in **one continuous session** so the verbatim *why* from
-grilling stays a primary source (use fresh subagents only where independence or
-parallelism helps: read-heavy scans, bounded domain specialists, `Design It
-Twice`, and `Design Review` / `Plan Review` / adjudication), then stop for a
-fresh Implementation session:
+Keep preparation in **one continuous session** while inside the **smart zone**
+so the verbatim *why* from grilling stays a primary source (use fresh subagents
+only where independence or parallelism helps: read-heavy scans, bounded domain
+specialists, `Design It Twice`, and `Design Review` / `Plan Review` /
+adjudication), then stop for a fresh Implementation session:
 
 | Phase | Owner | Output |
 | --- | --- | --- |
