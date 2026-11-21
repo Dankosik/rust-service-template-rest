@@ -504,23 +504,30 @@ pub(crate) struct Scopes(Vec<String>);
 
 impl Scopes {
     fn from_claim(scope: Option<StringOrStrings<'_>>) -> Option<Self> {
-        let mut values: Vec<String> = match scope {
-            None => Vec::new(),
-            Some(StringOrStrings::One(value)) if value.is_empty() => Vec::new(),
-            Some(StringOrStrings::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
-            Some(StringOrStrings::Many(values)) => {
-                values.into_iter().map(Cow::into_owned).collect()
+        match scope {
+            None => Some(Self(Vec::new())),
+            Some(StringOrStrings::One(value)) if value.is_empty() => Some(Self(Vec::new())),
+            Some(StringOrStrings::One(value)) => {
+                let mut values: SmallVec<[&str; 8]> = value
+                    .split(' ')
+                    .map(|part| shared_rules::rfc6749::is_scope_token(part).then_some(part))
+                    .collect::<Option<_>>()?;
+                values.sort_unstable();
+                values.dedup();
+                Some(Self(values.into_iter().map(str::to_owned).collect()))
             }
-        };
-        if !values
-            .iter()
-            .all(|value| shared_rules::rfc6749::is_scope_token(value))
-        {
-            return None;
+            Some(StringOrStrings::Many(mut values)) => {
+                if !values
+                    .iter()
+                    .all(|value| shared_rules::rfc6749::is_scope_token(value))
+                {
+                    return None;
+                }
+                values.sort_unstable();
+                values.dedup();
+                Some(Self(values.into_iter().map(Cow::into_owned).collect()))
+            }
         }
-        values.sort_unstable();
-        values.dedup();
-        Some(Self(values))
     }
 
     pub(crate) fn as_slice(&self) -> &[String] {
@@ -1109,8 +1116,8 @@ mod tests {
                 true,
             ),
             (
-                serde_json::json!({"scp":["read"]}),
-                Some(vec!["read"]),
+                serde_json::json!({"scp":["write", "read", "write"]}),
+                Some(vec!["read", "write"]),
                 true,
             ),
             (
@@ -1129,6 +1136,7 @@ mod tests {
             (serde_json::json!({"scope":"read","scp":42}), None, true),
             (serde_json::json!({"scope":"read  write"}), None, true),
             (serde_json::json!({"scope":["read write"]}), None, false),
+            (serde_json::json!({"scp":["read", "bad scope"]}), None, true),
         ] {
             let response = merged(
                 serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"}),

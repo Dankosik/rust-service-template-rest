@@ -234,12 +234,13 @@ impl IntrospectionVerifier {
             {
                 return Ok(value.principal);
             }
+            let token_text = token.as_str();
             let filled = cache
                 .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
                     let unix_now = unix_now.clone();
-                    let token = token.to_secret();
+                    let token = secrecy::SecretString::from(token_text);
                     async move {
                         if let Some(value) = retained.get(&key)
                             && value.is_reusable_at(unix_now()?)

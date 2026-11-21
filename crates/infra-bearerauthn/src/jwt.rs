@@ -167,6 +167,36 @@ struct AdmittedHeader {
     algorithm: JwtAlgorithm,
 }
 
+enum SignatureAttempt {
+    Verified,
+    Miss(SignatureVerificationError),
+    Malformed,
+}
+
+fn verify_encoded_signature(
+    keys: &KeySet,
+    message: &[u8],
+    encoded_signature: &[u8],
+    admitted: &AdmittedHeader,
+) -> SignatureAttempt {
+    let mut bytes = SmallVec::<[u8; MAX_SIGNATURE_BYTES]>::from_elem(
+        0_u8,
+        base64::decoded_len_estimate(encoded_signature.len()).min(MAX_SIGNATURE_BYTES),
+    );
+    let Ok(length) = URL_SAFE_NO_PAD.decode_slice(encoded_signature, &mut bytes) else {
+        return SignatureAttempt::Malformed;
+    };
+    match keys.verify(&SignatureInput {
+        message,
+        signature: &bytes[..length],
+        kid: admitted.kid.as_deref(),
+        algorithm: admitted.algorithm,
+    }) {
+        Ok(()) => SignatureAttempt::Verified,
+        Err(miss) => SignatureAttempt::Miss(miss),
+    }
+}
+
 #[derive(derive_more::Debug)]
 #[debug("JwtVerifier(..)")]
 pub(crate) struct JwtVerifier {
@@ -248,11 +278,6 @@ impl JwtVerifier {
         } = rfc7515::compact(token.as_bytes())
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
         let admitted = self.admit_header(header)?;
-        let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
-        let signature = URL_SAFE_NO_PAD
-            .decode_slice(signature, &mut signature_bytes)
-            .map(|length| &signature_bytes[..length])
-            .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
         let decode_payload = || {
             URL_SAFE_NO_PAD
                 .decode(payload)
@@ -261,31 +286,32 @@ impl JwtVerifier {
         let validate_claims = |payload: Vec<u8>, now: Duration| {
             validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
         };
-        let input = SignatureInput {
-            message,
-            signature,
-            kid: admitted.kid.as_deref(),
-            algorithm: admitted.algorithm,
-        };
-        let (signing_keys, verified, sampled_at, now) = if let Err(miss) = keys.verify(&input) {
-            let Ok(preflight) =
-                decode_payload().and_then(|payload| validate_claims(payload, unix_now()?))
-            else {
-                return Err(miss.into());
+        let (signing_keys, verified, sampled_at, now) =
+            match verify_encoded_signature(&keys, message, signature, &admitted) {
+                SignatureAttempt::Verified => {
+                    let payload = decode_payload()?;
+                    let sampled_at = MonotonicInstant::now();
+                    let now = unix_now()?;
+                    (keys, validate_claims(payload, now)?, sampled_at, now)
+                }
+                SignatureAttempt::Malformed => {
+                    return Err(VerificationError::invalid(VerificationReason::Signature));
+                }
+                SignatureAttempt::Miss(miss) => {
+                    let Ok(preflight) =
+                        decode_payload().and_then(|payload| validate_claims(payload, unix_now()?))
+                    else {
+                        return Err(miss.into());
+                    };
+                    let signing_keys = self
+                        .verify_after_signature_miss(&keys, message, signature, &admitted, miss)
+                        .await?;
+                    let sampled_at = MonotonicInstant::now();
+                    let now = unix_now()?;
+                    preflight.check_at(now)?;
+                    (signing_keys, preflight, sampled_at, now)
+                }
             };
-            let signing_keys = self
-                .verify_after_signature_miss(&keys, &input, miss)
-                .await?;
-            let sampled_at = MonotonicInstant::now();
-            let now = unix_now()?;
-            preflight.check_at(now)?;
-            (signing_keys, preflight, sampled_at, now)
-        } else {
-            let payload = decode_payload()?;
-            let sampled_at = MonotonicInstant::now();
-            let now = unix_now()?;
-            (keys, validate_claims(payload, now)?, sampled_at, now)
-        };
         signing_keys.require_fresh(self.jwks_max_age)?;
         let ttl =
             MAX_VERIFIED_CACHE_TTL.min(verified.principal.expiry_from_epoch().saturating_sub(now));
@@ -333,14 +359,21 @@ impl JwtVerifier {
     async fn verify_after_signature_miss(
         &self,
         checked: &Arc<KeySet>,
-        input: &SignatureInput<'_>,
+        message: &[u8],
+        encoded_signature: &[u8],
+        admitted: &AdmittedHeader,
         miss: SignatureVerificationError,
     ) -> Result<Arc<KeySet>, VerificationError> {
         match self.key_store.refresh_for_signature_miss(checked).await {
             SignatureRefresh::NewerSet(key_set) => {
                 key_set.require_fresh(self.jwks_max_age)?;
-                key_set.verify(input)?;
-                Ok(key_set)
+                match verify_encoded_signature(&key_set, message, encoded_signature, admitted) {
+                    SignatureAttempt::Verified => Ok(key_set),
+                    SignatureAttempt::Miss(error) => Err(error.into()),
+                    SignatureAttempt::Malformed => {
+                        Err(VerificationError::invalid(VerificationReason::Signature))
+                    }
+                }
             }
             SignatureRefresh::NoNewerSet => {
                 checked.require_fresh(self.jwks_max_age)?;
@@ -690,6 +723,22 @@ mod tests {
             ),
             (
                 format!("{message}.{}", URL_SAFE_NO_PAD.encode([7_u8; 1025])),
+                VerificationReason::Signature,
+            ),
+            (
+                format!(
+                    "{}.{payload}.{}",
+                    header(r#"{"alg":"RS256","kid":"missing"}"#),
+                    URL_SAFE_NO_PAD.encode([7_u8; 1024])
+                ),
+                VerificationReason::UnknownKey,
+            ),
+            (
+                format!(
+                    "{}.{payload}.{}",
+                    header(r#"{"alg":"RS256","kid":"missing"}"#),
+                    URL_SAFE_NO_PAD.encode([7_u8; 1025])
+                ),
                 VerificationReason::Signature,
             ),
         ] {

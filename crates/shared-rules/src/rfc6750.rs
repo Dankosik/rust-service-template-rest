@@ -6,10 +6,6 @@ pub enum NoBearer {
     Malformed,
 }
 
-pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, NoBearer> {
-    std::str::from_utf8(token_bytes(values)?).map_err(|_| NoBearer::Malformed)
-}
-
 /// RFC 6750 §2.1
 pub fn token_bytes<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a [u8], NoBearer> {
     let mut values = values.into_iter();
@@ -54,22 +50,45 @@ pub fn is_b64token(token: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{NoBearer, token};
+    use super::{NoBearer, is_b64token, token_bytes};
 
     #[test]
     fn the_scheme_matches_any_case_and_spaces_separate_the_token() {
         assert_eq!(
-            token([b"bEaReR   abc.DEF_~+/=".as_slice()]),
-            Ok("abc.DEF_~+/=")
+            token_bytes([b"bEaReR   abc.DEF_~+/=".as_slice()]),
+            Ok(b"abc.DEF_~+/=".as_slice())
         );
-        assert_eq!(token([b"Bearer a.b.c".as_slice()]), Ok("a.b.c"));
+        assert_eq!(
+            token_bytes([b"Bearer a.b.c".as_slice()]),
+            Ok(b"a.b.c".as_slice())
+        );
         let long = format!("Bearer {}", "a".repeat(64 * 1024));
-        assert_eq!(token([long.as_bytes()]).map(str::len), Ok(64 * 1024));
+        assert_eq!(
+            token_bytes([long.as_bytes()]).map(<[u8]>::len),
+            Ok(64 * 1024)
+        );
+    }
+
+    #[test]
+    fn b64token_admits_only_ascii_bytes_from_the_rfc6750_alphabet() {
+        for byte in 0_u8..=u8::MAX {
+            let expected = byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/');
+            assert_eq!(is_b64token(&[byte]), expected, "{byte:#04x}");
+            assert_eq!(
+                is_b64token(&[b'a', byte]),
+                expected || byte == b'=',
+                "{byte:#04x}"
+            );
+            if is_b64token(&[byte]) || is_b64token(&[b'a', byte]) {
+                assert!(byte.is_ascii(), "{byte:#04x}");
+            }
+        }
     }
 
     #[test]
     fn no_value_or_another_scheme_is_missing_and_never_read() {
-        assert_eq!(token(std::iter::empty()), Err(NoBearer::Missing));
+        assert_eq!(token_bytes(std::iter::empty()), Err(NoBearer::Missing));
         for value in [
             b"Basic abc".as_slice(),
             b"Digest realm=\"api\", nonce=\"xyz\"",
@@ -77,7 +96,7 @@ mod tests {
             b"Digest realm=\"unterminated",
             b"Basic abc\n",
         ] {
-            assert_eq!(token([value]), Err(NoBearer::Missing), "{value:?}");
+            assert_eq!(token_bytes([value]), Err(NoBearer::Missing), "{value:?}");
         }
     }
 
@@ -99,10 +118,10 @@ mod tests {
             b"Bearer \xff",
             b"B@d abc",
         ] {
-            assert_eq!(token([value]), Err(NoBearer::Malformed), "{value:?}");
+            assert_eq!(token_bytes([value]), Err(NoBearer::Malformed), "{value:?}");
         }
         assert_eq!(
-            token([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
+            token_bytes([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
             Err(NoBearer::Malformed)
         );
     }
