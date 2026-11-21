@@ -1,7 +1,10 @@
 use std::{fmt, str::FromStr, sync::Arc};
 
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, Uri, Version, header, uri::Scheme};
+use http::{
+    HeaderValue, Method, Request, Uri, Version, header,
+    uri::{Builder as UriBuilder, PathAndQuery, Scheme},
+};
 
 use crate::Error;
 
@@ -38,7 +41,7 @@ impl OriginParts {
         let canonical_uri = Uri::builder()
             .scheme(scheme)
             .authority(host_header.as_bytes())
-            .path_and_query("/")
+            .path_and_query(PathAndQuery::from_static("/"))
             .build()
             .map_err(|_| InvalidOrigin)?;
         Ok(Self {
@@ -49,10 +52,8 @@ impl OriginParts {
         })
     }
 
-    fn uri_with_scheme(&self, scheme: Scheme, path_and_query: &str) -> Result<Uri, http::Error> {
-        Uri::builder()
-            .scheme(scheme)
-            .authority(self.host_header.as_bytes())
+    fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
+        UriBuilder::from(self.uri.clone())
             .path_and_query(path_and_query)
             .build()
     }
@@ -101,7 +102,7 @@ impl Origin {
     }
 
     pub fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
-        self.0.uri_with_scheme(Scheme::HTTPS, path_and_query)
+        self.0.uri(path_and_query)
     }
 
     #[must_use]
@@ -193,7 +194,7 @@ impl TargetOrigin {
     }
 
     pub(crate) fn uri(&self, path_and_query: &str) -> Result<Uri, http::Error> {
-        self.parts().uri_with_scheme(self.scheme(), path_and_query)
+        self.parts().uri(path_and_query)
     }
 
     pub(crate) fn admits(&self, uri: &Uri) -> bool {

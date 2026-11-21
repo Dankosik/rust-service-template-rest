@@ -65,6 +65,22 @@ fn client_binds_one_https_origin() {
         extracted.uri("/items?q=1").expect("origin uri"),
         Uri::from_static("https://provider.example/items?q=1")
     );
+    assert_eq!(
+        extracted.uri("").expect("empty path defaults to root"),
+        Uri::from_static("https://provider.example")
+    );
+    assert_eq!(extracted.uri("").expect("empty path").path(), "/");
+    assert_eq!(
+        extracted.uri("/").expect("slash path"),
+        Uri::from_static("https://provider.example/")
+    );
+    assert!(extracted.uri("relative").is_err());
+    assert!(extracted.uri("/bad\npath").is_err());
+    let ipv6_port = Origin::parse_https("https://[fd00:ec2::254]:8443").expect("ipv6 origin");
+    assert_eq!(
+        ipv6_port.uri("/items?q=1").expect("ipv6 origin uri"),
+        Uri::from_static("https://[fd00:ec2::254]:8443/items?q=1")
+    );
     for raw in [
         "http://provider.example/v1",
         "https://user@provider.example/v1",

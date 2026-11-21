@@ -1002,41 +1002,70 @@ async fn transport_source_redacts_request_and_response_content() {
     server.await.expect("truncated fixture server succeeds");
 }
 
-#[tokio::test]
-async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_between_frames() {
-    use std::collections::VecDeque;
-    use std::convert::Infallible;
-    use std::pin::Pin;
-    use std::task::Poll;
+struct FrameBody {
+    frames: std::collections::VecDeque<hyper::body::Frame<Bytes>>,
+    on_poll: Option<Box<dyn FnMut(usize) + Send>>,
+    polls: usize,
+}
 
-    use hyper::body::{Body, Frame};
+impl hyper::body::Body for FrameBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
 
-    struct FrameBody {
-        frames: VecDeque<Frame<Bytes>>,
-        on_poll: Option<Box<dyn FnMut(usize) + Send>>,
-        polls: usize,
-    }
-
-    impl Body for FrameBody {
-        type Data = Bytes;
-        type Error = Infallible;
-
-        fn poll_frame(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-            let poll_index = self.polls;
-            self.polls += 1;
-            if let Some(on_poll) = self.on_poll.as_mut() {
-                on_poll(poll_index);
-            }
-            Poll::Ready(self.frames.pop_front().map(Ok))
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let poll_index = self.polls;
+        self.polls += 1;
+        if let Some(on_poll) = self.on_poll.as_mut() {
+            on_poll(poll_index);
         }
+        std::task::Poll::Ready(self.frames.pop_front().map(Ok))
     }
+}
+
+struct TrackedBacking {
+    bytes: Vec<u8>,
+    released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AsRef<[u8]> for TrackedBacking {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for TrackedBacking {
+    fn drop(&mut self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[tokio::test]
+async fn collect_bounded_body_releases_source_backing_and_checks_context_between_frames() {
+    use std::collections::VecDeque;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use hyper::body::Frame;
 
     let context = OperationContext::unbounded();
-    let payload = Bytes::from(b"single-frame-payload".to_vec());
-    let expected_ptr = payload.as_ptr();
+    let expected = b"single-frame-payload";
+    let mut backing_bytes = vec![0_u8; 4096];
+    backing_bytes[..expected.len()].copy_from_slice(expected);
+    let released = Arc::new(AtomicBool::new(false));
+    let backing = Bytes::from_owner(TrackedBacking {
+        bytes: backing_bytes,
+        released: Arc::clone(&released),
+    });
+    let payload = backing.slice(..expected.len());
+    drop(backing);
+    assert!(!released.load(Ordering::Acquire));
+
     let single = FrameBody {
         frames: VecDeque::from([
             Frame::data(Bytes::new()),
@@ -1050,8 +1079,24 @@ async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_bet
     let buffered = crate::collect_bounded_body(single, 64, &context)
         .await
         .expect("single-frame body succeeds");
-    assert_eq!(buffered.as_ref(), b"single-frame-payload");
-    assert_eq!(buffered.as_ptr(), expected_ptr);
+    assert!(
+        released.load(Ordering::Acquire),
+        "single-frame buffered body must not retain the transport backing allocation"
+    );
+    assert_eq!(buffered.as_ref(), expected);
+
+    let empty = FrameBody {
+        frames: VecDeque::from([
+            Frame::data(Bytes::new()),
+            Frame::trailers(http::HeaderMap::new()),
+        ]),
+        on_poll: None,
+        polls: 0,
+    };
+    let empty_buffered = crate::collect_bounded_body(empty, 64, &context)
+        .await
+        .expect("empty body succeeds");
+    assert!(empty_buffered.is_empty());
 
     let multi = FrameBody {
         frames: VecDeque::from([

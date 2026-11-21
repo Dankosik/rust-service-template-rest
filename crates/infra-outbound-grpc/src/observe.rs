@@ -29,7 +29,7 @@ static CLIENT_SERIES: LazyLock<Series> = LazyLock::new(Series::new);
 
 pub(crate) type Call = infra_grpc_core::observe::Call<MethodMetrics>;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Destination {
     address: Arc<str>,
     port: Option<u16>,

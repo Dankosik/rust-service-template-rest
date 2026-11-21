@@ -448,8 +448,12 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
             request.len() <= 2 * 1024 * 1024,
             "fixture request exceeded bound"
         );
-        if let Some(end) = request.array_windows().position(|part| part == b"\r\n\r\n") {
-            break end + 4;
+        let scan_start = request.len().saturating_sub(read + 3);
+        if let Some(offset) = request[scan_start..]
+            .array_windows()
+            .position(|part| part == b"\r\n\r\n")
+        {
+            break scan_start + offset + 4;
         }
     };
     let head = std::str::from_utf8(&request[..header_end]).unwrap();

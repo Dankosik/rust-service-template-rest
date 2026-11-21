@@ -19,7 +19,7 @@ use crate::{
 #[derive(Clone)]
 enum BoundTokens {
     Service(ServiceTokens),
-    Exchange(ExchangeTokens, OnBehalfOf),
+    Exchange(ExchangeTokens, Arc<OnBehalfOf>),
 }
 
 impl BoundTokens {
@@ -54,7 +54,7 @@ impl ExchangeClient {
     #[must_use]
     pub fn on_behalf_of(&self, subject: OnBehalfOf) -> AuthenticatedClient {
         AuthenticatedClient {
-            tokens: BoundTokens::Exchange(self.tokens.clone(), subject),
+            tokens: BoundTokens::Exchange(self.tokens.clone(), Arc::new(subject)),
             resource: self.resource.clone(),
         }
     }

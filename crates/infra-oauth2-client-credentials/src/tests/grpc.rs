@@ -1102,16 +1102,25 @@ async fn exchange_client_sends_exchanged_bearer_and_closes_when_registration_dro
         )
         .unwrap();
     let exchange_client = exchange.grpc(channel).unwrap();
-    let mut client = EchoServiceClient::new(exchange_client.on_behalf_of(subject("subject-token")));
+    let authenticated = exchange_client.on_behalf_of(subject("subject-token"));
+    let mut client = EchoServiceClient::new(authenticated.clone());
 
     tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
     client
         .unary(rpc(message(), Duration::from_secs(10)))
         .await
         .unwrap();
+    EchoServiceClient::new(authenticated.with_context(&OperationContext::unbounded()))
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap();
     assert_eq!(
         resource.authorizations(),
-        ["Bearer fixture-token", "Bearer exchanged-token"]
+        [
+            "Bearer fixture-token",
+            "Bearer exchanged-token",
+            "Bearer exchanged-token",
+        ]
     );
     drop(registration);
     assert_eq!(
@@ -1123,7 +1132,7 @@ async fn exchange_client_sends_exchanged_bearer_and_closes_when_registration_dro
         Code::Unavailable
     );
     assert_eq!(tokens.token_request_count(), 2);
-    assert_eq!(resource.calls(), 2);
+    assert_eq!(resource.calls(), 3);
     resource.finish().await;
     tokens.finish().await;
 }
