@@ -131,7 +131,6 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
                     ..fixture.options()
                 },
                 &[],
-                fixture.resource_origin(),
             )
             .http(fixture.resource_client())
             .unwrap();
@@ -184,7 +183,6 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
                 ..fixture.options()
             },
             &[],
-            fixture.resource_origin(),
         )
         .http(fixture.resource_client())
         .unwrap();
@@ -333,7 +331,6 @@ async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
                 ..fixture.options()
             },
             &[],
-            fixture.resource_origin(),
         )
         .http(fixture.resource_client())
         .unwrap();

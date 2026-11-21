@@ -4,8 +4,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, StatusCode, Uri, header};
-use infra_outbound_http::Client;
+use http::{HeaderValue, Method, Request, StatusCode, header};
+use infra_outbound_http::{Client, Origin};
 use jsonwebtoken::jwk::Jwk;
 use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
@@ -400,8 +400,8 @@ fn caller(algorithm: Algorithm) -> String {
     format!("caller-{algorithm:?}").to_lowercase()
 }
 
-fn resource_origin(recipient: &str) -> Uri {
-    format!("https://{recipient}.example").parse().unwrap()
+fn resource_origin(recipient: &str) -> Origin {
+    Origin::parse_https(&format!("https://{recipient}.example")).unwrap()
 }
 
 fn key_pair(algorithm: Algorithm) -> KeyPair {

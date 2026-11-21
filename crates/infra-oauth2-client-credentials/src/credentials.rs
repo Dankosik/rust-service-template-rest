@@ -7,7 +7,7 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use infra_outbound_http::Client;
+use infra_outbound_http::{Client, Origin};
 use operation_context::{Deadline, OperationContext};
 use parking_lot::{Mutex, MutexGuard};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -191,6 +191,14 @@ impl Registration {
     pub fn service_tokens(
         &self,
         target: ServiceTokenTarget,
+        resource_origin: Origin,
+    ) -> (ServiceTokens, RefreshDriver) {
+        self.service_tokens_uri(target, resource_origin.into())
+    }
+
+    pub(crate) fn service_tokens_uri(
+        &self,
+        target: ServiceTokenTarget,
         resource_origin: http::Uri,
     ) -> (ServiceTokens, RefreshDriver) {
         let (refresh, requests) = watch::channel(RefreshSlot::Idle);
@@ -215,6 +223,15 @@ impl Registration {
     }
 
     pub fn exchange_tokens(
+        &self,
+        target: ExchangeTokenTarget,
+        resource_origin: Origin,
+        capacity: NonZeroU32,
+    ) -> Result<ExchangeTokens, ConfigurationError> {
+        self.exchange_tokens_uri(target, resource_origin.into(), capacity)
+    }
+
+    pub(crate) fn exchange_tokens_uri(
         &self,
         target: ExchangeTokenTarget,
         resource_origin: http::Uri,

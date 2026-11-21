@@ -7,7 +7,9 @@ use std::{
 };
 
 use enum_map::EnumMap;
+// template:begin oidc-introspection:authn-provider-operation-context-import
 use operation_context::{OperationContext, Stopped};
+// template:end oidc-introspection:authn-provider-operation-context-import
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
 use tracing::Instrument as _;
@@ -117,7 +119,9 @@ impl Operation {
 enum Outcome {
     Success,
     Failure(ProviderReason),
+    // template:begin oidc-introspection:authn-provider-caller-deadline-outcome
     CallerDeadline,
+    // template:end oidc-introspection:authn-provider-caller-deadline-outcome
     Cancelled,
 }
 
@@ -126,7 +130,9 @@ impl Outcome {
         match self {
             Self::Success => "success",
             Self::Failure(reason) => reason.label(),
+            // template:begin oidc-introspection:authn-provider-caller-deadline-label
             Self::CallerDeadline => "caller_deadline",
+            // template:end oidc-introspection:authn-provider-caller-deadline-label
             Self::Cancelled => "cancelled",
         }
     }
@@ -134,7 +140,7 @@ impl Outcome {
     const fn error_label(self) -> Option<&'static str> {
         match self {
             Self::Success => None,
-            Self::Failure(_) | Self::CallerDeadline | Self::Cancelled => Some(self.label()),
+            _ => Some(self.label()),
         }
     }
 }
@@ -294,10 +300,19 @@ impl ProviderClient {
         document: Document,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<u8>, ProviderFailure> {
+        let request = self.client.get(url.clone());
         self.exchange(document.operation(), "GET", url)
             .run(
-                self.client.get(url.clone()),
-                ExchangeMode::Document { deadline },
+                || Outcome::Cancelled,
+                async move |span| {
+                    let response_body = receive(request, false, span);
+                    match deadline {
+                        None => response_body.await,
+                        Some(deadline) => tokio::time::timeout_at(deadline, response_body)
+                            .await
+                            .unwrap_or(Err(ProviderFailure::Timeout)),
+                    }
+                },
             )
             .await
     }
@@ -321,7 +336,14 @@ impl ProviderClient {
                 .form(form)
         };
         self.exchange(Operation::Introspection, "POST", url)
-            .run(request, ExchangeMode::Introspection { caller_stop })
+            .run(
+                move || {
+                    caller_stop
+                        .stopped()
+                        .map_or(Outcome::Cancelled, stopped_outcome)
+                },
+                async move |span| receive(request, true, span).await,
+            )
             .await
     }
     // template:end oidc-introspection:authn-provider-post-form-json
@@ -352,49 +374,8 @@ impl Document {
 }
 // template:end oidc-jwt:authn-provider-document
 
+// template:begin oidc-introspection:authn-provider-stop-probe
 #[derive(Clone, Copy)]
-enum ExchangeMode<'a> {
-    #[allow(
-        dead_code,
-        reason = "the introspection-only profile removes document requests"
-    )]
-    Document {
-        deadline: Option<tokio::time::Instant>,
-    },
-    #[allow(
-        dead_code,
-        reason = "the JWT-only profile removes introspection requests"
-    )]
-    Introspection { caller_stop: StopProbe<'a> },
-}
-
-impl ExchangeMode<'_> {
-    const fn require_json_content_type(self) -> bool {
-        matches!(self, Self::Introspection { .. })
-    }
-
-    const fn deadline(self) -> Option<tokio::time::Instant> {
-        match self {
-            Self::Document { deadline } => deadline,
-            Self::Introspection { .. } => None,
-        }
-    }
-
-    fn abandon_outcome(self) -> Outcome {
-        match self {
-            Self::Document { .. } => Outcome::Cancelled,
-            Self::Introspection { caller_stop } => caller_stop
-                .stopped()
-                .map_or(Outcome::Cancelled, stopped_outcome),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "the JWT-only profile removes introspection requests"
-)]
 pub(crate) enum StopProbe<'a> {
     Context(&'a OperationContext),
     Waiter(&'a OnceLock<Stopped>),
@@ -408,6 +389,14 @@ impl StopProbe<'_> {
         }
     }
 }
+
+const fn stopped_outcome(stopped: Stopped) -> Outcome {
+    match stopped {
+        Stopped::Deadline => Outcome::CallerDeadline,
+        Stopped::Cancelled => Outcome::Cancelled,
+    }
+}
+// template:end oidc-introspection:authn-provider-stop-probe
 
 struct Exchange<'a> {
     histograms: &'a OperationHistograms,
@@ -445,20 +434,11 @@ impl<'a> Exchange<'a> {
 
     async fn run(
         self,
-        request: reqwest::RequestBuilder,
-        mode: ExchangeMode<'_>,
+        on_abandon: impl FnOnce() -> Outcome,
+        work: impl AsyncFnOnce(&tracing::Span) -> Result<Vec<u8>, ProviderFailure>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let guard = std::mem::DropGuard::new(self, move |exchange| {
-            exchange.record(mode.abandon_outcome());
-        });
-        let response_body = receive(request, mode.require_json_content_type(), &guard.span)
-            .instrument(guard.span.clone());
-        let result = match mode.deadline() {
-            None => response_body.await,
-            Some(deadline) => tokio::time::timeout_at(deadline, response_body)
-                .await
-                .unwrap_or(Err(ProviderFailure::Timeout)),
-        };
+        let guard = std::mem::DropGuard::new(self, |exchange| exchange.record(on_abandon()));
+        let result = work(&guard.span).await;
         let outcome = result
             .as_ref()
             .err()
@@ -487,42 +467,39 @@ impl<'a> Exchange<'a> {
     }
 }
 
-const fn stopped_outcome(stopped: Stopped) -> Outcome {
-    match stopped {
-        Stopped::Deadline => Outcome::CallerDeadline,
-        Stopped::Cancelled => Outcome::Cancelled,
-    }
-}
-
 async fn receive(
     request: reqwest::RequestBuilder,
     require_json_content_type: bool,
     span: &tracing::Span,
 ) -> Result<Vec<u8>, ProviderFailure> {
-    let transport = |error| ProviderFailure::from_transport(&error);
-    let mut response = request.send().await.map_err(transport)?;
-    let status = response.status();
-    span.record("http.response.status_code", status.as_u16());
-    if status != reqwest::StatusCode::OK {
-        return Err(ProviderFailure::Status(status.as_u16()));
-    }
-    if require_json_content_type && !has_json_content_type(&response) {
-        return Err(ProviderFailure::MediaType);
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
-        return Err(ProviderFailure::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(transport)? {
-        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
+    async {
+        let transport = |error| ProviderFailure::from_transport(&error);
+        let mut response = request.send().await.map_err(transport)?;
+        let status = response.status();
+        span.record("http.response.status_code", status.as_u16());
+        if status != reqwest::StatusCode::OK {
+            return Err(ProviderFailure::Status(status.as_u16()));
+        }
+        if require_json_content_type && !has_json_content_type(&response) {
+            return Err(ProviderFailure::MediaType);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
             return Err(ProviderFailure::TooLarge);
         }
-        body.extend_from_slice(&chunk);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport)? {
+            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
+                return Err(ProviderFailure::TooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
-    Ok(body)
+    .instrument(span.clone())
+    .await
 }
 
 fn client_builder() -> reqwest::ClientBuilder {
@@ -665,14 +642,25 @@ mod tests {
     use super::Document;
     // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
-        EndpointUrl, ExchangeMode, IssuerUrl, Operation, ProviderClient, ProviderFailure,
-        client_builder, fixture_acceptor, new_fixture_client,
+        EndpointUrl, IssuerUrl, Operation, Outcome, ProviderClient, ProviderFailure,
+        client_builder, fixture_acceptor, new_fixture_client, receive,
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
 
     fn test_operation() -> Operation {
         <Operation as enum_map::Enum>::from_usize(0)
+    }
+
+    async fn get_untyped(client: &ProviderClient, url: &Url) -> Result<Vec<u8>, ProviderFailure> {
+        let request = client.client.get(url.clone());
+        client
+            .exchange(test_operation(), "GET", url)
+            .run(
+                || Outcome::Cancelled,
+                async move |span| receive(request, false, span).await,
+            )
+            .await
     }
 
     #[test]
@@ -862,28 +850,15 @@ mod tests {
         .unwrap();
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         let started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_millis(2500),
-            client.exchange(test_operation(), "GET", &url).run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            ),
-        )
-        .await
-        .expect("the connection budget must expire before the three-second total");
+        let result = tokio::time::timeout(Duration::from_millis(2500), get_untyped(&client, &url))
+            .await
+            .expect("the connection budget must expire before the three-second total");
         assert_eq!(result, Err(ProviderFailure::Timeout));
         assert!(started.elapsed() >= Duration::from_secs(2));
         assert!(started.elapsed() < Duration::from_millis(2500));
 
         tokio::time::resume();
-        let body = client
-            .exchange(test_operation(), "GET", &url)
-            .run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            )
-            .await
-            .unwrap();
+        let body = get_untyped(&client, &url).await.unwrap();
         assert_eq!(body, b"{}");
         assert!(server.await.unwrap().starts_with(b"GET /keys HTTP/1.1\r\n"));
     }
@@ -923,25 +898,9 @@ mod tests {
         )
         .unwrap();
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
+        assert_eq!(get_untyped(&old_client, &url).await.unwrap(), b"{}");
         assert_eq!(
-            old_client
-                .exchange(test_operation(), "GET", &url)
-                .run(
-                    old_client.client.get(url.clone()),
-                    ExchangeMode::Document { deadline: None }
-                )
-                .await
-                .unwrap(),
-            b"{}"
-        );
-        assert_eq!(
-            old_client
-                .exchange(test_operation(), "GET", &url)
-                .run(
-                    old_client.client.get(url.clone()),
-                    ExchangeMode::Document { deadline: None }
-                )
-                .await,
+            get_untyped(&old_client, &url).await,
             Err(ProviderFailure::Connect)
         );
 
@@ -951,17 +910,7 @@ mod tests {
                 .tls_certs_only([reqwest::Certificate::from_der(&root_b).unwrap()]),
         )
         .unwrap();
-        assert_eq!(
-            rebuilt_client
-                .exchange(test_operation(), "GET", &url)
-                .run(
-                    rebuilt_client.client.get(url.clone()),
-                    ExchangeMode::Document { deadline: None }
-                )
-                .await
-                .unwrap(),
-            b"{}"
-        );
+        assert_eq!(get_untyped(&rebuilt_client, &url).await.unwrap(), b"{}");
         let (first, replacement) = server.await.unwrap();
         assert!(first.starts_with(b"GET /keys HTTP/1.1\r\n"));
         assert!(replacement.starts_with(b"GET /keys HTTP/1.1\r\n"));
@@ -977,13 +926,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         let url = fixture_url(address);
         let client = fixture_client(address, &root);
-        let result = client
-            .exchange(test_operation(), "GET", &url)
-            .run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            )
-            .await;
+        let result = get_untyped(&client, &url).await;
         assert_eq!(result, Err(ProviderFailure::Status(302)));
         assert!(
             server
@@ -1142,13 +1085,7 @@ mod tests {
         let pending = tokio::spawn({
             let client = client.clone();
             let url = url.clone();
-            async move {
-                let request = client.client.get(url.clone());
-                client
-                    .exchange(test_operation(), "GET", &url)
-                    .run(request, ExchangeMode::Document { deadline: None })
-                    .await
-            }
+            async move { get_untyped(&client, &url).await }
         });
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
@@ -1163,14 +1100,7 @@ mod tests {
         assert_eq!(result, Err(ProviderFailure::Timeout));
         tokio::time::resume();
 
-        let body = client
-            .exchange(test_operation(), "GET", &url)
-            .run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            )
-            .await
-            .unwrap();
+        let body = get_untyped(&client, &url).await.unwrap();
         assert_eq!(body, b"{}");
         assert!(
             server

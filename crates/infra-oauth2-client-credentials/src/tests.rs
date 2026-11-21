@@ -17,7 +17,7 @@ use std::{
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode, header};
-use infra_outbound_http::Client;
+use infra_outbound_http::{Client, Origin};
 use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_RSA_SHA256};
 use secrecy::SecretString;
@@ -35,7 +35,7 @@ use crate::{
     ExchangeTokens, IssuerUrl, OnBehalfOf, Options, PrivateKeyJwt, RefreshDriver, Registration,
     Rejection, ServiceHttpClient, ServiceTokenTarget, ServiceTokens, TokenUrl,
     credentials::acquisition_deadline,
-    test_support::{HttpOptions, prepare_http},
+    test_support::{HttpOptions, exchange_tokens_http, prepare_http, service_tokens_http},
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -165,22 +165,22 @@ impl Fixture {
         }
     }
 
-    fn resource_origin(&self) -> http::Uri {
-        self.origin.as_str().parse().unwrap()
+    fn resource_origin(&self) -> &str {
+        self.origin.as_str()
     }
 
     fn service_tokens(&self, scopes: &[&str]) -> ServiceTokens {
-        self.service_tokens_with(self.options(), scopes, self.resource_origin())
+        self.service_tokens_with(self.options(), scopes)
     }
 
-    fn service_tokens_with(
-        &self,
-        options: HttpOptions,
-        scopes: &[&str],
-        origin: http::Uri,
-    ) -> ServiceTokens {
+    fn service_tokens_with(&self, options: HttpOptions, scopes: &[&str]) -> ServiceTokens {
         let registration = prepare_registration(options);
-        let (tokens, driver) = registration.service_tokens(service_target(scopes), origin);
+        let (tokens, driver) = service_tokens_http(
+            &registration,
+            service_target(scopes),
+            self.resource_origin(),
+        )
+        .unwrap();
         self.drive(driver);
         self.registrations.lock().unwrap().push(registration);
         tokens
@@ -203,13 +203,13 @@ impl Fixture {
         capacity: NonZeroU32,
     ) -> ExchangeTokens {
         let registration = prepare_registration(options);
-        let tokens = registration
-            .exchange_tokens(
-                exchange_target(scopes, audience),
-                self.resource_origin(),
-                capacity,
-            )
-            .unwrap();
+        let tokens = exchange_tokens_http(
+            &registration,
+            exchange_target(scopes, audience),
+            self.resource_origin(),
+            capacity,
+        )
+        .unwrap();
         self.registrations.lock().unwrap().push(registration);
         tokens
     }

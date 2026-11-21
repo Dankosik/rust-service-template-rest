@@ -6,9 +6,10 @@ use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
 use infra_oauth2_client_credentials::{
-    Algorithm, IssuerUrl, PrivateKeyJwt, ServiceTokenTarget,
+    Algorithm, IssuerUrl, PrivateKeyJwt, ServiceTokenTarget, ServiceTokens,
     test_support::{HttpOptions, prepare_http},
 };
+use infra_outbound_http::Origin;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -61,12 +62,11 @@ pub(crate) fn route() -> Result<HttpContract<crate::AppState>, infra_http::Final
     infra_http::http_route!(resource)
 }
 
-type Build = fn(&infra_oauth2_client_credentials::ServiceTokens) -> Resource;
+type Build = fn(&ServiceTokens, &Origin) -> Resource;
 
-fn http(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
-    let origin = infra_outbound_http::Origin::parse_https("https://127.0.0.1:0").unwrap();
+fn http(tokens: &ServiceTokens, origin: &Origin) -> Resource {
     let transport = infra_outbound_http::Client::try_new(
-        origin,
+        origin.clone(),
         infra_outbound_http::Limits::new(Duration::from_secs(5), 16, 1024),
     )
     .unwrap();
@@ -88,11 +88,11 @@ async fn grpc_unavailable(
         .is_err_and(|status| status.code() == tonic::Code::Unavailable && status.source().is_none())
 }
 
-fn grpc(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
+fn grpc(tokens: &ServiceTokens, origin: &Origin) -> Resource {
     use infra_outbound_grpc::{Client, ClientSecurity};
 
     let transport = Client::builder(
-        "https://127.0.0.1:0",
+        &origin.to_string(),
         ClientSecurity::tls(),
         Duration::from_secs(5),
     )
@@ -173,12 +173,13 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let registration = crate::ServiceRegistration::for_http_resource(move |_, background| {
             let registration = Arc::new(prepare_http(token_options(peer_addr))?);
             let lifetime = Arc::downgrade(&registration);
+            let origin = Origin::parse_https("https://127.0.0.1:0").unwrap();
             let tokens = background.service_tokens(
                 registration,
                 ServiceTokenTarget::default(),
-                "https://127.0.0.1:0".parse().unwrap(),
+                origin.clone(),
             );
-            let resource = build(&tokens);
+            let resource = build(&tokens, &origin);
             installed.send((lifetime, tokens)).unwrap();
             Ok(resource)
         });

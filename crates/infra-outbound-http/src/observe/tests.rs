@@ -237,8 +237,9 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
     )
     .await;
-    let mut request = request_to("https://provider.fixture.test/items/sentinel-path");
-    request.extensions_mut().insert(UrlTemplate("/items/{id}"));
+    let request = UrlTemplate("/items/{id}").attach(request_to(
+        "https://provider.fixture.test/items/sentinel-path",
+    ));
     fixture_client(address, &material)
         .execute(&default_context(), request)
         .await
