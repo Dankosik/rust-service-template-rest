@@ -66,7 +66,7 @@ impl WorkerInput {
                 runtime: self.runtime,
                 health: self.health,
                 observability,
-                http,
+                http: http?,
                 // template:begin jobs:worker-postgres-admitted-field
                 postgres: postgres?,
                 // template:end jobs:worker-postgres-admitted-field

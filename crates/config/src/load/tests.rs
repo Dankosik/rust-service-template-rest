@@ -557,7 +557,7 @@ fn env_parses_durations_sizes_numbers_and_enums() {
     ]);
     let http = cfg.http().listener();
     assert_eq!(http.request_timeout, Duration::from_millis(500));
-    assert_eq!(http.max_body_bytes, bytesize::ByteSize::mib(2));
+    assert_eq!(http.max_body_bytes.get(), 2 * 1024 * 1024);
     assert_eq!(http.max_in_flight.map(std::num::NonZeroU32::get), Some(12));
     assert_eq!(http.max_connection_age, Some(Duration::from_hours(1)));
     assert!(http.access_log_health_probes);

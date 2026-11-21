@@ -8,9 +8,7 @@ use serde::Deserialize;
 
 use crate::app::local_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
-use crate::validate::{
-    Rejected, Violations, duration_range, int_range, nonzero_usize_range, optional_pair,
-};
+use crate::validate::{Rejected, Violations, duration_range, nonzero_usize_range, optional_pair};
 
 #[serde_with::serde_as]
 #[derive(Clone, Debug, Deserialize, educe::Educe)]
@@ -75,8 +73,8 @@ pub struct CacheConfig {
     pub allow_unauthenticated: bool,
     pub command_timeout: Duration,
     pub max_concurrency: NonZeroUsize,
-    pub max_key_bytes: ByteSize,
-    pub max_value_bytes: ByteSize,
+    pub max_key_bytes: NonZeroUsize,
+    pub max_value_bytes: NonZeroUsize,
 }
 
 impl CacheInput {
@@ -118,18 +116,20 @@ impl CacheInput {
             self.max_concurrency,
             1..=usize::MAX,
         ));
-        for (key, size) in [
-            ("cache.max_key_bytes", self.max_key_bytes),
-            ("cache.max_value_bytes", self.max_value_bytes),
-        ] {
-            v.check(int_range(
-                key,
-                size.as_u64(),
-                1..=shared_rules::cache::MAX_ENTRY_BYTES as u64,
-            ));
-        }
+        let max_key_bytes = v.record(nonzero_usize_range(
+            "cache.max_key_bytes",
+            self.max_key_bytes.as_u64(),
+            1..=shared_rules::cache::MAX_ENTRY_BYTES,
+        ));
+        let max_value_bytes = v.record(nonzero_usize_range(
+            "cache.max_value_bytes",
+            self.max_value_bytes.as_u64(),
+            1..=shared_rules::cache::MAX_ENTRY_BYTES,
+        ));
         let client_certificate = client_certificate?;
         let max_concurrency = max_concurrency?;
+        let max_key_bytes = max_key_bytes?;
+        let max_value_bytes = max_value_bytes?;
         Ok(self.dsn.map(|dsn| CacheConfig {
             dsn,
             password_file: self.password_file,
@@ -139,8 +139,8 @@ impl CacheInput {
             allow_unauthenticated: self.allow_unauthenticated,
             command_timeout: self.command_timeout,
             max_concurrency,
-            max_key_bytes: self.max_key_bytes,
-            max_value_bytes: self.max_value_bytes,
+            max_key_bytes,
+            max_value_bytes,
         }))
     }
 }

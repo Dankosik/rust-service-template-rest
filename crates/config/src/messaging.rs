@@ -9,10 +9,12 @@ use url::Url;
 use crate::app::local_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount};
 use crate::validate::{
-    Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
+    Rejected, ValidationError, Violations, missing, non_blank, nonzero_usize_range, required,
 };
 
 const DELIVERY_OVERHEAD_BYTES: u64 = shared_rules::messaging::HEADER_LIMIT_BYTES as u64;
+const MAX_PAYLOAD_BYTES: usize =
+    shared_rules::messaging::PUBLICATION_WINDOW_BYTES - shared_rules::messaging::HEADER_LIMIT_BYTES;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = shared_rules::messaging::PUBLICATION_WINDOW_BYTES as u64;
 const MAX_RESIDENT_DELIVERY_MIB: u64 = MAX_RESIDENT_DELIVERY_BYTES / MIB;
 
@@ -133,30 +135,14 @@ impl MessagingInput {
         };
         validate_urls(&self.urls, security, v);
         let delivery_bounds = v.record(
-            int_range(
+            nonzero_usize_range(
                 "messaging.max_payload_bytes",
                 self.max_payload_bytes.as_u64(),
-                1..=MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
+                1..=MAX_PAYLOAD_BYTES,
             )
-            .and_then(|()| {
+            .and_then(|max_payload_bytes| {
                 validate_resident_delivery_bound(self.max_payload_bytes, self.consumer_concurrency)
-            })
-            .and_then(|()| {
-                let max_payload_bytes =
-                    usize::try_from(self.max_payload_bytes.as_u64()).map_err(|_| {
-                        ValidationError::new(
-                            "messaging.max_payload_bytes",
-                            "cannot fit this platform",
-                        )
-                    })?;
-                let consumer_concurrency = NonZeroUsize::try_from(self.consumer_concurrency)
-                    .map_err(|_| {
-                        ValidationError::new(
-                            "messaging.consumer_concurrency",
-                            "cannot fit this platform",
-                        )
-                    })?;
-                Ok((max_payload_bytes, consumer_concurrency))
+                    .map(|consumer_concurrency| (max_payload_bytes.get(), consumer_concurrency))
             }),
         );
         let (max_payload_bytes, consumer_concurrency) = delivery_bounds?;
@@ -233,20 +219,22 @@ impl MessagingConfig {
 fn validate_resident_delivery_bound(
     max_payload_bytes: ByteSize,
     consumer_concurrency: NonZeroU32,
-) -> Result<(), ValidationError> {
+) -> Result<NonZeroUsize, ValidationError> {
     let resident = u64::from(consumer_concurrency.get())
         * (max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES);
-    if resident > MAX_RESIDENT_DELIVERY_BYTES {
-        return Err(ValidationError::new(
-            "messaging.consumer_concurrency",
-            format!(
-                "{consumer_concurrency} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
-                max_payload_bytes.as_u64(),
-                DELIVERY_OVERHEAD_BYTES / KIB,
-            ),
-        ));
+    if resident <= MAX_RESIDENT_DELIVERY_BYTES
+        && let Ok(concurrency) = NonZeroUsize::try_from(consumer_concurrency)
+    {
+        return Ok(concurrency);
     }
-    Ok(())
+    Err(ValidationError::new(
+        "messaging.consumer_concurrency",
+        format!(
+            "{consumer_concurrency} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
+            max_payload_bytes.as_u64(),
+            DELIVERY_OVERHEAD_BYTES / KIB,
+        ),
+    ))
 }
 
 enum BrokerScheme {

@@ -55,8 +55,7 @@ fn watch_listener(name: &'static str, server: &Server, background: &mut Backgrou
 fn server_options(http: &HttpListenerConfig) -> Http1Options {
     Http1Options {
         header_read_timeout: http.header_read_timeout,
-        max_read_buffer_bytes: usize::try_from(http.max_header_bytes.as_u64())
-            .unwrap_or(usize::MAX),
+        max_read_buffer_bytes: http.max_header_bytes.get(),
         connections: ConnectionLimits {
             max_connections: http.max_connections,
             max_connection_age: http.max_connection_age,
@@ -66,7 +65,7 @@ fn server_options(http: &HttpListenerConfig) -> Http1Options {
 
 fn harden_options(http: &HttpListenerConfig, readiness: ReadinessReader) -> HardenOptions {
     HardenOptions {
-        max_body_bytes: usize::try_from(http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_body_bytes: http.max_body_bytes.get(),
         request_timeout: http.request_timeout,
         max_in_flight: http.max_in_flight,
         admission_wait: http.admission_wait,

@@ -223,7 +223,7 @@ impl ConfigInput {
             // template:end http-idempotency:config-http-idempotency-validate
             Ok(Config {
                 app,
-                http,
+                http: http?,
                 // template:begin grpc:config-admitted-field
                 grpc: grpc?,
                 // template:end grpc:config-admitted-field
