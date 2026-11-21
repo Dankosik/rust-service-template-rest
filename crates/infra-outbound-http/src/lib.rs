@@ -503,14 +503,8 @@ where
     B: hyper::body::Body<Data = Bytes> + Unpin,
     B::Error: Into<BoxError>,
 {
-    enum Buffered {
-        Empty,
-        Single(Bytes),
-        Multi(Vec<u8>),
-    }
-
     let mut body = Limited::new(body, limit);
-    let mut buffered = Buffered::Empty;
+    let mut collected = Vec::new();
     loop {
         context.check()?;
         let Some(frame) = body.frame().await else {
@@ -519,27 +513,10 @@ where
         if let Ok(data) = frame.map_err(map_body_error)?.into_data()
             && !data.is_empty()
         {
-            match &mut buffered {
-                Buffered::Empty => buffered = Buffered::Single(data),
-                Buffered::Single(first) => {
-                    let mut collected = Vec::new();
-                    let required = first.len().saturating_add(data.len());
-                    reserve_with_capacity_cap(&mut collected, required, first.len(), limit);
-                    collected.extend_from_slice(first);
-                    collected.extend_from_slice(&data);
-                    buffered = Buffered::Multi(collected);
-                }
-                Buffered::Multi(collected) => {
-                    append_with_capacity_cap(collected, &data, limit);
-                }
-            }
+            append_with_capacity_cap(&mut collected, &data, limit);
         }
     }
-    Ok(match buffered {
-        Buffered::Empty => Bytes::new(),
-        Buffered::Single(single) => single,
-        Buffered::Multi(collected) => Bytes::from(collected),
-    })
+    Ok(Bytes::from(collected))
 }
 
 impl From<Stopped> for Error {
@@ -551,21 +528,12 @@ impl From<Stopped> for Error {
     }
 }
 
-fn reserve_with_capacity_cap(
-    collected: &mut Vec<u8>,
-    required: usize,
-    growth_base: usize,
-    capacity_cap: usize,
-) {
-    if required > collected.capacity() {
-        let target = required.max(growth_base.saturating_mul(2).min(capacity_cap));
-        collected.reserve_exact(target - collected.len());
-    }
-}
-
 fn append_with_capacity_cap(collected: &mut Vec<u8>, data: &[u8], capacity_cap: usize) {
     let required = collected.len().saturating_add(data.len());
-    reserve_with_capacity_cap(collected, required, collected.capacity(), capacity_cap);
+    if required > collected.capacity() {
+        let target = required.max(collected.capacity().saturating_mul(2).min(capacity_cap));
+        collected.reserve_exact(target - collected.len());
+    }
     collected.extend_from_slice(data);
 }
 

@@ -134,14 +134,16 @@ impl ClientBuilder<'_> {
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
         Ok(Client {
-            origin,
-            channel: Channel::new(GrpcConnector { http, tls }, endpoint),
-            destination,
-            timeout: self.timeout,
-            openings: self
-                .opening_limit
-                .map(|limit| Arc::new(Semaphore::new(limit.get()))),
-            series: crate::observe::Series::client(),
+            inner: Arc::new(ClientInner {
+                origin,
+                channel: Channel::new(GrpcConnector { http, tls }, endpoint),
+                destination,
+                timeout: self.timeout,
+                openings: self
+                    .opening_limit
+                    .map(|limit| Arc::new(Semaphore::new(limit.get()))),
+                series: crate::observe::Series::client(),
+            }),
         })
     }
 }
@@ -176,10 +178,9 @@ impl<'a> OriginParts<'a> {
     }
 }
 
-#[derive(Clone)]
 struct ClientOrigin {
     scheme: OriginScheme,
-    host: Arc<str>,
+    host: Box<str>,
     port: u16,
 }
 
@@ -187,7 +188,7 @@ impl ClientOrigin {
     fn from_parts(parts: &OriginParts<'_>) -> Self {
         Self {
             scheme: parts.scheme,
-            host: Arc::from(parts.host),
+            host: Box::from(parts.host),
             port: parts.port,
         }
     }
@@ -199,8 +200,8 @@ impl ClientOrigin {
     }
 }
 
-#[derive(Clone, derive_more::Debug)]
-pub struct Client {
+#[derive(derive_more::Debug)]
+struct ClientInner {
     channel: Channel,
     #[debug(skip)]
     origin: ClientOrigin,
@@ -209,6 +210,11 @@ pub struct Client {
     timeout: ClientTimeout,
     openings: Option<Arc<Semaphore>>,
     series: &'static crate::observe::Series,
+}
+
+#[derive(Clone, Debug)]
+pub struct Client {
+    inner: Arc<ClientInner>,
 }
 
 impl Client {
@@ -227,13 +233,13 @@ impl Client {
     }
 
     #[must_use]
-    pub const fn uses_tls(&self) -> bool {
-        matches!(self.origin.scheme, OriginScheme::Https)
+    pub fn uses_tls(&self) -> bool {
+        matches!(self.inner.origin.scheme, OriginScheme::Https)
     }
 
     #[must_use]
     pub fn matches_origin(&self, origin: &http::Uri) -> bool {
-        OriginParts::parse(origin).is_some_and(|other| self.origin.matches(&other))
+        OriginParts::parse(origin).is_some_and(|other| self.inner.origin.matches(&other))
     }
 
     #[must_use]
@@ -352,6 +358,7 @@ pub struct PreparedCall {
 
 impl PreparedCall {
     pub fn prepare(client: &Client, mut request: Request<Body>) -> Result<Self, tonic::Status> {
+        let inner = client.inner.as_ref();
         let context_conflict = request
             .extensions_mut()
             .remove::<ContextConflict>()
@@ -361,14 +368,14 @@ impl PreparedCall {
         if caller_timeout.is_none() {
             request.headers_mut().remove(GRPC_TIMEOUT);
         }
-        let call = crate::observe::start_call(client.series, &request, client.destination.as_ref());
+        let call = crate::observe::start_call(inner.series, &request, inner.destination.as_ref());
         if context_conflict {
             return Err(call.refuse(tonic::Status::internal(
                 "request operation context conflicts with client context",
             )));
         }
         let contexts = derive_call_contexts(
-            client.timeout,
+            inner.timeout,
             started_at,
             caller_timeout,
             request.extensions().get::<OperationContext>(),
@@ -377,12 +384,12 @@ impl PreparedCall {
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
-        let permit = match acquire_opening_permit(client.openings.as_ref(), &contexts.opening) {
+        let permit = match acquire_opening_permit(inner.openings.as_ref(), &contexts.opening) {
             Ok(permit) => permit,
             Err(status) => return Err(call.refuse(status)),
         };
         Ok(Self {
-            channel: client.channel.clone(),
+            channel: inner.channel.clone(),
             request,
             opening: contexts.opening,
             lifetime: contexts.lifetime,
