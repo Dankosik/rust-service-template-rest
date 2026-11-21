@@ -125,6 +125,10 @@ impl Diagnostics {
             .collect()
     }
 
+    #[allow(
+        dead_code,
+        reason = "the jwt-only profile asserts structured spans via take_captured_spans"
+    )]
     pub(crate) fn take_spans(&self) -> Vec<String> {
         self.spans
             .take()
