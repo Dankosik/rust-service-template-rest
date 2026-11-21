@@ -54,6 +54,7 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 enum MissAdmission {
     Answer(SignatureRefresh),
     Wait(u64),
@@ -98,25 +99,41 @@ impl KeyStore {
         (!Arc::ptr_eq(&installed, checked)).then(|| Arc::clone(&installed))
     }
 
+    fn inspect_signature_miss(
+        &self,
+        state: &State,
+        checked: &Arc<KeySet>,
+    ) -> Option<MissAdmission> {
+        if state.worker == WorkerState::Stopped {
+            return Some(MissAdmission::Answer(SignatureRefresh::NoNewerSet));
+        }
+        if let Some(keys) = self.newer_set(checked) {
+            return Some(MissAdmission::Answer(SignatureRefresh::NewerSet(keys)));
+        }
+        if state.worker == WorkerState::Lost {
+            return Some(MissAdmission::Answer(SignatureRefresh::WorkerLost));
+        }
+        if let Some(ticket) = state.pending() {
+            return Some(MissAdmission::Wait(ticket));
+        }
+        if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
+            return Some(MissAdmission::Answer(SignatureRefresh::NoNewerSet));
+        }
+        None
+    }
+
     fn admit_signature_miss(&self, checked: &Arc<KeySet>) -> MissAdmission {
+        let fast_path = {
+            let state = self.state.borrow();
+            self.inspect_signature_miss(&state, checked)
+        };
+        if let Some(admission) = fast_path {
+            return admission;
+        }
         let mut admission = MissAdmission::Answer(SignatureRefresh::NoNewerSet);
         self.state.send_if_modified(|state| {
-            if state.worker == WorkerState::Stopped {
-                return false;
-            }
-            if let Some(keys) = self.newer_set(checked) {
-                admission = MissAdmission::Answer(SignatureRefresh::NewerSet(keys));
-                return false;
-            }
-            if state.worker == WorkerState::Lost {
-                admission = MissAdmission::Answer(SignatureRefresh::WorkerLost);
-                return false;
-            }
-            if let Some(ticket) = state.pending() {
-                admission = MissAdmission::Wait(ticket);
-                return false;
-            }
-            if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
+            if let Some(decided) = self.inspect_signature_miss(state, checked) {
+                admission = decided;
                 return false;
             }
             admission = MissAdmission::Wait(state.request_fetch());
@@ -192,14 +209,16 @@ impl KeyStore {
                 ("failure", reason)
             }
         };
+        let mut previous = None;
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
-                self.keys.store(keys);
+                previous = Some(self.keys.swap(keys));
                 self.last_acquisition
                     .set(acquisition_timestamp(SystemTime::now()));
             }
             state.finished_ticket = ticket;
         });
+        drop(previous);
         metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
     }
 
@@ -718,5 +737,64 @@ mod tests {
             SignatureRefresh::WorkerLost
         );
         assert_eq!(store.state.borrow().worker, super::WorkerState::Lost);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_only_miss_admissions_never_wait_for_a_write_lock() {
+        let admit_under_read_lock = |store: &Arc<KeyStore>, checked: &Arc<KeySet>| {
+            let reader = store.state.borrow();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let handle = tokio::runtime::Handle::current();
+            let probe = {
+                let store = Arc::clone(store);
+                let checked = Arc::clone(checked);
+                std::thread::spawn(move || {
+                    let _entered = handle.enter();
+                    let _ = done_tx.send(store.admit_signature_miss(&checked));
+                })
+            };
+            let result = done_rx.recv_timeout(Duration::from_secs(2));
+            drop(reader);
+            probe.join().unwrap();
+            result.expect("read-only miss admission must not acquire a write lock")
+        };
+
+        let store = KeyStore::new(key_set("old"));
+        let checked = Guard::into_inner(store.current());
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Answer(SignatureRefresh::NoNewerSet)
+        );
+
+        store.expire_refresh_cooldown_for_test();
+        assert_matches!(
+            store.admit_signature_miss(&checked),
+            super::MissAdmission::Wait(1)
+        );
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Wait(1)
+        );
+
+        store.finish(1, Ok(key_set("new")));
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Answer(SignatureRefresh::NewerSet(keys)) if keys.has_kid("new")
+        );
+
+        store.stop();
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Answer(SignatureRefresh::NoNewerSet)
+        );
+
+        let lost_store = KeyStore::new(key_set("old"));
+        let lost_checked = Guard::into_inner(lost_store.current());
+        let driver = worker_with_unavailable_provider(&lost_store, Duration::from_hours(1));
+        drop(driver);
+        assert_matches!(
+            admit_under_read_lock(&lost_store, &lost_checked),
+            super::MissAdmission::Answer(SignatureRefresh::WorkerLost)
+        );
     }
 }
