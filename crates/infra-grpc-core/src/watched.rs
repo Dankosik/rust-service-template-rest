@@ -383,6 +383,29 @@ where
             None => State::Local(envelope),
         }))
     }
+
+    #[must_use]
+    pub fn attach_response<F>(
+        mut response: http::Response<B>,
+        hooks: H,
+        initial: impl FnOnce(&H, &http::Response<B>) -> Option<H::Outcome>,
+        watch: impl FnOnce(&H) -> Option<F>,
+        wrap: impl FnOnce(Self) -> B,
+    ) -> http::Response<B>
+    where
+        B: Default,
+        F: Future<Output = H::Stop> + Send + 'static,
+    {
+        let initial = if let Some(stop) = hooks.stopped() {
+            for name in crate::protocol::STATUS_HEADERS {
+                response.headers_mut().remove(name);
+            }
+            Some(hooks.write_stop(stop, response.headers_mut()))
+        } else {
+            initial(&hooks, &response)
+        };
+        response.map(|body| Self::start(body, hooks, initial, watch).map_or_else(B::default, wrap))
+    }
 }
 
 impl<B, H> Body for WatchedBody<B, H>
@@ -517,7 +540,7 @@ mod tests {
         }
     }
 
-    impl StreamHooks<Infallible> for TestHooks {
+    impl<E> StreamHooks<E> for TestHooks {
         type Stop = &'static str;
         type Outcome = &'static str;
         type Guards = GuardLog;
@@ -539,7 +562,7 @@ mod tests {
             stop
         }
 
-        fn end_outcome(&self, end: StreamEnd<'_, Infallible>) -> Self::Outcome {
+        fn end_outcome(&self, end: StreamEnd<'_, E>) -> Self::Outcome {
             match end {
                 StreamEnd::Trailers(_) => "polled",
                 StreamEnd::Empty => "empty",
@@ -703,5 +726,82 @@ mod tests {
             .unwrap();
         assert_eq!(trailers["x-stop"], "expired");
         assert!(body.frame().await.is_none());
+    }
+
+    #[test]
+    fn attach_response_rewrites_stopped_headers_and_falls_back_to_initial() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut initial_called = false;
+        let mut watch_called = false;
+        let response = http::Response::builder()
+            .header(tonic::Status::GRPC_STATUS, "0")
+            .header(tonic::Status::GRPC_MESSAGE, "stale")
+            .header(tonic::Status::GRPC_STATUS_DETAILS, "AAAA")
+            .body(tonic::body::Body::new(ProbeBody::new(
+                None,
+                Arc::clone(&dropped),
+                Arc::clone(&events),
+            )))
+            .unwrap();
+        let stopped = WatchedBody::attach_response(
+            response,
+            TestHooks::new(Arc::clone(&events), Some("expired")),
+            |_, _| {
+                initial_called = true;
+                Some("initial")
+            },
+            |_| {
+                watch_called = true;
+                Some(std::future::pending::<&'static str>())
+            },
+            tonic::body::Body::new,
+        );
+        for name in crate::protocol::STATUS_HEADERS {
+            assert!(!stopped.headers().contains_key(name));
+        }
+        assert_eq!(stopped.headers()["x-stop"], "expired");
+        assert!(stopped.body().is_end_stream());
+        assert!(!initial_called);
+        assert!(!watch_called);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            *events.lock(),
+            ["expired", "body_dropped", "guards_dropped"]
+        );
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let response = http::Response::builder()
+            .header(tonic::Status::GRPC_STATUS, "0")
+            .body(tonic::body::Body::new(ProbeBody::new(
+                None,
+                Arc::clone(&dropped),
+                Arc::clone(&events),
+            )))
+            .unwrap();
+        let completed = WatchedBody::attach_response(
+            response,
+            TestHooks::new(Arc::clone(&events), None),
+            |_, response| {
+                response
+                    .headers()
+                    .contains_key(tonic::Status::GRPC_STATUS)
+                    .then_some("header-status")
+            },
+            |_| {
+                watch_called = true;
+                Some(std::future::pending::<&'static str>())
+            },
+            tonic::body::Body::new,
+        );
+        assert_eq!(completed.headers()[tonic::Status::GRPC_STATUS], "0");
+        assert!(completed.body().is_end_stream());
+        assert!(!watch_called);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            *events.lock(),
+            ["header-status", "body_dropped", "guards_dropped"]
+        );
     }
 }

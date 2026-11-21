@@ -32,97 +32,32 @@ pub struct StatusNames {
 
 #[must_use]
 pub const fn status_code_names(code: tonic::Code) -> StatusNames {
-    match code {
-        tonic::Code::Ok => StatusNames {
-            span: "OK",
-            metric: "OK",
-        },
-        tonic::Code::Cancelled => StatusNames {
-            span: "CANCELLED",
-            metric: "Canceled",
-        },
-        tonic::Code::Unknown => StatusNames {
-            span: "UNKNOWN",
-            metric: "Unknown",
-        },
-        tonic::Code::InvalidArgument => StatusNames {
-            span: "INVALID_ARGUMENT",
-            metric: "InvalidArgument",
-        },
-        tonic::Code::DeadlineExceeded => StatusNames {
-            span: "DEADLINE_EXCEEDED",
-            metric: "DeadlineExceeded",
-        },
-        tonic::Code::NotFound => StatusNames {
-            span: "NOT_FOUND",
-            metric: "NotFound",
-        },
-        tonic::Code::AlreadyExists => StatusNames {
-            span: "ALREADY_EXISTS",
-            metric: "AlreadyExists",
-        },
-        tonic::Code::PermissionDenied => StatusNames {
-            span: "PERMISSION_DENIED",
-            metric: "PermissionDenied",
-        },
-        tonic::Code::ResourceExhausted => StatusNames {
-            span: "RESOURCE_EXHAUSTED",
-            metric: "ResourceExhausted",
-        },
-        tonic::Code::FailedPrecondition => StatusNames {
-            span: "FAILED_PRECONDITION",
-            metric: "FailedPrecondition",
-        },
-        tonic::Code::Aborted => StatusNames {
-            span: "ABORTED",
-            metric: "Aborted",
-        },
-        tonic::Code::OutOfRange => StatusNames {
-            span: "OUT_OF_RANGE",
-            metric: "OutOfRange",
-        },
-        tonic::Code::Unimplemented => StatusNames {
-            span: "UNIMPLEMENTED",
-            metric: "Unimplemented",
-        },
-        tonic::Code::Internal => StatusNames {
-            span: "INTERNAL",
-            metric: "Internal",
-        },
-        tonic::Code::Unavailable => StatusNames {
-            span: "UNAVAILABLE",
-            metric: "Unavailable",
-        },
-        tonic::Code::DataLoss => StatusNames {
-            span: "DATA_LOSS",
-            metric: "DataLoss",
-        },
-        tonic::Code::Unauthenticated => StatusNames {
-            span: "UNAUTHENTICATED",
-            metric: "Unauthenticated",
-        },
-    }
+    status_entry(code).1
 }
 
-const fn status_slot(code: tonic::Code) -> usize {
+const fn entry(slot: usize, span: &'static str, metric: &'static str) -> (usize, StatusNames) {
+    (slot, StatusNames { span, metric })
+}
+
+const fn status_entry(code: tonic::Code) -> (usize, StatusNames) {
     match code {
-        tonic::Code::Ok => 0,
-        tonic::Code::Cancelled => 1,
-        tonic::Code::Unknown => 2,
-        tonic::Code::InvalidArgument => 3,
-        tonic::Code::DeadlineExceeded => 4,
-        tonic::Code::NotFound => 5,
-        tonic::Code::AlreadyExists => 6,
-        tonic::Code::PermissionDenied => 7,
-        tonic::Code::ResourceExhausted => 8,
-        tonic::Code::FailedPrecondition => 9,
-        tonic::Code::Aborted => 10,
-        tonic::Code::OutOfRange => 11,
-        tonic::Code::Unimplemented => 12,
-        tonic::Code::Internal => 13,
-        tonic::Code::Unavailable => 14,
-        tonic::Code::DataLoss => 15,
-        tonic::Code::Unauthenticated => 16,
+        tonic::Code::Ok => entry(0, "OK", "OK"),
+        tonic::Code::Cancelled => entry(1, "CANCELLED", "Canceled"),
+        tonic::Code::Unknown => entry(2, "UNKNOWN", "Unknown"),
+        tonic::Code::InvalidArgument => entry(3, "INVALID_ARGUMENT", "InvalidArgument"),
+        tonic::Code::DeadlineExceeded => entry(4, "DEADLINE_EXCEEDED", "DeadlineExceeded"),
+        tonic::Code::NotFound => entry(5, "NOT_FOUND", "NotFound"),
+        tonic::Code::AlreadyExists => entry(6, "ALREADY_EXISTS", "AlreadyExists"),
+        tonic::Code::PermissionDenied => entry(7, "PERMISSION_DENIED", "PermissionDenied"),
+        tonic::Code::ResourceExhausted => entry(8, "RESOURCE_EXHAUSTED", "ResourceExhausted"),
+        tonic::Code::FailedPrecondition => entry(9, "FAILED_PRECONDITION", "FailedPrecondition"),
+        tonic::Code::Aborted => entry(10, "ABORTED", "Aborted"),
+        tonic::Code::OutOfRange => entry(11, "OUT_OF_RANGE", "OutOfRange"),
+        tonic::Code::Unimplemented => entry(12, "UNIMPLEMENTED", "Unimplemented"),
+        tonic::Code::Internal => entry(13, "INTERNAL", "Internal"),
+        tonic::Code::Unavailable => entry(14, "UNAVAILABLE", "Unavailable"),
+        tonic::Code::DataLoss => entry(15, "DATA_LOSS", "DataLoss"),
+        tonic::Code::Unauthenticated => entry(16, "UNAUTHENTICATED", "Unauthenticated"),
     }
 }
 
@@ -150,10 +85,8 @@ impl StatusCounters {
         code: tonic::Code,
         init: impl FnOnce(&'static str) -> metrics::Counter,
     ) {
-        let metric_code = status_code_names(code).metric;
-        self.0[status_slot(code)]
-            .get_or_init(|| init(metric_code))
-            .increment(1);
+        let (slot, names) = status_entry(code);
+        self.0[slot].get_or_init(|| init(names.metric)).increment(1);
     }
 }
 
@@ -193,10 +126,10 @@ impl<M: CallMetrics> CallInner<M> {
     }
 }
 
+#[must_use = "finish the gRPC call or drop it intentionally"]
 pub struct Call<M: CallMetrics>(DropGuard<CallInner<M>, fn(CallInner<M>)>);
 
 impl<M: CallMetrics> Call<M> {
-    #[must_use]
     pub fn start(metrics: Arc<M>, span: tracing::Span, started_at: Instant) -> Self {
         Self(DropGuard::new(
             CallInner {

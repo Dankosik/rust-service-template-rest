@@ -4,19 +4,17 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, StatusCode};
 use http_body::{Body, Frame, SizeHint};
-use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
+use infra_grpc_core::protocol::header_status_code;
 use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody, register_waker};
 use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
 use tokio_util::sync::DropGuard;
 
 use crate::observe::Call;
-use crate::protocol::grpc_code_from_http_status;
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
-type ClientResponseBody<B> = WatchedBody<B, ClientHooks>;
 
 #[expect(dead_code, reason = "guards release resources on drop")]
 pub(crate) struct ClientGuards {
@@ -155,22 +153,26 @@ impl StreamHooks<tonic::Status> for ClientHooks {
     }
 }
 
+fn grpc_code_from_http_status(status: StatusCode) -> Option<tonic::Code> {
+    match status {
+        StatusCode::OK => None,
+        StatusCode::BAD_REQUEST => Some(tonic::Code::Internal),
+        StatusCode::UNAUTHORIZED => Some(tonic::Code::Unauthenticated),
+        StatusCode::FORBIDDEN => Some(tonic::Code::PermissionDenied),
+        StatusCode::NOT_FOUND => Some(tonic::Code::Unimplemented),
+        StatusCode::TOO_MANY_REQUESTS
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => Some(tonic::Code::Unavailable),
+        _ => Some(tonic::Code::Unknown),
+    }
+}
+
 pub(crate) fn attach_client_response(
-    mut response: http::Response<tonic::body::Body>,
+    response: http::Response<tonic::body::Body>,
     observation: ClientObservation,
     custody: ClientCustody,
 ) -> http::Response<tonic::body::Body> {
-    let initial = if let Some(reason) = custody.lifetime.stopped() {
-        let status = client_stopped_status(reason);
-        observation.record_local_stop(&status);
-        for name in STATUS_HEADERS {
-            response.headers_mut().remove(name);
-        }
-        let _ = status.add_header(response.headers_mut());
-        Some(ClientOutcome::local(status.code()))
-    } else {
-        ClientOutcome::from_headers(&observation, response.headers())
-    };
     let missing_status = grpc_code_from_http_status(response.status()).map_or(
         ClientOutcome::local(tonic::Code::Unknown),
         |code| ClientOutcome {
@@ -178,22 +180,6 @@ pub(crate) fn attach_client_response(
             status_hook_code: Some(code),
         },
     );
-    response.map(|body| {
-        start_response_body(body, observation, custody, initial, missing_status)
-            .map_or_else(tonic::body::Body::empty, tonic::body::Body::new)
-    })
-}
-
-fn start_response_body<B>(
-    body: B,
-    observation: ClientObservation,
-    custody: ClientCustody,
-    initial: Option<ClientOutcome>,
-    missing_status: ClientOutcome,
-) -> Option<ClientResponseBody<B>>
-where
-    B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
-{
     let watch_stop = custody.watch_stop;
     let hooks = ClientHooks {
         observation,
@@ -202,12 +188,18 @@ where
         on_status: custody.on_status,
         missing_status,
     };
-    WatchedBody::start(body, hooks, initial, move |hooks| {
-        watch_stop.then(|| {
-            let lifetime = hooks.lifetime.clone();
-            async move { client_stopped_status(lifetime.wait_stopped().await) }
-        })
-    })
+    WatchedBody::attach_response(
+        response,
+        hooks,
+        |hooks, response| ClientOutcome::from_headers(&hooks.observation, response.headers()),
+        move |hooks| {
+            watch_stop.then(|| {
+                let lifetime = hooks.lifetime.clone();
+                async move { client_stopped_status(lifetime.wait_stopped().await) }
+            })
+        },
+        tonic::body::Body::new,
+    )
 }
 
 enum UploadPhase {
@@ -324,6 +316,47 @@ mod tests {
 
     const TEST_BUDGET: Duration = Duration::from_secs(1);
     const TEST_PANIC: &str = "stream source panic";
+
+    type ClientResponseBody<B> = WatchedBody<B, ClientHooks>;
+
+    fn start_response_body<B>(
+        body: B,
+        observation: ClientObservation,
+        custody: ClientCustody,
+        initial: Option<ClientOutcome>,
+        missing_status: ClientOutcome,
+    ) -> Option<ClientResponseBody<B>>
+    where
+        B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
+    {
+        let watch_stop = custody.watch_stop;
+        let hooks = ClientHooks {
+            observation,
+            guards: custody.guards,
+            lifetime: custody.lifetime,
+            on_status: custody.on_status,
+            missing_status,
+        };
+        WatchedBody::start(body, hooks, initial, move |hooks| {
+            watch_stop.then(|| {
+                let lifetime = hooks.lifetime.clone();
+                async move { client_stopped_status(lifetime.wait_stopped().await) }
+            })
+        })
+    }
+
+    #[test]
+    fn http_status_codes_follow_grpc_mappings() {
+        assert_eq!(grpc_code_from_http_status(StatusCode::OK), None);
+        assert_eq!(
+            grpc_code_from_http_status(StatusCode::UNAUTHORIZED),
+            Some(tonic::Code::Unauthenticated)
+        );
+        assert_eq!(
+            grpc_code_from_http_status(StatusCode::SERVICE_UNAVAILABLE),
+            Some(tonic::Code::Unavailable)
+        );
+    }
 
     struct PendingFrames {
         queued: VecDeque<Frame<Bytes>>,

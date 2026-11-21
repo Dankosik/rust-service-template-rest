@@ -1458,7 +1458,7 @@ fn opening_app_waiting(
         .unwrap()
 }
 
-async fn hold_capacity(app: &infra_grpc::Application) -> axum::response::Response {
+async fn hold_capacity(app: &infra_grpc::Application) -> http::Response<tonic::body::Body> {
     app.clone()
         .oneshot(opening_request(
             "/example.v1.EchoService/ServerStream",

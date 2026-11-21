@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures_util::future::{BoxFuture, Either};
 use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
 use operation_context::OperationContext;
 use tonic::body::Body;
 
 use crate::transport::PreparedCall;
-use crate::{Client, ClientError, WithContext};
+use crate::{Client, ClientError, ResponseFuture, WithContext};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -57,32 +56,27 @@ impl ServiceTokenClient {
 impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Response = http::Response<Body>;
     type Error = tonic::Status;
-    type Future = Either<
-        std::future::Ready<Result<Self::Response, Self::Error>>,
-        BoxFuture<'static, Result<Self::Response, Self::Error>>,
-    >;
+    type Future = ResponseFuture;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let prepared = match self.prepare(request) {
-            Ok(prepared) => prepared,
-            Err(status) => return Either::Left(std::future::ready(Err(status))),
-        };
-        let tokens = self.tokens.clone();
-        Either::Right(Box::pin(prepared.send_with_dispatch(move |headers| {
-            let authorization = tokens.authorization().map_err(|error| {
-                let mut status = tonic::Status::unavailable("service token unavailable");
-                status.set_source(Arc::new(error));
-                status
-            })?;
-            if let Some(value) = authorization {
-                headers.insert(AUTHORIZATION, value);
-            }
-            Ok(())
-        })))
+        ResponseFuture::from_prepared(self.prepare(request), |prepared| {
+            let tokens = self.tokens.clone();
+            prepared.send_with_dispatch(move |headers| {
+                let authorization = tokens.authorization().map_err(|error| {
+                    let mut status = tonic::Status::unavailable("service token unavailable");
+                    status.set_source(Arc::new(error));
+                    status
+                })?;
+                if let Some(value) = authorization {
+                    headers.insert(AUTHORIZATION, value);
+                }
+                Ok(())
+            })
+        })
     }
 }
 

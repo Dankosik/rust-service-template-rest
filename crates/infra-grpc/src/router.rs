@@ -17,12 +17,12 @@ use infra_http_transport::{ConnectionLimits, Http2Options};
 use opentelemetry::context::FutureExt as _;
 use operation_context::{Deadline, OperationContext};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::server::NamedService as _;
 use tower::Layer as _;
 use tracing::Instrument as _;
 
-use crate::call::{ServerCustody, check_open, stopped_status, wrap_response};
+use crate::call::{ServerCustody, ServerStop, check_open, stopped_status, wrap_response};
 use crate::health::HealthServer;
 use crate::observe;
 use crate::services::{BuiltServices, ListenerLayer, ListenerService, Method, MethodKind, Methods};
@@ -81,7 +81,7 @@ impl From<tonic::Status> for Rejection {
 
 #[derive(Clone, Debug)]
 pub struct Application {
-    router: axum::Router,
+    routes: tonic::service::Routes,
     // template:begin service-auth:grpc-app-tls-requirement
     requires_tls: bool,
     // template:end service-auth:grpc-app-tls-requirement
@@ -99,24 +99,25 @@ impl Application {
             return Err(TlsRequiredError);
         }
         // template:end service-auth:grpc-app-tls-check
-        Ok(listener.serve_h2(self.router, options, tls))
+        Ok(listener.serve_h2(self.routes.into_axum_router(), options, tls))
     }
 }
 
 impl<B> tower::Service<http::Request<B>> for Application
 where
-    axum::Router: tower::Service<http::Request<B>, Response = Response, Error = Infallible>,
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<tower::BoxError>,
 {
-    type Response = Response;
+    type Response = http::Response<tonic::body::Body>;
     type Error = Infallible;
-    type Future = <axum::Router as tower::Service<http::Request<B>>>::Future;
+    type Future = <tonic::service::Routes as tower::Service<http::Request<B>>>::Future;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        tower::Service::<http::Request<B>>::poll_ready(&mut self.router, cx)
+        tower::Service::<http::Request<B>>::poll_ready(&mut self.routes, cx)
     }
 
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
-        tower::Service::call(&mut self.router, request)
+        tower::Service::call(&mut self.routes, request)
     }
 }
 
@@ -150,7 +151,7 @@ pub(crate) fn build(
         // template:begin service-auth:grpc-app-tls-init
         requires_tls: matches!(authentication, Authentication::ServiceTokens(_)),
         // template:end service-auth:grpc-app-tls-init
-        router: {
+        routes: tonic::service::Routes::from({
             let state = Arc::new(BusinessState {
                 authentication,
                 methods: Arc::clone(&methods),
@@ -169,7 +170,7 @@ pub(crate) fn build(
                 limits.request_timeout,
                 options.trust_trace_context,
             )
-        },
+        }),
     })
 }
 
@@ -284,7 +285,8 @@ fn start_call<'a>(
 struct BusinessLifecycle {
     opening_context: OperationContext,
     response_context: ResponseContext,
-    custody: ServerCustody,
+    cancel_on_drop: DropGuard,
+    stop: Option<ServerStop>,
 }
 
 fn business_lifecycle(
@@ -303,16 +305,19 @@ fn business_lifecycle(
         response_deadline,
         response_token.clone(),
     ));
-    let custody = ServerCustody {
-        deadline: response_deadline,
-        end_on_drain: method.end_on_drain().then(|| response_token.clone()),
-        cancel_on_drop: Some(response_token.drop_guard()),
-        ..ServerCustody::default()
+    let stop = if method.end_on_drain() {
+        Some(ServerStop::Drain {
+            deadline: response_deadline,
+            drain: response_token.clone(),
+        })
+    } else {
+        response_deadline.map(ServerStop::Deadline)
     };
     BusinessLifecycle {
         opening_context,
         response_context,
-        custody,
+        cancel_on_drop: response_token.drop_guard(),
+        stop,
     }
 }
 
@@ -367,7 +372,13 @@ async fn business_call(
     )
     .await;
 
-    finish_call(outcome, started.call, started.fallback, lifecycle.custody)
+    finish_call(
+        outcome,
+        started.call,
+        started.fallback,
+        lifecycle.cancel_on_drop,
+        lifecycle.stop,
+    )
 }
 
 async fn open_business(
@@ -516,11 +527,12 @@ async fn health_call(
     )
     .await;
 
-    let custody = ServerCustody {
-        deadline: response_deadline,
-        ..ServerCustody::default()
-    };
-    wrap_response(response, started.call, started.fallback, custody)
+    wrap_response(
+        response,
+        started.call,
+        started.fallback,
+        ServerCustody::deadline(response_deadline),
+    )
 }
 
 fn call_deadlines(
@@ -576,26 +588,38 @@ fn finish_call(
     outcome: Result<Admitted, Rejection>,
     call: observe::Call,
     fallback: Option<opentelemetry::Context>,
-    mut custody: ServerCustody,
+    cancel_on_drop: DropGuard,
+    stop: Option<ServerStop>,
 ) -> Response {
-    let (response, custody) = match outcome {
-        Ok(Admitted { response, permit }) => {
-            custody.permit = permit;
-            (response, custody)
-        }
+    match outcome {
+        Ok(Admitted { response, permit }) => wrap_response(
+            response,
+            call,
+            fallback,
+            ServerCustody {
+                permit,
+                cancel_on_drop: Some(cancel_on_drop),
+                stop,
+            },
+        ),
         // template:begin authn:grpc-router-scope-refusal-span
         Err(Rejection::InsufficientScope(status)) => {
             call.record_insufficient_scope();
-            drop(custody);
-            (status.into_http(), ServerCustody::default())
+            finish_rejected(status, call, cancel_on_drop)
         }
         // template:end authn:grpc-router-scope-refusal-span
-        Err(Rejection::Status(status)) => {
-            drop(custody);
-            (status.into_http(), ServerCustody::default())
-        }
-    };
-    wrap_response(response, call, fallback, custody)
+        Err(Rejection::Status(status)) => finish_rejected(status, call, cancel_on_drop),
+    }
+}
+
+fn finish_rejected(
+    status: tonic::Status,
+    call: observe::Call,
+    cancel_on_drop: DropGuard,
+) -> Response {
+    drop(cancel_on_drop);
+    call.finish_status(&status);
+    status.into_http()
 }
 
 const REJECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);

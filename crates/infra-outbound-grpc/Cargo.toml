@@ -16,7 +16,6 @@ arc-swap = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 foldhash = { workspace = true, features = ["std"] }
-futures-util = { workspace = true, features = ["std"] }
 http = { workspace = true }
 http-body = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
@@ -44,6 +43,7 @@ tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["htt
 
 [dev-dependencies]
 axum = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
 grpc-contracts = { workspace = true }
 http-body-util = { workspace = true }
 infra-http-transport = { workspace = true }
