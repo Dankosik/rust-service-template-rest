@@ -148,10 +148,6 @@ pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "removing every profile with bounded nonzero counts leaves the rule without a caller"
-)]
 pub(crate) fn nonzero_usize_range<T>(
     key: &str,
     value: T,

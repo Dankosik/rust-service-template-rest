@@ -30,21 +30,19 @@ impl Audiences {
         &self.0
     }
 
-    fn from_values(values: impl IntoIterator<Item = String>) -> Result<Self, &'static str> {
+    fn from_values(values: impl IntoIterator<Item = String>) -> Option<Self> {
         let deduplicated: Vec<String> = values
             .into_iter()
             .map(|value| {
                 if value.trim().is_empty() {
-                    Err("values must be nonblank")
+                    Err(())
                 } else {
                     Ok(value)
                 }
             })
-            .process_results(|iter| iter.unique().collect())?;
-        if deduplicated.is_empty() {
-            return Err("must be a nonempty string or list of nonblank exact values");
-        }
-        Ok(Self(deduplicated))
+            .process_results(|iter| iter.unique().collect())
+            .ok()?;
+        (!deduplicated.is_empty()).then_some(Self(deduplicated))
     }
 }
 
@@ -70,20 +68,12 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => Self::from_values([value]),
             Input::Many(values) => Self::from_values(values),
         }
-        .map_err(|_| {
+        .ok_or_else(|| {
             serde::de::Error::invalid_value(
                 Unexpected::Other("an empty or blank audience"),
                 &"a nonempty string or list of nonblank exact values",
             )
         })
-    }
-}
-
-impl TryFrom<Vec<String>> for Audiences {
-    type Error = &'static str;
-
-    fn try_from(values: Vec<String>) -> Result<Self, Self::Error> {
-        Self::from_values(values)
     }
 }
 
@@ -103,7 +93,7 @@ impl<'de> DeserializeAs<'de, Audiences> for AudienceList {
         };
         let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
         let values: Vec<String> = Vec::deserialize(value).map_err(|_| invalid())?;
-        Audiences::from_values(values).map_err(|_| invalid())
+        Audiences::from_values(values).ok_or_else(invalid)
     }
 }
 
