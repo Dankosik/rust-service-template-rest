@@ -63,7 +63,7 @@ pub struct OperationDeadline {
     expired: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("postgres operation deadline elapsed before commit")]
 pub struct OperationDeadlineElapsed;
 

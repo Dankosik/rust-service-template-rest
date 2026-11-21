@@ -340,7 +340,7 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
 async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    let resource = Client::try_new_for_test_http(
+    let resource = infra_outbound_http::test_support::client_http(
         fixture.origin.as_str(),
         TOKEN_LIMITS
             .with_operation_timeout(Duration::from_secs(10))

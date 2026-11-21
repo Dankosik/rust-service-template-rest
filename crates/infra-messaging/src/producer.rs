@@ -34,7 +34,7 @@ impl PublishOutcome {
 }
 
 const PUBLISH_TOTAL: &str = "messaging_publish_total";
-const PUBLISH_DURATION_SECONDS: &str = "messaging_publish_duration_seconds";
+pub(crate) const PUBLISH_DURATION_SECONDS: &str = "messaging_publish_duration_seconds";
 const PUBLISH_ADMISSION_REFUSED_TOTAL: &str = "messaging_publish_admission_refused_total";
 
 #[derive(Debug)]

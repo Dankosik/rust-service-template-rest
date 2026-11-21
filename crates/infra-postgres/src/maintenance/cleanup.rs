@@ -40,6 +40,12 @@ impl CleanupName {
     }
 }
 
+impl std::borrow::Borrow<str> for CleanupName {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
 impl AsRef<str> for CleanupName {
     fn as_ref(&self) -> &str {
         self.0

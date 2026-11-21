@@ -53,7 +53,7 @@ mod tests {
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
         let config =
-            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+            service_config::test_support::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
         let mut background = Background::new();
         let result = crate::bootstrap::register_capabilities(
@@ -69,7 +69,7 @@ mod tests {
     #[tokio::test]
     async fn postgres_message_factory_is_single_and_an_empty_consumer_refuses() {
         let config =
-            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+            service_config::test_support::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
         let mut background = Background::new();
         let mut registration = crate::Registration::new(&config, &mut background);
@@ -81,7 +81,7 @@ mod tests {
             })
             .unwrap();
         assert!(registration.with_postgres_messages(|_, _| Ok(())).is_err());
-        let pool = infra_postgres::Pool::connect_lazy_for_test(
+        let pool = infra_postgres::test_support::connect_lazy(
             "postgres://test:test@127.0.0.1:1/test?sslmode=verify-full",
         )
         .unwrap();

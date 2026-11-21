@@ -560,7 +560,7 @@ impl Fixture {
         let control = readiness.control();
         let prepared = readiness.prepare().await.unwrap();
         let pending_activation = if seed {
-            prepared.activate().unwrap();
+            let _refresher = prepared.activate().unwrap();
             None
         } else {
             Some(prepared)
@@ -2909,7 +2909,7 @@ async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
     .unwrap_err();
     assert_eq!(unknown.code(), Code::NotFound);
 
-    fixture
+    let _refresher = fixture
         .pending_activation
         .take()
         .unwrap()

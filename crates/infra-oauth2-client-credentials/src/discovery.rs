@@ -43,13 +43,13 @@ impl Registration {
     ) -> Result<Self, DiscoveryError> {
         let build_test_http = |url: &Url, endpoint: &'static str| {
             token_endpoint::build_http_client(url).map_err(|error| match error {
-                infra_outbound_http::TestBuildError::InvalidOrigin(_) => {
+                infra_outbound_http::test_support::TestBuildError::InvalidOrigin(_) => {
                     DiscoveryError::from(ConfigurationError {
                         key: endpoint,
                         reason: "requires an HTTP loopback IP address",
                     })
                 }
-                infra_outbound_http::TestBuildError::Tls(cause) => {
+                infra_outbound_http::test_support::TestBuildError::Tls(cause) => {
                     DiscoveryError::from(TransportBuildFailure::new(endpoint, cause))
                 }
             })

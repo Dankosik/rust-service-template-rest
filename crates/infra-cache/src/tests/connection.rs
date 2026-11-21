@@ -292,7 +292,7 @@ async fn direct_cache_start_rejects_unsupported_byte_limits() {
         })
         .await
         .unwrap_err();
-        assert_eq!(error, StartError::InvalidSizeLimit);
+        assert_eq!(error.0, StartErrorKind::InvalidSizeLimit);
     }
 }
 
@@ -305,7 +305,7 @@ async fn a_cache_window_must_leave_room_for_maintenance() {
         })
         .await
         .unwrap_err();
-        assert_eq!(error, StartError::InvalidConcurrency);
+        assert_eq!(error.0, StartErrorKind::InvalidConcurrency);
     }
 }
 
@@ -1935,7 +1935,7 @@ fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() 
             .await
             .expect("admission must time out while the blocking worker is unavailable")
             .unwrap_err();
-        assert_eq!(error, StartError::AdmissionTimedOut);
+        assert_eq!(error.0, StartErrorKind::AdmissionTimedOut);
 
         let tasks = tokio_util::task::TaskTracker::new();
         {

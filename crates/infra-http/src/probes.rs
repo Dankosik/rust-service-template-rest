@@ -142,7 +142,7 @@ mod tests {
     async fn ready_reader() -> ReadinessReader {
         let readiness = readiness();
         let reader = readiness.control().reader();
-        readiness.prepare().await.unwrap().activate().unwrap();
+        let _refresher = readiness.prepare().await.unwrap().activate().unwrap();
         reader
     }
 

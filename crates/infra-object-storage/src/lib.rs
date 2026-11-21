@@ -38,7 +38,7 @@ pub use self::download::Download;
 pub use self::error::{
     ConfigError, MutationError, MutationFailure, ObjectStorageError, UnknownOutcome,
 };
-use self::error::{Failure, LocalFailure, MutationMode, OutcomeError};
+use self::error::{ConfigErrorKind, Failure, LocalFailure, MutationMode, OutcomeError};
 pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
@@ -166,14 +166,16 @@ impl PresignedUrl {
 
 impl ObjectStorage {
     pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
-        let resolved = provider::resolve(&options.provider, &options.bucket)?;
+        let resolved =
+            provider::resolve(&options.provider, &options.bucket).map_err(ConfigError)?;
         if !(1..=Semaphore::MAX_PERMITS).contains(&options.max_concurrency) {
-            return Err(ConfigError::MaxConcurrency);
+            return Err(ConfigError(ConfigErrorKind::MaxConcurrency));
         }
         let http_client = https_client();
         let credentials = options
             .provider
-            .credentials_provider(&resolved.region, &http_client)?;
+            .credentials_provider(&resolved.region, &http_client)
+            .map_err(ConfigError)?;
         Ok(Self::build(options, resolved, http_client, credentials))
     }
 

@@ -36,9 +36,11 @@ pub(crate) fn build_https_client(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn build_http_client(url: &Url) -> Result<Client, infra_outbound_http::TestBuildError> {
+pub(crate) fn build_http_client(
+    url: &Url,
+) -> Result<Client, infra_outbound_http::test_support::TestBuildError> {
     let origin = url.origin().ascii_serialization();
-    Client::try_new_for_test_http(&origin, TOKEN_LIMITS)
+    infra_outbound_http::test_support::client_http(&origin, TOKEN_LIMITS)
 }
 
 const GRANT_CLIENT_CREDENTIALS: &str = "client_credentials";

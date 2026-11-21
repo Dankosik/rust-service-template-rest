@@ -703,7 +703,7 @@ async fn http_application(
 
 #[cfg(test)]
 fn test_config(environment: &[(&str, &str)]) -> Config {
-    service_config::fixtures::service(environment, BUILD_INFO, shutdown::TAIL).unwrap()
+    service_config::test_support::service(environment, BUILD_INFO, shutdown::TAIL).unwrap()
 }
 
 #[cfg(test)]

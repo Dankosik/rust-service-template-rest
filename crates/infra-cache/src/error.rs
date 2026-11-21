@@ -1,7 +1,11 @@
 use operation_context::{BoundedStop, Stopped};
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum StartError {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(transparent)]
+pub struct StartError(pub(crate) StartErrorKind);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum StartErrorKind {
     #[error("cache.max_concurrency must allow application commands and leave one maintenance slot")]
     InvalidConcurrency,
     #[error("cache key or value size limit is outside the supported range")]

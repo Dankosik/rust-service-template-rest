@@ -422,7 +422,7 @@ mod tests {
 
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let keys = KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None)
             .expect("key");
@@ -508,7 +508,7 @@ mod tests {
             "WebhookState {\n    active: false,\n}"
         );
 
-        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let active = WebhookState::active(Verifiers::new().into_receiver(pool));
         assert_eq!(format!("{active:?}"), "WebhookState { active: true }");
@@ -602,7 +602,7 @@ mod tests {
             }
         }
 
-        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let mut verifiers = Verifiers::new();
         verifiers.bind("provider", Arc::new(TokenVerifier));

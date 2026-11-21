@@ -589,7 +589,7 @@ mod tests {
     fn worker_config(
         environment: &[(&str, &str)],
     ) -> Result<service_config::WorkerConfig, service_config::Error> {
-        service_config::fixtures::worker(environment, crate::BUILD_INFO, TAIL)
+        service_config::test_support::worker(environment, crate::BUILD_INFO, TAIL)
     }
 
     #[test]

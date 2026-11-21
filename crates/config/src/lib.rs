@@ -44,12 +44,10 @@ mod worker;
 
 mod cli;
 mod de;
-#[cfg(feature = "test-support")]
-pub mod fixtures;
 mod load;
 mod secret_policy;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod validate;
 
 use serde::Deserialize;

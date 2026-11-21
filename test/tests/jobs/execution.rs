@@ -110,7 +110,7 @@ fn locked_multi_kind_registry() -> infra_jobs::Kinds {
     kinds.register::<Stranded>(Policy::default(), |job: Job<Stranded>| async move {
         sqlx::query("INSERT INTO stranded_attempts (job_id) VALUES ($1::uuid)")
             .bind(job.id().to_string())
-            .execute(job.pool().as_sqlx())
+            .execute(infra_postgres::test_support::as_sqlx(job.pool()))
             .await
             .map_err(|_| JobError::retryable("probe write failed"))?;
         job.cancellation().cancelled().await;
@@ -149,7 +149,7 @@ async fn proxied_pool(pool: &PgPool, workers: u32) -> (CommitProxy, Pool) {
 
 async fn prepare(pool: &Pool) {
     sqlx::query(jobs::CREATE_PROBE_ATTEMPTS)
-        .execute(pool.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("the probe table");
 }
@@ -299,7 +299,7 @@ async fn install_claim_transition_blocker(pool: &Pool) {
          BEFORE UPDATE OF state ON background_jobs \
          FOR EACH ROW EXECUTE FUNCTION test_block_claim_transition();",
     )
-    .execute(pool.as_sqlx())
+    .execute(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("the claim transition blocker");
 }
@@ -354,7 +354,7 @@ async fn load(pool: &Pool, id: &str) -> JobView {
          FROM background_jobs WHERE id::text = $1",
     )
     .bind(id)
-    .fetch_one(pool.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("the job row");
     JobView {
@@ -376,7 +376,7 @@ async fn load(pool: &Pool, id: &str) -> JobView {
 async fn attempts_of(pool: &Pool, id: &str) -> Vec<i32> {
     sqlx::query_scalar("SELECT attempt FROM probe_attempts WHERE job_id = $1::uuid ORDER BY seq")
         .bind(id)
-        .fetch_all(pool.as_sqlx())
+        .fetch_all(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("probe attempts")
 }
@@ -389,14 +389,14 @@ async fn attempt_started_us(pool: &Pool, id: &str, attempt: i32) -> Option<i64> 
     )
     .bind(id)
     .bind(attempt)
-    .fetch_optional(pool.as_sqlx())
+    .fetch_optional(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("attempt start")
 }
 
 async fn db_now_us(pool: &Pool) -> i64 {
     sqlx::query_scalar("SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint")
-        .fetch_one(pool.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("database clock")
 }
@@ -409,7 +409,7 @@ async fn set_not_before(pool: &Pool, id: &str, seconds_ago: i64) {
     )
     .bind(id)
     .bind(seconds_ago)
-    .execute(pool.as_sqlx())
+    .execute(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("not_before moves");
     assert_eq!(updated.rows_affected(), 1);
@@ -454,7 +454,7 @@ async fn stage_running(pool: &Pool, payload: &str, expired: bool) -> (String, i6
     let row = sqlx::query(sql)
         .bind(Probe::NAME.as_str())
         .bind(payload)
-        .fetch_one(pool.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("a staged running job");
     (
@@ -474,7 +474,7 @@ async fn stage_expired_gate(pool: &Pool) -> String {
     )
     .bind(Gate::NAME.as_str())
     .bind(serde_json::to_string(&Gate { token: 1 }).expect("gate payload"))
-    .fetch_one(pool.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("an expired gate job");
     row.try_get("id").expect("id")
@@ -502,7 +502,7 @@ async fn x1_x3_two_engines_run_each_job_once(pool: PgPool) {
     until("every raced job completes", super::WAIT, async || {
         let completed: i64 =
             sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = 'completed'")
-                .fetch_one(pool_a.as_sqlx())
+                .fetch_one(infra_postgres::test_support::as_sqlx(&pool_a))
                 .await
                 .expect("completed count");
         (completed == RACE_JOBS).then_some(())
@@ -510,16 +510,16 @@ async fn x1_x3_two_engines_run_each_job_once(pool: PgPool) {
     .await;
 
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM probe_attempts")
-        .fetch_one(pool_a.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&pool_a))
         .await
         .expect("probe count");
     let distinct: i64 = sqlx::query_scalar("SELECT count(DISTINCT job_id) FROM probe_attempts")
-        .fetch_one(pool_a.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&pool_a))
         .await
         .expect("distinct jobs");
     let wrong_attempt: i64 =
         sqlx::query_scalar("SELECT count(*) FROM probe_attempts WHERE attempt <> 1")
-            .fetch_one(pool_a.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&pool_a))
             .await
             .expect("attempt numbers");
     assert_eq!(rows, RACE_JOBS, "each job ran exactly once");
@@ -573,7 +573,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     let locker = open(&pool, 1).await;
     prepare(&jobs).await;
     sqlx::query("CREATE TABLE stranded_attempts (job_id uuid NOT NULL)")
-        .execute(jobs.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("the second-kind attempts table");
     let locked = enqueue_one(&jobs, ProbeAction::Succeed).await;
@@ -588,8 +588,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
             "the other-kind job commits",
         );
     }
-    let mut hold = locker
-        .as_sqlx()
+    let mut hold = infra_postgres::test_support::as_sqlx(&locker)
         .begin()
         .await
         .expect("the candidate lock begins");
@@ -604,7 +603,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
         super::WAIT,
         async || {
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM stranded_attempts")
-                .fetch_one(jobs.as_sqlx())
+                .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
                 .await
                 .expect("second-kind attempt count");
             (count == 1).then_some(())
@@ -616,7 +615,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     assert_eq!(locked_view.attempts, 0);
     assert_eq!(attempts_of(&jobs, &locked).await, Vec::<i32>::new());
     let dispatched: i64 = sqlx::query_scalar("SELECT count(*) FROM stranded_attempts")
-        .fetch_one(jobs.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("second-kind attempt count");
     assert_eq!(dispatched, 1, "the only slot runs the next unlocked job");
@@ -643,7 +642,7 @@ async fn x1_due_jobs_run_in_not_before_then_id_order(pool: PgPool) {
 
     until("every ordered job runs", super::WAIT, async || {
         let ran: i64 = sqlx::query_scalar("SELECT count(*) FROM probe_attempts")
-            .fetch_one(jobs.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .expect("probe count");
         (ran == 5).then_some(())
@@ -652,16 +651,16 @@ async fn x1_due_jobs_run_in_not_before_then_id_order(pool: PgPool) {
 
     let expected: Vec<String> =
         sqlx::query_scalar("SELECT id::text FROM background_jobs ORDER BY not_before, id")
-            .fetch_all(jobs.as_sqlx())
+            .fetch_all(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .expect("claim order");
     let actual: Vec<String> =
         sqlx::query_scalar("SELECT job_id::text FROM probe_attempts ORDER BY seq")
-            .fetch_all(jobs.as_sqlx())
+            .fetch_all(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .expect("execution order");
     let by_id: Vec<String> = sqlx::query_scalar("SELECT id::text FROM background_jobs ORDER BY id")
-        .fetch_all(jobs.as_sqlx())
+        .fetch_all(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("id order");
     assert_ne!(expected, by_id, "not_before must change the order");
@@ -689,7 +688,7 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
             "SELECT count(*) FROM background_jobs WHERE kind = $1 AND state = 'completed'",
         )
         .bind(Probe::NAME.as_str())
-        .fetch_one(jobs.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("completed probes");
         (completed == 3).then_some(())
@@ -725,7 +724,7 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
     until("two slots fill", super::WAIT, async || {
         let running: i64 =
             sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = 'running'")
-                .fetch_one(jobs.as_sqlx())
+                .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
                 .await
                 .expect("running count");
         (running == 2 && run.started.in_flight() == 2).then_some(())
@@ -736,14 +735,14 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
     absent_for(window, async || {
         let running: i64 =
             sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = 'running'")
-                .fetch_one(jobs.as_sqlx())
+                .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
                 .await
                 .expect("running count");
         let untouched: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM background_jobs \
              WHERE state = 'pending' AND attempts = 0 AND claim_generation = 0",
         )
-        .fetch_one(jobs.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("untouched count");
         assert_eq!(running, 2, "a claim took more than the free slots");
@@ -830,7 +829,10 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
     assert_eq!(view.attempts, 1);
     assert_eq!(
         clock
-            .wait("the same listener", listening_pid(jobs.as_sqlx()))
+            .wait(
+                "the same listener",
+                listening_pid(infra_postgres::test_support::as_sqlx(&jobs))
+            )
             .await,
         Some(listener)
     );
@@ -1040,7 +1042,7 @@ async fn wake_listener_ready(pool: &Pool, recorder: &WakeRecorder, engines: usiz
     )
     .await;
     until("the engine listens", super::WAIT, async || {
-        listening_pid(pool.as_sqlx()).await
+        listening_pid(infra_postgres::test_support::as_sqlx(pool)).await
     })
     .await
 }
@@ -1058,7 +1060,7 @@ async fn prove_empty_notification_rounds(
                 .wait("the empty wake commits", async {
                     sqlx::query("SELECT pg_notify('background_jobs', $1)")
                         .bind(kind)
-                        .execute(pool.as_sqlx())
+                        .execute(infra_postgres::test_support::as_sqlx(pool))
                         .await
                         .expect("the wake commits");
                 })
@@ -1084,7 +1086,7 @@ async fn insert_notified(pool: &Pool, kind: &str, payload: String) -> String {
     )
     .bind(kind)
     .bind(payload)
-    .fetch_one(pool.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("a due job and its wake commit")
 }
@@ -1096,7 +1098,7 @@ async fn listening_sessions(pool: &Pool) -> i64 {
            AND query LIKE 'LISTEN%'",
     )
     .bind(super::APP)
-    .fetch_one(pool.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("the listener observation")
 }
@@ -1118,7 +1120,7 @@ async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
     let (proxy, worker) = proxied_pool(&pool, 1).await;
     let run = start(&worker, probe_registry(2, DEFAULT_TIMEOUT), 1);
     until("the wake listener subscribes", super::WAIT, || {
-        listening_pid(worker.as_sqlx())
+        listening_pid(infra_postgres::test_support::as_sqlx(&worker))
     })
     .await;
     run.started.stop_claiming();
@@ -1179,8 +1181,8 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     .execute(&pool)
     .await
     .expect("the rotation");
-    jobs.as_sqlx().set_connect_options(
-        jobs.as_sqlx()
+    infra_postgres::test_support::as_sqlx(&jobs).set_connect_options(
+        infra_postgres::test_support::as_sqlx(&jobs)
             .connect_options()
             .as_ref()
             .clone()
@@ -1265,7 +1267,10 @@ async fn x2_isolated_groups_share_one_listener_and_worker_id(pool: PgPool) {
     assert_eq!(view.attempts, 1);
     assert_eq!(
         clock
-            .wait("the same shared listener", listening_pid(jobs.as_sqlx()))
+            .wait(
+                "the same shared listener",
+                listening_pid(infra_postgres::test_support::as_sqlx(&jobs))
+            )
             .await,
         Some(listener)
     );
@@ -1327,7 +1332,7 @@ fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Kinds {
 async fn states(pool: &Pool, kind: &str) -> Vec<String> {
     sqlx::query_scalar("SELECT state FROM background_jobs WHERE kind = $1 ORDER BY state")
         .bind(kind)
-        .fetch_all(pool.as_sqlx())
+        .fetch_all(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("the kind's job states")
 }
@@ -1366,7 +1371,7 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         "SELECT id::text FROM background_jobs WHERE kind = $1 AND state = 'running'",
     )
     .bind(Gate::NAME.as_str())
-    .fetch_one(jobs.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("the capped running job");
     let mut hold = pool.begin().await.expect("the completion row lock begins");
@@ -1376,7 +1381,7 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         .await
         .expect("the capped completion is blocked");
     capped.open.add_permits(1);
-    super::wait_for_lock_waiter(jobs.as_sqlx()).await;
+    super::wait_for_lock_waiter(infra_postgres::test_support::as_sqlx(&jobs)).await;
 
     absent_for(POLL_INTERVAL + POLL, async || {
         assert_eq!(
@@ -1445,9 +1450,12 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         )
         .await;
         absent_for(Duration::from_secs(2), async || {
-            assert_eq!(super::job_count(jobs.as_sqlx()).await, 0);
+            assert_eq!(
+                super::job_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+                0
+            );
             let probes: i64 = sqlx::query_scalar("SELECT count(*) FROM probe_attempts")
-                .fetch_one(jobs.as_sqlx())
+                .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
                 .await
                 .expect("probe count");
             assert_eq!(probes, 0);
@@ -1566,7 +1574,7 @@ async fn assert_stale_completion_ignored(pool: &PgPool, advance_generation: bool
     )
     .bind(&id)
     .bind(advance_generation)
-    .execute(jobs.as_sqlx())
+    .execute(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("the newer claim");
     assert_eq!(updated.rows_affected(), 1);
@@ -1752,7 +1760,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     let (proxy, replacement) = proxied_pool(&pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
-        .execute(jobs.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("the business-effects table");
     let gate = Arc::new(TransactionGateState::default());
@@ -1782,13 +1790,13 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
          WHERE id::text = $1 AND state = 'running'",
     )
     .bind(&id)
-    .execute(jobs.as_sqlx())
+    .execute(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("restore pending work before reclaiming with the lost generation");
     assert_eq!(restored.rows_affected(), 1);
     sqlx::query("SELECT setval('background_jobs_claim_generation', $1, false)")
         .bind(original.claim_generation)
-        .execute(jobs.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("the next claim repeats the lost generation");
     let replacement_gate = Arc::new(TransactionGateState::default());
@@ -1810,7 +1818,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
 
     super::bounded("the old executor drains", run.started.drained()).await;
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
-        .fetch_one(jobs.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("business effects count");
     assert_eq!(
@@ -1834,7 +1842,7 @@ async fn x6_reused_generation_cannot_commit_a_stale_transaction(pool: PgPool) {
     assert_eq!(done.attempts, 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM job_effects")
-            .fetch_one(jobs.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .expect("committed business effects"),
         1,
@@ -1854,7 +1862,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
     let jobs = open(pool, 1).await;
     let (proxy, worker) = proxied_pool(pool, 1).await;
     sqlx::query("CREATE TABLE job_effects (job_id uuid NOT NULL)")
-        .execute(jobs.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("the business-effects table");
     let gate = Arc::new(TransactionGateState {
@@ -1897,7 +1905,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
     .await;
     assert_eq!(proxy.fired(), Some(fault));
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
-        .fetch_one(jobs.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("business effects count");
     match fault {
@@ -1914,7 +1922,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
             let retried = completed(&jobs, &id).await;
             assert_eq!(retried.attempts, 2);
             let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM job_effects")
-                .fetch_one(jobs.as_sqlx())
+                .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
                 .await
                 .expect("retried business effects count");
             assert_eq!(effects, 1, "the rollback permits one later execution");
@@ -1957,8 +1965,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     let run = start(&jobs, gate_registry(Arc::clone(&gate)), 1);
     super::bounded("the gate handler starts", gate.entered.notified()).await;
 
-    let mut hold = locker
-        .as_sqlx()
+    let mut hold = infra_postgres::test_support::as_sqlx(&locker)
         .begin()
         .await
         .expect("the row-lock transaction begins");
@@ -1968,7 +1975,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
         .await
         .expect("the row is locked");
     gate.open.notify_one();
-    super::wait_for_lock_waiter(jobs.as_sqlx()).await;
+    super::wait_for_lock_waiter(infra_postgres::test_support::as_sqlx(&jobs)).await;
 
     let pending = must(
         jobs.in_tx(async |tx| -> Result<String, AttemptError> {
@@ -2089,7 +2096,7 @@ async fn stage_spent(pool: &Pool, payload: &str, summary: Option<&str>) -> Strin
     .bind(Probe::NAME.as_str())
     .bind(payload)
     .bind(summary)
-    .fetch_one(pool.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("a spent job");
     row.try_get("id").expect("id")
@@ -2416,7 +2423,7 @@ async fn x7_undecodable_payload_is_retryable_without_the_handler(pool: PgPool) {
          RETURNING id::text AS id",
     )
     .bind(Probe::NAME.as_str())
-    .fetch_one(jobs.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("the undecodable job");
     let id: String = row.try_get("id").expect("id");
@@ -2446,7 +2453,7 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
                 statement_timestamp() - interval '25 hours' \
          FROM generate_series(1, 1201) AS g",
     )
-    .execute(jobs.as_sqlx())
+    .execute(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("old completed rows");
     for kind in [Probe::NAME.as_str(), Stranded::NAME.as_str()] {
@@ -2456,14 +2463,14 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
         stage_live(&jobs, kind, false).await;
         stage_live(&jobs, kind, true).await;
     }
-    let before = super::job_count(jobs.as_sqlx()).await;
+    let before = super::job_count(infra_postgres::test_support::as_sqlx(&jobs)).await;
     let engine = Engine::new(
         jobs.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
         NonZeroU32::MIN,
     );
     let deleted = engine.remove_expired().await.expect("retention");
-    let after = super::job_count(jobs.as_sqlx()).await;
+    let after = super::job_count(infra_postgres::test_support::as_sqlx(&jobs)).await;
     assert_eq!(deleted, 1201);
     let scrape = recorder.handle().render();
     for line in [
@@ -2482,14 +2489,14 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
         "SELECT count(*) FROM background_jobs \
          WHERE state = 'completed' AND finished_at <= statement_timestamp() - interval '24 hours'",
     )
-    .fetch_one(jobs.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("old completed");
     let old_failed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM background_jobs \
          WHERE state = 'failed' AND finished_at <= statement_timestamp() - interval '7 days'",
     )
-    .fetch_one(jobs.as_sqlx())
+    .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
     .await
     .expect("old failed");
     assert_eq!(old_completed, 0);
@@ -2524,7 +2531,7 @@ async fn stage_terminal(
     .bind(state)
     .bind(reason)
     .bind(seconds_ago)
-    .execute(pool.as_sqlx())
+    .execute(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("a terminal row");
     assert_eq!(inserted.rows_affected(), 1);
@@ -2545,7 +2552,7 @@ async fn stage_live(pool: &Pool, kind: &str, running: bool) {
     };
     let inserted = sqlx::query(sql)
         .bind(kind)
-        .execute(pool.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("a live row");
     assert_eq!(inserted.rows_affected(), 1);
@@ -2554,7 +2561,7 @@ async fn stage_live(pool: &Pool, kind: &str, running: bool) {
 async fn count_state(pool: &Pool, state: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE state = $1")
         .bind(state)
-        .fetch_one(pool.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("a state count")
 }
@@ -2563,7 +2570,7 @@ async fn count_kind_state(pool: &Pool, kind: &str, state: &str) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM background_jobs WHERE kind = $1 AND state = $2")
         .bind(kind)
         .bind(state)
-        .fetch_one(pool.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(pool))
         .await
         .expect("a kind count")
 }
@@ -2864,7 +2871,7 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
 
     let statement_timeout: String =
         sqlx::query_scalar("SELECT current_setting('statement_timeout')")
-            .fetch_one(jobs.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .expect("a pool session after the cancelled retention");
     assert_eq!(statement_timeout, "8s");

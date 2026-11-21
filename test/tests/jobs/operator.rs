@@ -481,7 +481,7 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
         assert_eq!(error.sqlstate().as_deref(), Some("57014"));
         assert_eq!(stored(&pool, &target).await, before);
         let budget: String = sqlx::query_scalar("SHOW statement_timeout")
-            .fetch_one(jobs.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .unwrap();
         assert_eq!(
@@ -633,7 +633,10 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
         })
         .await;
     std::assert_matches!(result, Err(OperatorError::Stale));
-    assert_eq!(stored(jobs.as_sqlx(), &target).await, before);
+    assert_eq!(
+        stored(infra_postgres::test_support::as_sqlx(&jobs), &target).await,
+        before
+    );
     for fault in [Fault::DropBeforeForward, Fault::ForwardThenDrop] {
         let target = failed(&pool, Uuid::new_v4(), "uncertain").await;
         let before = stored(&pool, &target).await;

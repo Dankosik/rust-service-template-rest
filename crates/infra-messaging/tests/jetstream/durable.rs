@@ -325,7 +325,7 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
     publishes_elsewhere
         .register(&fixture.route, accept)
         .expect("fixture handler is registered");
-    messaging
+    let _consumer = messaging
         .consumer(publishes_elsewhere, &context(deadline(), &cancel))
         .await
         .expect("a publish-only route outside the filter does not refuse the consumer");

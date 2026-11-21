@@ -79,6 +79,14 @@ impl FromStr for ServiceName {
     }
 }
 
+impl TryFrom<&str> for ServiceName {
+    type Error = InvalidServiceName;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
 impl From<ServiceName> for Arc<str> {
     fn from(name: ServiceName) -> Self {
         name.0
@@ -143,6 +151,14 @@ impl FromStr for JwtType {
     }
 }
 
+impl TryFrom<&str> for JwtType {
+    type Error = InvalidJwtType;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
 #[display("{_0}")]
@@ -187,6 +203,14 @@ impl FromStr for KeyId {
     type Err = InvalidKeyId;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<&str> for KeyId {
+    type Error = InvalidKeyId;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::parse(value)
     }
 }

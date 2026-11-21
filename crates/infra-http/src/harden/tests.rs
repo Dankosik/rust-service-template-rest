@@ -623,7 +623,7 @@ async fn ready_control() -> health::ReadinessControl {
         .unwrap(),
     );
     let control = readiness.control();
-    readiness.prepare().await.unwrap().activate().unwrap();
+    let _refresher = readiness.prepare().await.unwrap().activate().unwrap();
     control
 }
 

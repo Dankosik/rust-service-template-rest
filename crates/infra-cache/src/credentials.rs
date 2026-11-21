@@ -9,9 +9,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use zeroize::{Zeroize as _, Zeroizing};
 
-use crate::error::ErrorType;
+use crate::ServerEndpoint;
+use crate::error::{ErrorType, StartErrorKind};
 use crate::observe::PASSWORD_REFRESHES_METRIC;
-use crate::{ServerEndpoint, StartError};
 
 const DEFAULT_USER: &str = "default";
 const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
@@ -41,10 +41,10 @@ pub(crate) enum ReadFailure {
 }
 
 impl PasswordFile {
-    pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, StartError> {
+    pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, StartErrorKind> {
         let content =
-            read_password_file(&path).map_err(|kind| StartError::PasswordFile { kind })?;
-        password_from(content).ok_or(StartError::PasswordFileEmpty)?;
+            read_password_file(&path).map_err(|kind| StartErrorKind::PasswordFile { kind })?;
+        password_from(content).ok_or(StartErrorKind::PasswordFileEmpty)?;
         Ok(Self {
             path,
             username: username

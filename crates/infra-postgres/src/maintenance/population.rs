@@ -34,6 +34,12 @@ impl PopulationName {
     }
 }
 
+impl std::borrow::Borrow<str> for PopulationName {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
 impl AsRef<str> for PopulationName {
     fn as_ref(&self) -> &str {
         self.0

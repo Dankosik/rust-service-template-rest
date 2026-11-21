@@ -8,10 +8,10 @@ mod probe;
 mod slots;
 #[cfg(test)]
 mod test_metrics;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod transaction;
 
-#[cfg(feature = "test-support")]
-pub const PASSWORD_REFRESH_INTERVAL: std::time::Duration = credentials::PASSWORD_REFRESH_INTERVAL;
 pub use dsn::{Dsn, DsnError, SslPolicy};
 pub use error::{failure_cause, is_transient, sqlstate};
 pub use observe::HISTOGRAMS;

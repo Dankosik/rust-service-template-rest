@@ -67,6 +67,7 @@ fn pull_delivery_bytes(
     .try_fold(payload_bytes, usize::checked_add)
 }
 
+#[must_use = "start Consumer to process messages"]
 #[derive(Debug)]
 pub struct Consumer {
     shared: Arc<Shared>,
@@ -156,6 +157,7 @@ impl ConsumerError {
     }
 }
 
+#[must_use = "await or join ConsumerHandle on shutdown"]
 #[derive(Debug)]
 pub struct ConsumerHandle {
     drain: CancellationToken,
@@ -261,7 +263,6 @@ impl Consumer {
         ConsumerProbe(Arc::downgrade(&self.durable_ready))
     }
 
-    #[must_use]
     pub fn start(self, cancel: &CancellationToken) -> ConsumerHandle {
         let drain = cancel.child_token();
         let abort = self.handler.abort.clone();
@@ -785,6 +786,8 @@ async fn release_message(
         () = &mut request => {}
     }
 }
+
+pub(crate) use delivery::HANDLER_DURATION_SECONDS;
 
 pub(crate) fn describe_metrics() {
     use metrics::describe_counter;

@@ -2,7 +2,6 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_jobs::operator::{self, OperatorError, RecoveryTarget};
 use infra_messaging::Messaging;
 use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, ReconcileOutcome, kinds};
-use infra_postgres::Pool;
 use integration_tests::{dsn_for, poll_until};
 use migrate::{MIGRATOR, RunError, RunOptions};
 use operation_context::OperationContext;
@@ -204,7 +203,10 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
     })
     .await
     .unwrap();
-    assert_eq!(outbox_count(jobs.as_sqlx()).await, 2);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+        2
+    );
     std::assert_matches!(
         jobs.in_tx(async |tx| operator::discard(tx, &alias_target).await)
             .await,
@@ -227,7 +229,9 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
         WAIT,
         POLL,
         async || {
-            (stored_job(jobs.as_sqlx(), &duplicate).await["state"] == "completed").then_some(())
+            (stored_job(infra_postgres::test_support::as_sqlx(&jobs), &duplicate).await["state"]
+                == "completed")
+                .then_some(())
         },
     )
     .await;
@@ -456,7 +460,7 @@ async fn upgrade_requeues_only_verified_transient_exhaustion_without_displacing_
     ] {
         assert_eq!(history[1][field], before[field], "archived {field}");
     }
-    let stale = Pool::from_test_pool(pool.clone())
+    let stale = infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx(async |tx| operator::redrive(tx, &old_target).await)
         .await;
     std::assert_matches!(stale, Err(OperatorError::Stale));

@@ -2,8 +2,8 @@ mod observe;
 mod policy;
 mod transport;
 
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -150,21 +150,6 @@ impl TlsError {
     pub(crate) fn new(source: BoxError) -> Self {
         Self { source }
     }
-
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub fn for_test(source: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        Self { source }
-    }
-}
-
-#[cfg(feature = "test-support")]
-#[derive(Debug, thiserror::Error)]
-pub enum TestBuildError {
-    #[error(transparent)]
-    InvalidOrigin(#[from] InvalidOrigin),
-    #[error(transparent)]
-    Tls(#[from] TlsError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -272,7 +257,7 @@ impl Client {
         Self::try_with_default_transport(policy::TargetOrigin::Https(origin), limits)
     }
 
-    fn try_with_default_transport(
+    pub(crate) fn try_with_default_transport(
         origin: policy::TargetOrigin,
         limits: Limits,
     ) -> Result<Self, TlsError> {
@@ -284,7 +269,7 @@ impl Client {
         ))
     }
 
-    fn with_transport(
+    pub(crate) fn with_transport(
         origin: policy::TargetOrigin,
         limits: Limits,
         tls: rustls::ClientConfig,
@@ -304,31 +289,6 @@ impl Client {
     pub fn with_trace_context(mut self) -> Self {
         self.propagate_trace_context = true;
         self
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn try_new_for_test_http(origin: &str, limits: Limits) -> Result<Self, TestBuildError> {
-        Self::try_with_default_transport(policy::admit_test_http_origin(origin)?, limits)
-            .map_err(TestBuildError::from)
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn try_new_for_test_https(
-        origin: Origin,
-        limits: Limits,
-        root_der: &[u8],
-        address: std::net::SocketAddr,
-    ) -> Result<Self, TestBuildError> {
-        if !address.ip().is_loopback() {
-            return Err(TestBuildError::InvalidOrigin(InvalidOrigin));
-        }
-        let tls = transport::tls_config_with_root(root_der)?;
-        Ok(Self::with_transport(
-            policy::TargetOrigin::Https(origin),
-            limits,
-            tls,
-            transport::Resolver::Fixture(transport::FixtureResolver::with_addresses(vec![address])),
-        ))
     }
 
     pub async fn execute(

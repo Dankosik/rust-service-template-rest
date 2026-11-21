@@ -254,7 +254,7 @@ fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
     let source = || Box::new(std::io::Error::other(PRIVATE_DETAIL));
     let build_failure = PreparationError::from(TransportBuildFailure::new(
         "token_url",
-        infra_outbound_http::TlsError::for_test(source()),
+        infra_outbound_http::test_support::tls_error(source()),
     ));
     assert!(
         build_failure
@@ -272,7 +272,7 @@ fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
         PRIVATE_DETAIL
     );
     let issuer_failure = DiscoveryError::from(TransportBuildFailure::issuer(
-        infra_outbound_http::TlsError::for_test(source()),
+        infra_outbound_http::test_support::tls_error(source()),
     ));
     assert!(issuer_failure.to_string().contains("for issuer"));
     assert_redacted(&issuer_failure, &[PRIVATE_DETAIL]);

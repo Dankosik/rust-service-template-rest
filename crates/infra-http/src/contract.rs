@@ -619,7 +619,6 @@ impl Application {
         Self(self.0.layer(axum::Extension(value)))
     }
 
-    #[must_use]
     pub fn serve(
         self,
         listener: infra_http_transport::BoundListener,

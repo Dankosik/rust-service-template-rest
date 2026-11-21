@@ -1,4 +1,3 @@
-#![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -90,7 +89,7 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> Pool {
 
 async fn replica(dsn: &Dsn) -> (Pool, Store) {
     let pool = template_pool(dsn, 3).await;
-    let store = Store::new(pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+    let store = Store::try_new(pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     (pool, store)
 }
 
@@ -426,7 +425,11 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(Pool::from_test_pool(pool.clone()), RETENTION).unwrap();
+    let store = Store::try_new(
+        infra_postgres::test_support::pool_from_sqlx(pool.clone()),
+        RETENTION,
+    )
+    .unwrap();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refusal = TerminalRefusal::capture(
         StatusCode::CONFLICT,
@@ -468,7 +471,7 @@ async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
         .unwrap();
     listener.listen(CHANNEL).await.unwrap();
     let producer = template_pool(&dsn_for(&pool).await, 1).await;
-    let store = Store::new(producer.clone(), RETENTION).unwrap();
+    let store = Store::try_new(producer.clone(), RETENTION).unwrap();
     let refusal = TerminalRefusal::capture(
         StatusCode::CONFLICT,
         &HeaderMap::new(),
@@ -501,7 +504,11 @@ async fn only_committed_command_work_wakes_listeners(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn disabling_terminal_writes_still_replays_live_refusals(pool: PgPool) {
     create_effects(&pool).await;
-    let store = Store::new(Pool::from_test_pool(pool.clone()), RETENTION).unwrap();
+    let store = Store::try_new(
+        infra_postgres::test_support::pool_from_sqlx(pool.clone()),
+        RETENTION,
+    )
+    .unwrap();
     let work = Work::default();
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
     let refusal = TerminalRefusal::capture(
@@ -801,7 +808,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
     create_effects(&pool).await;
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
     let retention = Duration::from_secs(2);
-    let store = Store::new(store_pool.clone(), retention).expect("retention fits PostgreSQL");
+    let store = Store::try_new(store_pool.clone(), retention).expect("retention fits PostgreSQL");
 
     for (key, delete_while_locked) in [(KEY, false), (OTHER_KEY, true)] {
         let scope = ScopeKey::new(caller(SUBJECT), key);
@@ -894,7 +901,8 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
     let dsn = dsn_for(&pool).await;
     let (proxy, proxied) = CommitProxy::start_for(&pool).await;
     let replay_pool = template_pool(&proxied, 1).await;
-    let replaying = Store::new(replay_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+    let replaying =
+        Store::try_new(replay_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     let (writer_pool, writer) = replica(&dsn).await;
     let original = success(r#"{"id":1}"#);
     let replacement = success(r#"{"id":2}"#);
@@ -931,7 +939,7 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
 async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPool) {
     create_effects(&pool).await;
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
-    let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789))
+    let store = Store::try_new(store_pool.clone(), Duration::new(3_600, 123_456_789))
         .expect("retention fits PostgreSQL");
     let record = success(r#"{"id":1}"#);
     let scope = ScopeKey::new(caller(SUBJECT), KEY);
@@ -1017,7 +1025,7 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
-    let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+    let store = Store::try_new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     seed(&pool, SEED_EXPIRED, 501).await;
     sqlx::query(
         "UPDATE http_idempotency_records SET expires_at = now() - interval '2 hours' \
@@ -1179,7 +1187,8 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
             .await
             .expect("the sole slot");
         let cancel = CancellationToken::new();
-        let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+        let store =
+            Store::try_new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
         let mut task = Box::pin(store.run_cleanup(cancel.clone()));
         assert!(futures_util::poll!(&mut task).is_pending());
         let initial = snapshot_gauges();

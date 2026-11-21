@@ -154,7 +154,7 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(5);
 
     fn config() -> WorkerConfig {
-        service_config::fixtures::worker(
+        service_config::test_support::worker(
             &[
                 ("APP__POSTGRES__ENABLED", "true"),
                 ("APP__POSTGRES__DSN", DSN),

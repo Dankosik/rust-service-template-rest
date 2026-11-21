@@ -551,8 +551,8 @@ mod tests {
     #[tokio::test]
     async fn a_caller_with_a_nul_is_refused_before_the_work_runs() {
         let pool =
-            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
-        let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
+        let store = Store::try_new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
             ("iss\0uer", "subject"),

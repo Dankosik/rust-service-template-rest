@@ -242,7 +242,7 @@ async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure
     let client = fixture
         .service_tokens(&[])
         .http(
-            Client::try_new_for_test_http(
+            infra_outbound_http::test_support::client_http(
                 fixture.origin.as_str(),
                 TOKEN_LIMITS
                     .with_operation_timeout(Duration::from_secs(10))
@@ -279,7 +279,7 @@ async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure
 #[tokio::test]
 async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline() {
     let fixture = Fixture::new().await;
-    let resource = Client::try_new_for_test_http(
+    let resource = infra_outbound_http::test_support::client_http(
         fixture.origin.as_str(),
         TOKEN_LIMITS.with_operation_timeout(Duration::MAX).unwrap(),
     )

@@ -192,6 +192,14 @@ impl FromStr for IssuerUrl {
     }
 }
 
+impl TryFrom<&str> for IssuerUrl {
+    type Error = InvalidUrl;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
 #[derive(Clone, Eq, derive_more::Debug)]
 #[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
@@ -242,6 +250,14 @@ impl FromStr for EndpointUrl {
     type Err = InvalidUrl;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl TryFrom<&str> for EndpointUrl {
+    type Error = InvalidUrl;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
         Self::parse(raw)
     }
 }

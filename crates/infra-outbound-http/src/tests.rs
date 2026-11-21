@@ -1090,7 +1090,8 @@ async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_bet
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
-    use crate::{Client, Origin, TestBuildError, TransportErrorKind};
+    use crate::test_support::{TestBuildError, client_http, client_https};
+    use crate::{Origin, TransportErrorKind};
 
     let material = TlsMaterial::new(FIXTURE_HOST);
     let origin = Origin::parse_https(&format!("https://{FIXTURE_HOST}")).expect("origin");
@@ -1099,7 +1100,7 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntls",
     )
     .await;
-    let client = Client::try_new_for_test_https(origin.clone(), limits(), &material.root, address)
+    let client = client_https(origin.clone(), limits(), &material.root, address)
         .expect("fixture HTTPS client");
     let response = client
         .execute(&default_context(), request())
@@ -1112,7 +1113,7 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let untrusted = TlsMaterial::new(FIXTURE_HOST);
-    let error = Client::try_new_for_test_https(origin.clone(), limits(), &untrusted.root, address)
+    let error = client_https(origin.clone(), limits(), &untrusted.root, address)
         .expect("client with different root")
         .execute(&default_context(), request())
         .await
@@ -1122,7 +1123,7 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
     server.await.expect("untrusted fixture TLS server joins");
 
     std::assert_matches!(
-        Client::try_new_for_test_https(
+        client_https(
             origin.clone(),
             limits(),
             &material.root,
@@ -1131,11 +1132,10 @@ async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
         Err(TestBuildError::InvalidOrigin(_))
     );
     std::assert_matches!(
-        Client::try_new_for_test_https(origin, limits(), b"not-der", address),
+        client_https(origin, limits(), b"not-der", address),
         Err(TestBuildError::Tls(_))
     );
-    let http_client =
-        Client::try_new_for_test_http("http://127.0.0.1:8080", limits()).expect("test http client");
+    let http_client = client_http("http://127.0.0.1:8080", limits()).expect("test http client");
     assert_eq!(http_client.host(), "127.0.0.1");
     assert_eq!(http_client.port(), 8080);
     assert_eq!(

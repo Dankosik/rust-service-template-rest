@@ -17,6 +17,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 
 use self::connection::Link;
+use self::error::StartErrorKind;
 pub use self::error::{MutationError, MutationFailure, OperationError, StartError, UnknownOutcome};
 pub use self::namespace::{CacheLookup, CacheNamespace, Namespace};
 pub use self::observe::HISTOGRAMS;
@@ -41,6 +42,7 @@ pub struct ClientCertificate {
     pub key_path: PathBuf,
 }
 
+#[must_use = "inspect close outcome to log or handle incomplete drain"]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseOutcome {
     Complete,
@@ -70,21 +72,22 @@ impl Cache {
         let command_timeout = options.command_timeout;
         let max_concurrency = options.max_concurrency;
         if !(1..tokio::sync::Semaphore::MAX_PERMITS).contains(&max_concurrency) {
-            return Err(StartError::InvalidConcurrency);
+            return Err(StartError(StartErrorKind::InvalidConcurrency));
         }
         let max_key_bytes = options.max_key_bytes;
         let max_value_bytes = options.max_value_bytes;
         let supported = 1..=shared_rules::cache::MAX_ENTRY_BYTES;
         if !supported.contains(&max_key_bytes) || !supported.contains(&max_value_bytes) {
-            return Err(StartError::InvalidSizeLimit);
+            return Err(StartError(StartErrorKind::InvalidSizeLimit));
         }
         let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             admission::admit(options)
         }));
         let admitted = tokio::time::timeout(ADMISSION_TIMEOUT, admission)
             .await
-            .map_err(|_| StartError::AdmissionTimedOut)?
-            .map_err(|_| StartError::ClientBuild)??;
+            .map_err(|_| StartError(StartErrorKind::AdmissionTimedOut))?
+            .map_err(|_| StartError(StartErrorKind::ClientBuild))?
+            .map_err(StartError)?;
         observe::describe();
         Ok(Self {
             max_key_bytes,

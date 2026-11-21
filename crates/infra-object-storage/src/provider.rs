@@ -2,7 +2,7 @@ use aws_sdk_s3::config::{SharedCredentialsProvider, SharedHttpClient};
 use url::Url;
 
 use crate::credentials::{AccessKey, AmazonCredentials};
-use crate::error::ConfigError;
+use crate::error::ConfigErrorKind;
 use crate::put_body::Payload;
 
 #[derive(Clone, derive_more::Debug)]
@@ -54,7 +54,7 @@ impl Provider {
         &self,
         region: &str,
         http_client: &SharedHttpClient,
-    ) -> Result<SharedCredentialsProvider, ConfigError> {
+    ) -> Result<SharedCredentialsProvider, ConfigErrorKind> {
         match self {
             Self::AmazonS3 { credentials, .. } => {
                 credentials.credentials_provider(region, http_client)
@@ -111,9 +111,12 @@ impl ResolvedProvider {
     }
 }
 
-pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvider, ConfigError> {
+pub(crate) fn resolve(
+    provider: &Provider,
+    bucket: &str,
+) -> Result<ResolvedProvider, ConfigErrorKind> {
     if !valid_bucket(bucket) {
-        return Err(ConfigError::Bucket);
+        return Err(ConfigErrorKind::Bucket);
     }
     match provider {
         Provider::AmazonS3 {
@@ -127,7 +130,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
                     .bytes()
                     .all(|byte| byte.is_ascii_digit())
             {
-                return Err(ConfigError::ExpectedBucketOwner);
+                return Err(ConfigErrorKind::ExpectedBucketOwner);
             }
             Ok(ResolvedProvider {
                 target: Target::AmazonS3 {
@@ -140,7 +143,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
         Provider::CloudflareR2 { endpoint, .. } => {
             let origin = parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?;
             if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
-                return Err(ConfigError::Endpoint);
+                return Err(ConfigErrorKind::Endpoint);
             }
             Ok(ResolvedProvider::at_endpoint(
                 origin_without_path(&origin),
@@ -154,7 +157,7 @@ pub(crate) fn resolve(provider: &Provider, bucket: &str) -> Result<ResolvedProvi
         } => {
             let origin = parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?;
             if origin.port().is_some() {
-                return Err(ConfigError::Endpoint);
+                return Err(ConfigErrorKind::Endpoint);
             }
             Ok(ResolvedProvider::at_endpoint(
                 origin_without_path(&origin),
@@ -191,13 +194,13 @@ enum OriginScheme {
     HttpOrHttps,
 }
 
-fn parse_endpoint_origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
+fn parse_endpoint_origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigErrorKind> {
     if shared_rules::uri::has_whitespace_or_control(endpoint)
         || shared_rules::uri::authority_has_userinfo(endpoint)
     {
-        return Err(ConfigError::Endpoint);
+        return Err(ConfigErrorKind::Endpoint);
     }
-    let url = Url::parse(endpoint).map_err(|_| ConfigError::Endpoint)?;
+    let url = Url::parse(endpoint).map_err(|_| ConfigErrorKind::Endpoint)?;
     let scheme_allowed = match scheme {
         OriginScheme::HttpsOnly => url.scheme() == "https",
         OriginScheme::HttpOrHttps => matches!(url.scheme(), "http" | "https"),
@@ -211,7 +214,7 @@ fn parse_endpoint_origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, Co
     if scheme_allowed && bare {
         Ok(url)
     } else {
-        Err(ConfigError::Endpoint)
+        Err(ConfigErrorKind::Endpoint)
     }
 }
 
@@ -219,11 +222,11 @@ fn origin_without_path(origin: &Url) -> String {
     origin[..url::Position::BeforePath].to_owned()
 }
 
-fn optional_region(region: Option<&str>, default: &'static str) -> Result<String, ConfigError> {
+fn optional_region(region: Option<&str>, default: &'static str) -> Result<String, ConfigErrorKind> {
     region.map_or_else(|| Ok(default.to_owned()), validate_region)
 }
 
-fn validate_region(region: &str) -> Result<String, ConfigError> {
+fn validate_region(region: &str) -> Result<String, ConfigErrorKind> {
     let valid = !region.is_empty()
         && region.len() <= 32
         && region
@@ -232,7 +235,7 @@ fn validate_region(region: &str) -> Result<String, ConfigError> {
     if valid {
         Ok(region.to_owned())
     } else {
-        Err(ConfigError::Region)
+        Err(ConfigErrorKind::Region)
     }
 }
 
@@ -264,7 +267,7 @@ fn valid_bucket(bucket: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AccessKey, AmazonCredentials, Provider, Target, UploadChecksum, resolve};
-    use crate::ConfigError;
+    use crate::ConfigErrorKind;
 
     const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
 
@@ -314,7 +317,7 @@ mod tests {
                 },
                 "evidence-bucket",
             );
-            assert_eq!(refused.unwrap_err(), ConfigError::Region, "{region:?}");
+            assert_eq!(refused.unwrap_err(), ConfigErrorKind::Region, "{region:?}");
         }
         for owner in ["", "12345678901", "1234567890123", "12345678901a"] {
             let refused = resolve(
@@ -327,7 +330,7 @@ mod tests {
             );
             assert_eq!(
                 refused.unwrap_err(),
-                ConfigError::ExpectedBucketOwner,
+                ConfigErrorKind::ExpectedBucketOwner,
                 "{owner:?}"
             );
         }
@@ -375,7 +378,11 @@ mod tests {
                 },
                 "evidence-bucket",
             );
-            assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+            assert_eq!(
+                refused.unwrap_err(),
+                ConfigErrorKind::Endpoint,
+                "{endpoint:?}"
+            );
         }
     }
 
@@ -412,7 +419,11 @@ mod tests {
                 },
                 "evidence-bucket",
             );
-            assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+            assert_eq!(
+                refused.unwrap_err(),
+                ConfigErrorKind::Endpoint,
+                "{endpoint:?}"
+            );
         }
         for region in ["", "AMS 1"] {
             let refused = resolve(
@@ -423,7 +434,7 @@ mod tests {
                 },
                 "evidence-bucket",
             );
-            assert_eq!(refused.unwrap_err(), ConfigError::Region, "{region:?}");
+            assert_eq!(refused.unwrap_err(), ConfigErrorKind::Region, "{region:?}");
         }
     }
 
@@ -504,7 +515,11 @@ mod tests {
                 },
                 "evidence-bucket",
             );
-            assert_eq!(refused.unwrap_err(), ConfigError::Endpoint, "{endpoint:?}");
+            assert_eq!(
+                refused.unwrap_err(),
+                ConfigErrorKind::Endpoint,
+                "{endpoint:?}"
+            );
         }
     }
 
@@ -533,7 +548,7 @@ mod tests {
         ] {
             assert_eq!(
                 resolve(&provider, bucket).unwrap_err(),
-                ConfigError::Bucket,
+                ConfigErrorKind::Bucket,
                 "{bucket:?}"
             );
         }

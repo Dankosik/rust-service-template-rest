@@ -13,12 +13,12 @@ use http_body_util::{BodyExt, StreamBody};
 use operation_context::{OperationContext, Stopped};
 use secrecy::SecretString;
 
-use crate::error::{Failure, LocalFailure};
+use crate::error::{ConfigErrorKind, Failure, LocalFailure};
 use crate::provider::{UploadChecksum, resolve};
 use crate::{
-    AccessKey, AmazonCredentials, ConfigError, ContentType, MutationError, MutationFailure,
-    ObjectKey, ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody,
-    PutOptions, UnknownOutcome,
+    AccessKey, AmazonCredentials, ContentType, MutationError, MutationFailure, ObjectKey,
+    ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody, PutOptions,
+    UnknownOutcome,
 };
 
 const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -52,8 +52,8 @@ fn credentials_are_required_and_redacted() {
         credentials: access_key(" ", "hunter2-secret"),
     });
     assert_eq!(
-        ObjectStorage::try_new(missing_id).unwrap_err(),
-        ConfigError::AccessKeyId
+        ObjectStorage::try_new(missing_id).unwrap_err().0,
+        ConfigErrorKind::AccessKeyId
     );
 
     let missing_secret = options(Provider::Local {
@@ -62,8 +62,8 @@ fn credentials_are_required_and_redacted() {
         credentials: access_key("AKIDEXAMPLE", ""),
     });
     assert_eq!(
-        ObjectStorage::try_new(missing_secret).unwrap_err(),
-        ConfigError::SecretAccessKey
+        ObjectStorage::try_new(missing_secret).unwrap_err().0,
+        ConfigErrorKind::SecretAccessKey
     );
 
     let credentials = default_access_key();
@@ -109,8 +109,8 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
         });
         refused.max_concurrency = max_concurrency;
         assert_eq!(
-            ObjectStorage::try_new(refused).unwrap_err(),
-            ConfigError::MaxConcurrency
+            ObjectStorage::try_new(refused).unwrap_err().0,
+            ConfigErrorKind::MaxConcurrency
         );
     }
 }

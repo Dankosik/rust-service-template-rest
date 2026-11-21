@@ -1,4 +1,3 @@
-#![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -23,9 +22,10 @@ use std::time::{Duration, Instant};
 use backon::{ConstantBuilder, Retryable};
 use commit_proxy::{Boundary, CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
+use infra_postgres::test_support::PASSWORD_REFRESH_INTERVAL;
 use infra_postgres::{
-    ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, Pool, PoolOptions,
-    PostgresProbe, SessionSettingsSource, SslPolicy, TxError, TxOptions, sqlstate,
+    ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, Pool, PoolOptions, PostgresProbe,
+    SessionSettingsSource, SslPolicy, TxError, TxOptions, sqlstate,
 };
 use integration_tests::{
     DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, propagate_join_panic, url_for,
@@ -127,7 +127,7 @@ async fn order_served_by_a_one_connection_pool(
     for task in [first, early, late] {
         task.await.unwrap();
     }
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
     std::mem::take(&mut *served.lock().unwrap())
 }
 
@@ -160,9 +160,11 @@ async fn ipv6_literal_reaches_the_admitted_database(pool: PgPool) {
     let work = async {
         let connected = template_pool(&dsn, 1).await;
         let result = sqlx::query_scalar::<_, String>("SELECT current_database()")
-            .fetch_one(connected.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&connected))
             .await;
-        connected.as_sqlx().close().await;
+        infra_postgres::test_support::as_sqlx(&connected)
+            .close()
+            .await;
         result
     };
     let relay = async {
@@ -285,7 +287,7 @@ async fn show(pool: &Pool, setting: &'static str) -> String {
         other => panic!("unexpected setting {other}"),
     };
     sqlx::query_scalar(sql)
-        .fetch_one(pool.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(pool))
         .await
         .unwrap()
 }
@@ -441,14 +443,17 @@ async fn pool_default_isolation_survives_replacement_and_explicit_transactions_o
     let ours = pool_with_default_isolation(&dsn, 1, Isolation::ReadCommitted).await;
 
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
-    let physical_connection = ours.as_sqlx().acquire().await.unwrap();
+    let physical_connection = infra_postgres::test_support::as_sqlx(&ours)
+        .acquire()
+        .await
+        .unwrap();
     physical_connection.close().await.unwrap();
 
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
     assert_ne!(
@@ -481,7 +486,7 @@ async fn an_idle_connection_the_server_closed_is_replaced_before_use(pool: PgPoo
     let dsn = dsn_for(&pool).await;
     let ours = template_pool(&dsn, 1).await;
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
 
@@ -494,7 +499,7 @@ async fn an_idle_connection_the_server_closed_is_replaced_before_use(pool: PgPoo
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .expect("the idle ping discards the closed connection");
     assert_ne!(first_pid, second_pid);
@@ -506,7 +511,7 @@ async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquir
 ) {
     let (proxy, ours) = proxied_pool(&pool, 1).await;
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
 
@@ -516,13 +521,13 @@ async fn an_idle_connection_whose_peer_went_silent_is_replaced_inside_the_acquir
 
     let started = Instant::now();
     let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .expect("the bounded idle ping discards the silent connection");
     assert_ne!(first_pid, second_pid);
     assert!(started.elapsed() >= Duration::from_millis(1900));
     assert!(started.elapsed() < ACQUIRE_TIMEOUT);
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
     proxy.shutdown().await;
 }
 
@@ -539,7 +544,7 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
     ] {
         let (proxy, ours) = proxied_pool(&pool, 1).await;
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(ours.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
             .await
             .unwrap();
         let mut pending = Box::pin(async {
@@ -550,7 +555,7 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
                 );
                 sqlx::query("INSERT INTO pool_return_finality VALUES ($1)")
                     .bind(boundary)
-                    .execute(ours.as_sqlx())
+                    .execute(infra_postgres::test_support::as_sqlx(&ours))
                     .await?;
                 return Ok::<(), AppError>(());
             }
@@ -598,19 +603,24 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
 
         wait_for_slot_reclamation(&ours).await;
         let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(ours.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
             .await
             .expect("later ordinary work succeeds with the same one-slot pool");
         assert_ne!(first_pid, second_pid, "{boundary}");
         let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(ours.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
             .await
             .unwrap();
         assert_eq!(
             reused_pid, second_pid,
             "healthy replacement remains reusable"
         );
-        assert_eq!(ours.as_sqlx().options().get_max_connections(), 1);
+        assert_eq!(
+            infra_postgres::test_support::as_sqlx(&ours)
+                .options()
+                .get_max_connections(),
+            1
+        );
         let visible: i64 =
             sqlx::query_scalar("SELECT count(*) FROM pool_return_finality WHERE id = $1")
                 .bind(boundary)
@@ -623,7 +633,7 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
             "server visibility is independent of cancelled client work at {boundary}"
         );
         assert!(PostgresProbe::new(ours.clone()).check().await.is_ok());
-        ours.as_sqlx().close().await;
+        infra_postgres::test_support::as_sqlx(&ours).close().await;
         proxy.shutdown().await;
     }
 }
@@ -632,7 +642,10 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
 async fn a_successful_statement_still_has_a_bounded_silent_return(pool: PgPool) {
     let (proxy, ours) = proxied_pool(&pool, 1).await;
     for _ in 0..2 {
-        let mut conn = ours.as_sqlx().acquire().await.unwrap();
+        let mut conn = infra_postgres::test_support::as_sqlx(&ours)
+            .acquire()
+            .await
+            .unwrap();
         let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *conn)
             .await
@@ -641,14 +654,19 @@ async fn a_successful_statement_still_has_a_bounded_silent_return(pool: PgPool) 
         drop(conn);
         wait_for_slot_reclamation(&ours).await;
         let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(ours.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
             .await
             .unwrap();
         assert_ne!(first_pid, second_pid);
-        assert_eq!(ours.as_sqlx().options().get_max_connections(), 1);
+        assert_eq!(
+            infra_postgres::test_support::as_sqlx(&ours)
+                .options()
+                .get_max_connections(),
+            1
+        );
         wait_for_idle(&ours).await;
     }
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
     proxy.shutdown().await;
 }
 
@@ -671,38 +689,44 @@ async fn a_cancelled_readiness_ping_releases_its_silent_connection(pool: PgPool)
     );
     assert_eq!(
         sqlx::query_scalar::<_, i32>("SELECT 42")
-            .fetch_one(ours.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
             .await
             .unwrap(),
         42
     );
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
     proxy.shutdown().await;
 }
 
 #[sqlx::test(migrations = false)]
 async fn cancelling_an_acquire_wait_preserves_capacity_and_healthy_reuse(pool: PgPool) {
     let ours = template_pool(&dsn_for(&pool).await, 1).await;
-    let mut held = ours.as_sqlx().acquire().await.unwrap();
+    let mut held = infra_postgres::test_support::as_sqlx(&ours)
+        .acquire()
+        .await
+        .unwrap();
     let before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *held)
         .await
         .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), ours.as_sqlx().acquire())
-            .await
-            .is_err()
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            infra_postgres::test_support::as_sqlx(&ours).acquire()
+        )
+        .await
+        .is_err()
     );
     drop(held);
     let after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
     assert_eq!(
         before, after,
         "a cancelled waiter does not discard a healthy return"
     );
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -746,7 +770,7 @@ async fn budgets_the_server_carries_are_verified_when_the_pool_opens(pool: PgPoo
         show(&ours, "idle_in_transaction_session_timeout").await,
         "8s"
     );
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
 
     alter_database(&pool, "default_transaction_isolation = 'serializable'").await;
     let isolation = pool_with_server_budgets(&dsn, Isolation::ReadCommitted)
@@ -873,7 +897,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     );
     let current_user = || async {
         sqlx::query_scalar::<_, String>("SELECT current_user")
-            .fetch_one(ours.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
             .await
     };
     assert_eq!(current_user().await.unwrap(), role);
@@ -884,7 +908,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     .execute(&pool)
     .await
     .unwrap();
-    ours.as_sqlx()
+    infra_postgres::test_support::as_sqlx(&ours)
         .acquire()
         .await
         .unwrap()
@@ -913,7 +937,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
 
     cancel.cancel();
     refresh.await.unwrap();
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
     sqlx::query(AssertSqlSafe(format!("DROP ROLE {role:?}")))
         .execute(&pool)
         .await
@@ -927,7 +951,10 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
     let events = PoolEvents::default();
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     async {
-        let held = ours.as_sqlx().acquire().await.unwrap();
+        let held = infra_postgres::test_support::as_sqlx(&ours)
+            .acquire()
+            .await
+            .unwrap();
         let started = Instant::now();
         let (transaction, history, readiness) = tokio::join!(
             ours.in_tx(async |_tx| Ok::<_, AppError>(())),
@@ -974,7 +1001,10 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
         drop(held);
         wait_for_idle(&ours).await;
 
-        let held = ours.as_sqlx().acquire().await.unwrap();
+        let held = infra_postgres::test_support::as_sqlx(&ours)
+            .acquire()
+            .await
+            .unwrap();
         let release = async {
             tokio::time::sleep(Duration::from_millis(1100)).await;
             drop(held);
@@ -1018,7 +1048,7 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
             events.take().is_empty(),
             "execution failure is not an acquire timeout"
         );
-        ours.as_sqlx().close().await;
+        infra_postgres::test_support::as_sqlx(&ours).close().await;
         std::assert_matches!(
             ours.acquire("closed diagnostic").await,
             Err(sqlx::Error::PoolClosed)
@@ -1054,7 +1084,10 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     let reader = readiness.control().reader();
     let refresher = readiness.prepare().await.unwrap().activate().unwrap();
     assert!(reader.verdict().is_ok());
-    let mut held = ours.as_sqlx().acquire().await.unwrap();
+    let mut held = infra_postgres::test_support::as_sqlx(&ours)
+        .acquire()
+        .await
+        .unwrap();
     let events = PoolEvents::default();
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let cancel = CancellationToken::new();
@@ -1114,7 +1147,12 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
                 .iter()
                 .any(|event| event["message"] == "readiness_recovered")
         );
-        assert_eq!(ours.as_sqlx().options().get_max_connections(), 1);
+        assert_eq!(
+            infra_postgres::test_support::as_sqlx(&ours)
+                .options()
+                .get_max_connections(),
+            1
+        );
         println!(
             "responsive saturation: readiness lost after {lost_after:?}; useful work and readiness recovered {:?} after release; pool max=1",
             released.elapsed()
@@ -1126,7 +1164,7 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     }
     .with_subscriber(events.subscriber())
     .await;
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -1134,7 +1172,7 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
     pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
         .await
         .unwrap();
-    let ours = Pool::from_test_pool(pool.clone());
+    let ours = infra_postgres::test_support::pool_from_sqlx(pool.clone());
 
     let inserted: Result<u64, AppError> = ours
         .in_tx(async |tx| {
@@ -1176,7 +1214,7 @@ async fn later_locked_work_consumes_the_deadline_and_restores_server_settings(po
         .await
         .unwrap();
     let session: (i32, i32) = sqlx::query_as(SETTINGS)
-        .fetch_one(writer.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&writer))
         .await
         .unwrap();
     assert_eq!(session.1, 4000);
@@ -1196,7 +1234,7 @@ async fn later_locked_work_consumes_the_deadline_and_restores_server_settings(po
             "active limit was {effective_ms} ms"
         );
         let after_commit: (i32, i32) = sqlx::query_as(SETTINGS)
-            .fetch_one(writer.as_sqlx())
+            .fetch_one(infra_postgres::test_support::as_sqlx(&writer))
             .await
             .unwrap();
         assert_eq!(session, after_commit);
@@ -1228,7 +1266,7 @@ async fn later_locked_work_consumes_the_deadline_and_restores_server_settings(po
     std::assert_matches!(expired, Err(AppError::Deadline(_)));
     holder.rollback().await.unwrap();
     let restored: (i32, i32) = sqlx::query_as(SETTINGS)
-        .fetch_one(writer.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&writer))
         .await
         .unwrap();
     assert_eq!(session, restored);
@@ -1237,7 +1275,7 @@ async fn later_locked_work_consumes_the_deadline_and_restores_server_settings(po
         .await
         .unwrap();
     assert_eq!(effects, [] as [i32; 0]);
-    writer.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&writer).close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -1245,7 +1283,7 @@ async fn a_budgeted_attempt_rejects_multi_statement_sql_and_an_expired_commit(po
     use tokio::time::Instant;
 
     pool.execute("CREATE TABLE effects (id int)").await.unwrap();
-    let ours = Pool::from_test_pool(pool.clone());
+    let ours = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let options = TxOptions::default();
     let multiple = ours
         .in_tx_with_deadline(
@@ -1308,7 +1346,7 @@ async fn a_finished_transaction_returns_its_connection_outside_any_transaction(p
         })
         .await;
     std::assert_matches!(failed, Err(AppError::Business), "{failed:?}");
-    ours.as_sqlx()
+    infra_postgres::test_support::as_sqlx(&ours)
         .execute("INSERT INTO t VALUES (4)")
         .await
         .unwrap();
@@ -1325,7 +1363,7 @@ async fn a_savepoint_inside_the_transaction_contains_an_expected_failure(pool: P
     pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
         .await
         .unwrap();
-    let result: Result<(), AppError> = Pool::from_test_pool(pool.clone())
+    let result: Result<(), AppError> = infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx(async |tx| {
             tx.execute("INSERT INTO t VALUES (1)").await?;
             let mut savepoint = tx.connection().begin().await?;
@@ -1352,7 +1390,7 @@ async fn a_commit_the_server_rejects_is_commit_failed(pool: PgPool) {
     )
     .await
     .unwrap();
-    let result: Result<(), AppError> = Pool::from_test_pool(pool.clone())
+    let result: Result<(), AppError> = infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx(async |tx| {
             tx.execute("INSERT INTO t VALUES (1, 1), (2, 1)").await?;
             Ok(())
@@ -1376,7 +1414,7 @@ async fn a_swallowed_statement_failure_is_commit_failed_not_success(pool: PgPool
     pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
         .await
         .unwrap();
-    let result: Result<(), AppError> = Pool::from_test_pool(pool.clone())
+    let result: Result<(), AppError> = infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx(async |tx| {
             tx.execute("INSERT INTO t VALUES (1)").await?;
             let _ = tx.execute("INSERT INTO t VALUES (1)").await;
@@ -1401,7 +1439,7 @@ async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: P
     pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
         .await
         .unwrap();
-    let ours = Pool::from_test_pool(pool.clone());
+    let ours = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let result: Result<(), AppError> = ours
         .in_tx(async |tx| {
             tx.execute("INSERT INTO t VALUES (1)").await?;
@@ -1449,7 +1487,7 @@ async fn a_serialization_failure_reaches_the_caller_with_its_sqlstate(pool: PgPo
         .await
         .unwrap();
 
-    let ours = Pool::from_test_pool(pool.clone());
+    let ours = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     let other = ours.clone();
     let result: Result<(), AppError> = ours
         .in_tx_with(
@@ -1493,7 +1531,7 @@ async fn a_serialization_failure_reaches_the_caller_with_its_sqlstate(pool: PgPo
 
 #[sqlx::test(migrations = false)]
 async fn every_transaction_option_reaches_the_server(pool: PgPool) {
-    let ours = Pool::from_test_pool(pool.clone());
+    let ours = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     for (isolation, read_only, expected) in [
         (Isolation::ServerDefault, false, ("read committed", "off")),
         (Isolation::ServerDefault, true, ("read committed", "on")),
@@ -1533,7 +1571,7 @@ async fn every_transaction_option_reaches_the_server(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn a_read_only_transaction_refuses_writes(pool: PgPool) {
     pool.execute("CREATE TABLE t (id int)").await.unwrap();
-    let result: Result<(), AppError> = Pool::from_test_pool(pool.clone())
+    let result: Result<(), AppError> = infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx_with(
             TxOptions {
                 isolation: Isolation::ReadCommitted,
@@ -1575,7 +1613,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     wait_for_slot_reclamation(&proxied).await;
 
     sqlx::query("INSERT INTO pending_begin_visibility VALUES (1)")
-        .execute(proxied.as_sqlx())
+        .execute(infra_postgres::test_support::as_sqlx(&proxied))
         .await
         .unwrap();
     let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_begin_visibility")
@@ -1589,7 +1627,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     proxy.release_ready();
 
     let session_before: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(proxied.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&proxied))
         .await
         .unwrap();
     let options: Result<(String, String), AppError> = proxied
@@ -1614,7 +1652,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
         ("serializable".to_owned(), "on".to_owned())
     );
     let session_after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(proxied.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&proxied))
         .await
         .unwrap();
     assert_eq!(
@@ -1677,7 +1715,7 @@ async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_ca
                 .await
                 .unwrap();
         assert_eq!(written, commit, "cleanup does not change transaction truth");
-        ours.as_sqlx().close().await;
+        infra_postgres::test_support::as_sqlx(&ours).close().await;
         proxy.shutdown().await;
     }
 }
@@ -1717,7 +1755,7 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
     let repeated = migrate::run(&MIGRATOR, &options(&dsn)).await.unwrap();
     assert_eq!(repeated.before, target);
     assert_eq!(repeated.applied, [] as [i64; 0]);
-    let checked = Pool::from_test_pool(pool.clone());
+    let checked = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     assert_eq!(migrate::verify_history(&checked).await, Ok(()));
 
     let newer = target.unwrap_or(0) + 1;
@@ -1738,7 +1776,7 @@ async fn the_embedded_set_runs_on_an_empty_database(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn history_admission_refuses_missing_bookkeeping_without_creating_it(pool: PgPool) {
     assert_eq!(
-        migrate::verify_history(&Pool::from_test_pool(pool.clone())).await,
+        migrate::verify_history(&infra_postgres::test_support::pool_from_sqlx(pool.clone())).await,
         Err(HistoryError::Pending)
     );
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
@@ -1766,9 +1804,11 @@ async fn history_refusals_identify_permissions_deadlines_and_divergent_versions(
         .await
         .unwrap();
     assert_eq!(
-        migrate::verify_history(&Pool::from_test_pool(restricted.clone()))
-            .with_subscriber(subscriber.clone())
-            .await,
+        migrate::verify_history(&infra_postgres::test_support::pool_from_sqlx(
+            restricted.clone()
+        ))
+        .with_subscriber(subscriber.clone())
+        .await,
         Err(HistoryError::Unavailable)
     );
     restricted.close().await;
@@ -1780,7 +1820,7 @@ async fn history_refusals_identify_permissions_deadlines_and_divergent_versions(
     tx.execute("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
         .await
         .unwrap();
-    let checked = Pool::from_test_pool(pool.clone());
+    let checked = infra_postgres::test_support::pool_from_sqlx(pool.clone());
     assert_eq!(
         migrate::verify_history(&checked)
             .with_subscriber(subscriber.clone())
@@ -1851,7 +1891,7 @@ async fn history_admission_reports_a_table_outside_search_path(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(
-        migrate::verify_history(&Pool::from_test_pool(hidden)).await,
+        migrate::verify_history(&infra_postgres::test_support::pool_from_sqlx(hidden)).await,
         Err(HistoryError::NotVisible)
     );
 }
@@ -2257,7 +2297,7 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
     assert_eq!(dsn.host(), "localhost");
     let ours = template_pool(&dsn, 1).await;
     let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
     wait_for_idle(&ours).await;
@@ -2266,11 +2306,11 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
         .await
         .unwrap();
     let retained_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
     assert_eq!(retained_pid, first_pid);
-    ours.as_sqlx()
+    infra_postgres::test_support::as_sqlx(&ours)
         .acquire()
         .await
         .unwrap()
@@ -2278,7 +2318,7 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
         .await
         .unwrap();
     let invalid = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await;
     assert!(
         invalid
@@ -2294,7 +2334,7 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
     let replacement = PostgresTlsRelay::start(listener, target, second.acceptor);
     tokio::fs::write(&root_file, &first.root).await.unwrap();
     let untrusted = sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await;
     assert!(
         untrusted
@@ -2304,13 +2344,18 @@ async fn same_pool_redials_replacement_ip_and_rereads_tls_roots(pool: PgPool) {
     );
     tokio::fs::write(&root_file, &second.root).await.unwrap();
     let replacement_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(ours.as_sqlx())
+        .fetch_one(infra_postgres::test_support::as_sqlx(&ours))
         .await
         .unwrap();
     assert_ne!(replacement_pid, first_pid);
-    assert_eq!(ours.as_sqlx().options().get_max_connections(), 1);
+    assert_eq!(
+        infra_postgres::test_support::as_sqlx(&ours)
+            .options()
+            .get_max_connections(),
+        1
+    );
     assert!(PostgresProbe::new(ours.clone()).check().await.is_ok());
     assert!(!replacement.server_names.lock().unwrap().is_empty());
-    ours.as_sqlx().close().await;
+    infra_postgres::test_support::as_sqlx(&ours).close().await;
     replacement.stop().await;
 }

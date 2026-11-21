@@ -31,6 +31,7 @@ pub use messaging::{
     CloseOutcome, ConsumerOptions, Credentials, Messaging, MessagingOptions, MessagingStartup,
     TransportSecurity,
 };
+pub use observe::HISTOGRAMS;
 pub use operation_context::{Deadline, OperationContext};
 pub use prepared::PreparedEvent;
 pub use probe::MessagingProbe;

@@ -422,7 +422,7 @@ mod tests {
     async fn an_exhausted_attempt_answers_unavailable_without_waiting_for_acquisition() {
         use futures_util::FutureExt as _;
 
-        let pool = infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let budget = Duration::from_millis(200);
         for elapsed in [Duration::from_millis(100), Duration::from_millis(101)] {
@@ -430,7 +430,7 @@ mod tests {
                 .checked_sub(elapsed)
                 .expect("the deadline origin fits");
             let attempt = Attempt {
-                store: Store::new(pool.clone(), Duration::from_mins(1))
+                store: Store::try_new(pool.clone(), Duration::from_mins(1))
                     .expect("retention fits PostgreSQL"),
                 scope: scope(),
                 fingerprint: RequestFingerprint::from_bytes([9; 32]),

@@ -66,7 +66,8 @@ mod tests {
                 ("APP__INBOUND_WEBHOOKS__SECRETS__B", second_key),
             ])
         };
-        let pool = Pool::connect_lazy_for_test("postgres://127.0.0.1:1/app").unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/app").unwrap();
         let independent = config_for("AgICAgICAgICAgICAgICAgICAgICAgIC");
         assert!(prepare(&independent, Some(&pool)).is_ok());
         let overlap = config_for("whsec_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB");

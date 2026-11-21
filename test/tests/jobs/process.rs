@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use async_nats::jetstream::{self, stream};
 // template:end outbox:test-jobs-process-nats-imports-2
 use infra_jobs::{JobKind, enqueue};
-use infra_postgres::{Pool, TxError};
+use infra_postgres::TxError;
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use integration_tests::poll_until;
 use nix::sys::signal::{Signal, kill};
@@ -550,7 +550,7 @@ async fn prepare(pool: &PgPool) {
 }
 
 async fn enqueue_committed(pool: &PgPool, action: ProbeAction) -> String {
-    let id = Pool::from_test_pool(pool.clone())
+    let id = infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx(async |tx| -> Result<_, TxError> {
             Ok(enqueue(tx, &Probe { action }).await.expect("enqueue"))
         })
@@ -773,7 +773,7 @@ async fn outbox_age_reports_deferred_and_blocked_events_through_broker_refusal(p
         )
         .unwrap()
         .for_outbox(uuid::NonNilUuid::new(uuid::Uuid::from_u128(1)).unwrap());
-    Pool::from_test_pool(pool.clone())
+    infra_postgres::test_support::pool_from_sqlx(pool.clone())
         .in_tx(async |tx| -> Result<(), TxError> {
             for (version, name) in [(1, "first"), (2, "second")] {
                 let event = publication
