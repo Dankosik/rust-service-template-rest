@@ -12,8 +12,8 @@ use super::*;
 use crate::observe::{Histograms, Operation};
 use crate::tests::{Records, in_tracing_child};
 
-fn local_context(timeout: Duration) -> CallContext {
-    CallContext::new(&OperationContext::unbounded(), timeout)
+fn local_context(timeout: Duration) -> BoundedContext {
+    OperationContext::unbounded().bounded(timeout)
 }
 
 fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>) {
@@ -343,7 +343,7 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
             ByteStream::from_body_1_x(body),
             guard,
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            CallContext::new(&context, storage_timeout),
+            context.bounded(storage_timeout),
         );
         if expected == ObjectStorageError::Stopped(Stopped::Cancelled) {
             context.cancel();
@@ -422,7 +422,7 @@ async fn a_provider_chunk_or_eof_at_the_original_cutoff_is_not_delivered() {
             ByteStream::from_body_1_x(LateChunk { cutoff, chunk }),
             OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None),
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            CallContext::new(&context, Duration::from_mins(1)),
+            context.bounded(Duration::from_mins(1)),
         );
         assert_eq!(
             download.next_chunk().await,

@@ -1,6 +1,4 @@
-use operation_context::Stopped;
-
-use crate::namespace::Operation;
+use operation_context::{BoundedStop, Stopped};
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum StartError {
@@ -127,62 +125,95 @@ impl UnknownCause {
     }
 }
 
+impl From<BoundedStop> for UnknownCause {
+    fn from(stop: BoundedStop) -> Self {
+        match stop {
+            BoundedStop::Parent(stopped) => Self::Stopped(stopped),
+            BoundedStop::Timeout => Self::Failed(ErrorType::Timeout),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-pub(crate) enum Refusal {
+pub(crate) enum ReadFailure {
     Cause(UnknownCause),
     PermissionDenied,
-    InvalidTtl,
     ValueTooLarge,
 }
 
-impl Refusal {
-    fn operation_error(self) -> OperationError {
-        match self {
-            Self::Cause(cause) => cause.operation_error(),
-            Self::ValueTooLarge => OperationError::ValueTooLarge,
-            Self::PermissionDenied | Self::InvalidTtl => OperationError::Unavailable,
+impl ReadFailure {
+    pub(crate) fn from_reply(error: &redis::RedisError, stopped: Option<UnknownCause>) -> Self {
+        if error.code() == Some("NOPERM") {
+            return stopped.map_or(Self::PermissionDenied, Self::Cause);
+        }
+        Self::Cause(stopped.unwrap_or_else(|| UnknownCause::Failed(error_type(error))))
+    }
+}
+
+impl From<ReadFailure> for OperationError {
+    fn from(failure: ReadFailure) -> Self {
+        match failure {
+            ReadFailure::Cause(cause) => cause.operation_error(),
+            ReadFailure::ValueTooLarge => Self::ValueTooLarge,
+            ReadFailure::PermissionDenied => Self::Unavailable,
         }
     }
+}
 
+#[derive(Clone, Copy)]
+pub(crate) enum MutationKind {
+    Set,
+    Delete,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MutationRefusal {
+    Cause(UnknownCause),
+    PermissionDenied,
+    InvalidTtl,
+}
+
+impl MutationRefusal {
     fn mutation_failure(self) -> MutationFailure {
         match self {
             Self::Cause(cause) => cause.mutation_failure(),
             Self::InvalidTtl => MutationFailure::InvalidTtl,
-            Self::ValueTooLarge => MutationFailure::ValueTooLarge,
             Self::PermissionDenied => MutationFailure::Unavailable,
         }
     }
 }
 
-impl From<UnknownCause> for Refusal {
+impl From<UnknownCause> for MutationRefusal {
     fn from(cause: UnknownCause) -> Self {
         Self::Cause(cause)
     }
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum CommandError {
-    NotApplied(Refusal),
+pub(crate) enum MutationCommandError {
+    NotApplied(MutationRefusal),
     OutcomeUnknown(UnknownCause),
 }
 
-impl CommandError {
+impl MutationCommandError {
     pub(crate) fn from_reply(
         error: &redis::RedisError,
-        operation: Operation,
+        kind: MutationKind,
         stopped: Option<UnknownCause>,
     ) -> Self {
         let code = error.code();
-        if matches!(operation, Operation::Set)
+        if matches!(kind, MutationKind::Set)
             && code == Some("ERR")
             && error.detail().is_some_and(|detail| {
                 detail.eq_ignore_ascii_case("invalid expire time in 'set' command")
             })
         {
-            return Self::NotApplied(Refusal::InvalidTtl);
+            return Self::NotApplied(MutationRefusal::InvalidTtl);
         }
         if code == Some("NOPERM") {
-            return Self::NotApplied(stopped.map_or(Refusal::PermissionDenied, Refusal::from));
+            return Self::NotApplied(
+                stopped.map_or(MutationRefusal::PermissionDenied, MutationRefusal::from),
+            );
         }
         let cause = stopped.unwrap_or_else(|| UnknownCause::Failed(error_type(error)));
         match code {
@@ -195,33 +226,16 @@ impl CommandError {
     }
 }
 
-impl From<CommandError> for OperationError {
-    fn from(error: CommandError) -> Self {
+impl From<MutationCommandError> for MutationError {
+    fn from(error: MutationCommandError) -> Self {
         match error {
-            CommandError::NotApplied(refusal) => refusal.operation_error(),
-            CommandError::OutcomeUnknown(cause) => cause.operation_error(),
+            MutationCommandError::NotApplied(refusal) => {
+                Self::NotApplied(refusal.mutation_failure())
+            }
+            MutationCommandError::OutcomeUnknown(cause) => {
+                Self::OutcomeUnknown(cause.unknown_outcome())
+            }
         }
-    }
-}
-
-impl From<CommandError> for MutationError {
-    fn from(error: CommandError) -> Self {
-        match error {
-            CommandError::NotApplied(refusal) => Self::NotApplied(refusal.mutation_failure()),
-            CommandError::OutcomeUnknown(cause) => Self::OutcomeUnknown(cause.unknown_outcome()),
-        }
-    }
-}
-
-impl From<ErrorType> for CommandError {
-    fn from(error: ErrorType) -> Self {
-        Self::NotApplied(Refusal::Cause(UnknownCause::Failed(error)))
-    }
-}
-
-impl From<Refusal> for CommandError {
-    fn from(refusal: Refusal) -> Self {
-        Self::NotApplied(refusal)
     }
 }
 

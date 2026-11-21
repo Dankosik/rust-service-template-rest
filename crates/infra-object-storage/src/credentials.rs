@@ -93,10 +93,11 @@ fn workload_identity(
                 .build(),
         ));
     }
+    #[expect(clippy::expect_used, reason = "constant IPv4 IMDS URI")]
     let instance_metadata = aws_config::imds::Client::builder()
         .configure(&config)
         .endpoint(INSTANCE_METADATA_ENDPOINT)
-        .map_err(|_| ConfigError::Credentials)?
+        .expect("valid constant IPv4 IMDS URI")
         .build();
     Ok(CredentialsProviderChain::first_try(
         "EcsContainer",

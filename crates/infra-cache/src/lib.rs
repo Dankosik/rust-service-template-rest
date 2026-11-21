@@ -93,7 +93,7 @@ impl Cache {
         })
     }
 
-    pub async fn close(&self, deadline: tokio::time::Instant) -> CloseOutcome {
-        self.link.close(deadline).await
+    pub async fn close(&self, budget: Duration) -> CloseOutcome {
+        self.link.close(budget).await
     }
 }

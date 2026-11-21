@@ -7,8 +7,7 @@ use metrics::{Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
 
-use crate::error::{CommandError, ErrorType, Refusal, UnknownCause};
-use crate::namespace::Operation;
+use crate::error::{ErrorType, MutationCommandError, MutationRefusal, ReadFailure, UnknownCause};
 use crate::{Namespace, ServerEndpoint};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
@@ -46,11 +45,35 @@ impl LocalSizeRefusal {
     }
 }
 
-fn operation_label(operation: Operation) -> &'static str {
-    match operation {
-        Operation::Get => "get",
-        Operation::Set => "set",
-        Operation::Delete => "delete",
+#[derive(Clone, Copy, enum_map::Enum)]
+pub(crate) enum Operation {
+    Get,
+    Set,
+    Delete,
+}
+
+impl Operation {
+    pub(crate) const fn redis_name(self) -> &'static str {
+        match self {
+            Self::Get => "MULTI",
+            Self::Set => "SET",
+            Self::Delete => "DEL",
+        }
+    }
+
+    const fn redis_batch_size(self) -> Option<i64> {
+        match self {
+            Self::Get => Some(2),
+            Self::Set | Self::Delete => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Set => "set",
+            Self::Delete => "delete",
+        }
     }
 }
 
@@ -124,7 +147,7 @@ impl NamespaceHistograms {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
-                    "operation" => operation_label(operation),
+                    "operation" => operation.label(),
                     "outcome" => outcome.label(),
                     "error_type" => error_label,
                 )
@@ -132,7 +155,7 @@ impl NamespaceHistograms {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
-                    "operation" => operation_label(operation),
+                    "operation" => operation.label(),
                     "outcome" => outcome.label(),
                 )
             }
@@ -200,25 +223,34 @@ impl<'a> OperationGuard<'a> {
         DropGuard::dismiss(self.0).finish(Outcome::Success(outcome));
     }
 
-    pub(crate) fn fail(self, error: CommandError) {
-        if matches!(self.0.operation, Operation::Set | Operation::Delete) {
-            let effect = match error {
-                CommandError::NotApplied(_) => "not_applied",
-                CommandError::OutcomeUnknown(_) => "outcome_unknown",
-            };
-            self.0.span.record("cache.mutation.outcome", effect);
-        }
-        match error {
-            CommandError::OutcomeUnknown(cause)
-            | CommandError::NotApplied(Refusal::Cause(cause)) => self.record_cause(cause),
-            CommandError::NotApplied(Refusal::PermissionDenied) => {
+    pub(crate) fn fail_read(self, failure: ReadFailure) {
+        match failure {
+            ReadFailure::Cause(cause) => self.record_cause(cause),
+            ReadFailure::PermissionDenied => {
                 self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
             }
-            CommandError::NotApplied(Refusal::InvalidTtl) => {
-                self.record_error(ErrorType::ServerErrorReply, None);
-            }
-            CommandError::NotApplied(Refusal::ValueTooLarge) => {
+            ReadFailure::ValueTooLarge => {
                 self.record_failure(Outcome::ValueTooLarge, "value_too_large", None);
+            }
+        }
+    }
+
+    pub(crate) fn fail_mutation(self, error: MutationCommandError) {
+        let effect = match error {
+            MutationCommandError::NotApplied(_) => "not_applied",
+            MutationCommandError::OutcomeUnknown(_) => "outcome_unknown",
+        };
+        self.0.span.record("cache.mutation.outcome", effect);
+        match error {
+            MutationCommandError::OutcomeUnknown(cause)
+            | MutationCommandError::NotApplied(MutationRefusal::Cause(cause)) => {
+                self.record_cause(cause);
+            }
+            MutationCommandError::NotApplied(MutationRefusal::PermissionDenied) => {
+                self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
+            }
+            MutationCommandError::NotApplied(MutationRefusal::InvalidTtl) => {
+                self.record_error(ErrorType::ServerErrorReply, None);
             }
         }
     }
@@ -250,7 +282,7 @@ impl<'a> OperationGuard<'a> {
         inner.span.in_scope(|| {
             tracing::debug!(
                 cache.name = inner.histograms.namespace().as_str(),
-                cache.operation = operation_label(inner.operation),
+                cache.operation = inner.operation.label(),
                 cache.error.reason = reason,
                 error.type = label,
                 "cache_operation_failed"

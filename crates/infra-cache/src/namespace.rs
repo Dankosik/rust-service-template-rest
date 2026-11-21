@@ -6,9 +6,12 @@ use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
 use tokio::time::Instant;
 
-use crate::error::{CommandError, Refusal};
+use crate::connection::WireReply;
+use crate::error::{MutationCommandError, MutationKind, ReadFailure};
 use crate::exchange::reply_data;
-use crate::observe::{LocalSizeRefusal, NamespaceHistograms, OperationGuard, SuccessOutcome};
+use crate::observe::{
+    LocalSizeRefusal, NamespaceHistograms, Operation, OperationGuard, SuccessOutcome,
+};
 use crate::{Cache, MutationError, MutationFailure, OperationError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -122,30 +125,6 @@ impl CacheLookup {
     }
 }
 
-#[derive(Clone, Copy, enum_map::Enum)]
-pub(super) enum Operation {
-    Get,
-    Set,
-    Delete,
-}
-
-impl Operation {
-    pub(super) fn redis_name(self) -> &'static str {
-        match self {
-            Self::Get => "MULTI",
-            Self::Set => "SET",
-            Self::Delete => "DEL",
-        }
-    }
-
-    pub(super) fn redis_batch_size(self) -> Option<i64> {
-        match self {
-            Self::Get => Some(2),
-            Self::Set | Self::Delete => None,
-        }
-    }
-}
-
 impl CacheNamespace {
     pub async fn get(
         &self,
@@ -154,24 +133,50 @@ impl CacheNamespace {
     ) -> Result<Option<Vec<u8>>, OperationError> {
         let key = self.admit_key(key).ok_or(OperationError::KeyTooLarge)?;
         let max_value_bytes = self.cache.max_value_bytes;
-        self.run(
-            parent,
-            Operation::Get,
-            |connection| {
-                query_read(
-                    key.read_transaction(max_value_bytes),
-                    connection,
-                    max_value_bytes,
+        let guard =
+            OperationGuard::start(&self.histograms, Operation::Get, &self.cache.link.server);
+        let result = async {
+            let WireReply { reply, stopped } = self
+                .cache
+                .link
+                .dispatch(
+                    |connection| {
+                        query_read(
+                            key.read_transaction(max_value_bytes),
+                            connection,
+                            max_value_bytes,
+                        )
+                    },
+                    parent,
                 )
-            },
-            |value| match value {
-                Some(bytes) if bytes.len() > max_value_bytes => Err(Refusal::ValueTooLarge),
-                Some(_) => Ok(SuccessOutcome::Hit),
-                None => Ok(SuccessOutcome::Miss),
-            },
-        )
-        .await
-        .map_err(Into::into)
+                .await?;
+            let value = reply.map_err(|error| ReadFailure::from_reply(&error, stopped))?;
+            if let Some(cause) = stopped {
+                return Err(ReadFailure::Cause(cause));
+            }
+            if value
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() > max_value_bytes)
+            {
+                return Err(ReadFailure::ValueTooLarge);
+            }
+            Ok(value)
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                guard.succeed(if value.is_some() {
+                    SuccessOutcome::Hit
+                } else {
+                    SuccessOutcome::Miss
+                });
+                Ok(value)
+            }
+            Err(failure) => {
+                guard.fail_read(failure);
+                Err(failure.into())
+            }
+        }
     }
 
     pub async fn set(
@@ -192,61 +197,56 @@ impl CacheNamespace {
             LocalSizeRefusal::Value.record(self.histograms.namespace());
             return Err(MutationError::NotApplied(MutationFailure::ValueTooLarge));
         }
-        let build_query = |connection| {
+        self.run_mutation(parent, MutationKind::Set, |connection| {
             query_mutation(
                 key.set_command(value, milliseconds.cast_unsigned()),
                 connection,
                 |value| matches!(value, redis::Value::Okay),
             )
-        };
-        self.run(parent, Operation::Set, build_query, |()| {
-            Ok(SuccessOutcome::Ok)
         })
         .await
-        .map_err(Into::into)
     }
 
     pub async fn delete(&self, parent: &OperationContext, key: &str) -> Result<(), MutationError> {
         let key = self
             .admit_key(key)
             .ok_or(MutationError::NotApplied(MutationFailure::KeyTooLarge))?;
-        let build_query = |connection| {
+        self.run_mutation(parent, MutationKind::Delete, |connection| {
             query_mutation(key.delete_command(), connection, |value| {
                 matches!(value, redis::Value::Int(0 | 1))
             })
-        };
-        self.run(parent, Operation::Delete, build_query, |()| {
-            Ok(SuccessOutcome::Ok)
         })
         .await
-        .map_err(Into::into)
     }
 
-    async fn run<T: Send + 'static, F>(
+    async fn run_mutation<F>(
         &self,
         parent: &OperationContext,
-        operation: Operation,
+        kind: MutationKind,
         build_query: impl FnOnce(MultiplexedConnection) -> F,
-        outcome: impl FnOnce(&T) -> Result<SuccessOutcome, Refusal>,
-    ) -> Result<T, CommandError>
+    ) -> Result<(), MutationError>
     where
-        F: Future<Output = redis::RedisResult<T>> + Send + 'static,
+        F: Future<Output = redis::RedisResult<()>> + Send + 'static,
     {
+        let operation = match kind {
+            MutationKind::Set => Operation::Set,
+            MutationKind::Delete => Operation::Delete,
+        };
         let guard = OperationGuard::start(&self.histograms, operation, &self.cache.link.server);
-        match self
-            .cache
-            .link
-            .command(build_query, parent, operation)
-            .await
-            .and_then(|value| Ok((outcome(&value)?, value)))
-        {
-            Ok((outcome, value)) => {
-                guard.succeed(outcome);
-                Ok(value)
+        let result = async {
+            let WireReply { reply, stopped } =
+                self.cache.link.dispatch(build_query, parent).await?;
+            reply.map_err(|error| MutationCommandError::from_reply(&error, kind, stopped))
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                guard.succeed(SuccessOutcome::Ok);
+                Ok(())
             }
             Err(error) => {
-                guard.fail(error);
-                Err(error)
+                guard.fail_mutation(error);
+                Err(error.into())
             }
         }
     }

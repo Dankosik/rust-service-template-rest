@@ -5,12 +5,13 @@ use std::task::{Context, Poll, Waker};
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
+use operation_context::{BoundedContext, BoundedStop};
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
 use crate::byte_progress::ByteProgress;
-use crate::call::{CallContext, CallStop};
+use crate::call::check_active;
 use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error};
@@ -35,7 +36,7 @@ enum State {
 
 struct Resources {
     waker: Option<Waker>,
-    context: CallContext,
+    context: BoundedContext,
     body: ByteStream,
     progress: ByteProgress,
     guard: OperationGuard,
@@ -97,7 +98,7 @@ type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 
 impl Resources {
     fn collection_buffer(&self, limit: usize) -> Result<Vec<u8>, Failure> {
-        self.context.check_active()?;
+        check_active(&self.context)?;
         let Ok(unread) = usize::try_from(self.progress.remaining()) else {
             return Err(Failure::too_large());
         };
@@ -222,7 +223,7 @@ impl State {
 }
 
 enum Termination {
-    Stopped(CallStop),
+    Stopped(BoundedStop),
     Fallback(Outcome),
 }
 
@@ -253,7 +254,7 @@ impl Download {
         body: ByteStream,
         guard: OperationGuard,
         permit: OwnedSemaphorePermit,
-        context: CallContext,
+        context: BoundedContext,
     ) -> Self {
         let shared = Arc::new(Mutex::new(State::Open(Resources {
             waker: None,
