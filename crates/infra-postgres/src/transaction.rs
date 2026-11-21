@@ -12,7 +12,9 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
     PgArguments, PgConnection, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
-use sqlx::{AssertSqlSafe, Connection, Either, Execute, Executor, Row as _, SqlStr};
+use sqlx::{
+    Arguments as _, AssertSqlSafe, Connection, Either, Execute, Executor, Row as _, SqlStr,
+};
 use tokio::time::Instant;
 use tracing::Instrument;
 
@@ -176,15 +178,21 @@ impl OperationDeadline {
     }
 
     async fn arm(&mut self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+        const ARM_ARG_COUNT: usize = 2;
+        const ARM_ARG_BYTES: usize = 2 * (size_of::<i32>() + size_of::<i32>());
+
         let remaining_ms = self
             .remaining_ms_or_expire()
             .await
             .ok_or_else(deadline_elapsed_error)?;
-        let result = sqlx::query(
+        let mut arguments = PgArguments::default();
+        arguments.reserve(ARM_ARG_COUNT, ARM_ARG_BYTES);
+        let result = sqlx::query_with(
             "WITH prior AS MATERIALIZED (SELECT setting::integer AS ms FROM pg_settings \
              WHERE name = 'statement_timeout') \
              SELECT set_config('statement_timeout', LEAST(NULLIF(ms, 0), $1)::text, true), \
              ms = 0 OR $1 < ms OR (ms = $1 AND ms IS NOT DISTINCT FROM $2) FROM prior",
+            arguments,
         )
         .bind(remaining_ms)
         .bind(self.armed_timeout_ms)
@@ -461,11 +469,25 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
         'c: 'e,
         E: 'q + Execute<'q, Postgres>,
     {
-        Box::pin(
-            self.fetch_many(query)
-                .try_filter_map(|step| std::future::ready(Ok(step.left())))
-                .try_collect(),
-        )
+        self.proven_alive = false;
+        let proven_alive = &mut self.proven_alive;
+        let conn = &mut *self.conn;
+        if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
+            Box::pin(async move {
+                budget.arm(conn).await?;
+                let result = collect_query_result(conn.fetch_many(SingleStatement(query))).await;
+                let result = budget.observe_cancellation(result).await?;
+                *proven_alive = true;
+                Ok(result)
+            })
+        } else {
+            let stream = conn.fetch_many(query);
+            Box::pin(async move {
+                let result = collect_query_result(stream).await?;
+                *proven_alive = true;
+                Ok(result)
+            })
+        }
     }
 
     fn fetch_many<'e, 'q: 'e, E>(self, query: E) -> DriverStream<'e, Either<PgQueryResult, PgRow>>
@@ -501,18 +523,25 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
         E: 'q + Execute<'q, Postgres>,
     {
         self.proven_alive = false;
-        Box::pin(async move {
-            let row = if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
-                budget.arm(self.conn).await?;
-                budget
-                    .observe_cancellation(self.conn.fetch_optional(SingleStatement(query)).await)
-                    .await?
-            } else {
-                self.conn.fetch_optional(query).await?
-            };
-            self.proven_alive = true;
-            Ok(row)
-        })
+        let proven_alive = &mut self.proven_alive;
+        let conn = &mut *self.conn;
+        if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
+            Box::pin(async move {
+                budget.arm(conn).await?;
+                let row = budget
+                    .observe_cancellation(conn.fetch_optional(SingleStatement(query)).await)
+                    .await?;
+                *proven_alive = true;
+                Ok(row)
+            })
+        } else {
+            let row = conn.fetch_optional(query);
+            Box::pin(async move {
+                let row = row.await?;
+                *proven_alive = true;
+                Ok(row)
+            })
+        }
     }
 
     fn prepare_with<'e>(
@@ -532,6 +561,18 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
     {
         self.run_unproven(move |conn| conn.describe(sql))
     }
+}
+
+async fn collect_query_result(
+    mut stream: DriverStream<'_, Either<PgQueryResult, PgRow>>,
+) -> Result<PgQueryResult, sqlx::Error> {
+    let mut result = PgQueryResult::default();
+    while let Some(step) = stream.try_next().await? {
+        if let Either::Left(done) = step {
+            result.extend(std::iter::once(done));
+        }
+    }
+    Ok(result)
 }
 
 struct Proving<'e, T> {
@@ -887,6 +928,23 @@ mod tests {
             assert_eq!(Instant::now() >= budget.at, expires);
             assert_eq!(budget.expired, expires);
         }
+    }
+
+    #[tokio::test]
+    async fn collect_query_result_drains_the_stream_and_surfaces_late_errors() {
+        let done = collect_query_result(Box::pin(stream::iter(vec![Ok(Either::Left(
+            PgQueryResult::default(),
+        ))])))
+        .await
+        .unwrap();
+        assert_eq!(done.rows_affected(), 0);
+
+        let late = collect_query_result(Box::pin(stream::iter(vec![
+            Ok(Either::Left(PgQueryResult::default())),
+            Err(sqlx::Error::Protocol("late".into())),
+        ])))
+        .await;
+        std::assert_matches!(late, Err(sqlx::Error::Protocol(_)));
     }
 
     #[test]

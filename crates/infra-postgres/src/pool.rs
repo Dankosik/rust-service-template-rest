@@ -126,7 +126,36 @@ pub struct Pool {
 struct PoolPolicy {
     slots: Option<Slots>,
     notifications: bool,
+    target: ConnectionTarget,
     metrics: PoolMetrics,
+}
+
+pub(crate) struct ConnectionTarget {
+    host: Box<str>,
+    port: u16,
+    database: Option<Box<str>>,
+}
+
+impl ConnectionTarget {
+    fn from_options(options: &PgConnectOptions) -> Self {
+        Self {
+            host: options.get_host().into(),
+            port: options.get_port(),
+            database: options.get_database().map(Into::into),
+        }
+    }
+
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) const fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub(crate) fn database(&self) -> Option<&str> {
+        self.database.as_deref()
+    }
 }
 
 impl fmt::Debug for Pool {
@@ -284,11 +313,13 @@ impl Pool {
                 Some(Slots::new(options.max_connections.get() as usize))
             }
         };
+        let target = ConnectionTarget::from_options(&connect_options);
         let pool = Self {
             inner: pool_options.connect_lazy_with(connect_options),
             policy: Arc::new(PoolPolicy {
                 slots,
                 notifications: options.notifications,
+                target,
                 metrics: PoolMetrics::default(),
             }),
         };
@@ -368,13 +399,19 @@ impl Pool {
         self.policy.notifications
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn connect_options(&self) -> Arc<PgConnectOptions> {
         self.inner.connect_options()
     }
 
-    pub(crate) fn set_connect_options(&self, options: PgConnectOptions) {
+    pub(crate) fn set_password(&self, password: &str) {
+        let options = (*self.inner.connect_options()).clone().password(password);
         self.inner.set_connect_options(options);
+    }
+
+    pub(crate) fn target(&self) -> &ConnectionTarget {
+        &self.policy.target
     }
 
     #[must_use]
@@ -407,11 +444,13 @@ impl Pool {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub(crate) fn from_test_pool(inner: PgPool) -> Self {
+        let target = ConnectionTarget::from_options(inner.connect_options().as_ref());
         Self {
             inner,
             policy: Arc::new(PoolPolicy {
                 slots: None,
                 notifications: true,
+                target,
                 metrics: PoolMetrics::default(),
             }),
         }
@@ -761,7 +800,7 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
         let policy = Arc::downgrade(&pool.policy);
-        pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
+        pool.set_password("rotated");
         assert!(
             take_slot(pool.policy.slots.as_ref(), deadline, Queue::Regular)
                 .await
@@ -785,7 +824,7 @@ mod tests {
             listener.close(ACQUIRE_TIMEOUT).await,
             CloseOutcome::Complete
         );
-        pool.set_connect_options((*pool.connect_options()).clone().password("rotated"));
+        pool.set_password("rotated");
         std::assert_matches!(listener.connect().await, Err(sqlx::Error::PoolClosed));
         assert_eq!(
             listener.inner.connect_options().to_url_lossy().password(),
