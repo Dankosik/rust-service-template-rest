@@ -42,15 +42,23 @@ and `docs/backend-library-selection.md` override generic taste.
 
 ### Axis 1 — Behavior, System Crossings & Rollout
 
-1. **Spec fidelity & behavioral loopholes:**
-   - Verify every `R<n>`, `G<n>`, `Must not` prohibition, and `Non-goal` maps
-     to a real technical owner without altering confirmed behavior or leaking
-     non-goals; verify autonomous choices under user-delegated boundaries
-     recorded in `spec.md` stay within stated limits rather than flagging them
-     as `UPSTREAM_GAP`.
-   - Attack `spec.md` for malicious compliance, external two-implementation
-     divergence, tautological falsifiers, and missed [Behavioral
-     Probes](specification/behavioral-probes.md).
+1. **Spec fidelity, WHAT/HOW boundary & behavioral loopholes:**
+   - Verify every `R<n>`, `G<n>`, hard external constraint, `Must not`
+     prohibition, and `Non-goal` maps to a real technical owner without altering
+     confirmed behavior or leaking non-goals; when `intent.md` is present,
+     verify zero dropped product choices/*why*, hard constraints, `Must not`
+     rules, or cross-task term tags; verify autonomous choices under
+     user-delegated boundaries recorded in `spec.md` stay within stated limits
+     rather than flagging them as `UPSTREAM_GAP`.
+   - Attack `spec.md` against [Specification](specification.md) and [Behavioral
+     Probes](specification/behavioral-probes.md): `FAIL` on malicious
+     compliance, external two-implementation divergence, ungrounded HOW-leakage
+     (internal mechanisms, storage/migration tactics, or code layout without a
+     hard external constraint), abstract prose closing Behavioral Probes,
+     unclosed or ambiguous state/input-boundary/failure-precedence interactions,
+     tautological/happy-path-only/internal-seam falsifiers, or unresolved
+     terminology collisions (including cross-task terms missing from
+     `design.md`'s or inline `## Architecture`'s `Durable doc updates`).
 2. **System mechanisms, reuse & crossing probes:**
    - Apply the **deletion test** to every added system mechanism, queue, cache,
      worker, fallback, or config key; `FAIL` when an existing `crates/infra-*`
@@ -64,9 +72,10 @@ and `docs/backend-library-selection.md` override generic taste.
      trust, or stacked-retry defect.
 3. **Rollout & mixed-version safety:**
    - Verify deployment impact classification, [Release
-     Closure](technical-design/release-closure.md) gates, lock-safe DDL,
-     forward/backward payload compatibility across `migrate` / `service` /
-     `jobs-worker`, and `same-release` vs `multi-release` boundaries.
+     Closure](technical-design/release-closure.md) gates, pre-existing state
+     transition tactic, lock-safe DDL, forward/backward payload compatibility
+     across `migrate` / `service` / `jobs-worker`, and `same-release` vs
+     `multi-release` boundaries.
 
 ### Axis 2 — Rust Architecture, Compile Reality & Handoff Readiness
 

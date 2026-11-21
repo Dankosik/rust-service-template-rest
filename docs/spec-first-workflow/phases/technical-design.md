@@ -53,12 +53,13 @@ Leave internals behind one module's seam open to Implementation.
        listed in the Boundary rule above.
    - **Fast path for lightweight architecture:** when **none** of the [Design
      Review Gate](#design-review-gate) triggers hold and zero open forks
-     remain, record the forced owners, pinned identifiers, and any durable doc
-     updates in a compact `## Architecture` section inside `spec.md` (`status:
-     draft`) and proceed directly to [Planning](planning.md).
-   - *Done when:* every `R<n>`, `G<n>`, and `Must not` prohibition maps to a
-     verified forced owner or an explicit open fork tagged `one-way door` or
-     `two-way door`.
+     remain, record the forced owners, pinned technical identifiers, and any
+     durable doc updates (carrying every cross-task term tagged in `spec.md`) in
+     a compact `## Architecture` section inside `spec.md` (`status: draft`) and
+     proceed directly to [Planning](planning.md).
+   - *Done when:* every `R<n>`, `G<n>`, hard external constraint, and `Must not`
+     prohibition maps to a verified forced owner or an explicit open fork tagged
+     `one-way door` or `two-way door`.
 
 3. **Close open forks across triggered branches.**
    - Load only the branches whose observable trigger fires:
@@ -68,7 +69,7 @@ Leave internals behind one module's seam open to Implementation.
      | Any **one-way door** not already fixed by `docs/decisions/` or an existing crate contract | [Design It Twice](technical-design/design-it-twice.md) |
      | Any **runtime crossing** (DB, cache, queue/outbox, worker, network/provider, config/secret, or operator lifecycle) | [System Crossings & Probes](technical-design/system-crossings.md) |
      | Any new or changed **Rust seam**, crate edge, error contract, workspace type, or profile boundary | [Rust Architecture](technical-design/rust-architecture.md) |
-     | Schema, payload, or wire change across live versions, new required config/trust material, or ordered rollout across `migrate` / `service` / `jobs-worker` | [Release Closure](technical-design/release-closure.md) |
+     | Schema, payload, or wire change across live versions, deploy-time pre-existing state or in-flight work transition, new required config/trust material, or ordered rollout across `migrate` / `service` / `jobs-worker` | [Release Closure](technical-design/release-closure.md) |
      | Decision-changing external contract or empirical runtime uncertainty | [Research](research.md) (persist `specs/<task>/research/<topic>.md` when reused) |
 
    - When both fire, close **System Crossings before Rust Architecture** (revise
@@ -123,7 +124,8 @@ fresh [Design Review](design-review.md) before [Planning](planning.md) whenever
 3. Changes spanning `≥2` workspace crates or adding/changing a cross-crate Rust
    seam.
 4. Any **non-trivial rollout** (mixed-version schema/payload/wire evolution,
-   new required config/trust material, or ordered multi-binary deploy).
+   deploy-time pre-existing state transition, new required config/trust
+   material, or ordered multi-binary deploy).
 
 **Lightweight architecture** (inline `## Architecture` in `spec.md`, skipping
 Design Review) is permitted strictly when **none** of 1–4 hold.
@@ -152,8 +154,10 @@ so IDs never collide across files.
   category, and happy + worst-case failure/cancel **caller walkthrough**).
 - **`## Handoff deltas for Planning`** *(record only cross-cutting items not
   already pinned inside `D<n>`/`S<n>`)*:
-  - **Pinned shared identifiers:** config keys, error codes, metric names, and
-    wire/table names that parallel tasks must match verbatim.
+  - **Pinned shared identifiers:** technical/internal identifiers (table/column
+    names, internal config keys, internal metric/span names, and Rust symbols)
+    that parallel tasks must match verbatim—linking rather than redefining
+    external wire/operator identifiers already pinned in `spec.md`.
   - **Shared mutated surfaces:** canonical lock paths + modified exhaustive
     public types with cross-crate fan-out.
   - **Superseded paths & generated contracts:** shallow modules, wrappers, and
@@ -161,8 +165,8 @@ so IDs never collide across files.
   - **Durable doc updates:** `docs/decisions/` (add a new ADR only when hard to
     reverse, surprising without context, and the result of a real trade-off, or
     when overturning a rejected choice), `docs/repo-architecture.md` (including
-    `Domain Vocabulary`), `docs/production-contract.md`, or
-    `docs/backend-library-selection.md`.
+    `Domain Vocabulary`, carrying every cross-task term tagged in `spec.md`),
+    `docs/production-contract.md`, or `docs/backend-library-selection.md`.
   - **Execution risks & staging:** unverified compile/integration assumptions
     (`-> [integration-first]`), wide-refactor blast radius
     (`-> expand–migrate–contract`), and multi-release boundaries.

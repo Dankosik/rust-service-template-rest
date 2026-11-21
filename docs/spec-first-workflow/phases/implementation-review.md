@@ -32,10 +32,10 @@ axis never masks another's defect:
 
 1. **Outcome, Spec & Scope Parity.** Start from `spec.md` and `Completion`.
    Construct a concrete caller or operator scenario where every executed test
-   stays green yet an accepted `R<n>`, preserved `G<n>`, `Must not`
-   prohibition, withdrawn path, or `Completion` target fails. Trace every
-   material hunk to an accepted obligation and flag silent scope drift with
-   exact anchors.
+   stays green yet an accepted `R<n>`, preserved `G<n>`, hard external
+   constraint, `Must not` prohibition, withdrawn path, or `Completion` target
+   fails. Trace every material hunk to an accepted obligation and flag silent
+   scope drift with exact anchors.
 2. **Real-Path Defects & Cross-Unit Seams.** Attack touched production code
    with the loaded domain skills and five probes:
    - *Precedence & rejection:* colliding rules or errors; state mutation or info
