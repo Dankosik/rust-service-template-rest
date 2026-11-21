@@ -94,6 +94,7 @@ async fn concurrent_replicas_admit_the_same_new_durable() {
     assert_eq!(actual.config.filter_subject, fixture.subject);
     assert_eq!(actual.config.max_deliver, -1);
     assert_eq!(actual.config.ack_policy, consumer::AckPolicy::Explicit);
+    assert_eq!(actual.config.ack_wait, infra_messaging::DURABLE_ACK_WAIT);
     assert_eq!(actual.config.ack_wait, Duration::from_secs(46));
     assert!(
         actual.config.max_ack_pending > 1,
@@ -173,7 +174,7 @@ async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage
                     filter_subject: fixture.subject.clone(),
                     metadata: registered
                         .durable_metadata(&fixture.dlq_stream, &fixture.dlq_subject),
-                    ack_wait: Duration::from_secs(46),
+                    ack_wait: infra_messaging::DURABLE_ACK_WAIT,
                     max_deliver: -1,
                     memory_storage,
                     ..Default::default()
@@ -490,7 +491,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
             filter_subject: fixture.subject.clone(),
             metadata,
             ack_policy: consumer::AckPolicy::Explicit,
-            ack_wait: Duration::from_secs(46),
+            ack_wait: infra_messaging::DURABLE_ACK_WAIT,
             max_deliver: -1,
             ..Default::default()
         })

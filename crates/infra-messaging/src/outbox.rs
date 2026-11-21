@@ -18,6 +18,7 @@ use crate::error::{PrepareError, PublishError, PublishRejection};
 use crate::prepared::{
     PreparedEvent, Publication, payload_depth_allowed, validate_reconstructed_envelope,
 };
+use crate::wire::CreatedAt;
 use crate::{OutboxProducer, PublicationRoute};
 
 const FORMAT_VERSION: u8 = 1;
@@ -321,7 +322,7 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
         let Self(producer) = self;
         let stored = job.payload();
-        let (occurred_at, payload) = stored.validate().map_err(JobError::permanent)?;
+        let (created_at, payload) = stored.validate().map_err(JobError::permanent)?;
         let subject = Subject::from(stored.subject.as_str());
         let event = Publication {
             subject: &subject,
@@ -329,7 +330,7 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
             publication_id: &stored.publication_id,
             event_type: &stored.event_type,
             schema_version: stored.schema_version,
-            occurred_at,
+            created_at: created_at.as_str(),
             payload,
         };
         let context = job.context().child(BROKER_OPERATION_BUDGET);
@@ -456,7 +457,7 @@ impl PublishDomainEvent {
             payload: Ok(Bytes::new()),
         }
     }
-    fn validate(&self) -> Result<(UtcDateTime, &Bytes), &'static str> {
+    fn validate(&self) -> Result<(CreatedAt, &Bytes), &'static str> {
         if self.format_version != FORMAT_VERSION {
             return Err("outbox_format_unsupported");
         }
@@ -472,7 +473,7 @@ impl PublishDomainEvent {
             return Err("outbox_payload_too_deep");
         }
         serde_json::from_str::<serde::de::IgnoredAny>(json).map_err(|_| "outbox_json_invalid")?;
-        validate_reconstructed_envelope(
+        let created_at = validate_reconstructed_envelope(
             &self.subject,
             &self.message_id,
             &self.publication_id,
@@ -481,7 +482,7 @@ impl PublishDomainEvent {
             occurred_at,
         )
         .map_err(|_| "outbox_envelope_invalid")?;
-        Ok((occurred_at, payload))
+        Ok((created_at, payload))
     }
 }
 
@@ -555,7 +556,7 @@ mod tests {
         let stored: PublishDomainEvent = serde_json::from_slice(&encoded).unwrap();
         let (occurred_at, payload) = stored.validate().expect("stored immutable intent is valid");
         assert_eq!(payload, event.payload());
-        assert_eq!(occurred_at, event.occurred_at());
+        assert_eq!(occurred_at.instant(), event.occurred_at());
         assert_eq!(stored.subject, event.subject());
         assert_eq!(stored.message_id, event.message_id());
         assert_eq!(stored.publication_id, event.publication_id());

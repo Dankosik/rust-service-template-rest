@@ -501,7 +501,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
                 .prepare(&event_with_value("full-transfer", &"x".repeat(1012)))
                 .unwrap();
             assert_eq!(prepared.payload().len(), 1024);
-            let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
+            let mut headers = infra_messaging::wire::encode_prepared(&prepared);
             headers.insert("tracestate", "");
             let trace = "x".repeat(8192 - encoded_headers(&headers));
             headers.insert("tracestate", trace.as_str());
@@ -572,7 +572,7 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
         .prepare(&event_with_value("wildcard-transfer", &"x".repeat(1012)))
         .unwrap();
     assert_eq!(prepared.payload().len(), 1024);
-    let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
+    let mut headers = infra_messaging::wire::encode_prepared(&prepared);
     headers.insert("tracestate", "");
     let trace = "x".repeat(8192 - encoded_headers(&headers));
     headers.insert("tracestate", trace.as_str());

@@ -9,7 +9,7 @@ use time::UtcDateTime;
 
 use crate::error::PrepareError;
 use crate::registry::route_key;
-use crate::wire::RestoreError;
+use crate::wire::{CreatedAt, RestoreError};
 
 const MAX_PAYLOAD_JSON_DEPTH: usize = 127;
 
@@ -20,7 +20,7 @@ pub struct PreparedEvent {
     distinct_publication_id: Option<String>,
     event_type: Cow<'static, str>,
     schema_version: u16,
-    occurred_at: UtcDateTime,
+    occurred_at: CreatedAt,
     payload: Bytes,
 }
 
@@ -37,7 +37,7 @@ impl fmt::Debug for PreparedEvent {
             .field("publication_id", &publication_id)
             .field("event_type", &self.event_type)
             .field("schema_version", &self.schema_version)
-            .field("occurred_at", &self.occurred_at)
+            .field("occurred_at", &self.occurred_at.instant())
             .field("payload", &self.payload)
             .finish()
     }
@@ -64,7 +64,7 @@ pub(crate) struct Publication<'a> {
     pub(crate) publication_id: &'a str,
     pub(crate) event_type: &'a str,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: UtcDateTime,
+    pub(crate) created_at: &'a str,
     pub(crate) payload: &'a Bytes,
 }
 
@@ -85,12 +85,11 @@ impl PreparedEvent {
         if !payload_depth_allowed(&payload) {
             return Err(PrepareError::PayloadStructure);
         }
-        let occurred_at = event.occurred_at;
         if !crate::wire::valid_outbound_identity(&event.id) {
             return Err(PrepareError::Identity);
         }
         let key = route_key::<T>();
-        crate::wire::validate_outbound_created_at(occurred_at)?;
+        let occurred_at = CreatedAt::parse_outbound(event.occurred_at)?;
         Ok(Self {
             subject,
             message_id: make_id(),
@@ -112,7 +111,7 @@ impl PreparedEvent {
             occurred_at,
             payload,
         } = parts;
-        validate_reconstructed_envelope(
+        let occurred_at = validate_reconstructed_envelope(
             &subject,
             &message_id,
             &publication_id,
@@ -138,7 +137,7 @@ impl PreparedEvent {
             publication_id: self.publication_id(),
             event_type: self.event_type(),
             schema_version: self.schema_version,
-            occurred_at: self.occurred_at,
+            created_at: self.occurred_at.as_str(),
             payload: &self.payload,
         }
     }
@@ -171,7 +170,7 @@ impl PreparedEvent {
     }
     #[must_use]
     pub const fn occurred_at(&self) -> UtcDateTime {
-        self.occurred_at
+        self.occurred_at.instant()
     }
     #[must_use]
     pub fn payload(&self) -> &Bytes {
@@ -186,7 +185,7 @@ pub(crate) fn validate_reconstructed_envelope(
     event_type: &str,
     schema_version: u16,
     occurred_at: UtcDateTime,
-) -> Result<(), RestoreError> {
+) -> Result<CreatedAt, RestoreError> {
     if !crate::wire::valid_subject(subject) {
         return Err(RestoreError::Subject);
     }
@@ -201,8 +200,7 @@ pub(crate) fn validate_reconstructed_envelope(
     if crate::wire::is_zero_time(occurred_at) {
         return Err(RestoreError::CreatedAtRequired);
     }
-    crate::wire::validate_rfc3339_timestamp(occurred_at)?;
-    Ok(())
+    CreatedAt::new(occurred_at).map_err(RestoreError::from)
 }
 
 pub(crate) fn payload_depth_allowed(mut bytes: &[u8]) -> bool {
@@ -337,12 +335,11 @@ mod tests {
             items: [true, false],
         });
         let expected = r#"{"text":"a\"\\\n\u0000Ж","amount":1.0,"items":[true,false]}"#;
-        let service = crate::PublicationPolicy {
-            max_payload_bytes: expected.len(),
-        };
         let route = Route::new("events.created");
         let mut registry = Registry::default();
-        let publication = service.declare(&mut registry, &route).unwrap();
+        let publication = registry
+            .declare_publication(&route, expected.len())
+            .unwrap();
         let prepared = publication
             .prepare(&event)
             .expect("payload at the exact ceiling is admitted");
@@ -352,17 +349,11 @@ mod tests {
                 .check_publication_limit(expected.len() - 1)
                 .is_err()
         );
-        let strict = service
-            .capped_at(expected.len() - 1)
-            .declare(&mut Registry::default(), &route)
+        assert!(registry.check_publication_limit(expected.len()).is_ok());
+        let strict = Registry::default()
+            .declare_publication(&route, expected.len() - 1)
             .unwrap();
         std::assert_matches!(strict.prepare(&event), Err(PrepareError::PayloadTooLarge));
-        let mut registry = Registry::default();
-        service
-            .capped_at(usize::MAX)
-            .declare(&mut registry, &route)
-            .unwrap();
-        assert!(registry.check_publication_limit(expected.len()).is_ok());
     }
 
     #[test]
@@ -648,7 +639,8 @@ mod tests {
             let result = prepare("events.created", &event, 1_024);
             if accepted {
                 let prepared = result.expect("the time is in range");
-                crate::wire::encode_prepared(&prepared).expect("an accepted time encodes");
+                let headers = crate::wire::encode_prepared(&prepared);
+                assert!(headers.get(crate::wire::CREATED_AT).is_some());
             } else {
                 std::assert_matches!(result, Err(PrepareError::CreatedAtOutOfRange));
             }

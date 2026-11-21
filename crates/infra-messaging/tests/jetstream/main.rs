@@ -174,7 +174,7 @@ impl Fixture {
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
                     metadata: handled.durable_metadata(&dlq_stream, &dlq_subject),
-                    ack_wait: Duration::from_secs(46),
+                    ack_wait: infra_messaging::DURABLE_ACK_WAIT,
                     max_deliver: -1,
                     max_ack_pending: 1,
                     ..Default::default()

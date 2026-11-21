@@ -1,17 +1,18 @@
-use arrayvec::ArrayVec;
-use async_nats::{HeaderMap, HeaderName};
-use bytes::Bytes;
+use arrayvec::{ArrayString, ArrayVec};
+use async_nats::HeaderName;
 use compact_str::CompactString;
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcDateTime};
 
 use crate::error::{PrepareError, PublishEnvelopeError};
 use crate::prepared::{PreparedEvent, Publication};
 
 mod dead_letter;
 
+pub use async_nats::HeaderMap;
+pub use bytes::Bytes;
 pub(crate) use dead_letter::{DeadLetterReason, dead_letter_bounds, dead_letter_headers};
 pub use dead_letter::{DeadLetterRecord, RestoreError, dead_letter_id, restore_dead_letter};
+pub use time::{OffsetDateTime, UtcDateTime};
 
 pub const HEADER_LIMIT_BYTES: usize = shared_rules::messaging::HEADER_LIMIT_BYTES;
 pub const MESSAGE_ID: &str = "Message-Id";
@@ -37,15 +38,39 @@ impl From<TimestampOutOfRange> for PrepareError {
     }
 }
 
-impl From<TimestampOutOfRange> for PublishEnvelopeError {
+impl From<TimestampOutOfRange> for RestoreError {
     fn from(_: TimestampOutOfRange) -> Self {
         Self::CreatedAtOutOfRange
     }
 }
 
-impl From<TimestampOutOfRange> for RestoreError {
-    fn from(_: TimestampOutOfRange) -> Self {
-        Self::CreatedAtOutOfRange
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CreatedAt {
+    instant: UtcDateTime,
+    rfc3339: ArrayString<40>,
+}
+
+impl CreatedAt {
+    pub(crate) fn new(instant: UtcDateTime) -> Result<Self, TimestampOutOfRange> {
+        let bytes = format_timestamp_bytes(instant)?;
+        let text = str::from_utf8(&bytes).map_err(|_| TimestampOutOfRange)?;
+        let rfc3339 = ArrayString::from(text).map_err(|_| TimestampOutOfRange)?;
+        Ok(Self { instant, rfc3339 })
+    }
+
+    pub(crate) fn parse_outbound(instant: UtcDateTime) -> Result<Self, PrepareError> {
+        if is_zero_time(instant) {
+            return Err(PrepareError::CreatedAtRequired);
+        }
+        Self::new(instant).map_err(PrepareError::from)
+    }
+
+    pub(crate) const fn instant(self) -> UtcDateTime {
+        self.instant
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.rfc3339
     }
 }
 
@@ -98,13 +123,12 @@ pub(crate) struct InboundEnvelopeRef<'a> {
     pub(crate) payload: &'a [u8],
 }
 
-pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, TimestampOutOfRange> {
+#[must_use]
+pub fn encode_prepared(event: &PreparedEvent) -> HeaderMap {
     encode_publication(&event.publication())
 }
 
-pub(crate) fn encode_publication(
-    event: &Publication<'_>,
-) -> Result<HeaderMap, TimestampOutOfRange> {
+pub(crate) fn encode_publication(event: &Publication<'_>) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header_name::MESSAGE_ID, event.message_id);
     headers.insert(header_name::EVENT_TYPE, event.event_type);
@@ -112,12 +136,9 @@ pub(crate) fn encode_publication(
         header_name::EVENT_SCHEMA,
         schema_label(event.schema_version),
     );
-    headers.insert(
-        header_name::CREATED_AT,
-        format_timestamp(event.occurred_at)?,
-    );
+    headers.insert(header_name::CREATED_AT, event.created_at);
     headers.insert(header_name::NATS_MSG_ID, event.publication_id);
-    Ok(headers)
+    headers
 }
 
 pub fn decode_envelope(
@@ -333,13 +354,6 @@ pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), PublishEn
         .ok_or(PublishEnvelopeError::HeadersTooLarge)
 }
 
-pub(crate) fn format_timestamp(value: UtcDateTime) -> Result<String, TimestampOutOfRange> {
-    let bytes = format_timestamp_bytes(value)?;
-    str::from_utf8(&bytes)
-        .map(str::to_owned)
-        .map_err(|_| TimestampOutOfRange)
-}
-
 pub(crate) fn format_timestamp_bytes(
     value: UtcDateTime,
 ) -> Result<ArrayVec<u8, 40>, TimestampOutOfRange> {
@@ -348,21 +362,6 @@ pub(crate) fn format_timestamp_bytes(
         .format_into(&mut buf, &Rfc3339)
         .map_err(|_| TimestampOutOfRange)?;
     Ok(buf)
-}
-
-pub(crate) fn validate_rfc3339_timestamp(value: UtcDateTime) -> Result<(), TimestampOutOfRange> {
-    value
-        .format_into(&mut std::io::sink(), &Rfc3339)
-        .map(|_| ())
-        .map_err(|_| TimestampOutOfRange)
-}
-
-pub(crate) fn validate_outbound_created_at(value: UtcDateTime) -> Result<(), PrepareError> {
-    if is_zero_time(value) {
-        return Err(PrepareError::CreatedAtRequired);
-    }
-    validate_rfc3339_timestamp(value)?;
-    Ok(())
 }
 
 fn parse_timestamp(value: &str) -> Option<UtcDateTime> {
@@ -568,16 +567,14 @@ mod tests {
 
         let crosses_into_range = datetime!(-0001-12-31 23:30 -01:00);
         let utc_in_range = crosses_into_range.to_utc();
-        assert_eq!(validate_outbound_created_at(utc_in_range), Ok(()));
-        assert_eq!(
-            format_timestamp(utc_in_range).as_deref(),
-            Ok("0000-01-01T00:30:00Z")
-        );
+        let created_at = CreatedAt::parse_outbound(utc_in_range).unwrap();
+        assert_eq!(created_at.instant(), utc_in_range);
+        assert_eq!(created_at.as_str(), "0000-01-01T00:30:00Z");
         assert!(dead_letter_id("SOURCE", 1, crosses_into_range, "event-1").is_ok());
 
         let crosses_out_of_range = datetime!(0000-01-01 00:30 +01:00);
         assert_eq!(
-            validate_outbound_created_at(crosses_out_of_range.to_utc()),
+            CreatedAt::parse_outbound(crosses_out_of_range.to_utc()),
             Err(PrepareError::CreatedAtOutOfRange)
         );
         assert_eq!(
