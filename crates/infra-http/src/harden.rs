@@ -13,29 +13,36 @@ use axum::http::header::{
 };
 use axum::http::{HeaderName, HeaderValue, StatusCode, Version};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use health::ReadinessReader;
 use http_body::Body as _;
 use http_body_util::{BodyExt as _, LengthLimitError, Limited};
+use opentelemetry::context::FutureExt as _;
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
-use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::request_id::{RequestId, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
+use tracing::Instrument as _;
 
-use crate::context::ResponseContext;
+use crate::context;
 use crate::observe::{self, Observer};
 use crate::probes::ProbeRoutes;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
-use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
+use crate::problem::{Code, Problem, body_too_large, pending_problem, sanitized_problem};
 use crate::request_id;
 
 struct Admission {
     permits: Semaphore,
     max_wait: Duration,
-    probes: ProbeRoutes,
+}
+
+struct Hardened {
+    observer: Arc<Observer>,
+    admission: Option<Admission>,
+    request_timeout: Duration,
+    max_body_bytes: usize,
+    draining: Option<ReadinessReader>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,52 +63,33 @@ pub(crate) fn harden(routes: Router, options: &HardenOptions) -> Router {
 
 pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRoutes) -> Router {
     observe::describe();
-    let in_flight = options.max_in_flight.map(|limit| {
+    let admission = options.max_in_flight.map(|limit| {
         metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(0);
-        middleware::from_fn_with_state(
-            Arc::new(Admission {
-                permits: Semaphore::new(limit.get() as usize),
-                max_wait: options.admission_wait.min(options.request_timeout),
-                probes: probes.clone(),
-            }),
-            admit,
-        )
+        Admission {
+            permits: Semaphore::new(limit.get() as usize),
+            max_wait: options.admission_wait.min(options.request_timeout),
+        }
     });
 
-    let closing = options
-        .draining
-        .clone()
-        .map(|draining| middleware::from_fn_with_state(draining, close_while_draining));
+    let state = Arc::new(Hardened {
+        observer: Observer::new(
+            options.log_health_probes,
+            options.trust_trace_context,
+            probes,
+        ),
+        admission,
+        request_timeout: options.request_timeout,
+        max_body_bytes: options.max_body_bytes,
+        draining: options.draining.clone(),
+    });
 
     let chain = ServiceBuilder::new()
-        .layer(option_layer(closing))
-        .map_request(request_id::sanitize)
-        .layer(SetRequestIdLayer::new(
-            request_id::REQUEST_ID_HEADER,
-            request_id::MakeRequestUuid,
-        ))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
-        .layer(middleware::from_fn_with_state(
-            Observer::new(
-                options.log_health_probes,
-                options.trust_trace_context,
-                probes,
-            ),
-            observe::observe,
-        ))
-        .layer(option_layer(in_flight))
-        .layer(middleware::from_fn_with_state(
-            options.request_timeout,
-            crate::context::enforce_request_budget,
-        ))
+        .layer(middleware::from_fn_with_state(state, handle))
         .layer(CatchPanicLayer::custom(panic_to_problem))
-        .layer(middleware::from_fn_with_state(
-            options.max_body_bytes,
-            limit_body,
-        ))
         .layer(DefaultBodyLimit::disable());
 
     #[expect(
@@ -114,29 +102,91 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
     routes.layer(chain)
 }
 
-async fn close_while_draining(
-    State(readiness): State<ReadinessReader>,
-    request: Request,
+async fn handle(
+    State(state): State<Arc<Hardened>>,
+    matched: Option<MatchedPath>,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    let http1 = request.version() <= Version::HTTP_11;
-    let mut response = next.run(request).await;
-    if http1 && readiness.is_draining() {
+    let request_id = request_id::ensure(&mut request);
+    let version = request.version();
+    let (mut observation, is_probe) =
+        state
+            .observer
+            .start(&mut request, matched, request_id, state.admission.is_some());
+    let response_id = observation.response_request_id();
+    let span = observation.span().clone();
+    let fallback = observation.take_fallback_context();
+
+    let traced = async {
+        let (mut response, cancel_guard) = run_admitted(&state, is_probe, request, next).await;
+        context::attach_request_id(&mut response, response_id);
+        (response, cancel_guard)
+    }
+    .instrument(span);
+
+    let (mut response, cancel_guard) = match fallback {
+        None => traced.await,
+        Some(context) => traced.with_context(context).await,
+    };
+
+    if version <= Version::HTTP_11
+        && state
+            .draining
+            .as_ref()
+            .is_some_and(ReadinessReader::is_draining)
+    {
         response
             .headers_mut()
             .insert(CONNECTION, HeaderValue::from_static("close"));
     }
-    response
+
+    observation.finish(response, cancel_guard)
 }
 
-async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next) -> Response {
+async fn run_admitted(
+    state: &Hardened,
+    is_probe: bool,
+    request: Request,
+    next: Next,
+) -> (Response, Option<context::CancelGuard>) {
+    let (arrived, permit) = match (&state.admission, is_probe) {
+        (Some(admission), false) => {
+            let arrived = tokio::time::Instant::now();
+            match infra_http_transport::acquire_borrowed_within(
+                &admission.permits,
+                admission.max_wait,
+            )
+            .await
+            {
+                infra_http_transport::Admission::Immediate(permit) => (Some(arrived), Some(permit)),
+                infra_http_transport::Admission::Waited { permit, waited } => {
+                    metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
+                    (Some(arrived), Some(permit))
+                }
+                infra_http_transport::Admission::Shed { waited } => {
+                    metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
+                    metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
+                    return (shed_response(), None);
+                }
+            }
+        }
+        _ => (None, None),
+    };
+    context::enforce_request_budget(state.request_timeout, arrived, permit, request, |request| {
+        limit_body(state.max_body_bytes, request, next)
+    })
+    .await
+}
+
+async fn limit_body(max_bytes: usize, request: Request, next: Next) -> Response {
     let declared = request
         .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
     let limit = declared.unwrap_or(max_bytes);
     if limit > max_bytes {
-        return body_too_large().into_response();
+        return pending_problem(body_too_large());
     }
     if request.body().is_end_stream() {
         return next.run(request).await;
@@ -169,7 +219,7 @@ const DIGEST_HEADERS: [HeaderName; 4] = [
 ];
 
 fn normalize_overflow_response(response: &mut Response) {
-    let (parts, body) = body_too_large().into_response().into_parts();
+    let (parts, body) = pending_problem(body_too_large()).into_parts();
     let headers = response.headers_mut();
     for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
         headers.remove(name);
@@ -182,76 +232,33 @@ fn normalize_overflow_response(response: &mut Response) {
     *response.body_mut() = body;
 }
 
-async fn admit(
-    State(admission): State<Arc<Admission>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    if request
-        .extensions()
-        .get::<MatchedPath>()
-        .is_some_and(|route| admission.probes.contains(request.method(), route.as_str()))
-    {
-        return next.run(request).await;
-    }
-    let arrived = tokio::time::Instant::now();
-    let _permit =
-        match infra_http_transport::acquire_borrowed_within(&admission.permits, admission.max_wait)
-            .await
-        {
-            infra_http_transport::Admission::Immediate(permit) => permit,
-            infra_http_transport::Admission::Waited { permit, waited } => {
-                metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
-                permit
-            }
-            infra_http_transport::Admission::Shed { waited } => {
-                metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
-                metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
-                return shed_response(&request);
-            }
-        };
-    request
-        .extensions_mut()
-        .insert(crate::context::Arrival(arrived));
-    next.run(request).await
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct AdmissionShed;
 
-fn shed_response(request: &Request) -> Response {
-    let problem = Problem::new(Code::ServiceUnavailable)
-        .detail_static(service_failure::AT_CAPACITY_DETAIL)
-        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER);
-    let extensions = request.extensions();
-    let mut response = if extensions.get::<ResponseContext>().is_some()
-        && extensions
-            .get::<RequestId>()
-            .is_some_and(|id| id.header_value().to_str().is_ok())
-    {
-        crate::problem::pending_problem(problem)
-    } else {
-        problem.into_response()
-    };
+fn shed_response() -> Response {
+    let mut response = pending_problem(
+        Problem::new(Code::ServiceUnavailable)
+            .detail_static(service_failure::AT_CAPACITY_DETAIL)
+            .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER),
+    );
     response.extensions_mut().insert(AdmissionShed);
     response
 }
 
 fn panic_to_problem(_payload: Box<dyn Any + Send + 'static>) -> Response {
     tracing::error!("http_handler_panicked");
-    sanitized_internal_error()
+    pending_problem(sanitized_problem())
 }
 
 async fn not_found() -> Response {
-    Problem::new(Code::NotFound)
-        .detail_static("no resource at this path")
-        .into_response()
+    pending_problem(Problem::new(Code::NotFound).detail_static("no resource at this path"))
 }
 
 pub(crate) fn method_not_allowed_response() -> Response {
-    Problem::new(Code::MethodNotAllowed)
-        .detail_static("method is not allowed for this resource")
-        .into_response()
+    pending_problem(
+        Problem::new(Code::MethodNotAllowed)
+            .detail_static("method is not allowed for this resource"),
+    )
 }
 
 async fn method_not_allowed() -> Response {

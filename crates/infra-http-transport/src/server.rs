@@ -5,18 +5,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use axum::{Extension, Router};
+use axum::Router;
 use hyper::rt::Executor;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
-use hyper_util::service::TowerToHyperService;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
-use tower::ServiceBuilder;
+use tower::ServiceExt as _;
 
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
@@ -126,7 +125,7 @@ pub struct Server {
 
 #[derive(Clone, Debug)]
 struct ConnectionShutdown {
-    drain: CancellationToken,
+    drain: Arc<CancellationToken>,
     force: CancellationToken,
 }
 
@@ -166,7 +165,7 @@ pub struct ConnectionInfo {
 #[derive(Debug)]
 struct ConnectionState {
     forced: AtomicBool,
-    drain: CancellationToken,
+    drain: Arc<CancellationToken>,
 }
 
 impl ConnectionInfo {
@@ -269,7 +268,7 @@ fn serve_tls(
         driver,
         delegated,
         TransportScheme::Https,
-        move |stream, peer| accept_tls(acceptor.clone(), stream, peer, handshake_timeout, protocol),
+        move |stream, peer| accept_tls(acceptor, stream, peer, handshake_timeout, protocol),
     )
 }
 
@@ -437,12 +436,12 @@ impl Drop for Server {
 #[derive(Clone, Debug, Default)]
 struct ListenerExecutor {
     tasks: TaskTracker,
-    force: CancellationToken,
+    force: Arc<CancellationToken>,
 }
 
 impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
     fn execute(&self, future: F) {
-        let force = self.force.clone();
+        let force = Arc::clone(&self.force);
         let task = self.tasks.track_future(async move {
             force.run_until_cancelled(future).await;
         });
@@ -595,13 +594,13 @@ fn serve_listener<F, Fut, IO>(
     prepare_io: F,
 ) -> Server
 where
-    F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let local_addr = bound.local_addr;
     let connection_shutdown = ConnectionShutdown {
-        drain: CancellationToken::new(),
+        drain: Arc::new(CancellationToken::new()),
         force: CancellationToken::new(),
     };
     let connections = TaskTracker::new();
@@ -615,7 +614,7 @@ where
     }
     let (accept_failure_tx, accept_failure) = watch::channel(None);
     let accept_failure_guard = DropGuard::new(
-        (connection_shutdown.drain.clone(), accept_failure_tx),
+        (Arc::clone(&connection_shutdown.drain), accept_failure_tx),
         |(drain, accept_failure_tx)| {
             let observed = if std::thread::panicking() {
                 AcceptFailure::Panicked
@@ -665,7 +664,7 @@ async fn accept_loop<F, Fut, IO>(
     context: Arc<ConnectionContext>,
     prepare_io: F,
 ) where
-    F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -753,7 +752,7 @@ fn serve_connection<F, Fut, IO>(
     prepare_io: F,
 ) -> impl Future<Output = ()>
 where
-    F: Fn(TcpStream, SocketAddr) -> Fut,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -766,7 +765,7 @@ where
             scheme: context.scheme,
             state: Arc::new(ConnectionState {
                 forced: AtomicBool::new(false),
-                drain: context.shutdown.drain.clone(),
+                drain: Arc::clone(&context.shutdown.drain),
             }),
         };
         let serve = drive_connection(stream, peer, &context, age_deadline, &info, prepare_io);
@@ -794,7 +793,7 @@ async fn drive_connection<F, Fut, IO>(
     prepare_io: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    F: Fn(TcpStream, SocketAddr) -> Fut,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -811,13 +810,15 @@ where
     // template:begin grpc:http2-observe-initial-read
     let (io, preface) = observe_http2_preface(io, context.driver.protocol.preface_timeout());
     // template:end grpc:http2-observe-initial-read
-    let service = ServiceBuilder::new()
-        .layer(Extension(info.clone()))
-        .service(context.app.clone());
+    let service =
+        hyper::service::service_fn(|mut request: hyper::Request<hyper::body::Incoming>| {
+            request.extensions_mut().insert(info.clone());
+            context.app.clone().oneshot(request)
+        });
     let connection = context
         .driver
         .builder
-        .serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
+        .serve_connection(TokioIo::new(io), service);
     tokio::pin!(connection);
     // template:begin grpc:http2-wait-initial-read
     if let Some((deadline, received)) = preface {

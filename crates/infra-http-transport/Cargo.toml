@@ -16,7 +16,7 @@ axum = { workspace = true }
 fastrand = { workspace = true, features = ["std"] }
 hyper = { workspace = true }
 hyper-util = { workspace = true, features = [
-    "server", "service", "tokio", "http1",
+    "server", "tokio", "http1",
     # template:begin grpc:transport-http2-feature
     "http2",
     # template:end grpc:transport-http2-feature
