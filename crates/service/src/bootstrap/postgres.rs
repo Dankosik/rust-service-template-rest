@@ -1,16 +1,16 @@
 use super::background::Background;
-use infra_postgres::{Dsn, Pool, PoolOptions, SessionSettingsSource, SslPolicy};
+use infra_postgres::{Dsn, Pool, PoolOptions, PoolStartup, SessionSettingsSource, SslPolicy};
 use secrecy::ExposeSecret;
 use service_config::{Config, PostgresConfig};
 
 use super::{BootstrapError, METRICS_MAINTENANCE_INTERVAL};
 
-pub(super) async fn open<'a>(
+pub(super) async fn open(
     postgres: &PostgresConfig,
     config: &Config,
     background: &mut Background,
-    retained: &'a mut Option<Pool>,
-) -> Result<&'a Pool, BootstrapError> {
+    retained: &mut Option<PoolStartup>,
+) -> Result<Pool, BootstrapError> {
     let raw = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
     let ssl_policy = if config.app().is_local_development() {
@@ -33,8 +33,10 @@ pub(super) async fn open<'a>(
         wait_order: infra_postgres::WaitOrder::NewestOnceStanding,
         notifications: postgres.notifications,
     };
-    let pool = retained.insert(Pool::prepare(&dsn, &options));
-    pool.admit().await?;
+    let pool = retained
+        .insert(Pool::prepare(&dsn, &options))
+        .admit()
+        .await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
@@ -53,5 +55,5 @@ pub(super) async fn open<'a>(
                 .refresh_password_periodically(password_file.to_owned(), stop)
         });
     }
-    Ok(&*pool)
+    Ok(pool)
 }

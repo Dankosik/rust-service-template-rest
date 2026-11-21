@@ -56,7 +56,7 @@ impl Registry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct TopologyAdmission {
     pub(crate) consumer: Option<ConsumerAdmission>,
     // template:begin outbox:messaging-outbox-topology-field

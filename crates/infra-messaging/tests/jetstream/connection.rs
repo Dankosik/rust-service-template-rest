@@ -832,7 +832,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .jetstream
         .publish_with_headers(
             fixture.subject.clone(),
-            infra_messaging::wire::encode_prepared(&after).unwrap(),
+            infra_messaging::wire::encode_prepared(&after),
             after.payload().clone(),
         )
         .await

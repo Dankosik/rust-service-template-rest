@@ -95,28 +95,47 @@ impl SuccessOutcome {
 }
 
 #[derive(Clone, Copy, enum_map::Enum)]
+enum FailureOutcome {
+    Error(ErrorType),
+    ValueTooLarge,
+}
+
+impl FailureOutcome {
+    fn error_label(self) -> &'static str {
+        match self {
+            Self::Error(error_type) => error_type.label(),
+            Self::ValueTooLarge => "value_too_large",
+        }
+    }
+
+    const fn outcome_label(self) -> &'static str {
+        match self {
+            Self::Error(ErrorType::Timeout) => "timeout",
+            Self::Error(_) | Self::ValueTooLarge => "error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
 enum Outcome {
     Success(SuccessOutcome),
     Cancelled,
-    Failed(ErrorType),
-    ValueTooLarge,
+    Failed(FailureOutcome),
 }
 
 impl Outcome {
     fn error_label(self) -> Option<&'static str> {
         match self {
-            Self::Failed(error_type) => Some(error_type.label()),
-            Self::ValueTooLarge => Some("value_too_large"),
+            Self::Failed(failure) => Some(failure.error_label()),
             Self::Success(_) | Self::Cancelled => None,
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Success(outcome) => outcome.label(),
             Self::Cancelled => "cancelled",
-            Self::Failed(ErrorType::Timeout) => "timeout",
-            Self::Failed(_) | Self::ValueTooLarge => "error",
+            Self::Failed(failure) => failure.outcome_label(),
         }
     }
 }
@@ -230,7 +249,7 @@ impl<'a> OperationGuard<'a> {
                 self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
             }
             ReadFailure::ValueTooLarge => {
-                self.record_failure(Outcome::ValueTooLarge, "value_too_large", None);
+                self.record_failure(FailureOutcome::ValueTooLarge, None);
             }
         }
     }
@@ -268,17 +287,18 @@ impl<'a> OperationGuard<'a> {
     }
 
     pub(crate) fn record_error(self, error_type: ErrorType, reason: Option<&'static str>) {
-        self.record_failure(Outcome::Failed(error_type), error_type.label(), reason);
+        self.record_failure(FailureOutcome::Error(error_type), reason);
     }
 
-    fn record_failure(self, outcome: Outcome, label: &'static str, reason: Option<&'static str>) {
+    fn record_failure(self, failure: FailureOutcome, reason: Option<&'static str>) {
+        let label = failure.error_label();
         let inner = DropGuard::dismiss(self.0);
         inner.span.record("error.type", label);
         if let Some(reason) = reason {
             inner.span.record("cache.error.reason", reason);
         }
         inner.span.record("otel.status_code", "ERROR");
-        inner.finish(outcome);
+        inner.finish(Outcome::Failed(failure));
         inner.span.in_scope(|| {
             tracing::debug!(
                 cache.name = inner.histograms.namespace().as_str(),

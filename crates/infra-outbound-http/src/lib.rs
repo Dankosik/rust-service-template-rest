@@ -290,6 +290,7 @@ impl Client {
         tls: rustls::ClientConfig,
         resolver: transport::Resolver,
     ) -> Self {
+        observe::describe();
         Self {
             server: observe::Server::new(&origin),
             transport: transport::build_transport(&limits, &origin, tls, resolver),

@@ -207,12 +207,12 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
         trust,
         CollectorTrust {
             certificate: Some(TrustFile {
-                scope: SettingScope::Signal,
+                scope: EnvScope::Signal,
                 variable: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
                 path: "/traces/ca.pem".into(),
             }),
             client_certificate: Some(TrustFile {
-                scope: SettingScope::Common,
+                scope: EnvScope::Common,
                 variable: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
                 path: "/general/client.pem".into(),
             }),
@@ -227,12 +227,7 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
 
 #[test]
 fn header_pairs_parse_and_blank_entries_are_skipped() {
-    let headers = parse_headers(&Setting {
-        scope: SettingScope::Typed,
-        name: TYPED_HEADERS,
-        raw: Cow::Borrowed(OsStr::new("authorization=Basic%20x, x-tenant = t1 ,")),
-    })
-    .unwrap();
+    let headers = parse_headers("authorization=Basic%20x, x-tenant = t1 ,", TYPED_HEADERS).unwrap();
     assert_eq!(
         headers.get("authorization").map(String::as_str),
         Some("Basic%20x")
@@ -254,12 +249,7 @@ fn malformed_header_entries_fail_by_position() {
         ("auth=private%+A", 1),
         ("auth=private%00", 1),
     ] {
-        let err = parse_headers(&Setting {
-            scope: SettingScope::Typed,
-            name: TYPED_HEADERS,
-            raw: Cow::Borrowed(OsStr::new(raw)),
-        })
-        .unwrap_err();
+        let err = parse_headers(raw, TYPED_HEADERS).unwrap_err();
         std::assert_matches!(err, TracingErrorKind::InvalidHeader { position: p, .. } if p == position,
             "{raw:?}: {err}"
         );

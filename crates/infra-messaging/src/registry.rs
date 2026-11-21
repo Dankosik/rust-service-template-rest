@@ -144,28 +144,6 @@ impl<T: EventPayload> Route<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct PublicationPolicy {
-    pub max_payload_bytes: usize,
-}
-
-impl PublicationPolicy {
-    pub fn declare<T: EventPayload + 'static>(
-        self,
-        registry: &mut Registry,
-        route: &Route<T>,
-    ) -> Result<PublicationRoute<T>, RegistryError> {
-        registry.declare_publication(route, self.max_payload_bytes)
-    }
-
-    #[must_use]
-    pub fn capped_at(self, max_payload_bytes: usize) -> Self {
-        Self {
-            max_payload_bytes: self.max_payload_bytes.min(max_payload_bytes),
-        }
-    }
-}
-
 #[derive_where::derive_where(Clone)]
 pub struct PublicationRoute<T> {
     route: Route<T>,
@@ -704,7 +682,7 @@ mod tests {
             })
             .unwrap();
 
-        let headers = crate::wire::encode_prepared(&prepared).unwrap();
+        let headers = crate::wire::encode_prepared(&prepared);
         let envelope =
             crate::wire::decode_envelope_ref(prepared.subject(), &headers, prepared.payload())
                 .unwrap();

@@ -81,20 +81,10 @@ mod tests {
             })
             .unwrap();
         assert!(registration.with_postgres_messages(|_, _| Ok(())).is_err());
-        let dsn =
-            infra_postgres::Dsn::admit("postgres://test:test@127.0.0.1:1/test?sslmode=verify-full")
-                .unwrap();
-        let pool = infra_postgres::Pool::prepare(
-            &dsn,
-            &infra_postgres::PoolOptions {
-                max_connections: std::num::NonZeroU32::MIN,
-                application_name: "factory-composition-test",
-                default_isolation: infra_postgres::Isolation::ReadCommitted,
-                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
-                wait_order: infra_postgres::WaitOrder::Arrival,
-                notifications: true,
-            },
-        );
+        let pool = infra_postgres::Pool::connect_lazy_for_test(
+            "postgres://test:test@127.0.0.1:1/test?sslmode=verify-full",
+        )
+        .unwrap();
         let mut messages = RetainedMessages {
             registry: registration.messages,
             postgres_messages: registration.postgres_messages,

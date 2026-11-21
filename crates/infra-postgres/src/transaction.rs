@@ -68,19 +68,20 @@ pub struct OperationDeadline {
 pub struct OperationDeadlineElapsed;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SavepointEnd<T> {
+pub enum SavepointEnd<T, A = std::convert::Infallible> {
     Keep(T),
     Rollback(T),
+    AbortTransaction(A),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SavepointError<E> {
+pub enum SavepointError<A = std::convert::Infallible> {
     #[error("postgres savepoint: begin: {0}")]
     Begin(#[source] sqlx::Error),
-    #[error(transparent)]
-    Work(E),
     #[error("postgres savepoint: rollback: {0}")]
     Rollback(#[source] sqlx::Error),
+    #[error(transparent)]
+    Aborted(A),
 }
 
 mod sealed {
@@ -298,9 +299,9 @@ impl<M: TxMode> Tx<'_, M> {
         })
     }
 
-    pub async fn with_savepoint<T, E, F>(&mut self, f: F) -> Result<T, SavepointError<E>>
+    pub async fn with_savepoint<T, A, F>(&mut self, f: F) -> Result<T, SavepointError<A>>
     where
-        F: AsyncFnOnce(&mut Tx<'_, M>) -> Result<SavepointEnd<T>, E>,
+        F: AsyncFnOnce(&mut Tx<'_, M>) -> SavepointEnd<T, A>,
     {
         let id = self.next_savepoint;
         self.next_savepoint = id.checked_add(1).ok_or_else(|| {
@@ -313,14 +314,14 @@ impl<M: TxMode> Tx<'_, M> {
             .await
             .map_err(SavepointError::Begin)?;
         match f(self).await {
-            Ok(SavepointEnd::Keep(value)) => Ok(value),
-            Ok(SavepointEnd::Rollback(value)) => {
+            SavepointEnd::Keep(value) => Ok(value),
+            SavepointEnd::Rollback(value) => {
                 self.rollback_savepoint(id, saved_notifications)
                     .await
                     .map_err(SavepointError::Rollback)?;
                 Ok(value)
             }
-            Err(error) => Err(SavepointError::Work(error)),
+            SavepointEnd::AbortTransaction(reason) => Err(SavepointError::Aborted(reason)),
         }
     }
 
@@ -886,5 +887,16 @@ mod tests {
             assert_eq!(Instant::now() >= budget.at, expires);
             assert_eq!(budget.expired, expires);
         }
+    }
+
+    #[test]
+    fn savepoint_types_default_to_infallible_abort() {
+        let keep: SavepointEnd<()> = SavepointEnd::Keep(());
+        let rollback: SavepointEnd<()> = SavepointEnd::Rollback(());
+        assert_ne!(keep, rollback);
+        let begin: SavepointError = SavepointError::Begin(sqlx::Error::RowNotFound);
+        assert!(begin.to_string().contains("begin"));
+        let aborted = SavepointError::Aborted(OperationDeadlineElapsed);
+        assert_eq!(aborted.to_string(), OperationDeadlineElapsed.to_string());
     }
 }

@@ -127,8 +127,6 @@ struct PoolPolicy {
     slots: Option<Slots>,
     notifications: bool,
     metrics: PoolMetrics,
-    default_isolation: Isolation,
-    session_settings_source: SessionSettingsSource,
 }
 
 impl fmt::Debug for Pool {
@@ -141,6 +139,86 @@ impl fmt::Debug for Pool {
             .field("notifications", &self.policy.notifications)
             .field("adaptive_slots", &self.policy.slots.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct PoolStartup {
+    pub(crate) pool: Pool,
+    default_isolation: Isolation,
+    session_settings_source: SessionSettingsSource,
+}
+
+impl PoolStartup {
+    pub async fn admit(&self) -> Result<Pool, ConnectError> {
+        let budget = SESSION_VERIFICATION_TIMEOUT;
+        tokio::time::timeout(budget, self.verify_session())
+            .await
+            .map_err(|_| ConnectError::SessionVerificationTimeout { budget })??;
+        Ok(self.pool.clone())
+    }
+
+    pub async fn close(&self, budget: Duration) -> CloseOutcome {
+        self.pool.close(budget).await
+    }
+
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.pool.is_closed()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn from_test_pool(pool: Pool) -> Self {
+        Self {
+            pool,
+            default_isolation: Isolation::ServerDefault,
+            session_settings_source: SessionSettingsSource::Startup,
+        }
+    }
+
+    async fn verify_session(&self) -> Result<(), ConnectError> {
+        let session = observed!("check session budgets", async {
+            let mut connection = self.pool.acquire("check session budgets").await?;
+            sqlx::query!(
+                "SELECT \
+                 (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout') \
+                     AS \"statement_ms!\", \
+                 (SELECT setting::bigint FROM pg_settings \
+                   WHERE name = 'idle_in_transaction_session_timeout') \
+                     AS \"idle_in_transaction_ms!\", \
+                 current_setting('default_transaction_isolation') AS \"isolation!\""
+            )
+            .fetch_one(&mut *connection)
+            .await
+        })
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::PoolTimedOut => ConnectError::Timeout {
+                budget: ACQUIRE_TIMEOUT,
+            },
+            other => ConnectError::Connect(other),
+        })?;
+        for (setting, found_ms, budget) in [
+            ("statement_timeout", session.statement_ms, STATEMENT_TIMEOUT),
+            (
+                "idle_in_transaction_session_timeout",
+                session.idle_in_transaction_ms,
+                IDLE_IN_TRANSACTION_TIMEOUT,
+            ),
+        ] {
+            check_budget(setting, found_ms, budget, self.session_settings_source)?;
+        }
+        match self.default_isolation.as_sql() {
+            Some(expected) if !expected.eq_ignore_ascii_case(&session.isolation) => {
+                Err(ConnectError::SessionIsolation {
+                    found: session.isolation,
+                    expected,
+                    session_settings_source: self.session_settings_source,
+                })
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -173,7 +251,7 @@ impl ListenerPool {
 
 impl Pool {
     #[must_use]
-    pub fn prepare(dsn: &Dsn, options: &PoolOptions<'_>) -> Self {
+    pub fn prepare(dsn: &Dsn, options: &PoolOptions<'_>) -> PoolStartup {
         crate::observe::describe();
         let mut settings = Vec::new();
         if options.session_settings_source == SessionSettingsSource::Startup {
@@ -207,37 +285,35 @@ impl Pool {
                 Some(Slots::new(options.max_connections.get() as usize))
             }
         };
-        Self {
+        let pool = Self {
             inner: pool_options.connect_lazy_with(connect_options),
             policy: Arc::new(PoolPolicy {
                 slots,
                 notifications: options.notifications,
-                default_isolation: options.default_isolation,
-                session_settings_source: options.session_settings_source,
                 metrics: PoolMetrics::default(),
             }),
+        };
+        PoolStartup {
+            pool,
+            default_isolation: options.default_isolation,
+            session_settings_source: options.session_settings_source,
         }
-    }
-
-    pub async fn admit(&self) -> Result<(), ConnectError> {
-        let budget = SESSION_VERIFICATION_TIMEOUT;
-        tokio::time::timeout(budget, self.verify_session())
-            .await
-            .map_err(|_| ConnectError::SessionVerificationTimeout { budget })?
     }
 
     pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<Self, ConnectError> {
-        let pool = Self::prepare(dsn, options);
-        if let Err(refused) = pool.admit().await {
-            if pool.close(SESSION_REJECTION_CLOSE_TIMEOUT).await == CloseOutcome::TimedOut {
-                tracing::warn!(
-                    budget = ?SESSION_REJECTION_CLOSE_TIMEOUT,
-                    "postgres_session_rejection_close_timed_out"
-                );
+        let startup = Self::prepare(dsn, options);
+        match startup.admit().await {
+            Ok(pool) => Ok(pool),
+            Err(refused) => {
+                if startup.close(SESSION_REJECTION_CLOSE_TIMEOUT).await == CloseOutcome::TimedOut {
+                    tracing::warn!(
+                        budget = ?SESSION_REJECTION_CLOSE_TIMEOUT,
+                        "postgres_session_rejection_close_timed_out"
+                    );
+                }
+                Err(refused)
             }
-            return Err(refused);
         }
-        Ok(pool)
     }
 
     pub async fn close(&self, budget: Duration) -> CloseOutcome {
@@ -337,8 +413,6 @@ impl Pool {
             policy: Arc::new(PoolPolicy {
                 slots: None,
                 notifications: true,
-                default_isolation: Isolation::ServerDefault,
-                session_settings_source: SessionSettingsSource::Startup,
                 metrics: PoolMetrics::default(),
             }),
         }
@@ -396,55 +470,6 @@ impl Pool {
             }
         }
         Err(sqlx::Error::PoolTimedOut)
-    }
-
-    async fn verify_session(&self) -> Result<(), ConnectError> {
-        let session = observed!("check session budgets", async {
-            let mut connection = self.acquire("check session budgets").await?;
-            sqlx::query!(
-                "SELECT \
-                 (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout') \
-                     AS \"statement_ms!\", \
-                 (SELECT setting::bigint FROM pg_settings \
-                   WHERE name = 'idle_in_transaction_session_timeout') \
-                     AS \"idle_in_transaction_ms!\", \
-                 current_setting('default_transaction_isolation') AS \"isolation!\""
-            )
-            .fetch_one(&mut *connection)
-            .await
-        })
-        .await
-        .map_err(|error| match error {
-            sqlx::Error::PoolTimedOut => ConnectError::Timeout {
-                budget: ACQUIRE_TIMEOUT,
-            },
-            other => ConnectError::Connect(other),
-        })?;
-        for (setting, found_ms, budget) in [
-            ("statement_timeout", session.statement_ms, STATEMENT_TIMEOUT),
-            (
-                "idle_in_transaction_session_timeout",
-                session.idle_in_transaction_ms,
-                IDLE_IN_TRANSACTION_TIMEOUT,
-            ),
-        ] {
-            check_budget(
-                setting,
-                found_ms,
-                budget,
-                self.policy.session_settings_source,
-            )?;
-        }
-        match self.policy.default_isolation.as_sql() {
-            Some(expected) if !expected.eq_ignore_ascii_case(&session.isolation) => {
-                Err(ConnectError::SessionIsolation {
-                    found: session.isolation,
-                    expected,
-                    session_settings_source: self.policy.session_settings_source,
-                })
-            }
-            _ => Ok(()),
-        }
     }
 }
 
@@ -658,18 +683,23 @@ mod tests {
             wait_order: WaitOrder::Arrival,
             notifications: true,
         };
-        let pool = Pool::prepare(&dsn, &options);
-        assert_eq!(pool.size(), 0, "preparation must not open a connection");
+        let startup = Pool::prepare(&dsn, &options);
+        assert_eq!(
+            startup.pool.size(),
+            0,
+            "preparation must not open a connection"
+        );
         let started = std::time::Instant::now();
-        let err = pool.admit().await.unwrap_err();
+        let err = startup.admit().await.unwrap_err();
         std::assert_matches!(err, ConnectError::Timeout { .. }, "{err}");
         assert!(started.elapsed() < ACQUIRE_TIMEOUT + Duration::from_secs(2));
         assert!(!err.to_string().contains("pw"), "{err}");
+        assert!(!format!("{startup:?}").contains("pw"));
         assert!(
-            !pool.is_closed(),
+            !startup.is_closed(),
             "admission must leave cleanup to its owner"
         );
-        assert_eq!(pool.close(ACQUIRE_TIMEOUT).await, CloseOutcome::Complete);
+        assert_eq!(startup.close(ACQUIRE_TIMEOUT).await, CloseOutcome::Complete);
     }
 
     fn unreachable_pool(wait_order: WaitOrder) -> Pool {
@@ -689,6 +719,7 @@ mod tests {
                 notifications: true,
             },
         )
+        .pool
     }
 
     #[tokio::test(start_paused = true)]

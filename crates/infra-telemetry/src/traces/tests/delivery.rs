@@ -229,8 +229,8 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         variable,
         path: files.path().join(name),
     };
-    let signal = |variable, name: &str| file(SettingScope::Signal, variable, name);
-    let common = |variable, name: &str| file(SettingScope::Common, variable, name);
+    let signal = |variable, name: &str| file(EnvScope::Signal, variable, name);
+    let common = |variable, name: &str| file(EnvScope::Common, variable, name);
     std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
     std::fs::write(files.path().join("large.pem"), vec![0; 1024 * 1024 + 1])
         .expect("write an oversized file");

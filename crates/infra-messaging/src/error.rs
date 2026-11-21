@@ -46,8 +46,6 @@ pub enum PublishEnvelopeError {
     PayloadTooLarge,
     #[error("encoded headers exceed {} KiB", crate::wire::HEADER_LIMIT_BYTES / 1024)]
     HeadersTooLarge,
-    #[error("creation time is out of range")]
-    CreatedAtOutOfRange,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

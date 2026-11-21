@@ -10,7 +10,7 @@ use infra_cache::Cache;
 use infra_object_storage::ObjectStorage;
 // template:end object-storage:service-shutdown-object-storage-imports
 // template:begin postgres:shutdown-imports
-use infra_postgres::{CloseOutcome, Pool};
+use infra_postgres::{CloseOutcome, PoolStartup};
 // template:end postgres:shutdown-imports
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
@@ -98,7 +98,7 @@ impl Budget {
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin postgres:shutdown-dependencies-postgres-field
-    pub(crate) postgres: Option<Pool>,
+    pub(crate) postgres: Option<PoolStartup>,
     // template:end postgres:shutdown-dependencies-postgres-field
     // template:begin cache:service-shutdown-dependencies-cache-field
     pub(crate) cache: Option<Cache>,
@@ -624,7 +624,7 @@ mod tests {
         entered: CancellationToken,
         dropping: CancellationToken,
         held: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
-        pool: Pool,
+        pool: infra_postgres::Pool,
         released_before_close: CancellationToken,
     ) -> &'static str {
         let _guard = std::mem::DropGuard::new(held, move |held| {
@@ -653,10 +653,9 @@ mod tests {
         let (release, held) = mpsc::channel();
         let held = Arc::new(Mutex::new(held));
         let mut dependencies = Dependencies::default();
-        let pool = dependencies
-            .postgres
-            .insert(Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap())
-            .clone();
+        let pool =
+            infra_postgres::Pool::connect_lazy_for_test("postgres://localhost/unused").unwrap();
+        dependencies.postgres = Some(PoolStartup::from_test_pool(pool.clone()));
         let handler = {
             let entered = entered.clone();
             let dropping = dropping.clone();
