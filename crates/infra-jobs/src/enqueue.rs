@@ -560,16 +560,16 @@ mod tests {
     }
 
     fn poll_to_completion<T>(future: impl Future<Output = T>) -> (T, usize) {
-        let wakes = std::sync::Arc::new(WakeCount::default());
-        let waker = std::task::Waker::from(std::sync::Arc::clone(&wakes));
+        let notifications = std::sync::Arc::new(WakeCount::default());
+        let waker = std::task::Waker::from(std::sync::Arc::clone(&notifications));
         let mut context = std::task::Context::from_waker(&waker);
         let mut future = std::pin::pin!(future);
         for polls in 1..=1024 {
-            let previous = wakes.0.load(Ordering::Relaxed);
+            let previous = notifications.0.load(Ordering::Relaxed);
             match future.as_mut().poll(&mut context) {
                 std::task::Poll::Ready(value) => return (value, polls),
                 std::task::Poll::Pending => assert!(
-                    wakes.0.load(Ordering::Relaxed) > previous,
+                    notifications.0.load(Ordering::Relaxed) > previous,
                     "a bounded preflight poll must schedule its next wakeup"
                 ),
             }

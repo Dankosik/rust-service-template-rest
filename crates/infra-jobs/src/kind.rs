@@ -1039,12 +1039,12 @@ mod tests {
         struct SharedHandler;
 
         impl TransactionalHandler<Alpha> for SharedHandler {
-            async fn run(
+            fn run(
                 &self,
                 _job: TransactionalJob<Alpha>,
                 _tx: &mut Tx<'_>,
-            ) -> Result<(), JobError> {
-                Ok(())
+            ) -> impl Future<Output = Result<(), JobError>> + Send {
+                std::future::ready(Ok(()))
             }
         }
 
