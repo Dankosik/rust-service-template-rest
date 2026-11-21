@@ -6,32 +6,30 @@ use bytes::Bytes;
 pub use service_failure::Code;
 use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER, SANITIZED_DETAIL};
 use tonic::Status;
-use tonic_types::{ErrorDetails, StatusExt as _};
+use tonic_types::{ErrorDetails, FieldViolation, StatusExt as _};
 
 pub const ERROR_DOMAIN: &str = "service";
 
 #[derive(Clone, Debug)]
 pub struct Failure {
     code: Code,
-    details: ErrorDetails,
+    retry_after: Option<Duration>,
+    field_violations: Vec<FieldViolation>,
 }
 
 impl Failure {
     #[must_use]
-    pub fn new(code: Code) -> Self {
+    pub const fn new(code: Code) -> Self {
         Self {
             code,
-            details: ErrorDetails::with_error_info(
-                code.as_str().to_ascii_uppercase(),
-                ERROR_DOMAIN,
-                HashMap::new(),
-            ),
+            retry_after: None,
+            field_violations: Vec::new(),
         }
     }
 
     #[must_use]
-    pub fn retry_after(mut self, after: Duration) -> Self {
-        self.details.set_retry_info(Some(after));
+    pub const fn retry_after(mut self, after: Duration) -> Self {
+        self.retry_after = Some(after);
         self
     }
 
@@ -41,12 +39,36 @@ impl Failure {
         field: impl Into<String>,
         description: impl Into<String>,
     ) -> Self {
-        self.details.add_bad_request_violation(field, description);
+        self.field_violations
+            .push(FieldViolation::new(field, description));
         self
     }
 
     pub(crate) fn into_status_as(self, grpc: tonic::Code, message: &'static str) -> Status {
-        Status::with_error_details(grpc, message, self.details)
+        let mut details = ErrorDetails::with_error_info(
+            self.code.as_str().to_ascii_uppercase(),
+            ERROR_DOMAIN,
+            HashMap::new(),
+        );
+        if let Some(after) = self.retry_after {
+            details.set_retry_info(Some(after));
+        }
+        if !self.field_violations.is_empty() {
+            details.set_bad_request(self.field_violations);
+        }
+        Status::with_error_details(grpc, message, details)
+    }
+
+    pub(crate) fn into_classified_as(
+        self,
+        grpc: tonic::Code,
+        message: &'static str,
+    ) -> ClassifiedStatus {
+        let code = self.code;
+        ClassifiedStatus {
+            status: self.into_status_as(grpc, message),
+            failure: Some(code),
+        }
     }
 }
 
@@ -54,6 +76,56 @@ impl From<Failure> for Status {
     fn from(failure: Failure) -> Self {
         let (grpc, message) = projection(failure.code);
         failure.into_status_as(grpc, message)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClassifiedStatus {
+    status: Status,
+    failure: Option<Code>,
+}
+
+impl ClassifiedStatus {
+    pub(crate) fn fixed(failure: FixedFailure) -> Self {
+        Self {
+            status: failure.status(),
+            failure: Some(failure.catalog_code()),
+        }
+    }
+
+    pub(crate) fn plain(status: Status) -> Self {
+        debug_assert!(
+            status.details().is_empty(),
+            "plain statuses cannot carry rich catalog details"
+        );
+        Self {
+            status,
+            failure: None,
+        }
+    }
+
+    pub(crate) fn code(&self) -> tonic::Code {
+        self.status.code()
+    }
+
+    pub(crate) const fn failure(&self) -> Option<Code> {
+        self.failure
+    }
+
+    pub(crate) fn into_status(self) -> Status {
+        self.status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> &Status {
+        &self.status
+    }
+}
+
+impl From<Failure> for ClassifiedStatus {
+    fn from(failure: Failure) -> Self {
+        let (grpc, message) = projection(failure.code);
+        failure.into_classified_as(grpc, message)
     }
 }
 
@@ -77,7 +149,7 @@ impl FixedFailure {
         }
     }
 
-    pub(crate) fn status(self) -> Status {
+    pub(crate) fn template(self) -> &'static Status {
         static DEADLINE: OnceLock<Status> = OnceLock::new();
         static INTERNAL: OnceLock<Status> = OnceLock::new();
         static AT_CAPACITY: OnceLock<Status> = OnceLock::new();
@@ -86,7 +158,7 @@ impl FixedFailure {
             Self::Internal => &INTERNAL,
             Self::AtCapacity => &AT_CAPACITY,
         };
-        let template = cache.get_or_init(|| {
+        cache.get_or_init(|| {
             let failure = Failure::new(self.catalog_code());
             match self {
                 Self::AtCapacity => failure
@@ -94,7 +166,11 @@ impl FixedFailure {
                     .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL),
                 Self::Deadline | Self::Internal => failure.into(),
             }
-        });
+        })
+    }
+
+    pub(crate) fn status(self) -> Status {
+        let template = self.template();
         Status::with_details(
             template.code(),
             template.message(),
@@ -192,6 +268,30 @@ mod tests {
             assert!(details.retry_info().is_none());
             assert!(details.bad_request().is_none());
             assert_eq!(catalog_code(&status), Some(code));
+            let classified = ClassifiedStatus::from(Failure::new(code));
+            assert_eq!(classified.code(), status.code());
+            assert_eq!(classified.failure(), Some(code));
+        }
+
+        let custom = Failure::new(Code::Forbidden)
+            .into_classified_as(tonic::Code::PermissionDenied, "custom refusal");
+        assert_eq!(custom.code(), tonic::Code::PermissionDenied);
+        assert_eq!(custom.status().message(), "custom refusal");
+        assert_eq!(custom.failure(), Some(Code::Forbidden));
+        assert_eq!(catalog_code(custom.status()), Some(Code::Forbidden));
+
+        for fixed in [
+            FixedFailure::Deadline,
+            FixedFailure::Internal,
+            FixedFailure::AtCapacity,
+        ] {
+            let classified = ClassifiedStatus::fixed(fixed);
+            assert_eq!(classified.code(), fixed.template().code());
+            assert_eq!(classified.failure(), Some(fixed.catalog_code()));
+            assert_eq!(
+                catalog_code(classified.status()),
+                Some(fixed.catalog_code())
+            );
         }
     }
 

@@ -1901,6 +1901,9 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
 // template:begin authn:grpc-transport-test-shared-queue-limit
 #[tokio::test]
 async fn both_admission_queues_share_the_call_wait_limit() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_secs(1));
@@ -1926,6 +1929,11 @@ async fn both_admission_queues_share_the_call_wait_limit() {
         "queued",
     )));
     assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    assert!(
+        metrics.render().contains("grpc_server_admission_waiting 1"),
+        "{}",
+        metrics.render()
+    );
     tokio::time::advance(Duration::from_millis(750)).await;
 
     echo.hold.release();
@@ -1941,6 +1949,23 @@ async fn both_admission_queues_share_the_call_wait_limit() {
         .unwrap();
     assert!(started.elapsed() >= Duration::from_secs(1));
     assert_at_capacity(&grpc_status(&response).unwrap());
+    let rendered = metrics.render();
+    assert!(
+        rendered.contains("grpc_server_admission_wait_seconds_count 2"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("grpc_server_admission_waiting 0"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("grpc_server_shed_requests_total 1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("failure_code=\"service_unavailable\"} 1"),
+        "{rendered}"
+    );
     assert_seen(&echo, &[Seen::ServerStream]);
     drop(held);
     tokio::time::resume();

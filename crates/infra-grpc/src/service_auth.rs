@@ -10,6 +10,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use crate::Failure;
 use crate::call::check_open;
 use crate::router::reject_with_budget;
+use crate::status::ClassifiedStatus;
 
 const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this method";
 
@@ -22,7 +23,7 @@ pub(crate) async fn admit_caller(
     allowed_callers: Option<&HashSet<ServiceName>>,
     context: &OperationContext,
     mut request: Request,
-) -> Result<Request, tonic::Status> {
+) -> Result<Request, ClassifiedStatus> {
     check_open(context)?;
     let result = {
         let authorization = request
@@ -51,7 +52,7 @@ pub(crate) async fn admit_caller(
             "service_auth_caller_not_admitted"
         );
         let status = Failure::new(service_failure::Code::Forbidden)
-            .into_status_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
+            .into_classified_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
         return Err(reject_with_budget(context, request, status).await);
     }
     check_open(context)?;
@@ -61,7 +62,7 @@ pub(crate) async fn admit_caller(
     Ok(request)
 }
 
-fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
+fn verification_status(failure: infra_serviceauth::Failure) -> ClassifiedStatus {
     Failure::new(match failure {
         infra_serviceauth::Failure::Missing
         | infra_serviceauth::Failure::Malformed
@@ -178,11 +179,13 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+        assert_eq!(denied.failure(), Some(service_failure::Code::Forbidden));
 
         let unknown = admit_caller(&verifier, None, &live, make_request(Some(&orders_bearer)))
             .await
             .unwrap_err();
         assert_eq!(unknown.code(), tonic::Code::PermissionDenied);
+        assert_eq!(unknown.failure(), Some(service_failure::Code::Forbidden));
 
         let admitted = admit_caller(
             &verifier,
