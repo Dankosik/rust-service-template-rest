@@ -451,13 +451,20 @@ async fn start(
     let service_auth = service_auth::prepare(config)?;
     // template:end service-auth:bootstrap-service-auth-prepare
     // template:begin postgres:bootstrap-postgres-startup
-    if let Some(postgres) = config.postgres() {
+    #[allow(
+        unused_variables,
+        reason = "profiles without inbound webhooks or HTTP idempotency read no pool after history check"
+    )]
+    let postgres_pool = if let Some(postgres) = config.postgres() {
         let pool = postgres::open(postgres, config, background, &mut dependencies.postgres).await?;
         probes.push(BoxedProbe::new(infra_postgres::PostgresProbe::new(
             pool.clone(),
         )));
-        migrate::verify_history(pool).await?;
-    }
+        migrate::verify_history(&pool).await?;
+        Some(pool)
+    } else {
+        None
+    };
     // template:end postgres:bootstrap-postgres-startup
     // template:begin cache:service-bootstrap-cache-startup
     if let Some(settings) = config.cache() {
@@ -471,7 +478,7 @@ async fn start(
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state = inbound_webhooks::prepare(config, dependencies.postgres.as_ref())?;
+    let webhook_state = inbound_webhooks::prepare(config, postgres_pool.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = Readiness::new(
         probes,
@@ -530,7 +537,7 @@ async fn start(
         auth,
         config,
         // template:begin http-idempotency:bootstrap-http-idempotency-resources
-        dependencies.postgres.as_ref(),
+        postgres_pool.as_ref(),
         background,
         // template:end http-idempotency:bootstrap-http-idempotency-resources
     )

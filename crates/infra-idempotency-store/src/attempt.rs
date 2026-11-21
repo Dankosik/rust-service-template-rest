@@ -247,22 +247,20 @@ impl Store {
             return Err(Stop::Decided(decision));
         }
         let written = if T::NEEDS_SAVEPOINT {
-            tx.with_savepoint(async |tx: &mut Tx<'_, M>| {
-                let outcome = work(tx).await.map_err(Stop::RolledBack)?;
-                Ok(match outcome {
-                    WriteOutcome::Success(record) => {
-                        SavepointEnd::Keep(Written::Success(record.into_record()))
-                    }
-                    WriteOutcome::TerminalRefusal(refusal) => {
-                        SavepointEnd::Rollback(Written::TerminalRefusal(refusal.into_record()))
-                    }
-                })
+            tx.with_savepoint(async |tx: &mut Tx<'_, M>| match work(tx).await {
+                Ok(WriteOutcome::Success(record)) => {
+                    SavepointEnd::Keep(Written::Success(record.into_record()))
+                }
+                Ok(WriteOutcome::TerminalRefusal(refusal)) => {
+                    SavepointEnd::Rollback(Written::TerminalRefusal(refusal.into_record()))
+                }
+                Err(rollback) => SavepointEnd::AbortTransaction(rollback),
             })
             .await
             .map_err(|error| match error {
                 SavepointError::Begin(err) => Stop::Failed(sql_failed(&err, "savepoint")),
-                SavepointError::Work(stop) => stop,
                 SavepointError::Rollback(err) => Stop::Failed(sql_failed(&err, "rollback_command")),
+                SavepointError::Aborted(rollback) => Stop::RolledBack(rollback),
             })?
         } else {
             match work(tx).await.map_err(Stop::RolledBack)? {

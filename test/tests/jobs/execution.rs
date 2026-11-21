@@ -761,7 +761,7 @@ async fn x1_claim_takes_only_free_slots(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool) {
-    let jobs = Pool::prepare(
+    let jobs = Pool::connect(
         &dsn_for(&pool).await,
         &infra_postgres::PoolOptions {
             max_connections: NonZeroU32::new(3).unwrap(),
@@ -771,7 +771,9 @@ async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool)
             wait_order: infra_postgres::WaitOrder::Arrival,
             notifications: false,
         },
-    );
+    )
+    .await
+    .unwrap();
     prepare(&jobs).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     tokio::time::sleep(Duration::from_millis(50)).await;

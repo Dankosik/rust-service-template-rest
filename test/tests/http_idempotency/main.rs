@@ -440,11 +440,12 @@ async fn a_command_cannot_shadow_the_terminal_refusal_savepoint(pool: PgPool) {
                 .execute(&mut *tx)
                 .await
                 .unwrap();
-            tx.with_savepoint(async |tx| -> Result<SavepointEnd<()>, sqlx::Error> {
+            tx.with_savepoint(async |tx| -> SavepointEnd<()> {
                 sqlx::query("INSERT INTO effects DEFAULT VALUES")
                     .execute(&mut *tx)
-                    .await?;
-                Ok(SavepointEnd::Rollback(()))
+                    .await
+                    .unwrap();
+                SavepointEnd::Rollback(())
             })
             .await
             .unwrap();
