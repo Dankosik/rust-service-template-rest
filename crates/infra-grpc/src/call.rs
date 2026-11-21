@@ -1,6 +1,4 @@
-use bytes::Bytes;
 use http::HeaderMap;
-use http_body::Body;
 use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
 use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody};
 use operation_context::{Deadline, OperationContext, Stopped};
@@ -10,12 +8,36 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::observe::Call;
 use crate::status::FixedFailure;
 
-#[derive(Default)]
 pub(crate) struct ServerCustody {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) cancel_on_drop: Option<DropGuard>,
-    pub(crate) deadline: Option<Deadline>,
-    pub(crate) end_on_drain: Option<CancellationToken>,
+    pub(crate) stop: Option<ServerStop>,
+}
+
+impl ServerCustody {
+    pub(crate) fn deadline(deadline: Option<Deadline>) -> Self {
+        Self {
+            permit: None,
+            cancel_on_drop: None,
+            stop: deadline.map(ServerStop::Deadline),
+        }
+    }
+
+    fn into_hooks(
+        self,
+        call: Call,
+        fallback: Option<opentelemetry::Context>,
+    ) -> (ServerHooks, Option<ServerStop>) {
+        let deadline = self.stop.as_ref().and_then(ServerStop::deadline);
+        let hooks = ServerHooks {
+            call,
+            permit: self.permit,
+            cancel_on_drop: self.cancel_on_drop,
+            deadline,
+            fallback,
+        };
+        (hooks, self.stop)
+    }
 }
 
 pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
@@ -176,12 +198,21 @@ impl<E> StreamHooks<E> for ServerHooks {
     }
 }
 
-enum ServerStop {
+pub(crate) enum ServerStop {
     Drain {
         deadline: Option<Deadline>,
         drain: CancellationToken,
     },
     Deadline(Deadline),
+}
+
+impl ServerStop {
+    const fn deadline(&self) -> Option<Deadline> {
+        match *self {
+            Self::Drain { deadline, .. } => deadline,
+            Self::Deadline(deadline) => Some(deadline),
+        }
+    }
 }
 
 async fn wait_server_stop(stop: ServerStop) -> LocalStatus {
@@ -200,58 +231,20 @@ async fn wait_server_stop(stop: ServerStop) -> LocalStatus {
     }
 }
 
-type ResponseBody<B> = WatchedBody<B, ServerHooks>;
-
-fn start_response_body<B>(
-    body: B,
-    call: Call,
-    fallback: Option<opentelemetry::Context>,
-    custody: ServerCustody,
-    initial: Option<ServerOutcome>,
-) -> Option<ResponseBody<B>>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
-    let end_on_drain = custody.end_on_drain;
-    let hooks = ServerHooks {
-        call,
-        permit: custody.permit,
-        cancel_on_drop: custody.cancel_on_drop,
-        deadline: custody.deadline,
-        fallback,
-    };
-    WatchedBody::start(body, hooks, initial, move |hooks| {
-        let stop = if let Some(drain) = end_on_drain {
-            ServerStop::Drain {
-                deadline: hooks.deadline,
-                drain,
-            }
-        } else {
-            ServerStop::Deadline(hooks.deadline?)
-        };
-        Some(wait_server_stop(stop))
-    })
-}
-
 pub(crate) fn wrap_response(
-    mut response: axum::response::Response,
+    response: axum::response::Response,
     call: Call,
     fallback: Option<opentelemetry::Context>,
     custody: ServerCustody,
 ) -> axum::response::Response {
-    let initial = if custody.deadline.is_some_and(Deadline::expired) {
-        let status = LocalStatus::failure(FixedFailure::Deadline);
-        for header in STATUS_HEADERS {
-            response.headers_mut().remove(header);
-        }
-        Some(status.write_headers(response.headers_mut()))
-    } else {
-        ServerOutcome::from_response(&response)
-    };
-    response.map(|body| {
-        start_response_body(body, call, fallback, custody, initial)
-            .map_or_else(axum::body::Body::empty, axum::body::Body::new)
-    })
+    let (hooks, stop) = custody.into_hooks(call, fallback);
+    WatchedBody::attach_response(
+        response,
+        hooks,
+        |_, response| ServerOutcome::from_response(response),
+        move |_| stop.map(wait_server_stop),
+        axum::body::Body::new,
+    )
 }
 
 #[cfg(test)]
@@ -263,7 +256,8 @@ mod tests {
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
-    use http_body::Frame;
+    use bytes::Bytes;
+    use http_body::{Body, Frame};
     use http_body_util::BodyExt as _;
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
@@ -274,6 +268,22 @@ mod tests {
     use super::*;
 
     const BUDGET: Duration = Duration::from_secs(1);
+
+    type ResponseBody<B> = WatchedBody<B, ServerHooks>;
+
+    fn start_response_body<B>(
+        body: B,
+        call: Call,
+        fallback: Option<opentelemetry::Context>,
+        custody: ServerCustody,
+        initial: Option<ServerOutcome>,
+    ) -> Option<ResponseBody<B>>
+    where
+        B: Body<Data = Bytes> + Unpin + Send + 'static,
+    {
+        let (hooks, stop) = custody.into_hooks(call, fallback);
+        WatchedBody::start(body, hooks, initial, move |_| stop.map(wait_server_stop))
+    }
 
     #[test]
     fn rich_trailers_use_the_first_status_values_even_with_repeated_metadata() {
@@ -386,7 +396,7 @@ mod tests {
                 http_body_util::StreamBody::new(frames),
                 server_call(),
                 None,
-                ServerCustody::default(),
+                ServerCustody::deadline(None),
                 None,
             )
             .unwrap(),
@@ -421,8 +431,7 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(token.clone().drop_guard()),
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
         tokio::time::advance(BUDGET).await;
@@ -471,8 +480,10 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(response_token.clone().drop_guard()),
-                deadline: None,
-                end_on_drain: Some(response_token),
+                stop: Some(ServerStop::Drain {
+                    deadline: None,
+                    drain: response_token,
+                }),
             },
         );
         listener_drain.cancel();
@@ -512,8 +523,7 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
         assert_eq!(
@@ -546,8 +556,7 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(cancellation.clone().drop_guard()),
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
         drop(body);
@@ -590,8 +599,7 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
         let trailers = body
@@ -638,8 +646,7 @@ mod tests {
                 ServerCustody {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                     cancel_on_drop: None,
-                    deadline: Some(budget_deadline()),
-                    end_on_drain: None,
+                    stop: Some(ServerStop::Deadline(budget_deadline())),
                 },
             )
         };
@@ -717,7 +724,7 @@ mod tests {
                 ContextBody(Arc::clone(&seen)),
                 call,
                 Some(fallback),
-                ServerCustody::default(),
+                ServerCustody::deadline(None),
                 None,
             )
             .unwrap(),

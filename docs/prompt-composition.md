@@ -57,8 +57,8 @@ discovers `.agents/skills` through the `skill` tool; `/orchestrator` binds the
 Orchestrator carrier.
 
 Include the outcome, authoritative inputs, writable or read-only boundary, and
-stop condition needed by a delegated lane, and use
-[Transition](spec-first-workflow/shared/transition.md) for boundary state.
+stop condition needed by a delegated lane, and use [Recovery And
+Handoff](spec-first-workflow/shared/transition.md) for handoffs and blockers.
 Required machine fields and exact protocol tokens keep their existing contracts;
 the accompanying request can still use natural prose.
 

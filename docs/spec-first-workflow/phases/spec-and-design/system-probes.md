@@ -1,10 +1,10 @@
 # System Probes
 
 Single source of truth for the seven adversarial crossing probes applied in
-[System Design](system-design.md) and verified in [Technical Design
-Review](../technical-design-review.md). Attack every exposed runtime
-**crossing**; omit inapplicable probes. Load a named skill only when its probe
-fires on an open decision.
+[System Design](system-design.md) and verified in [Plan
+Review](../plan-review.md). Attack every exposed runtime **crossing**; omit
+inapplicable probes. Load a named skill only when its probe fires on an open
+decision.
 
 1. **Data model, tx scope & truth** *(load `rust-sqlx`)*: Who is the canonical
    writer per invariant, and what commits atomically vs outside any DB tx

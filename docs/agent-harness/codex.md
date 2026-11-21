@@ -10,27 +10,26 @@ availability alone does not authorize use.
   subagents for all internal execution and review (including mutable and
   cross-repo work); never create separate Codex App chats or use App task
   handoff as a carrier or fallback.
-- Under [Transition](../spec-first-workflow/shared/transition.md#cross-phase-continuation),
-  map preparation phases to fresh collaboration subagents with
-  `fork_turns: "none"`. The root handles Intake and coordinates those phases.
+- Keep preparation (Intake through Planning) in the root session, using fresh
+  collaboration subagents (`fork_turns: "none"`) for wide scans, bounded
+  specialists / `Design It Twice`, and `Plan Review` / adjudication.
 - Subagents share the parent's working directory. For a neighboring repository,
   apply [Authority](../../AGENTS.md#authority) and target it in
   commands/navigation; brief paths or command `cwd` do not reload that project's
   config, roles, or tools.
-- For each ready ledger unit, Final Validation repair, or Delivery Owner pass,
-  spawn a general-purpose subagent with [Unit
-  Implementation](../spec-first-workflow/phases/implementation/unit.md),
-  [Repair Assignment](../spec-first-workflow/phases/implementation/repair.md),
-  or [Final
-  Validation](../spec-first-workflow/phases/implementation/final-validation.md)
-  as Method and that packet, repair brief, or ledger scope as boundary (it is
-  Acceptance-Unit Lead; `worker-agent` and read-only roles lack acceptance
-  authority). A root-local Lead handles a single fixed inline unit.
+- For each ready ledger unit or batched repair pass, spawn a general-purpose
+  subagent with [Unit
+  Implementation](../spec-first-workflow/phases/implementation/unit.md) or
+  [Repair Assignment](../spec-first-workflow/phases/implementation/repair.md) as
+  Method and that packet or repair scope as boundary (it is Acceptance-Unit
+  Lead; `worker-agent` and read-only roles cannot lead a unit or repair pass).
+  The Ledger Orchestrator owns assembled verification and review dispatch
+  directly.
 - When [Agent Harness](../agent-harness.md) selects isolation, assign a
   repo-native Git worktree's absolute root; share checkouts only with disjoint
   writable owners and locks. Report missing tools, config, or write access as
   a capability gap rather than switching control planes.
-- Phase actors and Leads call collaboration tools directly for descendants.
+- Leads call collaboration tools directly for descendants.
 - A Goal is optional and thread-local; create one only on explicit user/system
   instruction (duration is not authorization).
 
@@ -88,16 +87,13 @@ model/effort: escalate by stopping the old lane, reconciling its edits, and
 spawning a fresh agent. Never wait on an idle lane or blindly repeat uncertain
 dispatch; reconcile once from native status, ledger, and Git candidate identity.
 
-For isolated work, validate worktree and base before accepting bytes. An
-`Implemented` Worktree Lead returns [Acceptance
-Result](../spec-first-workflow/interfaces/acceptance-result-v1.md) with a fixed
-`candidate`; the Orchestrator or root-local Lead lands it serially without
-re-adjudicating.
-
-## Review And Recovery
-
-When [Review](../spec-first-workflow/shared/review.md) selects independent
-review, spawn a fresh `reviewer-agent` (`fork_turns: "none"`) with the phase
-review Method. Keep agent identities across [Transition](../spec-first-workflow/shared/transition.md)
-reopens and interruptions to reconcile completion and resume from the verified
-checkout.
+For isolated work, validate the worktree and base before accepting bytes. An
+isolated Acceptance-Unit Lead returns [Implementation
+Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result)
+with a fixed `candidate`; the Orchestrator integrates it serially under
+[Implementation Step
+3](../spec-first-workflow/phases/implementation.md#3-acceptance-transition).
+Spawn independent reviews as fresh `reviewer-agent` (`fork_turns: "none"`) with
+the phase review Method, and retain agent identities across
+[Resume](../spec-first-workflow/shared/resume.md) interruptions to reconcile
+completion and resume from the verified checkout.

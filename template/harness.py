@@ -109,23 +109,24 @@ ALLOWED_ROLE_KEYS = frozenset({
 })
 
 OUTPUT_SCHEMA_LINES = {
-    "lane-result-v1": (
-        "Return fields: conclusion, evidence (primary locator and result), "
-        "uncertainty_or_conflict, disposition (accept | reject | repair | "
-        "carry_as_proof_or_risk | reopen), destination."
+    "lane-result": (
+        "Return fields: conclusion, evidence (primary locators, commands, and "
+        "results), gaps (uncertainty, conflict, or missing owner, or none)."
     ),
-    "specialist-result-v1": (
-        "Return Decision Result V1 (disposition: decision | constraint_only | "
-        "proof_only | no_new_decision_required | blocked, decision_or_constraint, "
-        "forced_consequences, proof_or_gap, blocker, "
-        "strongest_rejected_alternative, rejection_reason, "
-        "reopen_owner_or_condition), or Candidate Proposal V1 when dispatched "
-        "as a generative candidate lane (pressure, proposal, caller_sketch, "
-        "hidden_complexity, dependencies_and_cost, thin_leverage_and_risks, "
-        "blocker_or_gap, anchors)."
+    "specialist-result": (
+        "Return fields: recommendation (policy, constraint, proof obligation, "
+        "or blocked), rejected_steelman (strongest simpler substitute and "
+        "broken invariant, or none), consequences_and_proof, reopen_if; for "
+        "Design It Twice, return "
+        "`docs/spec-first-workflow/phases/spec-and-design/design-it-twice.md#candidate-proposal`."
     ),
-    "review-result-v1": "Return `docs/spec-first-workflow/interfaces/review-result-v1.md`.",
-    "delegated-result-v1": (
+    "review-result": (
+        "Return fields: candidate, verdict (PASS | CONCERNS | FAIL | NEEDS_PARENT | "
+        "REVIEW_HANDOFF_INVALID), findings (anchored surviving findings grouped by "
+        "axis, or none), evidence_boundary, reopen_owner (see "
+        "`docs/spec-first-workflow/shared/review.md#review-result`)."
+    ),
+    "delegated-result": (
         "Return fields: result, changed_paths, proof (checks actually run "
         "with their results, or none), candidate, gap."
     ),
@@ -143,7 +144,7 @@ ANTIGRAVITY_READONLY_TOOLS = "[view_file, grep_search, run_command]"
 
 LEAD_DESC = (
     "Unit: Use when bound ACCEPTANCE_UNIT_LEAD for an implementation unit or "
-    "final delivery validation. Own the assigned boundary; Skip sibling scheduling."
+    "batched repair pass. Own the assigned boundary; Skip sibling scheduling."
 )
 ORCH_DESC = (
     "Ledger: Use when this session must route a ready persisted Implementation "
@@ -352,14 +353,13 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
     impl = "../../docs/spec-first-workflow/phases/implementation.md"
     lead_phase = impl.removesuffix(".md")
     lead_method = (
-        f"Apply [Unit Implementation]({lead_phase}/unit.md) for an assigned unit,\n"
-        f"[Repair Assignment]({lead_phase}/repair.md) for a Final Validation repair, or\n"
-        f"[Final Validation]({lead_phase}/final-validation.md) as Delivery Owner.\n"
+        f"Apply [Unit Implementation]({lead_phase}/unit.md) for an assigned unit, or\n"
+        f"[Repair Assignment]({lead_phase}/repair.md) for a batched repair pass.\n"
     )
     orch_method = f"Apply [Implementation as Ledger Orchestrator]({impl}#carrier)\n"
     lead_tail = (
-        "Apply the assigned packet, repair brief, or ledger scope and its named Method. Return\n"
-        "`docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.\n"
+        "Apply the assigned packet or repair brief and its named Method. Return\n"
+        "`docs/spec-first-workflow/phases/implementation/unit.md#implementation-result`.\n"
     )
 
     lead_specs = (
@@ -367,13 +367,13 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         (".qwen/agents", f'name: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\nmodel: inherit\ntools:\n{QWEN_MUTABLE_TOOLS}', "Qwen Code", "qwen-code.md"),
         (".cursor/agents", f'name: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\nmodel: grok-4.6[effort=xhigh]\nreadonly: false', "Cursor", "cursor.md"),
         (".grok/agents", f'name: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\nagents_md: true\npermission_mode: bypassPermissions\nprompt_mode: full', "Grok Build", "grok-build.md"),
-        (".opencode/agents", f'description: "{LEAD_DESC}"\nmode: all\nmodel: xai/grok-4.6\nvariant: xhigh\npermission:\n  task:\n    "*": deny\n    worker-agent: allow\n    specialist-agent: allow\n    evidence-agent: allow\n    reviewer-agent: allow\n    adjudicator-agent: allow\n  question: deny', "OpenCode", "opencode.md"),
+        (".opencode/agents", f'description: "{LEAD_DESC}"\nmode: all\nmodel: xai/grok-4.6\nvariant: xhigh\npermission:\n  task:\n    "*": deny\n    worker-agent: allow\n    specialist-agent: allow\n    evidence-agent: allow\n  question: deny', "OpenCode", "opencode.md"),
         (".agents/agents", f'name: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\ntools: {ANTIGRAVITY_MUTABLE_TOOLS}\nmainAgent: false\nsubagent: true', "Antigravity", "antigravity.md"),
     )
     for rel_dir, fm, label, doc in lead_specs:
         rendered[rel_dir]["acceptance-unit-lead.md"] = (
-            f"---\n{fm}\n---\n\n{lead_method}Load [{label} adapter](../../docs/agent-harness/{doc}) "
-            f"only when spawning sub-lanes or independent review.\n{lead_tail}"
+            f"---\n{fm}\n---\n\n{lead_method}Load [Agent Harness](../../docs/agent-harness.md#nested-execution) "
+            f"and [{label} adapter](../../docs/agent-harness/{doc}) only when delegating a strict subset.\n{lead_tail}"
         ).encode("utf-8")
 
     orch_specs = (

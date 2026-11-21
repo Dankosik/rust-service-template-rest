@@ -1,9 +1,9 @@
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures_util::future::BoxFuture;
 use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
@@ -35,8 +35,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 type TlsTarget = (TlsConnector, rustls::pki_types::ServerName<'static>);
 type TransportStream = Either<TcpStream, TlsStream<TcpStream>>;
+
+pub(crate) fn unbracket_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
 
 #[derive(Clone, Copy)]
 struct ContextConflict;
@@ -235,23 +242,53 @@ impl Client {
     }
 }
 
+enum ResponseFutureInner {
+    Err(std::future::Ready<tonic::Status>),
+    Pending(BoxFuture<Result<Response<Body>, tonic::Status>>),
+}
+
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+#[derive(derive_more::Debug)]
+#[debug("ResponseFuture {{ .. }}")]
+pub struct ResponseFuture(ResponseFutureInner);
+
+impl ResponseFuture {
+    pub fn from_prepared<F>(
+        prepared: Result<PreparedCall, tonic::Status>,
+        send: impl FnOnce(PreparedCall) -> F,
+    ) -> Self
+    where
+        F: Future<Output = Result<Response<Body>, tonic::Status>> + Send + 'static,
+    {
+        match prepared {
+            Ok(prepared) => Self(ResponseFutureInner::Pending(Box::pin(send(prepared)))),
+            Err(status) => Self(ResponseFutureInner::Err(std::future::ready(status))),
+        }
+    }
+}
+
+impl Future for ResponseFuture {
+    type Output = Result<Response<Body>, tonic::Status>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.get_mut().0 {
+            ResponseFutureInner::Err(err) => Pin::new(err).poll(cx).map(Err),
+            ResponseFutureInner::Pending(pending) => pending.as_mut().poll(cx),
+        }
+    }
+}
+
 impl Service<Request<Body>> for Client {
     type Response = Response<Body>;
     type Error = tonic::Status;
-    type Future = futures_util::future::Either<
-        std::future::Ready<Result<Self::Response, Self::Error>>,
-        BoxFuture<'static, Result<Self::Response, Self::Error>>,
-    >;
+    type Future = ResponseFuture;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        match PreparedCall::prepare(self, request) {
-            Ok(prepared) => futures_util::future::Either::Right(Box::pin(prepared.send())),
-            Err(status) => futures_util::future::Either::Left(std::future::ready(Err(status))),
-        }
+        ResponseFuture::from_prepared(PreparedCall::prepare(self, request), PreparedCall::send)
     }
 }
 
@@ -293,6 +330,7 @@ where
     }
 }
 
+#[must_use = "send the prepared call or drop it intentionally"]
 #[derive(derive_more::Debug)]
 pub struct PreparedCall {
     #[debug(skip)]
@@ -381,7 +419,6 @@ impl PreparedCall {
         }
     }
 
-    #[must_use]
     pub fn on_status(mut self, hook: impl FnOnce(tonic::Code) + Send + 'static) -> Self {
         self.on_status = Some(match self.on_status.take() {
             Some(previous) => Box::new(move |code| {
@@ -473,7 +510,7 @@ struct GrpcConnector {
 impl Service<http::Uri> for GrpcConnector {
     type Response = TokioIo<TransportStream>;
     type Error = BoxError;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.http.poll_ready(context).map_err(BoxError::from)
@@ -523,7 +560,7 @@ fn parse_destination(
     match (security, parts.scheme) {
         (ClientSecurity::Plaintext, OriginScheme::Http) => Ok((uri, origin, None)),
         (ClientSecurity::Tls(material), OriginScheme::Https) => {
-            let trimmed_host = crate::protocol::unbracket_host(parts.host);
+            let trimmed_host = unbracket_host(parts.host);
             let server_name = rustls::pki_types::ServerName::try_from(trimmed_host)
                 .map_err(|_| ClientError::InvalidDestination)?
                 .to_owned();
@@ -854,5 +891,35 @@ mod tests {
         let status = client.call(request).await.unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unavailable);
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_future_resolves_immediate_and_pending_outcomes() {
+        let ready = ResponseFuture::from_prepared(
+            Err(tonic::Status::permission_denied("refused")),
+            PreparedCall::send,
+        );
+        assert_eq!(format!("{ready:?}"), "ResponseFuture { .. }");
+        assert_eq!(
+            ready.await.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let client = Client::builder(
+            "http://127.0.0.1:1",
+            ClientSecurity::Plaintext,
+            Duration::from_secs(1),
+        )
+        .build()
+        .unwrap();
+        let pending = ResponseFuture::from_prepared(
+            PreparedCall::prepare(&client, Request::new(Body::empty())),
+            |prepared| async move {
+                drop(prepared);
+                Ok(Response::new(Body::empty()))
+            },
+        );
+        assert_eq!(format!("{pending:?}"), "ResponseFuture { .. }");
+        assert!(pending.await.is_ok());
     }
 }

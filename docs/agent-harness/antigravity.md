@@ -4,26 +4,25 @@ Use installed subagent, skill, Goal, and worktree controls as native authority;
 callable tool fields outrank public prose. Custom subagents exist in the
 Antigravity App and CLI; the IDE has no custom-subagent carrier, so report a
 full-ledger capability gap on the IDE surface instead of shrinking the ledger
-workflow (a fixed inline unit or Direct Work still runs in-session).
+workflow (Direct Work still runs in-session).
 
 ## Native Map
 
-- In the App or CLI, start each preparation phase with a new
-  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) using
-  `self`, the phase brief, and workspace `inherit`. This gives the child the
-  caller's tools and checkout with a fresh conversation. Track its returned
-  conversation ID. On an IDE surface without this control, preserve the
-  completed input and report the phase that needs the App or CLI.
+- Keep preparation (Intake through Planning) in the root session, using fresh
+  [`invoke_subagent`](https://antigravity.google/docs/subagents.md) read-only
+  lanes (`evidence-agent`, `specialist-agent`, `reviewer-agent`,
+  `adjudicator-agent`) on workspace `inherit` for wide scans, bounded
+  specialists / `Design It Twice`, and `Plan Review` / adjudication.
 - Antigravity reads `AGENTS.md`, `.agents/rules/antigravity-harness.md`, and
   `.agents/skills` directly; skills load by description or `/<skill-name>`.
 - Start the Ledger Orchestrator with `agy --agent orchestrator` or by
   selecting `orchestrator` as the App's primary agent.
 - Dispatch ready units via `invoke_subagent` with role
-  `acceptance-unit-lead` within capacity, consuming [Acceptance
-  Result](../spec-first-workflow/interfaces/acceptance-result-v1.md). Never
-  substitute `self`, `research`, or `define_subagent` for this implementation Lead;
-  report a missing `acceptance-unit-lead` or missing conversation ID as a
-  carrier gap before dispatch.
+  `acceptance-unit-lead` within capacity, consuming [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
+  Never substitute `self`, `research`, or `define_subagent` for this
+  implementation Lead; report a missing `acceptance-unit-lead` or missing
+  conversation ID as a carrier gap before dispatch.
 - Delegated lanes use `invoke_subagent` with `worker-agent`,
   `specialist-agent`, `evidence-agent`, `reviewer-agent`, or
   `adjudicator-agent`. Read-only roles carry no edit tool; mutable roles may
@@ -44,10 +43,10 @@ workflow (a fixed inline unit or Direct Work still runs in-session).
 ## Models And Dispatch
 
 Generated agents in `.agents/agents` omit `model`, so every role inherits the
-session model; the native field accepts only `inherit`, `flash`, or `pro`.
-Choose the session model with `--model`/`--effort` or the App selector when
-[Agent Harness](../agent-harness.md) capability routing or user selection
-requires it; never encode model names only in prompt text.
+session model; the native `Model` field accepts only its schema tiers (such as
+`inherit`, `flash`, or `pro`). Choose the session model with `--model`/`--effort`
+or the App selector when [Agent Harness](../agent-harness.md) capability routing
+or user selection requires it; never encode model names only in prompt text.
 
 Pass [delegation interface](../agent-harness.md#delegation-interface) fields
 through `invoke_subagent` (role, initial prompt, workspace option). Subagents
@@ -56,6 +55,3 @@ Lifetime](../agent-harness.md#context-and-lifetime): retain every returned
 conversation ID before waiting (missing identity is a carrier failure), use
 `send_message` to an idle subagent only for permitted continuations, and kill
 finished lanes before releasing scope.
-
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md).

@@ -1,144 +1,170 @@
 # Planning
 
-Prepare executable slices from accepted decisions. Work statically against
-primary sources without running builds, tests, or services. Return open product
-or architecture decisions to their upstream owner.
+Continue autonomously in the same session from `specs/<task>/spec.md` (and
+`specs/<task>/design.md` if split). Turn closed decisions into executable
+**tracer-bullet** vertical slices, clear one fresh [Plan Review](plan-review.md),
+and stop at the ready handoff for a fresh Implementation session.
 
 ## Steps
 
-1. **Reconcile inputs and remaining work.** Read the task's accepted intent,
-   specification (or cited fixed external contract for skipped Definition),
-   and applicable design and rollout decisions. When Technical Design ran
-   without a design document, consume its reviewed no-open-decisions result.
-   Check `status: ready` on present intent, spec, design and rollout documents.
-   Read applicable research, active `workflow-plan.md` rules and existing
-   ledger state. Route missing required authority through [Blocked Exit](#blocked-exit).
+1. **Ground blast radius and lock surfaces (static, read-only).**
+   - Trace every touched symbol, trait bound, error path, superseded path/test,
+     and [Exclusive lock](#exclusive-locks) surface across all workspace
+     targets (including tests), checking callers and match sites of changed
+     signatures or exhaustive public types.
+   - Verify non-obvious `Cargo.lock` crate APIs offline (`cargo metadata
+     --locked --offline --format-version 1`); offload wide sweeps to
+     `evidence-agent`.
+   - On reopen of an existing ledger, keep unaffected task IDs and integrated
+     `[x]` work against its original `Base:` intact. If zero coding delta
+     remains and every accepted obligation already holds (with no integrated
+     work awaiting acceptance), verify via [Plan
+     Review](plan-review.md#zero-delta-check) and report directly without
+     writing a ledger.
+   - *Done when:* every obligation (`R<n>`, `G<n>`, `D<n>`, `S<n>`, rollout
+     gates, durable doc updates, superseded cleanup) and affected caller is
+     mapped.
 
-   On reopen, leave the ledger and packets intact during analysis. Preserve
-   unaffected IDs and integrated work against its original `Base`.
+2. **Choose the smallest coherent task graph.**
+   - Default to **1 task** whenever one fresh Lead holds the change in its
+     **smart zone** (one coherent outcome, bounded crate set, uniform gate
+     boundary). For multi-task cuts, apply [Task Shapes And
+     Granularity](#task-shapes-and-granularity) and the deletion test, pulling
+     forward risk retirement or a `[prefactor]` simplifying `≥2` dependents and
+     keeping architecture, profile, manifest, durable-doc, and caller updates
+     atomic with their landing slice.
+   - *Done when:* every task has a clear vertical boundary, minimal lock
+     contention, and compiles and verifies cleanly on top of its `Depends on`
+     prerequisites.
 
-   Map each accepted obligation once:
+3. **Write `specs/<task>/tasks.md` and `specs/<task>/tasks/<ID>-<slug>.md`.**
+   - Persist `tasks.md` (`status: draft`) and one packet per task (including a
+     1-task ledger) under [Ledger And Packet Format](#ledger-and-packet-format).
+     Remove superseded orphan packets and clear Orchestrator runtime fields on a
+     fresh draft with no integrated `[x]` tasks.
+   - Verify on disk before review: acyclic topologically ordered DAG, every
+     `R<n>`/`D<n>`/`S<n>` traced, producer isolation satisfied, zero undeclared
+     lock or exhaustive-type collisions across concurrently eligible pairs, and
+     a shape-appropriate `Observable claim` per task.
+   - *Done when:* the on-disk bundle passes every structural and cold-start
+     check.
 
-   | Input | Disposition |
-   | --- | --- |
-   | Intent decisions (`I<n>`, binding or rejected), hard constraints, exclusions and priorities | Preserve in slice boundaries, global constraints or completion criteria. |
-   | Spec requirements, guarantees (`R<n>`, `G<n>`) and limits | Cite the source in the owning task and express its delta or preserved guarantee in the claim or assembled completion target. |
-   | Spec downstream handoff and durable contract updates | Apply Planning constraints to slicing or scope. Include required updates in the landing slice. |
-   | Design decisions and seams (`D<n>`, `S<n>`), forced owners, verified anchors, shared identifiers and mutated surfaces | Assign sources, mutable owners and locks. Include superseded paths, generated contracts and durable doc updates in the landing slice. Apply Planning hooks or give the obligations reviewer the reason for declining one. |
-   | Rollout gates and deployment boundaries | Gate the consuming stage and keep later-release work outside the ledger. |
-   | Carried concerns | Close Planning-owned concerns with a locator. Carry Implementation and Delivery Owner risks, owners and closing actions in global constraints or the affected packet's `Reopen if`. |
-   | Upstream assumptions, decision reopen conditions and active workflow rules | Record cross-task rules in global constraints and task-specific triggers in `Reopen if`. |
-
-   For an individual `R<n>`, `D<n>` or `S<n>` already satisfied on the
-   baseline, record `<ID>: already holds (<primary locator>)` in global constraints.
-
-   When no coding delta remains, take [No-Implementation Exit](#no-implementation-exit)
-   if all integrated work has been accepted. If acceptance remains, keep the
-   integrated tasks, packets and receipts and resume at Step 4 for Final Validation.
-   For remaining coding work, continue with Step 2.
-
-2. **Ground the proposed changes.** Inspect touched symbols, trait bounds,
-   error paths, superseded code and tests, and the [packet's lock
-   surfaces](../interfaces/task-packet-v1.md#field-rules). Locate production
-   and test callers and match sites across all workspace targets for changed
-   signatures and exhaustive public types. Verify non-obvious, unanchored or
-   slicing-critical crate APIs against locked sources (offline metadata or
-   cached paths). Record an unavailable source in `Reopen if` only if the
-   task boundary and producer contract are settled. Delegate large multi-crate
-   lookups under [Read-Only Delegation](../shared/read-only-delegation.md)
-   and verify decision-critical anchors directly.
-
-3. **Choose the task graph.** Apply [Task Shapes And Granularity](#task-shapes-and-granularity).
-   Keep architecture, profile and manifest updates atomic with their slice.
-   Cover every affected caller in the changing task or in a compatible staged
-   migration. For a single task spanning three or more crates, mixed gates or
-   an unverified seam, compare a split against the work one fresh Lead can
-   hold. For multiple tasks, try merging coupled pairs and pulling forward
-   risk retirement or a prefactor that simplifies two or more dependents.
-   Remove a task if its deletion loses no accepted outcome or prerequisite.
-
-4. **Write the draft.** Set `status: draft` in the [ledger](../interfaces/task-ledger-v1.md)
-   and write its [packets](../interfaces/task-packet-v1.md), including for one task.
-   Clear any resolved blocked stop, remove superseded orphan packets and
-   discard runtime fields on a fresh draft with no integrated work.
-
-5. **Check the candidate.** Inspect `tasks.md` and every packet for schema,
-   DAG, and lock invariants, and repair mechanical errors. Audit each producer using only its packet and sources
-   against every contract its dependents assume. Check pairs with no coding
-   path between them for undeclared owner, lock and exhaustive-type collisions.
-   Locate the baseline witness for each local outcome, assembled claim and
-   completion target under the packet's shape rules. Use the retained baseline
-   for integrated tasks. Resolve Planning defects in place and route upstream
-   contradictions through [Blocked Exit](#blocked-exit).
-
-6. **Review readiness.** Dispatch the [readiness review](task-review-readiness.md)
-   for the fixed draft. Apply the shared [Review Lifecycle](../shared/review.md#lifecycle)
-   to findings and disputes. For confirmed Planning defects, repeat Steps 4–5
-   on the repair. Recheck both axes when changed edges, locks or sources affect
-   isolation or when changed slices, coverage or claims affect obligations.
-   Reslicing requires fresh review. Send confirmed upstream gaps to
-   [Blocked Exit](#blocked-exit) with the review result.
-
-7. **Hand off.** Once all assigned axes clear, record bounded concerns in their
-   Step 1 homes. Mark the ledger ready and retire pre-ledger coordination under
-   [Artifacts](../shared/artifacts.md) before re-verifying `tasks.md` and its packets.
-   Return the ready ledger in [Transition Result V1](../shared/transition.md#transition-result-v1)
-   with Implementation as next owner. Include checked execution waves, lock
-   serializations, carried concerns and active reopen risks in movement evidence.
-   End preparation at [Implementation Handoff](../shared/transition.md#implementation-handoff).
+4. **Run fresh [Plan Review](plan-review.md) and hand off.**
+   - Dispatch fresh reviewer(s) on the fixed on-disk bundle (`spec.md`,
+     optional `design.md` and `intent.md`, `tasks.md`, `tasks/*.md`, plus
+     `research/*.md` for Axis 1) under [Review
+     Lifecycle](../shared/review.md#lifecycle).
+   - Verify every finding against primary sources, repair confirmed defects in
+     place, and re-run a bounded delta recheck (or fresh review if resliced or
+     interfaces changed). Escalate to the user only for a confirmed
+     product/risk contradiction.
+   - Once review clears (`PASS` or bounded `CONCERNS` recorded in `Global
+     constraints` / packet `Reopen if`), flip `spec.md`, `design.md` (if
+     present), and `tasks.md` to `status: ready`, and stop at [Implementation
+     Handoff](../shared/transition.md#implementation-handoff).
+   - *Done when:* `tasks.md` is `status: ready`, review cleared, and the user
+     has the one-screen plan overview and fresh-session launch message.
 
 ## Task Shapes And Granularity
 
-Default to **1 task** whenever one fresh Lead holds the change in its **smart
-zone** (one coherent outcome, bounded crate set, uniform risk/gate boundary).
-
-- **Split** only for: (1) independent observable outcomes compiling and
-  verifying alone; (2) genuine parallelism across disjoint `Mutable owners`,
-  `Exclusive locks`, and exhaustive-type updates; (3) isolating an unverified
-  integration seam or external gate; (4) smart-zone or blast-radius overload
-  across independent subsystems; or (5) a prerequisite shape below.
-- **Merge** tasks of one outcome sharing an `Exclusive lock` or `Mutable owner`
-  unless risk/gate isolation (3), smart-zone overload (4), or a valid
-  prerequisite shape (5) applies; tasks split solely for concurrency (2) that
-  serialize on a shared lock or owner; horizontal layers (`types -> repo ->
-  handler -> tests`); or standalone cleanup/docs tails (fold superseded cleanup
-  and durable doc updates into the landing slice, except `Contract`).
-- **Task vs lane:** parallel subtasks inside one outcome belong to Lead-chosen
-  lanes, not separate ledger tasks.
+- **Split only when earned:** independent observable outcomes that compile and
+  verify alone; genuine parallelism across disjoint `Mutable owners`,
+  `Exclusive locks`, and exhaustive-type updates; isolating an unverified
+  integration seam or external gate; smart-zone or blast-radius overload across
+  independent subsystems; or a prerequisite shape below.
+- **Merge instead of over-slicing:** combine tasks of one outcome sharing an
+  `Exclusive lock` or `Mutable owner` (unless risk isolation, smart-zone
+  overload, or a prerequisite shape applies); combine lock-serialized
+  "parallel" splits; collapse horizontal layers (`types -> repo -> handler ->
+  tests`); and fold cleanup/doc tails into the landing slice. Keep post-deploy
+  `multi-release` `Contract` steps outside Release 1's ledger.
 
 | Shape | Tag | When to use | Guardrail |
 | --- | --- | --- | --- |
 | **Vertical slice (tracer bullet)** | *(default; omit)* | Narrow, complete path through touched layers delivering observable behavior (or a behavior-preserving/quantitative delta) at its seam alone. | Litmus test: *"With prerequisites met and other tasks deferred, what works or is provably changed at the seam now?"* |
 | **Prefactor** | `[prefactor]` | Behavior-preserving cleanup of *existing* code ordered first to simplify the next slice(s). | Compiles alone; zero new feature types, schemas, or behavior. |
-| **Shared contract** | `[shared-contract]` | Minimal compiling contract/schema (types, traits, proto, CLI/Make contract, migration) ordered first. | Valid **only** when `≥2` lock-disjoint downstream slices run in parallel after it lands; otherwise fold into the first vertical slice. |
-| **Integration-first** / **Wide refactor** | `[integration-first]` / `[expand]`, `[migrate]`, `[contract]` | Unverified external seam is the primary risk, blast radius prevents one atomic green task, or `design.md -> Planning hooks` flags either. | Load [Conditional Planning Branches](planning/conditional-branches.md) only when triggered. |
+| **Shared contract** | `[shared-contract]` | Minimal compiling contract/schema (types, traits, proto, CLI/`just` contract, migration) ordered first. | Valid **only** when `≥2` lock-disjoint downstream slices run in parallel after it lands; otherwise fold into the first vertical slice. |
+| **Integration-first** / **Wide refactor** | `[integration-first]` / `[expand]`, `[migrate]`, `[contract]` | Unverified external seam is the primary risk, or blast radius prevents one atomic green task. | Load [Conditional Planning Branches](planning/conditional-branches.md) when triggered. |
 
-## Blocked Exit
+## Ledger And Packet Format
 
-Use when a required upstream input is missing, unready or contradicted, or a
-Planning concern or concurrent identifier needs an upstream decision.
+Order tasks **topologically** and by dispatch priority (risk retirement,
+`prefactor`, `shared-contract`, and critical-path blockers first). Keep IDs,
+shapes, and `Depends on` identical between `tasks.md` and packets;
+Implementation owns [Ledger Runtime State](implementation.md#ledger-runtime-state).
 
-- If `specs/<task>/tasks.md` exists and clean slices or already-integrated
-  `[x]` tasks (`Base:` runtime state) survive the blocker, keep `tasks.md` at
-  `status: blocked` with `Blocked stop:` naming the missing input and owner,
-  and set `result: specs/<task>/tasks.md`.
-- Otherwise delete any obsolete `tasks.md` and `specs/<task>/tasks/*.md` and
-  carry collected blockers inline in `result:`.
-- Emit [Transition Result V1](../shared/transition.md#transition-result-v1)
-  (`status: blocked`, `owner: Planning`, `reopen_owner: <smallest upstream
-  owner>`).
+### `specs/<task>/tasks.md`
 
-## No-Implementation Exit
+```markdown
+# Goal: <short request outcome>
+status: draft | ready | blocked | done
+Blocked stop: <missing input/decision and owner; omit unless blocked>
+Completion: <falsifiable assembled-request condition + any requested external outcome>
+Global constraints: <active rules, cross-task pinned identifiers, already-holds anchors, or carried CONCERNS; omit when none>
 
-Keep existing execution artifacts until the [no-implementation
-review](task-review-readiness.md#no-implementation-result) clears. Submit the
-accepted obligations and primary evidence, naming owners and stages for any
-outstanding proof or external effects.
+## Tasks
 
-Handle disputed findings under the [Review Lifecycle](../shared/review.md#lifecycle).
-If implementation work remains, resume at Step 2. Send confirmed upstream gaps
-to [Blocked Exit](#blocked-exit) with the review result. Once cleared, remove
-the obsolete ledger and packets, retire coordination under
-[Artifacts](../shared/artifacts.md), and return a ready Planning transition
-with the verified zero-delta evidence and the named external next owner or
-`none`.
+- [ ] T<ID>: <one-line observable outcome> [<shape; omit for vertical slice>]
+  - Depends on: <T<ID> list, external gate if any, or none>
+  - Packet: tasks/<ID>-<slug>.md
+```
+
+- **`Depends on`:** listing `T1` gates this task until `T1` lands on the
+  integration branch (required whenever compiling against a type, trait, config
+  field, exhaustive type, dependency, or SQLx schema from `T1`, or gating
+  risk-dependent slices on `[integration-first]`). Put request-level external
+  outcomes in `Completion`; name an external gate in `Depends on` only when it
+  blocks a specific task.
+
+### `specs/<task>/tasks/<ID>-<slug>.md`
+
+```markdown
+# T<ID> — <short observable outcome>
+Shape: <shape; omit for vertical slice>
+Outcome: <current -> target delta observed at this task's seam when T<ID> alone lands>
+Depends on: <T<ID> — consumed seam or retired risk, external gate, or none>
+Sources: <exact spec.md#r1-... / design.md#d1-... anchors, verified path::Symbol, crate@version::item>
+Provides: <exact compiling/behavioral contract consumed downstream, or none (leaf)>
+Boundary:
+- In scope: <primary responsibility, superseded cleanup, generated contracts, required durable doc update>
+- Out of scope: <exclusions, sibling surfaces, local stop before later gates>
+Mutable owners: <crate — subsystem>
+Exclusive locks: <narrowest canonical repo-relative shared file or ordered directory, or none>
+Final validation:
+- Observable claim: <assembled-candidate public-seam falsifier + paired G<n>>
+- Additional proof: <source-mandated extra verification, or none>
+Reopen if: <assumption, uncached crate check, or concern trigger with owner, or none>
+```
+
+- **Claim rules:**
+  - `Outcome` (unit-local): what changes at this task's seam when `T<ID>` lands
+    over its `Depends on`.
+  - `Observable claim` (assembled candidate): for vertical slices, a
+    base-commit-failing public-seam falsifier (for example, `POST /webhooks`
+    with a tampered signature returns `401 invalid_signature` and writes zero
+    inbox rows) paired with `G<n>`, leaving test names and commands to
+    Implementation. For `[prefactor]`, pin preserved `G<n>` + unlocked internal
+    seam; for `[shared-contract]`, compiling contract and boundary invariants;
+    for conditional shapes, see [Conditional Claim
+    Rules](planning/conditional-branches.md#claim-rules).
+  - `Completion` (`tasks.md`): cross-slice integration and any requested
+    external outcome.
+- **Producer isolation:** a Unit Lead reads only its own packet, so when
+  another task depends on `T<ID>`, `Provides` + `Sources` must pin every
+  consumed symbol, signature, error variant, config key, and invariant using
+  exact anchors (never bare `spec.md`/`design.md` links in multi-task ledgers).
+
+### Exclusive Locks
+
+List concrete repo-relative paths across four categories:
+
+1. **Manifests & policy:** `Cargo.toml`, `Cargo.lock`,
+   `quality/architecture.json`, `template/profiles.json`, `justfile`.
+2. **Ordered or generated surfaces:** `migrations/`, `.sqlx/`,
+   `api/openapi/service.yaml`, `api/proto/`.
+3. **Shared wiring & registries:** parent crate `lib.rs`/`mod.rs` when parallel
+   tasks add sibling modules or re-exports, plus shared router, state, config,
+   or bootstrap wiring files.
+4. **Shared durable docs:** concrete files under `docs/decisions/`,
+   `docs/repo-architecture.md`, `docs/production-contract.md`, or
+   `docs/backend-library-selection.md`.

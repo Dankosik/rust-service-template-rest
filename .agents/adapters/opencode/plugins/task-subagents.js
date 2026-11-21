@@ -1,6 +1,6 @@
 export const TaskSubagents = async () => {
   const catalog = [
-    "acceptance-unit-lead: implement an assigned task under the Implementation execution boundary, or own final validation after the whole ledger is implemented",
+    "acceptance-unit-lead: implement an assigned task or batched repair pass under the Implementation execution boundary",
     "worker-agent: one bounded mutable implementation, investigation, or verification result",
     "specialist-agent: one bounded domain decision or one generative design candidate",
     "evidence-agent: bounded read-only evidence without gate authority",

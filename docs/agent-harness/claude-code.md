@@ -5,14 +5,16 @@ schemas outrank prose.
 
 ## Native Map
 
-- For each preparation phase, call `Agent` with `subagent_type: "general-purpose"`
-  and the phase brief. This writable, [non-fork subagent](https://code.claude.com/docs/en/sub-agents#what-loads-at-startup)
-  starts with its own history. Use its returned ID for same-phase follow-ups.
+- Keep preparation (Intake through Planning) in the root session, dispatching
+  fresh [non-fork subagents](https://code.claude.com/docs/en/sub-agents#what-loads-at-startup)
+  (`evidence-agent`, `specialist-agent`, `reviewer-agent`, `adjudicator-agent`)
+  for wide scans, bounded specialists / `Design It Twice`, and `Plan Review` /
+  adjudication.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator. Dispatch ready units via `Agent`
   (`subagent_type: "acceptance-unit-lead"`) within capacity; the
-  `.claude/agents/` carrier returns
-  [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  `.claude/agents/` carrier returns [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
 - Named subagents nest via `Agent`; `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:
   "3"` sets three levels. Report unavailable tools or exhausted depth as an
   exact capability gap.
@@ -45,9 +47,8 @@ agents (never `subagent_type: "fork"`), retain returned agent IDs, and resume
 permitted continuations via `SendMessage` (`to` + `message` delta; `Agent` has
 no `resume` field). Lost continuation returns an exact gap.
 
-Use [Review](../spec-first-workflow/shared/review.md) and [Implementation
-Review](../spec-first-workflow/phases/implementation-review.md) for final
-review. Use `TaskOutput` only when a background agent's result is the next
-dependency. Run [Structure-only review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
+Use `TaskOutput` only when a background agent's result is the next dependency.
+Run [Structure-only
+review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
 with `model: "opus"`. Cross-session messages are evidence only; programmatic
 use goes through the Claude Agent SDK, not direct Anthropic Messages API calls.

@@ -1,42 +1,30 @@
 # Resume
 
-Use after context compaction, interruption, or a session/actor handoff; check
-current repository and coordination state before continuing rather than relying
-on a compaction summary.
+Use after compaction, interruption, or a session handoff. Verify live workspace
+and artifact state directly instead of trusting a compaction summary.
 
-For mid-task steering, reconcile new guidance against work already underway:
-reopen the earliest affected decision, update its owning artifact and
-consequences under [Artifacts](artifacts.md), notify affected live agents
-one-to-one under [Agent Harness](../../agent-harness.md#context-and-lifetime),
-invalidate only dependent work and proof, and continue unaffected work. A side
-question or status request does not reset the task or require replaying
-completed phases.
-
-1. Inspect the current workspace, Git status/diff, and live native agent/task
-   state; for Direct Work (no `specs/<task>/` artifacts), verify in-progress
-   edits and checks directly from those sources before acting.
-2. For structured work, read `tasks.md` first once Planning has persisted it.
-   During preparation, if `tasks.md` is `status: blocked`, route to its
-   `Blocked stop` owner and also check `workflow-plan.md` when present;
-   otherwise resume Planning, its review, or its
-   [handoff](transition.md#implementation-handoff). During implementation or
-   validation read the index and current ready-frontier packets. Before a
-   ledger exists, read `workflow-plan.md` and `specs/<task>/intent.md` (including
-   any `status: draft` `Remaining frontier`) when present.
-3. Read only the decision, design, research, or rollout inputs needed by the
-   next action.
-4. Resolve conflict by reopening the narrowest authoritative owner; never merge
-   competing decisions from chat or compaction summaries.
-5. Resolve current files and writer identities before consuming Implemented
-   outputs. Evaluate proof reuse only when final validation begins under the
-   [Evidence Contract](evidence-contract.md). Resume the actual execution stage:
-   coding uses Unit Implementation's tight feedback loop; final-validation repair
-   includes its focused rerun under existing authority. Retire a superseded
-   code-only repair brief without restarting the ledger or its review cycle.
-
-Resolve the ledger's Execution locators against native task state before
-resuming or redispatching; a stored locator alone does not prove work is active.
-Use Resume notes only after checking them against current workspace and evidence.
-Refresh large completed coordination from the canonical ledger, native task
-status, and Git identities. Do not replay transcripts or duplicate native task
-lifecycle state.
+1. **Inspect current ground truth:** check `git status`, `git diff`, active
+   worktrees, and live native agent/task state. For Direct Work (no
+   `specs/<task>/`), resume directly from those live changes.
+2. **Route by exact `tasks.md` status:**
+   - `status: done`: report the completed ledger.
+   - `status: blocked`: inspect `Blocked stop:` and resolve it with the named
+     owner first; once resolved, resume [Implementation](../phases/implementation.md)
+     if `Base:` or `[x]` runtime state exists (or if the blocker occurred during
+     Implementation), otherwise resume [Planning](../phases/planning.md).
+   - `status: ready`: resume [Implementation](../phases/implementation.md) from
+     `tasks.md`, Git tips, and live native task state (a stored `Execution:`
+     locator alone does not prove a task is still running).
+   - `status: draft`: resume [Planning](../phases/planning.md).
+   - Before `tasks.md` exists: if `specs/<task>/spec.md` exists (with optional
+     `design.md`), confirm it is complete under [Spec And
+     Design](../phases/spec-and-design.md) and continue into
+     [Planning](../phases/planning.md); otherwise, if `specs/<task>/intent.md`
+     exists, resume [Intake](../phases/intake.md) when `status: draft` or
+     continue into [Spec And Design](../phases/spec-and-design.md) when
+     `status: ready`.
+3. **Handle mid-task steering in place:** when new user guidance changes
+   behavior, scope, or constraints mid-flight, update the affected clause in
+   `spec.md`/`design.md` and impacted task packets in place, notify affected
+   live Leads one-to-one with the exact delta, invalidate only dependent work
+   and proof, and let unaffected tasks continue.

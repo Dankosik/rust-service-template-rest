@@ -1,12 +1,10 @@
 use std::{
-    pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
-use futures_util::future::Either;
 use http::{Request, Response, header::AUTHORIZATION};
-use infra_outbound_grpc::{Client, WithContext, transport::PreparedCall};
+use infra_outbound_grpc::{Client, ResponseFuture, WithContext, transport::PreparedCall};
 use operation_context::OperationContext;
 use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
@@ -17,9 +15,6 @@ use crate::{
     credentials::{AcquisitionDeadline, acquisition_deadline},
     token::Token,
 };
-
-type RpcFuture = Pin<Box<dyn Future<Output = Result<Response<Body>, Status>> + Send>>;
-type CallFuture = Either<std::future::Ready<Result<Response<Body>, Status>>, RpcFuture>;
 
 #[derive(Clone)]
 enum BoundTokens {
@@ -111,8 +106,8 @@ impl AuthenticatedClient {
         WithContext::new(self.clone(), context)
     }
 
-    fn begin_call(&self, request: Request<Body>) -> Result<RpcFuture, Status> {
-        let prepared = PreparedCall::prepare(&self.resource, request)
+    fn prepare(&self, request: Request<Body>) -> Result<PreparedCall, Status> {
+        PreparedCall::prepare(&self.resource, request)
             .map_err(|status| match status.code() {
                 Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
                 Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
@@ -128,8 +123,7 @@ impl AuthenticatedClient {
                     ));
                 }
                 Ok(())
-            })?;
-        Ok(Box::pin(send_admitted(prepared, self.tokens.clone())))
+            })
     }
 }
 
@@ -167,17 +161,16 @@ async fn send_admitted(
 impl Service<Request<Body>> for AuthenticatedClient {
     type Response = Response<Body>;
     type Error = Status;
-    type Future = CallFuture;
+    type Future = ResponseFuture;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        match self.begin_call(request) {
-            Ok(future) => Either::Right(future),
-            Err(status) => Either::Left(std::future::ready(Err(status))),
-        }
+        ResponseFuture::from_prepared(self.prepare(request), |prepared| {
+            send_admitted(prepared, self.tokens.clone())
+        })
     }
 }
 
