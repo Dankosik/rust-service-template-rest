@@ -30,7 +30,7 @@ fn redis_errors_map_to_bounded_error_types() {
 #[test]
 fn a_failed_command_names_its_cause_on_the_series() {
     use crate::error::ErrorType;
-    use crate::observe::{NamespaceHistograms, Operation, OperationGuard};
+    use crate::observe::{NamespaceMetrics, Operation, OperationGuard};
 
     let recorder = observation_recorder();
     let server = crate::ServerEndpoint {
@@ -39,7 +39,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
         database_index: 0,
     };
     metrics::with_local_recorder(&recorder, || {
-        let histograms = NamespaceHistograms::new(crate::namespace!("causes"));
+        let metrics = NamespaceMetrics::new(crate::namespace!("causes"));
         for operation in [Operation::Get, Operation::Set, Operation::Delete] {
             for error_type in [
                 ErrorType::Auth,
@@ -49,8 +49,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
                 ErrorType::Parse,
                 ErrorType::Other,
             ] {
-                OperationGuard::start(&histograms, operation, &server)
-                    .record_error(error_type, None);
+                OperationGuard::start(&metrics, operation, &server).record_error(error_type, None);
             }
         }
     });

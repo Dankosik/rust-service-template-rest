@@ -180,3 +180,108 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
         .await;
     }
 }
+
+async fn duplex_generation(cooldown_until: Instant) -> (Arc<Generation>, DuplexStream) {
+    let (stream, server) = tokio::io::duplex(1024);
+    let info = redis::RedisConnectionInfo::default().set_skip_set_lib_name();
+    let config = redis::AsyncConnectionConfig::new()
+        .set_response_timeout(None)
+        .set_pipeline_buffer_size(APPLICATION_SLOTS + 1);
+    let (connection, _driver) = timeout(
+        BUDGET,
+        MultiplexedConnection::new_with_config(&info, stream, config),
+    )
+    .await
+    .expect("bound Redis setup")
+    .expect("initialize Redis driver over duplex");
+    let (abandoned, _replies) = mpsc::unbounded_channel();
+    let generation = Arc::new(Generation {
+        connection,
+        caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
+        abandoned,
+        retired: CancellationToken::new(),
+        cooldown_until,
+    });
+    (generation, server)
+}
+
+#[tokio::test]
+async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
+    let (first, _server1) = duplex_generation(Instant::now()).await;
+    let (second, _server2) = duplex_generation(Instant::now()).await;
+    let shared = Shared {
+        max_concurrency: APPLICATION_SLOTS,
+        state: ArcSwap::from_pointee(State::Connected(first.clone())),
+        state_lock: Mutex::new(()),
+        changed: Notify::new(),
+        retirements: Counter::noop(),
+        tasks: TaskTracker::new(),
+    };
+    first.retired.cancel();
+
+    let mut waiting = pin!(shared.acquire());
+    let wake = Arc::new(DriverWake::default());
+    let waker = Waker::from(wake.clone());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+
+    shared.retire(&first);
+    assert!(
+        !wake.0.load(Ordering::Relaxed),
+        "storing State::Connecting woke a waiter that still cannot settle"
+    );
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+
+    assert!(shared.publish(second.clone()));
+    assert!(
+        wake.0.load(Ordering::Relaxed),
+        "publishing a replacement generation must wake parked waiters"
+    );
+    let acquired = waiting
+        .await
+        .expect("published generation must settle waiting acquire");
+    assert!(Arc::ptr_eq(&acquired, &second));
+
+    second.retired.cancel();
+    let mut waiting_failure = pin!(shared.acquire());
+    let failure_wake = Arc::new(DriverWake::default());
+    let failure_waker = Waker::from(failure_wake.clone());
+    assert!(
+        waiting_failure
+            .as_mut()
+            .poll(&mut Context::from_waker(&failure_waker))
+            .is_pending()
+    );
+    shared.retire(&second);
+    assert!(!failure_wake.0.load(Ordering::Relaxed));
+    assert!(shared.record_failure(ErrorType::Auth));
+    assert!(failure_wake.0.load(Ordering::Relaxed));
+    assert_eq!(waiting_failure.await.err(), Some(ErrorType::Auth));
+
+    let (third, _server3) = duplex_generation(Instant::now()).await;
+    assert!(shared.publish(third.clone()));
+    third.retired.cancel();
+    let mut waiting_close = pin!(shared.acquire());
+    let close_wake = Arc::new(DriverWake::default());
+    let close_waker = Waker::from(close_wake.clone());
+    assert!(
+        waiting_close
+            .as_mut()
+            .poll(&mut Context::from_waker(&close_waker))
+            .is_pending()
+    );
+    shared.retire(&third);
+    assert!(!close_wake.0.load(Ordering::Relaxed));
+    shared.close();
+    assert!(close_wake.0.load(Ordering::Relaxed));
+    assert_eq!(waiting_close.await.err(), Some(ErrorType::Io));
+}

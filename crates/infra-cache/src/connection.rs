@@ -16,7 +16,9 @@ use tokio_util::task::TaskTracker;
 use crate::admission::Admitted;
 use crate::credentials::{Disposition, PASSWORD_REFRESH_INTERVAL, Rotation};
 use crate::dial::Dialed;
-use crate::error::{ErrorType, MutationCommandError, ReadFailure, UnknownCause, error_type};
+use crate::error::{
+    ErrorType, MutationCommandError, MutationKind, ReadFailure, UnknownCause, error_type,
+};
 use crate::exchange::{AbandonedReply, Exchange, drain_abandoned_replies, reply_data};
 use crate::observe::{ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, RETIREMENTS_METRIC};
 use crate::{CloseOutcome, ServerEndpoint};
@@ -130,16 +132,24 @@ impl Shared {
     fn retire(&self, generation: &Arc<Generation>) {
         let state_guard = self.state_lock.lock();
         generation.retired.cancel();
-        if matches!(&**self.state.load(), State::Connected(current) if Arc::ptr_eq(current, generation))
-        {
-            let next = generation
-                .cooldown_error()
-                .map_or(State::Connecting, State::SetupFailed);
+        let notify = if matches!(
+            &**self.state.load(),
+            State::Connected(current) if Arc::ptr_eq(current, generation)
+        ) {
+            let (next, settled) = match generation.cooldown_error() {
+                Some(error) => (State::SetupFailed(error), true),
+                None => (State::Connecting, false),
+            };
             self.state.store(Arc::new(next));
             self.retirements.increment(1);
-        }
+            settled
+        } else {
+            false
+        };
         drop(state_guard);
-        self.changed.notify_waiters();
+        if notify {
+            self.changed.notify_waiters();
+        }
     }
 
     #[must_use]
@@ -193,45 +203,59 @@ impl Shared {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum WireFailure {
+pub(crate) enum AfterReply {
+    HonorStop,
+    KeepConfirmed,
+}
+
+pub(crate) enum DispatchError {
     NotApplied(UnknownCause),
     OutcomeUnknown(UnknownCause),
+    Reply {
+        error: redis::RedisError,
+        stopped: Option<UnknownCause>,
+    },
 }
 
-impl From<BoundedStop> for WireFailure {
-    fn from(stop: BoundedStop) -> Self {
-        Self::NotApplied(stop.into())
-    }
-}
-
-impl From<ErrorType> for WireFailure {
-    fn from(error: ErrorType) -> Self {
-        Self::NotApplied(UnknownCause::Failed(error))
-    }
-}
-
-impl From<WireFailure> for ReadFailure {
-    fn from(failure: WireFailure) -> Self {
-        match failure {
-            WireFailure::NotApplied(cause) | WireFailure::OutcomeUnknown(cause) => {
-                Self::Cause(cause)
+impl DispatchError {
+    pub(crate) fn into_mutation_error(self, kind: MutationKind) -> MutationCommandError {
+        match self {
+            Self::NotApplied(cause) => MutationCommandError::NotApplied(cause.into()),
+            Self::OutcomeUnknown(cause) => MutationCommandError::OutcomeUnknown(cause),
+            Self::Reply { error, stopped } => {
+                MutationCommandError::from_reply(&error, kind, stopped)
             }
         }
     }
 }
 
-impl From<WireFailure> for MutationCommandError {
-    fn from(failure: WireFailure) -> Self {
-        match failure {
-            WireFailure::NotApplied(cause) => Self::NotApplied(cause.into()),
-            WireFailure::OutcomeUnknown(cause) => Self::OutcomeUnknown(cause),
-        }
+impl From<UnknownCause> for DispatchError {
+    fn from(cause: UnknownCause) -> Self {
+        Self::NotApplied(cause)
     }
 }
 
-pub(crate) struct WireReply<T> {
-    pub(crate) reply: redis::RedisResult<T>,
-    pub(crate) stopped: Option<UnknownCause>,
+impl From<BoundedStop> for DispatchError {
+    fn from(stop: BoundedStop) -> Self {
+        Self::NotApplied(stop.into())
+    }
+}
+
+impl From<ErrorType> for DispatchError {
+    fn from(error: ErrorType) -> Self {
+        Self::NotApplied(UnknownCause::Failed(error))
+    }
+}
+
+impl From<DispatchError> for ReadFailure {
+    fn from(error: DispatchError) -> Self {
+        match error {
+            DispatchError::NotApplied(cause) | DispatchError::OutcomeUnknown(cause) => {
+                Self::Cause(cause)
+            }
+            DispatchError::Reply { error, stopped } => Self::from_reply(&error, stopped),
+        }
+    }
 }
 
 impl Link {
@@ -291,11 +315,16 @@ impl Link {
         &self,
         build_query: impl FnOnce(MultiplexedConnection) -> F,
         parent: &OperationContext,
-    ) -> Result<WireReply<T>, WireFailure>
+        wait_ceiling: Option<Duration>,
+        after_reply: AfterReply,
+    ) -> Result<T, DispatchError>
     where
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,
     {
-        let budget = parent.bounded(self.command_timeout);
+        let wait_timeout = wait_ceiling.map_or(self.command_timeout, |limit| {
+            self.command_timeout.min(limit)
+        });
+        let budget = parent.bounded(wait_timeout);
         budget.check()?;
         let _slot = self.claim_slot()?;
         let (generation, reservation) = self.reserve_generation(&budget).await?;
@@ -307,34 +336,43 @@ impl Link {
             biased;
             reply = &mut exchange => reply,
             stop = budget.wait_stopped() => {
-                return Err(WireFailure::OutcomeUnknown(stop.into()));
+                return Err(DispatchError::OutcomeUnknown(stop.into()));
             }
             () = generation.retired.cancelled() => {
-                return Err(WireFailure::OutcomeUnknown(UnknownCause::Failed(ErrorType::Io)));
+                return Err(DispatchError::OutcomeUnknown(UnknownCause::Failed(ErrorType::Io)));
             }
         };
-        Ok(WireReply {
-            reply,
-            stopped: budget.stopped().map(Into::into),
-        })
+        match reply {
+            Ok(value) => match after_reply {
+                AfterReply::HonorStop => match budget.stopped() {
+                    Some(stop) => Err(DispatchError::OutcomeUnknown(stop.into())),
+                    None => Ok(value),
+                },
+                AfterReply::KeepConfirmed => Ok(value),
+            },
+            Err(error) => Err(DispatchError::Reply {
+                error,
+                stopped: budget.stopped().map(Into::into),
+            }),
+        }
     }
 
     async fn reserve_generation(
         &self,
         budget: &BoundedContext,
-    ) -> Result<(Arc<Generation>, OwnedSemaphorePermit), WireFailure> {
+    ) -> Result<(Arc<Generation>, OwnedSemaphorePermit), UnknownCause> {
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
             stop = budget.wait_stopped() => return Err(stop.into()),
         };
         budget.check()?;
-        let generation = generation?;
+        let generation = generation.map_err(UnknownCause::Failed)?;
         let reservation = tokio::select! {
             biased;
-            result = generation.reserve() => result?,
+            result = generation.reserve() => result.map_err(UnknownCause::Failed)?,
             stop = budget.wait_stopped() => return Err(stop.into()),
-            () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
+            () = generation.retired.cancelled() => return Err(UnknownCause::Failed(ErrorType::Io)),
         };
         check_before_dispatch(budget, &generation)?;
         Ok((generation, reservation))
@@ -355,10 +393,10 @@ impl Link {
 fn check_before_dispatch(
     budget: &BoundedContext,
     generation: &Generation,
-) -> Result<(), WireFailure> {
+) -> Result<(), UnknownCause> {
     budget.check()?;
     if generation.retired.is_cancelled() {
-        return Err(ErrorType::Io.into());
+        return Err(UnknownCause::Failed(ErrorType::Io));
     }
     Ok(())
 }

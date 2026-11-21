@@ -1,16 +1,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use operation_context::{Deadline, OperationContext, Stopped};
+use operation_context::{OperationContext, Stopped};
 use redis::aio::MultiplexedConnection;
 use redis::{SetExpiry, SetOptions};
-use tokio::time::Instant;
 
-use crate::connection::WireReply;
-use crate::error::{MutationCommandError, MutationKind, ReadFailure};
+use crate::connection::AfterReply;
+use crate::error::{MutationKind, ReadFailure};
 use crate::exchange::reply_data;
 use crate::observe::{
-    LocalSizeRefusal, NamespaceHistograms, Operation, OperationGuard, SuccessOutcome,
+    LocalSizeRefusal, NamespaceMetrics, Operation, OperationGuard, SuccessOutcome,
 };
 use crate::{Cache, MutationError, MutationFailure, OperationError};
 
@@ -70,7 +69,7 @@ macro_rules! namespace {
 #[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,
-    histograms: Arc<NamespaceHistograms>,
+    metrics: Arc<NamespaceMetrics>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +83,7 @@ impl Cache {
     pub fn namespace(&self, namespace: Namespace) -> CacheNamespace {
         CacheNamespace {
             cache: self.clone(),
-            histograms: Arc::new(NamespaceHistograms::new(namespace)),
+            metrics: Arc::new(NamespaceMetrics::new(namespace)),
         }
     }
 }
@@ -112,20 +111,17 @@ impl CacheLookup {
         let Some(namespace) = &self.namespace else {
             return Ok(None);
         };
-        let child = if let Some(deadline) = parent.deadline() {
-            let now = Instant::now();
-            let budget = deadline
-                .remaining_at(now)
-                .saturating_sub(self.source_reserve);
+        let wait_ceiling = if let Some(deadline) = parent.deadline() {
+            let budget = deadline.remaining().saturating_sub(self.source_reserve);
             if budget.is_zero() {
                 return parent.check().map(|()| None);
             }
-            Some(parent.child_until(Deadline::new(now, budget)))
+            Some(budget)
         } else {
             None
         };
 
-        let result = namespace.get(child.as_ref().unwrap_or(parent), key).await;
+        let result = namespace.get_with_ceiling(parent, key, wait_ceiling).await;
         parent.check()?;
         Ok(result.ok().flatten())
     }
@@ -137,38 +133,45 @@ impl CacheNamespace {
         parent: &OperationContext,
         key: &str,
     ) -> Result<Option<Vec<u8>>, OperationError> {
+        self.get_with_ceiling(parent, key, None).await
+    }
+
+    async fn get_with_ceiling(
+        &self,
+        parent: &OperationContext,
+        key: &str,
+        wait_ceiling: Option<Duration>,
+    ) -> Result<Option<Vec<u8>>, OperationError> {
         let key = self.admit_key(key).ok_or(OperationError::KeyTooLarge)?;
         let max_value_bytes = self.cache.max_value_bytes;
-        let guard =
-            OperationGuard::start(&self.histograms, Operation::Get, &self.cache.link.server);
-        let result = async {
-            let WireReply { reply, stopped } = self
-                .cache
-                .link
-                .dispatch(
-                    |connection| {
-                        query_read(
-                            key.read_transaction(max_value_bytes),
-                            connection,
-                            max_value_bytes,
-                        )
-                    },
-                    parent,
-                )
-                .await?;
-            let value = reply.map_err(|error| ReadFailure::from_reply(&error, stopped))?;
-            if let Some(cause) = stopped {
-                return Err(ReadFailure::Cause(cause));
-            }
-            if value
-                .as_ref()
-                .is_some_and(|bytes| bytes.len() > max_value_bytes)
-            {
-                return Err(ReadFailure::ValueTooLarge);
-            }
-            Ok(value)
-        }
-        .await;
+        let guard = OperationGuard::start(&self.metrics, Operation::Get, &self.cache.link.server);
+        let result = self
+            .cache
+            .link
+            .dispatch(
+                |connection| {
+                    query_read(
+                        key.read_transaction(max_value_bytes),
+                        connection,
+                        max_value_bytes,
+                    )
+                },
+                parent,
+                wait_ceiling,
+                AfterReply::HonorStop,
+            )
+            .await
+            .map_err(ReadFailure::from)
+            .and_then(|value| {
+                if value
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.len() > max_value_bytes)
+                {
+                    Err(ReadFailure::ValueTooLarge)
+                } else {
+                    Ok(value)
+                }
+            });
         match result {
             Ok(value) => {
                 guard.succeed(if value.is_some() {
@@ -200,7 +203,7 @@ impl CacheNamespace {
             .admit_key(key)
             .ok_or(MutationError::NotApplied(MutationFailure::KeyTooLarge))?;
         if value.len() > self.cache.max_value_bytes {
-            LocalSizeRefusal::Value.record(self.histograms.namespace());
+            self.metrics.record_size_refusal(LocalSizeRefusal::Value);
             return Err(MutationError::NotApplied(MutationFailure::ValueTooLarge));
         }
         self.run_mutation(parent, MutationKind::Set, |connection| {
@@ -238,13 +241,13 @@ impl CacheNamespace {
             MutationKind::Set => Operation::Set,
             MutationKind::Delete => Operation::Delete,
         };
-        let guard = OperationGuard::start(&self.histograms, operation, &self.cache.link.server);
-        let result = async {
-            let WireReply { reply, stopped } =
-                self.cache.link.dispatch(build_query, parent).await?;
-            reply.map_err(|error| MutationCommandError::from_reply(&error, kind, stopped))
-        }
-        .await;
+        let guard = OperationGuard::start(&self.metrics, operation, &self.cache.link.server);
+        let result = self
+            .cache
+            .link
+            .dispatch(build_query, parent, None, AfterReply::KeepConfirmed)
+            .await
+            .map_err(|error| error.into_mutation_error(kind));
         match result {
             Ok(()) => {
                 guard.succeed(SuccessOutcome::Ok);
@@ -258,10 +261,10 @@ impl CacheNamespace {
     }
 
     fn admit_key<'a>(&self, key: &'a str) -> Option<NamespacedKey<'a>> {
-        let namespace = self.histograms.namespace();
+        let namespace = self.metrics.namespace();
         let full_key = NamespacedKey { namespace, key };
         if full_key.len() > self.cache.max_key_bytes {
-            LocalSizeRefusal::Key.record(namespace);
+            self.metrics.record_size_refusal(LocalSizeRefusal::Key);
             return None;
         }
         Some(full_key)
@@ -397,6 +400,64 @@ impl NamespacedKey<'_> {
 
 impl redis::ToRedisArgs for NamespacedKey<'_> {
     fn write_redis_args<W: redis::RedisWrite + ?Sized>(&self, out: &mut W) {
-        out.write_arg_fmt(format_args!("{}:{}", self.namespace.as_str(), self.key));
+        use std::io::Write as _;
+
+        let mut writer = out.writer_for_next_arg();
+        let _ = writer.write_all(self.namespace.as_str().as_bytes());
+        let _ = writer.write_all(b":");
+        let _ = writer.write_all(self.key.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn namespaced_key_encodes_exact_resp_bytes() {
+        let ns = namespace!("cache_ns");
+        for key in ["", "plain", "klúč:é🚀"] {
+            let namespaced = NamespacedKey { namespace: ns, key };
+            let formatted = format!("{}:{key}", ns.as_str());
+
+            let expected_read = redis::pipe()
+                .atomic()
+                .cmd("EXISTS")
+                .arg(&formatted)
+                .cmd("GETRANGE")
+                .arg(&formatted)
+                .arg("0")
+                .arg("64")
+                .get_packed_pipeline();
+            assert_eq!(
+                namespaced.read_transaction(64).get_packed_pipeline(),
+                expected_read,
+                "{key:?}"
+            );
+
+            let mut expected_set = redis::cmd("SET");
+            expected_set
+                .arg(&formatted)
+                .arg(b"payload")
+                .arg("PX")
+                .arg(1500_u64);
+            assert_eq!(
+                NamespacedKey { namespace: ns, key }
+                    .set_command(b"payload", 1500)
+                    .get_packed_command(),
+                expected_set.get_packed_command(),
+                "{key:?}"
+            );
+
+            let mut expected_del = redis::cmd("DEL");
+            expected_del.arg(&formatted);
+            assert_eq!(
+                NamespacedKey { namespace: ns, key }
+                    .delete_command()
+                    .get_packed_command(),
+                expected_del.get_packed_command(),
+                "{key:?}"
+            );
+        }
     }
 }

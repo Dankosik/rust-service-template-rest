@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use enum_map::EnumMap;
-use metrics::{Histogram, Unit};
+use metrics::{Counter, Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
 
@@ -25,23 +25,18 @@ pub(crate) const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total"
 pub(crate) const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
 const LOCAL_SIZE_REFUSALS_METRIC: &str = "cache_local_size_refusals_total";
 
+#[derive(Clone, Copy, enum_map::Enum)]
 pub(super) enum LocalSizeRefusal {
     Key,
     Value,
 }
 
 impl LocalSizeRefusal {
-    pub(super) fn record(self, namespace: Namespace) {
-        let reason = match self {
+    const fn label(self) -> &'static str {
+        match self {
             Self::Key => "key_too_large",
             Self::Value => "value_too_large",
-        };
-        metrics::counter!(
-            LOCAL_SIZE_REFUSALS_METRIC,
-            "cache" => namespace.as_str(),
-            "reason" => reason
-        )
-        .increment(1);
+        }
     }
 }
 
@@ -141,17 +136,19 @@ impl Outcome {
 }
 
 #[derive(derive_more::Debug)]
-#[debug("NamespaceHistograms({:?}, ..)", self.namespace)]
-pub(crate) struct NamespaceHistograms {
+#[debug("NamespaceMetrics({:?}, ..)", self.namespace)]
+pub(crate) struct NamespaceMetrics {
     namespace: Namespace,
-    entries: EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>,
+    durations: EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>,
+    local_size_refusals: EnumMap<LocalSizeRefusal, OnceLock<Counter>>,
 }
 
-impl NamespaceHistograms {
+impl NamespaceMetrics {
     pub(crate) fn new(namespace: Namespace) -> Self {
         Self {
             namespace,
-            entries: EnumMap::default(),
+            durations: EnumMap::default(),
+            local_size_refusals: EnumMap::default(),
         }
     }
 
@@ -159,8 +156,20 @@ impl NamespaceHistograms {
         self.namespace
     }
 
+    pub(crate) fn record_size_refusal(&self, refusal: LocalSizeRefusal) {
+        self.local_size_refusals[refusal]
+            .get_or_init(|| {
+                metrics::counter!(
+                    LOCAL_SIZE_REFUSALS_METRIC,
+                    "cache" => self.namespace.as_str(),
+                    "reason" => refusal.label(),
+                )
+            })
+            .increment(1);
+    }
+
     fn histogram(&self, operation: Operation, outcome: Outcome) -> &Histogram {
-        self.entries[operation][outcome].get_or_init(|| {
+        self.durations[operation][outcome].get_or_init(|| {
             let namespace = self.namespace.as_str();
             if let Some(error_label) = outcome.error_label() {
                 metrics::histogram!(
@@ -184,7 +193,7 @@ impl NamespaceHistograms {
 
 struct OperationInner<'a> {
     started: Instant,
-    histograms: &'a NamespaceHistograms,
+    metrics: &'a NamespaceMetrics,
     operation: Operation,
     span: Span,
 }
@@ -196,7 +205,7 @@ impl OperationInner<'_> {
 
     fn finish(&self, outcome: Outcome) {
         self.span.record("cache.outcome", outcome.label());
-        self.histograms
+        self.metrics
             .histogram(self.operation, outcome)
             .record(self.started.elapsed());
     }
@@ -206,7 +215,7 @@ pub(crate) struct OperationGuard<'a>(DropGuard<OperationInner<'a>, fn(OperationI
 
 impl<'a> OperationGuard<'a> {
     pub(crate) fn start(
-        histograms: &'a NamespaceHistograms,
+        metrics: &'a NamespaceMetrics,
         operation: Operation,
         server: &ServerEndpoint,
     ) -> Self {
@@ -218,7 +227,7 @@ impl<'a> OperationGuard<'a> {
             db.namespace = %server.database_index,
             db.operation.name = operation.redis_name(),
             db.operation.batch.size = operation.redis_batch_size(),
-            cache.name = histograms.namespace().as_str(),
+            cache.name = metrics.namespace().as_str(),
             server.address = server.host.as_str(),
             server.port = server.port,
             cache.outcome = tracing::field::Empty,
@@ -230,7 +239,7 @@ impl<'a> OperationGuard<'a> {
         Self(DropGuard::new(
             OperationInner {
                 started: Instant::now(),
-                histograms,
+                metrics,
                 operation,
                 span,
             },
@@ -301,7 +310,7 @@ impl<'a> OperationGuard<'a> {
         inner.finish(Outcome::Failed(failure));
         inner.span.in_scope(|| {
             tracing::debug!(
-                cache.name = inner.histograms.namespace().as_str(),
+                cache.name = inner.metrics.namespace().as_str(),
                 cache.operation = inner.operation.label(),
                 cache.error.reason = reason,
                 error.type = label,
