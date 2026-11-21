@@ -4,21 +4,20 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use backon::BackoffBuilder;
 use metrics::{Counter, Gauge};
-use operation_context::{Deadline, OperationContext};
+use operation_context::{BoundedContext, BoundedStop, Deadline, OperationContext};
 use parking_lot::Mutex;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
-use tokio::time::{Instant, sleep_until, timeout, timeout_at};
+use tokio::time::{Instant, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::admission::Admitted;
 use crate::credentials::{Disposition, PASSWORD_REFRESH_INTERVAL, Rotation};
 use crate::dial::Dialed;
-use crate::error::{CommandError, ErrorType, UnknownCause, error_type};
+use crate::error::{ErrorType, MutationCommandError, ReadFailure, UnknownCause, error_type};
 use crate::exchange::{AbandonedReply, Exchange, drain_abandoned_replies, reply_data};
-use crate::namespace::Operation;
 use crate::observe::{ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, RETIREMENTS_METRIC};
 use crate::{CloseOutcome, ServerEndpoint};
 
@@ -193,6 +192,48 @@ impl Shared {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum WireFailure {
+    NotApplied(UnknownCause),
+    OutcomeUnknown(UnknownCause),
+}
+
+impl From<BoundedStop> for WireFailure {
+    fn from(stop: BoundedStop) -> Self {
+        Self::NotApplied(stop.into())
+    }
+}
+
+impl From<ErrorType> for WireFailure {
+    fn from(error: ErrorType) -> Self {
+        Self::NotApplied(UnknownCause::Failed(error))
+    }
+}
+
+impl From<WireFailure> for ReadFailure {
+    fn from(failure: WireFailure) -> Self {
+        match failure {
+            WireFailure::NotApplied(cause) | WireFailure::OutcomeUnknown(cause) => {
+                Self::Cause(cause)
+            }
+        }
+    }
+}
+
+impl From<WireFailure> for MutationCommandError {
+    fn from(failure: WireFailure) -> Self {
+        match failure {
+            WireFailure::NotApplied(cause) => Self::NotApplied(cause.into()),
+            WireFailure::OutcomeUnknown(cause) => Self::OutcomeUnknown(cause),
+        }
+    }
+}
+
+pub(crate) struct WireReply<T> {
+    pub(crate) reply: redis::RedisResult<T>,
+    pub(crate) stopped: Option<UnknownCause>,
+}
+
 impl Link {
     pub(crate) fn start(
         admitted: Admitted,
@@ -231,9 +272,9 @@ impl Link {
         }
     }
 
-    pub(crate) async fn close(&self, deadline: Instant) -> CloseOutcome {
+    pub(crate) async fn close(&self, budget: Duration) -> CloseOutcome {
         self.stop();
-        if timeout_at(deadline, self.shared.tasks.wait()).await.is_ok() {
+        if timeout(budget, self.shared.tasks.wait()).await.is_ok() {
             CloseOutcome::Complete
         } else {
             CloseOutcome::TimedOut
@@ -246,64 +287,56 @@ impl Link {
         self.shared.tasks.close();
     }
 
-    pub(crate) async fn command<T: Send + 'static, F>(
+    pub(crate) async fn dispatch<T: Send + 'static, F>(
         &self,
         build_query: impl FnOnce(MultiplexedConnection) -> F,
         parent: &OperationContext,
-        operation: Operation,
-    ) -> Result<T, CommandError>
+    ) -> Result<WireReply<T>, WireFailure>
     where
         F: Future<Output = redis::RedisResult<T>> + Send + 'static,
     {
-        let budget = CommandBudget::new(parent, self.command_timeout);
-        budget.check_not_stopped()?;
+        let budget = parent.bounded(self.command_timeout);
+        budget.check()?;
         let _slot = self.claim_slot()?;
         let (generation, reservation) = self.reserve_generation(&budget).await?;
         let query = build_query(generation.connection.clone());
-        budget.check_before_dispatch(&generation)?;
+        check_before_dispatch(&budget, &generation)?;
         let mut exchange =
             generation.exchange(reservation, query, Deadline::after(self.command_timeout));
         let reply = tokio::select! {
             biased;
             reply = &mut exchange => reply,
-            () = budget.wait_stopped() => {
-                return Err(CommandError::OutcomeUnknown(budget.classify_stop()));
+            stop = budget.wait_stopped() => {
+                return Err(WireFailure::OutcomeUnknown(stop.into()));
             }
             () = generation.retired.cancelled() => {
-                return Err(CommandError::OutcomeUnknown(UnknownCause::Failed(ErrorType::Io)));
+                return Err(WireFailure::OutcomeUnknown(UnknownCause::Failed(ErrorType::Io)));
             }
         };
-        let value = reply.map_err(|error| {
-            CommandError::from_reply(&error, operation, budget.stopped_failure())
-        })?;
-        if matches!(operation, Operation::Get) {
-            budget.check_not_stopped()?;
-        }
-        Ok(value)
+        Ok(WireReply {
+            reply,
+            stopped: budget.stopped().map(Into::into),
+        })
     }
 
     async fn reserve_generation(
         &self,
-        budget: &CommandBudget<'_>,
-    ) -> Result<(Arc<Generation>, OwnedSemaphorePermit), CommandError> {
+        budget: &BoundedContext,
+    ) -> Result<(Arc<Generation>, OwnedSemaphorePermit), WireFailure> {
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
-            () = budget.wait_stopped() => {
-                return Err(CommandError::NotApplied(budget.classify_stop().into()));
-            }
+            stop = budget.wait_stopped() => return Err(stop.into()),
         };
-        budget.check_not_stopped()?;
+        budget.check()?;
         let generation = generation?;
         let reservation = tokio::select! {
             biased;
             result = generation.reserve() => result?,
-            () = budget.wait_stopped() => {
-                return Err(CommandError::NotApplied(budget.classify_stop().into()));
-            }
+            stop = budget.wait_stopped() => return Err(stop.into()),
             () = generation.retired.cancelled() => return Err(ErrorType::Io.into()),
         };
-        budget.check_before_dispatch(&generation)?;
+        check_before_dispatch(budget, &generation)?;
         Ok((generation, reservation))
     }
 
@@ -319,47 +352,15 @@ impl Link {
     }
 }
 
-struct CommandBudget<'a> {
-    context: OperationContext,
-    parent: &'a OperationContext,
-}
-
-impl<'a> CommandBudget<'a> {
-    fn new(parent: &'a OperationContext, command_timeout: Duration) -> Self {
-        Self {
-            context: parent.child(command_timeout),
-            parent,
-        }
+fn check_before_dispatch(
+    budget: &BoundedContext,
+    generation: &Generation,
+) -> Result<(), WireFailure> {
+    budget.check()?;
+    if generation.retired.is_cancelled() {
+        return Err(ErrorType::Io.into());
     }
-
-    fn classify_stop(&self) -> UnknownCause {
-        self.parent.stopped().map_or(
-            UnknownCause::Failed(ErrorType::Timeout),
-            UnknownCause::Stopped,
-        )
-    }
-
-    fn stopped_failure(&self) -> Option<UnknownCause> {
-        self.context.stopped().map(|_| self.classify_stop())
-    }
-
-    fn check_not_stopped(&self) -> Result<(), CommandError> {
-        self.context
-            .check()
-            .map_err(|_| CommandError::NotApplied(self.classify_stop().into()))
-    }
-
-    fn check_before_dispatch(&self, generation: &Generation) -> Result<(), CommandError> {
-        self.check_not_stopped()?;
-        if generation.retired.is_cancelled() {
-            return Err(ErrorType::Io.into());
-        }
-        Ok(())
-    }
-
-    async fn wait_stopped(&self) {
-        let _ = self.context.wait_stopped().await;
-    }
+    Ok(())
 }
 
 impl Drop for Link {

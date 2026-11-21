@@ -685,7 +685,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     }
 
     let during_build = OperationContext::unbounded();
-    let write = cache.link.command::<(), _>(
+    let write = cache.link.dispatch::<(), _>(
         |connection| {
             let mut command = redis::cmd("DEL");
             command.arg("stop:during_build");
@@ -695,12 +695,11 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
             })
         },
         &during_build,
-        crate::namespace::Operation::Delete,
     );
     assert!(matches!(
         write.await,
-        Err(crate::error::CommandError::NotApplied(
-            crate::error::Refusal::Cause(crate::error::UnknownCause::Stopped(Stopped::Cancelled))
+        Err(crate::connection::WireFailure::NotApplied(
+            crate::error::UnknownCause::Stopped(Stopped::Cancelled)
         ))
     ));
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
@@ -936,7 +935,8 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    use crate::error::{CommandError, ErrorType, Refusal, UnknownCause};
+    use crate::connection::WireFailure;
+    use crate::error::{ErrorType, UnknownCause};
 
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
@@ -973,15 +973,14 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     );
     let refused = cache
         .link
-        .command::<(), std::future::Ready<redis::RedisResult<()>>>(
+        .dispatch::<(), std::future::Ready<redis::RedisResult<()>>>(
             |_| panic!("a refused command must not be built"),
             &caller,
-            crate::namespace::Operation::Delete,
         );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(CommandError::NotApplied(Refusal::Cause(
-            UnknownCause::Failed(ErrorType::Other)
+        Poll::Ready(Err(WireFailure::NotApplied(UnknownCause::Failed(
+            ErrorType::Other
         ))))
     ));
     assert_work_metrics(&metrics, 2, 2, 0);
@@ -1331,8 +1330,10 @@ async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned()
         )
         .await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    assert_eq!(cache.close(deadline).await, CloseOutcome::Complete);
+    assert_eq!(
+        cache.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
     assert_eq!(
         pending.await,
         Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
@@ -1348,10 +1349,7 @@ async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned()
         namespace.get(&caller, "after").await,
         Err(OperationError::Unavailable)
     );
-    assert_eq!(
-        cache.close(tokio::time::Instant::now()).await,
-        CloseOutcome::Complete
-    );
+    assert_eq!(cache.close(Duration::ZERO).await, CloseOutcome::Complete);
     assert_eq!(server.connections(), old);
 }
 

@@ -131,7 +131,10 @@ impl Dependencies {
         let cache_close = async {
             // template:begin cache:service-shutdown-dependencies-cache-close
             if let Some(cache) = cache {
-                return match cache.close(deadline).await {
+                return match cache
+                    .close(deadline.saturating_duration_since(Instant::now()))
+                    .await
+                {
                     infra_cache::CloseOutcome::Complete => {
                         tracing::info!("cache_closed");
                         Outcome::Graceful

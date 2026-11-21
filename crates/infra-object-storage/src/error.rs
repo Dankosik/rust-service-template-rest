@@ -7,10 +7,10 @@ use aws_sdk_s3::operation::put_object::{PutObjectError, PutObjectOutput};
 use aws_sdk_s3::primitives::ByteStreamError;
 use aws_smithy_runtime::client::http::body::content_length_enforcement::ContentLengthError;
 use compact_str::CompactString;
-use operation_context::Stopped;
+use operation_context::{BoundedStop, Stopped};
 use shared_rules::error_chain;
 
-use crate::call::{CallStop, Interrupted};
+use crate::call::Interrupted;
 use crate::observe::FailureOutcome;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -75,8 +75,6 @@ pub enum ConfigError {
     Endpoint,
     #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
     ExpectedBucketOwner,
-    #[error("object_storage.credentials is not usable for the selected provider")]
-    Credentials,
     #[error(
         "AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE must both have nonblank Unicode values when configuring web identity"
     )]
@@ -90,10 +88,15 @@ pub enum ConfigError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Call {
-    Read,
-    UnconditionalMutation,
+pub(crate) enum MutationMode {
+    Unconditional,
     CreateOnly,
+}
+
+impl MutationMode {
+    pub(crate) fn if_none_match(self) -> Option<String> {
+        matches!(self, Self::CreateOnly).then(|| "*".to_owned())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,7 +112,7 @@ pub(crate) trait OutcomeError: Copy {
     fn failure_outcome(self) -> FailureOutcome;
     fn busy() -> Self;
     fn too_large() -> Self;
-    fn not_applied_stop(stopped: CallStop) -> Self;
+    fn not_applied_stop(stopped: BoundedStop) -> Self;
 }
 
 impl OutcomeError for ObjectStorageError {
@@ -132,10 +135,10 @@ impl OutcomeError for ObjectStorageError {
         Self::TooLarge
     }
 
-    fn not_applied_stop(stopped: CallStop) -> Self {
+    fn not_applied_stop(stopped: BoundedStop) -> Self {
         match stopped {
-            CallStop::Parent(stopped) => Self::Stopped(stopped),
-            CallStop::Timeout => Self::Unavailable,
+            BoundedStop::Parent(stopped) => Self::Stopped(stopped),
+            BoundedStop::Timeout => Self::Unavailable,
         }
     }
 }
@@ -164,10 +167,10 @@ impl OutcomeError for MutationError {
         Self::NotApplied(MutationFailure::TooLarge)
     }
 
-    fn not_applied_stop(stopped: CallStop) -> Self {
+    fn not_applied_stop(stopped: BoundedStop) -> Self {
         let reason = match stopped {
-            CallStop::Parent(stopped) => MutationFailure::Stopped(stopped),
-            CallStop::Timeout => MutationFailure::Unavailable,
+            BoundedStop::Parent(stopped) => MutationFailure::Stopped(stopped),
+            BoundedStop::Timeout => MutationFailure::Unavailable,
         };
         Self::NotApplied(reason)
     }
@@ -189,11 +192,11 @@ impl<E> Failure<E> {
         }
     }
 
-    const fn with_stop(error: E, stopped: CallStop) -> Self {
+    const fn with_stop(error: E, stopped: BoundedStop) -> Self {
         let (error_type, timeout_source) = match stopped {
-            CallStop::Parent(Stopped::Deadline) => ("timeout", Some("parent_deadline")),
-            CallStop::Timeout => ("timeout", Some("storage_timeout")),
-            CallStop::Parent(Stopped::Cancelled) => ("cancelled", None),
+            BoundedStop::Parent(Stopped::Deadline) => ("timeout", Some("parent_deadline")),
+            BoundedStop::Timeout => ("timeout", Some("storage_timeout")),
+            BoundedStop::Parent(Stopped::Cancelled) => ("cancelled", None),
         };
         Self {
             error,
@@ -212,7 +215,7 @@ impl<E: OutcomeError> Failure<E> {
         Self::with_error_type(E::too_large(), "too_large")
     }
 
-    pub(crate) fn not_applied_stop(stopped: CallStop) -> Self {
+    pub(crate) fn not_applied_stop(stopped: BoundedStop) -> Self {
         Self::with_stop(E::not_applied_stop(stopped), stopped)
     }
 }
@@ -228,10 +231,10 @@ impl Failure<MutationError> {
         Self::with_error_type(MutationError::NotApplied(reason), error_type)
     }
 
-    pub(crate) const fn mutation_unknown_stopped(stopped: CallStop) -> Self {
+    pub(crate) const fn mutation_unknown_stopped(stopped: BoundedStop) -> Self {
         let reason = match stopped {
-            CallStop::Parent(stopped) => UnknownOutcome::Stopped(stopped),
-            CallStop::Timeout => UnknownOutcome::Unavailable,
+            BoundedStop::Parent(stopped) => UnknownOutcome::Stopped(stopped),
+            BoundedStop::Timeout => UnknownOutcome::Unavailable,
         };
         Self::with_stop(MutationError::OutcomeUnknown(reason), stopped)
     }
@@ -294,18 +297,18 @@ impl From<UploadFailure> for Failure<MutationError> {
 
 type SdkFailure<E> = SdkError<E, HttpResponse>;
 type PutReply = Result<PutObjectOutput, SdkFailure<PutObjectError>>;
-pub(crate) type PutCallResult = Result<(PutReply, Option<CallStop>), Interrupted>;
+pub(crate) type PutCallResult = Result<(PutReply, Option<BoundedStop>), Interrupted>;
 
 pub(crate) fn interpret_put_result(
     result: &PutCallResult,
-    call: Call,
+    mode: MutationMode,
     length_mismatch: bool,
 ) -> Result<(), Failure<MutationError>> {
     match result {
         Ok((Ok(_), _)) => Ok(()),
         Ok((Err(sdk_error), stopped_on_reply)) => Err(from_sdk_mutation(
             sdk_error,
-            call,
+            mode,
             length_mismatch,
             *stopped_on_reply,
         )),
@@ -316,14 +319,14 @@ pub(crate) fn interpret_put_result(
 
 pub(crate) fn interpret_delete_result(
     result: &Result<DeleteObjectOutput, SdkFailure<DeleteObjectError>>,
-    stopped_on_reply: Option<CallStop>,
+    stopped_on_reply: Option<BoundedStop>,
 ) -> Result<(), Failure<MutationError>> {
     match result {
         Ok(_) => Ok(()),
         Err(error) if error.code() == Some("NoSuchKey") => Ok(()),
         Err(error) => Err(from_sdk_mutation(
             error,
-            Call::UnconditionalMutation,
+            MutationMode::Unconditional,
             false,
             stopped_on_reply,
         )),
@@ -344,9 +347,9 @@ where
 
 pub(crate) fn from_sdk_mutation<E>(
     error: &SdkFailure<E>,
-    call: Call,
+    mode: MutationMode,
     length_mismatch: bool,
-    stopped_on_reply: Option<CallStop>,
+    stopped_on_reply: Option<BoundedStop>,
 ) -> Failure<MutationError>
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
@@ -356,12 +359,12 @@ where
         return UploadFailure::Length.into();
     }
     if kind == FailureKind::Timeout
-        && let Some(stopped @ CallStop::Parent(Stopped::Deadline)) = stopped_on_reply
+        && let Some(stopped @ BoundedStop::Parent(Stopped::Deadline)) = stopped_on_reply
     {
         return Failure::mutation_unknown_stopped(stopped);
     }
     Failure {
-        error: classify_mutation(kind, call),
+        error: classify_mutation(kind, mode),
         error_type,
         timeout_source: None,
     }
@@ -414,53 +417,55 @@ fn is_safe_error_code(code: &str) -> bool {
 
 fn classify_read(kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
-    match kind.classify(Call::Read) {
-        FailureClass::NotFound => E::NotFound,
-        FailureClass::Unavailable | FailureClass::Conflict | FailureClass::OutcomeUnknown => {
-            E::Unavailable
-        }
-        FailureClass::Rejected | FailureClass::PreconditionFailed => E::Rejected,
+    if let FailureKind::Status { status, code } = kind
+        && code != Some("NoSuchBucket")
+        && classification_status(status, code) == 404
+    {
+        return E::NotFound;
+    }
+    match kind.classify_common() {
+        CommonFailure::Unavailable | CommonFailure::OutcomeUnknown => E::Unavailable,
+        CommonFailure::Rejected => E::Rejected,
     }
 }
 
-fn classify_mutation(kind: FailureKind<'_>, call: Call) -> MutationError {
+fn classify_mutation(kind: FailureKind<'_>, mode: MutationMode) -> MutationError {
     use MutationFailure as F;
-    let reason = match kind.classify(call) {
-        FailureClass::PreconditionFailed => F::AlreadyExists,
-        FailureClass::Conflict => F::Conflict,
-        FailureClass::Unavailable => F::Unavailable,
-        FailureClass::OutcomeUnknown => {
-            return MutationError::OutcomeUnknown(UnknownOutcome::Unavailable);
+    if mode == MutationMode::CreateOnly
+        && let FailureKind::Status { status, code } = kind
+        && code != Some("NoSuchBucket")
+    {
+        match classification_status(status, code) {
+            412 => return MutationError::NotApplied(F::AlreadyExists),
+            409 => return MutationError::NotApplied(F::Conflict),
+            _ => {}
         }
-        FailureClass::Rejected | FailureClass::NotFound => F::Rejected,
-    };
-    MutationError::NotApplied(reason)
+    }
+    match kind.classify_common() {
+        CommonFailure::Unavailable => MutationError::NotApplied(F::Unavailable),
+        CommonFailure::Rejected => MutationError::NotApplied(F::Rejected),
+        CommonFailure::OutcomeUnknown => MutationError::OutcomeUnknown(UnknownOutcome::Unavailable),
+    }
 }
 
-enum FailureClass {
-    NotFound,
-    PreconditionFailed,
-    Conflict,
+enum CommonFailure {
     Unavailable,
     Rejected,
     OutcomeUnknown,
 }
 
 impl FailureKind<'_> {
-    fn classify(self, call: Call) -> FailureClass {
+    fn classify_common(self) -> CommonFailure {
         match self {
-            Self::NotSent => FailureClass::Rejected,
-            Self::NoCredentials => FailureClass::Unavailable,
-            Self::Lost | Self::Timeout => FailureClass::OutcomeUnknown,
+            Self::NotSent => CommonFailure::Rejected,
+            Self::NoCredentials => CommonFailure::Unavailable,
+            Self::Lost | Self::Timeout => CommonFailure::OutcomeUnknown,
             Self::Status { status, code } => match (classification_status(status, code), code) {
-                (_, Some("NoSuchBucket")) => FailureClass::Rejected,
-                (404, _) if call == Call::Read => FailureClass::NotFound,
-                (412, _) if call == Call::CreateOnly => FailureClass::PreconditionFailed,
-                (409, _) if call == Call::CreateOnly => FailureClass::Conflict,
-                (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => FailureClass::Unavailable,
-                (501, _) => FailureClass::Rejected,
-                (500..=599, _) => FailureClass::OutcomeUnknown,
-                _ => FailureClass::Rejected,
+                (_, Some("NoSuchBucket")) => CommonFailure::Rejected,
+                (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => CommonFailure::Unavailable,
+                (501, _) => CommonFailure::Rejected,
+                (500..=599, _) => CommonFailure::OutcomeUnknown,
+                _ => CommonFailure::Rejected,
             },
         }
     }
@@ -496,13 +501,12 @@ mod tests {
     use aws_smithy_runtime_api::client::result::ConnectorError;
     use operation_context::{OperationContext, Stopped};
 
-    use super::Call::UnconditionalMutation as Unconditional;
     use super::MutationError::{NotApplied, OutcomeUnknown};
+    use super::MutationMode::{CreateOnly, Unconditional};
     use super::{
-        Call, DeleteObjectError, FailureKind, MutationFailure, ObjectStorageError, SdkFailure,
+        DeleteObjectError, FailureKind, MutationFailure, ObjectStorageError, SdkFailure,
         UnknownOutcome, classify_mutation, classify_read, from_sdk_mutation,
     };
-    use crate::call::CallContext;
 
     #[test]
     fn classification_separates_not_applied_from_unknown() {
@@ -513,12 +517,12 @@ mod tests {
         let unavailable = NotApplied(F::Unavailable);
         let cases = [
             (Unconditional, FailureKind::Lost, unknown),
-            (Call::CreateOnly, FailureKind::Lost, unknown),
+            (CreateOnly, FailureKind::Lost, unknown),
             (Unconditional, FailureKind::NotSent, rejected),
             (Unconditional, FailureKind::NoCredentials, unavailable),
             (Unconditional, status(404, Some("NoSuchBucket")), rejected),
             (
-                Call::CreateOnly,
+                CreateOnly,
                 status(412, Some("PreconditionFailed")),
                 NotApplied(F::AlreadyExists),
             ),
@@ -528,7 +532,7 @@ mod tests {
                 rejected,
             ),
             (
-                Call::CreateOnly,
+                CreateOnly,
                 status(409, Some("ConditionalRequestConflict")),
                 NotApplied(F::Conflict),
             ),
@@ -539,7 +543,7 @@ mod tests {
             ),
             (Unconditional, status(503, Some("SlowDown")), unavailable),
             (Unconditional, status(500, Some("InternalError")), unknown),
-            (Call::CreateOnly, status(502, None), unknown),
+            (CreateOnly, status(502, None), unknown),
             (Unconditional, status(400, Some("BadDigest")), rejected),
             (
                 Unconditional,
@@ -555,23 +559,23 @@ mod tests {
             (Unconditional, status(200, Some("InternalError")), unknown),
             (Unconditional, status(200, Some("SlowDown")), unavailable),
             (
-                Call::CreateOnly,
+                CreateOnly,
                 status(200, Some("PreconditionFailed")),
                 NotApplied(F::AlreadyExists),
             ),
             (
-                Call::CreateOnly,
+                CreateOnly,
                 status(200, Some("ConditionalRequestConflict")),
                 NotApplied(F::Conflict),
             ),
             (Unconditional, status(200, None), unknown),
             (Unconditional, status(200, Some("NoSuchBucket")), rejected),
         ];
-        for (call, reply, expected) in cases {
+        for (mode, reply, expected) in cases {
             assert_eq!(
-                classify_mutation(reply, call),
+                classify_mutation(reply, mode),
                 expected,
-                "{call:?} {reply:?}"
+                "{mode:?} {reply:?}"
             );
         }
     }
@@ -580,8 +584,8 @@ mod tests {
     async fn sdk_mutation_timeout_preserves_the_effective_parent_deadline() {
         let budget = Duration::from_secs(1);
         let parent = OperationContext::with_timeout(budget);
-        let parent_limited = CallContext::new(&parent, 2 * budget);
-        let locally_limited = CallContext::new(&OperationContext::unbounded(), budget);
+        let parent_limited = parent.bounded(2 * budget);
+        let locally_limited = OperationContext::unbounded().bounded(budget);
         let timed_out = || io::Error::from(io::ErrorKind::TimedOut);
         let errors: [SdkFailure<DeleteObjectError>; 2] = [
             SdkFailure::timeout_error(timed_out()),

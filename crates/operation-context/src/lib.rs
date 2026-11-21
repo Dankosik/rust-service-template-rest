@@ -75,6 +75,67 @@ pub enum Stopped {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundedStop {
+    Parent(Stopped),
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeadlineSource {
+    Parent,
+    Local,
+}
+
+#[derive(Clone, Debug)]
+pub struct BoundedContext {
+    deadline: Deadline,
+    source: DeadlineSource,
+    cancellation: CancellationToken,
+}
+
+impl BoundedContext {
+    #[must_use]
+    pub const fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        self.deadline.remaining()
+    }
+
+    #[must_use]
+    pub fn stopped(&self) -> Option<BoundedStop> {
+        if self.deadline.expired() {
+            Some(self.deadline_stop())
+        } else if self.cancellation.is_cancelled() {
+            Some(BoundedStop::Parent(Stopped::Cancelled))
+        } else {
+            None
+        }
+    }
+
+    pub fn check(&self) -> Result<(), BoundedStop> {
+        self.stopped().map_or(Ok(()), Err)
+    }
+
+    pub async fn wait_stopped(&self) -> BoundedStop {
+        tokio::select! {
+            biased;
+            () = self.deadline.wait() => self.deadline_stop(),
+            () = self.cancellation.cancelled() => BoundedStop::Parent(Stopped::Cancelled),
+        }
+    }
+
+    const fn deadline_stop(&self) -> BoundedStop {
+        match self.source {
+            DeadlineSource::Parent => BoundedStop::Parent(Stopped::Deadline),
+            DeadlineSource::Local => BoundedStop::Timeout,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OperationContext {
     deadline: Option<Deadline>,
@@ -127,6 +188,20 @@ impl OperationContext {
     #[must_use]
     pub fn child(&self, ceiling: Duration) -> Self {
         self.child_until(Deadline::after(ceiling))
+    }
+
+    #[must_use]
+    pub fn bounded(&self, ceiling: Duration) -> BoundedContext {
+        let now = Instant::now();
+        let (deadline, source) = match self.deadline {
+            Some(parent) if parent.remaining_at(now) <= ceiling => (parent, DeadlineSource::Parent),
+            _ => (Deadline::new(now, ceiling), DeadlineSource::Local),
+        };
+        BoundedContext {
+            deadline,
+            source,
+            cancellation: self.cancellation.child_token(),
+        }
     }
 
     #[must_use]
@@ -318,5 +393,56 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(run.await, Err(Stopped::Deadline));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_separates_parent_stop_from_local_timeout() {
+        let short_parent = OperationContext::with_timeout(Duration::from_secs(1));
+        let parent_limited = short_parent.bounded(Duration::from_secs(5));
+        assert_eq!(parent_limited.remaining(), Duration::from_secs(1));
+        assert_eq!(
+            parent_limited.deadline().instant(),
+            short_parent.deadline().and_then(Deadline::instant)
+        );
+        assert_eq!(parent_limited.check(), Ok(()));
+
+        let equal_parent = OperationContext::with_timeout(Duration::from_secs(2));
+        let tied = equal_parent.bounded(Duration::from_secs(2));
+
+        let long_parent = OperationContext::with_timeout(Duration::from_secs(10));
+        let locally_limited = long_parent.bounded(Duration::from_secs(2));
+        assert_eq!(locally_limited.remaining(), Duration::from_secs(2));
+
+        let unbounded_limited = OperationContext::unbounded().bounded(Duration::from_secs(2));
+
+        let cancelling_parent = OperationContext::with_timeout(Duration::from_secs(10));
+        let cancelled = cancelling_parent.bounded(Duration::from_secs(5));
+        cancelling_parent.cancel();
+        assert_eq!(
+            cancelled.check(),
+            Err(BoundedStop::Parent(Stopped::Cancelled))
+        );
+        assert_eq!(
+            cancelled.wait_stopped().await,
+            BoundedStop::Parent(Stopped::Cancelled)
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            parent_limited.stopped(),
+            Some(BoundedStop::Parent(Stopped::Deadline))
+        );
+        assert_eq!(
+            parent_limited.wait_stopped().await,
+            BoundedStop::Parent(Stopped::Deadline)
+        );
+        assert_eq!(locally_limited.check(), Ok(()));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(tied.check(), Err(BoundedStop::Parent(Stopped::Deadline)));
+        assert_eq!(locally_limited.check(), Err(BoundedStop::Timeout));
+        assert_eq!(locally_limited.wait_stopped().await, BoundedStop::Timeout);
+        assert_eq!(long_parent.check(), Ok(()));
+        assert_eq!(unbounded_limited.check(), Err(BoundedStop::Timeout));
     }
 }
