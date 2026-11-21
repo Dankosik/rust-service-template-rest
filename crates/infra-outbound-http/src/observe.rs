@@ -147,7 +147,6 @@ impl AttemptInner<'_> {
             outbound.outcome = outcome.as_str(),
             otel.status_code = error_type.is_some().then_some("ERROR"),
         );
-        describe_histogram();
         metrics::histogram!(
             REQUEST_DURATION_METRIC,
             self.labels(outcome, status_label, error_type)
@@ -262,15 +261,12 @@ impl<'a> Attempt<'a> {
     }
 }
 
-fn describe_histogram() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        metrics::describe_histogram!(
-            REQUEST_DURATION_METRIC,
-            Unit::Seconds,
-            "Outbound HTTP attempt duration in seconds"
-        );
-    });
+pub(crate) fn describe() {
+    metrics::describe_histogram!(
+        REQUEST_DURATION_METRIC,
+        Unit::Seconds,
+        "Outbound HTTP attempt duration in seconds"
+    );
 }
 
 fn span_name(method: HttpMethod, template: Option<&'static str>) -> impl fmt::Display {

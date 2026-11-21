@@ -36,13 +36,7 @@ impl Pki {
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
-    fn file(
-        &self,
-        scope: SettingScope,
-        variable: &'static str,
-        name: &str,
-        pem: &str,
-    ) -> TrustFile {
+    fn file(&self, scope: EnvScope, variable: &'static str, name: &str, pem: &str) -> TrustFile {
         let path = self.files.path().join(name);
         std::fs::write(&path, pem).expect("write a PEM file");
         TrustFile {
@@ -54,7 +48,7 @@ impl Pki {
 
     fn certificate_file(&self) -> TrustFile {
         self.file(
-            SettingScope::Common,
+            EnvScope::Common,
             CERTIFICATE_VARS[1],
             "ca.pem",
             &self.issuer.pem(),
@@ -68,7 +62,7 @@ impl Pki {
         let certificate = params.signed_by(&key, &self.issuer).expect("client leaf");
         if bundled {
             let certificate = self.file(
-                SettingScope::Common,
+                EnvScope::Common,
                 CLIENT_CERTIFICATE_VARS[1],
                 "client-bundle.pem",
                 &format!("{}\n{}", certificate.pem(), key.serialize_pem()),
@@ -83,7 +77,7 @@ impl Pki {
                 }
             };
             let key = TrustFile {
-                scope: SettingScope::Common,
+                scope: EnvScope::Common,
                 variable: CLIENT_KEY_VARS[1],
                 path: certificate.path.clone(),
             };
@@ -91,13 +85,13 @@ impl Pki {
         }
         (
             self.file(
-                SettingScope::Common,
+                EnvScope::Common,
                 CLIENT_CERTIFICATE_VARS[1],
                 "client.pem",
                 &certificate.pem(),
             ),
             self.file(
-                SettingScope::Common,
+                EnvScope::Common,
                 CLIENT_KEY_VARS[1],
                 "client.key",
                 &key.serialize_pem(),
