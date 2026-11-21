@@ -67,13 +67,7 @@ const SCHEDULER_LAG_BUCKETS: &[f64] = &[
 
 #[derive(Debug, Default)]
 struct Progress {
-    sample: Mutex<Option<ProgressSample>>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ProgressSample {
-    completed: Instant,
-    max_lag: Duration,
+    completed: Mutex<Option<Instant>>,
 }
 
 impl Progress {
@@ -104,16 +98,13 @@ impl Progress {
         metrics::gauge!(SCHEDULER_FRESHNESS_METRIC).set(SCHEDULER_FRESHNESS_LIMIT.as_secs_f64());
     }
 
-    fn record(&self, completed: Instant, lag: Duration) -> Duration {
-        let mut sample = self.sample.lock();
-        let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
-        *sample = Some(ProgressSample { completed, max_lag });
-        max_lag
+    fn record(&self, completed: Instant) {
+        *self.completed.lock() = Some(completed);
     }
 
     fn age_seconds(&self) -> f64 {
-        let sample = *self.sample.lock();
-        sample.map_or(f64::NAN, |sample| sample.completed.elapsed().as_secs_f64())
+        let completed = *self.completed.lock();
+        completed.map_or(f64::NAN, |completed| completed.elapsed().as_secs_f64())
     }
 }
 
@@ -201,6 +192,7 @@ impl Metrics {
 
     pub async fn runtime_progress(self, cancel: CancellationToken) {
         let mut expected = Instant::now() + PROGRESS_INTERVAL;
+        let mut max_lag = Duration::ZERO;
         let cancelled = cancel.cancelled();
         tokio::pin!(cancelled);
         loop {
@@ -214,7 +206,8 @@ impl Metrics {
             metrics::histogram!(SCHEDULER_LAG_METRIC).record(lag);
             metrics::counter!(SCHEDULER_SAMPLES_METRIC).increment(1);
             let completed = Instant::now();
-            let max_lag = self.progress.record(completed, lag);
+            self.progress.record(completed);
+            max_lag = max_lag.max(lag);
             metrics::gauge!(SCHEDULER_LAG_MAX_METRIC).set(max_lag.as_secs_f64());
             expected = completed + PROGRESS_INTERVAL;
         }

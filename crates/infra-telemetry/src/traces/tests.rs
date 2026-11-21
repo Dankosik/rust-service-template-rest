@@ -1,5 +1,5 @@
 use super::exporter::{
-    CERTIFICATE_VARS, CLIENT_CERTIFICATE_VARS, CLIENT_KEY_VARS, SettingScope, TrustFile,
+    CERTIFICATE_VARS, CLIENT_CERTIFICATE_VARS, CLIENT_KEY_VARS, EnvScope, TrustFile,
 };
 use super::*;
 

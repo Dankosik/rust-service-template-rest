@@ -201,18 +201,16 @@ fn offset(index: usize) -> u16 {
     u16::try_from(index).unwrap_or(u16::MAX)
 }
 
-struct EventScratch {
+struct FieldBuf<const MAX_FIELDS: usize> {
     values: Bytes<SCRATCH_CAPACITY>,
-    fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
-    truncated: bool,
+    fields: ArrayVec<Entry, MAX_FIELDS>,
 }
 
-impl EventScratch {
-    fn new() -> Self {
+impl<const MAX_FIELDS: usize> FieldBuf<MAX_FIELDS> {
+    fn new(limit: usize) -> Self {
         Self {
-            values: Bytes::inline(MAX_RECORD_BYTES),
+            values: Bytes::inline(limit),
             fields: ArrayVec::new(),
-            truncated: false,
         }
     }
 
@@ -224,75 +222,101 @@ impl EventScratch {
         });
     }
 
-    fn stop(&mut self) {
-        self.values.failed = true;
-        self.truncated = true;
-    }
-
-    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
+    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) -> bool {
         if self.values.failed {
-            return;
+            return false;
         }
         if self.fields.is_full() {
-            self.stop();
-            return;
+            self.values.failed = true;
+            return false;
         }
         let start = self.values.len();
         self.values.append_json(value);
         if self.values.failed {
             self.values.buf.truncate(start);
-            self.truncated = true;
-            return;
+            return false;
         }
         self.add_field(key, start);
+        true
+    }
+
+    fn push_raw(&mut self, key: &'static str, bytes: &[u8]) -> bool {
+        if self.values.failed {
+            return false;
+        }
+        if self.fields.is_full() {
+            self.values.failed = true;
+            return false;
+        }
+        let start = self.values.len();
+        self.values.append(bytes);
+        if self.values.failed {
+            return false;
+        }
+        self.add_field(key, start);
+        true
+    }
+}
+
+struct EventScratch {
+    buf: FieldBuf<MAX_EVENT_FIELDS>,
+    truncated: bool,
+}
+
+impl EventScratch {
+    fn new() -> Self {
+        Self {
+            buf: FieldBuf::new(MAX_RECORD_BYTES),
+            truncated: false,
+        }
+    }
+
+    fn stop(&mut self) {
+        self.buf.values.failed = true;
+        self.truncated = true;
+    }
+
+    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
+        if !self.buf.push_json(key, value) {
+            self.truncated = true;
+        }
     }
 
     fn push_truncating_str(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
-        if self.values.failed {
+        if self.buf.values.failed {
             return;
         }
-        if self.fields.is_full() || self.values.room() < 2 {
+        if self.buf.fields.is_full() || self.buf.values.room() < 2 {
             self.stop();
             return;
         }
-        let start = self.values.len();
-        self.values.append(b"\"");
+        let start = self.buf.values.len();
+        self.buf.values.append(b"\"");
         let mut quoted = Quoted {
-            values: &mut self.values,
+            values: &mut self.buf.values,
             cut: false,
         };
         let written = fmt::write(&mut quoted, text);
         let cut = quoted.cut;
         if written.is_err() && !cut {
-            self.values.buf.truncate(start);
+            self.buf.values.buf.truncate(start);
             self.truncated = true;
             return;
         }
-        self.values.append(b"\"");
-        self.add_field(key, start);
+        self.buf.values.append(b"\"");
+        self.buf.add_field(key, start);
         self.truncated |= cut;
     }
 
     fn copy(&mut self, field: Entry, values: &[u8]) {
-        if self.values.failed {
-            return;
-        }
-        if self.fields.is_full() {
-            self.stop();
-            return;
-        }
-        let start = self.values.len();
-        self.values.append(&values[field.range()]);
-        if self.values.failed {
+        if !self.buf.push_raw(field.key, &values[field.range()]) {
             self.truncated = true;
-            return;
         }
-        self.add_field(field.key, start);
     }
 
     fn write_body(&mut self, line: &mut Bytes, event_field_count: usize, format: LoggingFormat) {
-        let values = self.values.as_slice();
-        let (event, spans) = self.fields.split_at_mut(event_field_count);
+        let values = self.buf.values.as_slice();
+        let (event, spans) = self.buf.fields.split_at_mut(event_field_count);
         event.sort_unstable_by_key(|field| (field.key, field.start));
         spans.sort_unstable_by_key(|field| (field.key, field.start));
         let header = line.len();
@@ -310,40 +334,7 @@ impl EventScratch {
     }
 }
 
-struct SpanScratch {
-    values: Bytes<SCRATCH_CAPACITY>,
-    fields: ArrayVec<Entry, MAX_SPAN_FIELDS>,
-}
-
-impl SpanScratch {
-    fn new() -> Self {
-        Self {
-            values: Bytes::inline(MAX_SPAN_BYTES),
-            fields: ArrayVec::new(),
-        }
-    }
-
-    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
-        if self.values.failed {
-            return;
-        }
-        if self.fields.is_full() {
-            self.values.failed = true;
-            return;
-        }
-        let start = self.values.len();
-        self.values.append_json(value);
-        if self.values.failed {
-            self.values.buf.truncate(start);
-            return;
-        }
-        self.fields.push(Entry {
-            key,
-            start: offset(start),
-            end: offset(self.values.len()),
-        });
-    }
-}
+type SpanScratch = FieldBuf<MAX_SPAN_FIELDS>;
 
 struct Quoted<'a, const INLINE: usize> {
     values: &'a mut Bytes<INLINE>,
@@ -408,61 +399,72 @@ fn escape(byte: u8, unit: &mut [u8; 6]) -> &[u8] {
 }
 
 struct SpanFields {
-    values: Bytes,
+    values: Vec<u8>,
     fields: SmallVec<[Entry; 8]>,
     _slot: Permit,
 }
 
 impl SpanFields {
     fn from_capture(slot: Permit, capture: &SpanScratch) -> Option<Self> {
-        let mut cache = Self {
-            values: Bytes::new(MAX_SPAN_BYTES, 0),
-            fields: SmallVec::new(),
+        let (values, fields) = compact_span_fields(&[], &[], capture)?;
+        Some(Self {
+            values,
+            fields,
             _slot: slot,
-        };
-        cache.apply(capture).then_some(cache)
+        })
     }
 
     fn apply(&mut self, delta: &SpanScratch) -> bool {
-        if delta.values.failed {
+        let Some((values, fields)) = compact_span_fields(&self.fields, &self.values, delta) else {
             return false;
-        }
-        let capacity = (delta.values.len() + self.values.len()).min(MAX_SPAN_BYTES);
-        let mut next_values = Bytes::new(MAX_SPAN_BYTES, capacity);
-        let mut next_fields = SmallVec::new();
-        let unique = delta
-            .fields
-            .iter()
-            .enumerate()
-            .filter_map(|(index, field)| {
-                (!delta.fields[index + 1..]
-                    .iter()
-                    .any(|next| next.key == field.key))
-                .then_some((field.key, &delta.values.as_slice()[field.range()]))
-            });
-        let unchanged = self.fields.iter().filter_map(|field| {
-            (!delta.fields.iter().any(|next| next.key == field.key))
-                .then_some((field.key, &self.values.as_slice()[field.range()]))
-        });
-        for (key, value) in unique.chain(unchanged) {
-            if next_fields.len() == MAX_SPAN_FIELDS {
-                return false;
-            }
-            let start = next_values.len();
-            next_values.append(value);
-            if next_values.failed {
-                return false;
-            }
-            next_fields.push(Entry {
-                key,
-                start: offset(start),
-                end: offset(next_values.len()),
-            });
-        }
-        self.values = next_values;
-        self.fields = next_fields;
+        };
+        self.values = values;
+        self.fields = fields;
         true
     }
+}
+
+fn compact_span_fields(
+    existing_fields: &[Entry],
+    existing_values: &[u8],
+    delta: &SpanScratch,
+) -> Option<(Vec<u8>, SmallVec<[Entry; 8]>)> {
+    if delta.values.failed {
+        return None;
+    }
+    let capacity = (delta.values.len() + existing_values.len()).min(MAX_SPAN_BYTES);
+    let mut next_values = Bytes::new(MAX_SPAN_BYTES, capacity);
+    let mut next_fields = SmallVec::new();
+    let unique = delta
+        .fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            (!delta.fields[index + 1..]
+                .iter()
+                .any(|next| next.key == field.key))
+            .then_some((field.key, &delta.values.as_slice()[field.range()]))
+        });
+    let unchanged = existing_fields.iter().filter_map(|field| {
+        (!delta.fields.iter().any(|next| next.key == field.key))
+            .then_some((field.key, &existing_values[field.range()]))
+    });
+    for (key, value) in unique.chain(unchanged) {
+        if next_fields.len() == MAX_SPAN_FIELDS {
+            return None;
+        }
+        let start = next_values.len();
+        next_values.append(value);
+        if next_values.failed {
+            return None;
+        }
+        next_fields.push(Entry {
+            key,
+            start: offset(start),
+            end: offset(next_values.len()),
+        });
+    }
+    Some((next_values.buf.into_vec(), next_fields))
 }
 
 struct EventCapture<'a> {
@@ -572,7 +574,7 @@ impl FormatLayer {
             scratch: &mut scratch,
             bridged,
         });
-        let event_field_count = scratch.fields.len();
+        let event_field_count = scratch.buf.fields.len();
         write_record_header(&mut line, metadata, self.format);
         if let Some(event_span) = ctx.event_span(event) {
             self.write_trace_context_fields(&event_span.id(), &mut line);
@@ -583,9 +585,9 @@ impl FormatLayer {
                     continue;
                 };
                 for field in &cached.fields {
-                    scratch.copy(*field, cached.values.as_slice());
+                    scratch.copy(*field, &cached.values);
                 }
-                if scratch.values.failed {
+                if scratch.buf.values.failed {
                     break;
                 }
             }
@@ -652,7 +654,7 @@ where
             self.output.record_drop(DropReason::SpanCapacity);
             return;
         };
-        let mut scratch = SpanScratch::new();
+        let mut scratch = SpanScratch::new(MAX_SPAN_BYTES);
         attrs.record(&mut SpanCapture(&mut scratch));
         scratch.push_json("name", attrs.metadata().name());
         let Some(cache) = SpanFields::from_capture(slot, &scratch) else {
@@ -669,7 +671,7 @@ where
         let Some(_guard) = self.admit() else {
             return;
         };
-        let mut scratch = SpanScratch::new();
+        let mut scratch = SpanScratch::new(MAX_SPAN_BYTES);
         values.record(&mut SpanCapture(&mut scratch));
         let Some(span) = ctx.span(id) else {
             return;
