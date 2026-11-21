@@ -542,3 +542,151 @@ fn a_buffer_reserves_no_more_than_its_limit() {
     assert!(bytes.failed);
     assert!(bytes.buf.capacity() <= 100, "{}", bytes.buf.capacity());
 }
+
+#[test]
+fn single_new_span_field_appends_in_place_preserving_order_and_bounds() {
+    let mut initial = SpanScratch::new(MAX_SPAN_BYTES);
+    let large = "v".repeat(MAX_SPAN_BYTES / 2 + 512);
+    assert!(initial.push_json("f0", large.as_str()));
+    for key in ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"] {
+        assert!(initial.push_json(key, "v"));
+    }
+    let slot = Permit::take(&CACHED_SPANS, MAX_CACHED_SPANS).expect("span slot");
+    let mut cached = SpanFields::from_capture(slot, &initial).expect("initial span cache");
+    assert_eq!(cached.fields.len(), 9);
+    assert!(cached.values.capacity() > MAX_SPAN_BYTES / 2);
+    let fields_ptr = cached.fields.as_ptr();
+    let fields_cap = cached.fields.capacity();
+    assert!(fields_cap > cached.fields.len());
+
+    let empty = SpanScratch::new(MAX_SPAN_BYTES);
+    assert!(cached.apply(&empty));
+    assert_eq!(cached.fields.as_ptr(), fields_ptr);
+    assert_eq!(cached.fields.len(), 9);
+
+    let mut failed_empty = SpanScratch::new(MAX_SPAN_BYTES);
+    assert!(!failed_empty.push_json("too_big", "z".repeat(MAX_SPAN_BYTES).as_str()));
+    assert!(failed_empty.values.failed && failed_empty.fields.is_empty());
+    assert!(!cached.apply(&failed_empty));
+    assert_eq!(cached.fields.len(), 9);
+
+    let mut failed_after_one = SpanScratch::new(MAX_SPAN_BYTES);
+    assert!(failed_after_one.push_json("kept", "ok"));
+    assert!(!failed_after_one.push_json("too_big", "z".repeat(MAX_SPAN_BYTES).as_str()));
+    assert!(failed_after_one.values.failed && failed_after_one.fields.len() == 1);
+    assert!(!cached.apply(&failed_after_one));
+    assert_eq!(cached.fields.len(), 9);
+
+    let mut delta = SpanScratch::new(MAX_SPAN_BYTES);
+    assert!(delta.push_json("cache.outcome", "hit"));
+    assert!(cached.apply(&delta));
+    assert_eq!(cached.fields.as_ptr(), fields_ptr);
+    assert_eq!(cached.fields.capacity(), fields_cap);
+    assert_eq!(cached.fields.len(), 10);
+    assert_eq!(cached.fields[0].key, "cache.outcome");
+    assert_eq!(&cached.values[cached.fields[0].range()], b"\"hit\"");
+    assert_eq!(cached.fields[1].key, "f0");
+    assert!(cached.values.capacity() <= MAX_SPAN_BYTES);
+
+    let remaining = MAX_SPAN_BYTES - cached.values.len();
+    let mut exact_delta = SpanScratch::new(MAX_SPAN_BYTES);
+    let exact_str = "x".repeat(remaining - 2);
+    assert!(exact_delta.push_json("fill", exact_str.as_str()));
+    assert!(cached.apply(&exact_delta));
+    assert_eq!(cached.values.len(), MAX_SPAN_BYTES);
+    assert_eq!(cached.values.capacity(), MAX_SPAN_BYTES);
+    assert_eq!(cached.fields[0].key, "fill");
+
+    let mut overflow_delta = SpanScratch::new(MAX_SPAN_BYTES);
+    assert!(overflow_delta.push_json("one_more", "y"));
+    assert!(!cached.apply(&overflow_delta));
+
+    let mut overwrite = SpanScratch::new(MAX_SPAN_BYTES);
+    assert!(overwrite.push_json("fill", "tiny"));
+    assert!(cached.apply(&overwrite));
+    assert!(cached.values.len() < MAX_SPAN_BYTES);
+    assert_eq!(cached.fields[0].key, "fill");
+    assert_eq!(&cached.values[cached.fields[0].range()], b"\"tiny\"");
+}
+
+#[test]
+fn span_field_filtering_preserves_precedence_with_duplicates_and_truncation() {
+    use tracing::callsite::{DefaultCallsite, Identifier};
+    use tracing::field::{FieldSet, Value};
+    use tracing::metadata::Kind;
+
+    static EVENT_KEYS: [&str; 6] = ["dup", "dup", "dup", "mid", "payload", "zz0"];
+    static CALLSITE: DefaultCallsite = DefaultCallsite::new(&META);
+    static META: tracing::Metadata<'static> = tracing::Metadata::new(
+        "dup_event",
+        "formatter_test",
+        tracing::Level::INFO,
+        None,
+        None,
+        None,
+        FieldSet::new(&EVENT_KEYS, Identifier(&CALLSITE)),
+        Kind::EVENT,
+    );
+
+    let (records, snapshot) = capture(LoggingFormat::Json, || {
+        let zzz_value = "z".repeat(350);
+        let span = tracing::info_span!(
+            "outer",
+            aaa = "before_event",
+            dup = "shadowed_by_dup",
+            mmm = "between_event",
+            mid = "shadowed_by_mid",
+            zzz = zzz_value.as_str(),
+        );
+        let first = 1_u64;
+        let second = 2_u64;
+        let third = 3_u64;
+        let mid_val = "from_event";
+        let zz0_val = "from_event_end";
+        let short_payload = "ok";
+        let rewind_payload = "p".repeat(15_900);
+        span.in_scope(|| {
+            for payload_val in [short_payload, rewind_payload.as_str()] {
+                let values: [Option<&dyn Value>; 6] = [
+                    Some(&first),
+                    Some(&second),
+                    Some(&third),
+                    Some(&mid_val),
+                    Some(&payload_val),
+                    Some(&zz0_val),
+                ];
+                let fields = META.fields().value_set_all(&values);
+                tracing::dispatcher::get_default(|dispatch| {
+                    dispatch.event(&Event::new(&META, &fields));
+                });
+            }
+        });
+    });
+
+    assert!(snapshot.dropped.values().all(|&count| count == 0));
+    let lines: Vec<_> = records.lines().collect();
+    assert_eq!(lines.len(), 2);
+
+    let whole: serde_json::Value = serde_json::from_str(lines[0]).expect("valid whole JSON");
+    assert_eq!(whole["dup"], 3);
+    assert_eq!(whole["mid"], "from_event");
+    assert_eq!(whole["zz0"], "from_event_end");
+    assert_eq!(whole["aaa"], "before_event");
+    assert_eq!(whole["mmm"], "between_event");
+    assert_eq!(whole["zzz"].as_str().map(str::len), Some(350));
+    assert!(!lines[0].contains("shadowed_by_"));
+
+    assert!(is_marked(lines[1], LoggingFormat::Json));
+    assert_eq!(lines[1].len() + 1, MAX_RECORD_BYTES);
+    let cut: serde_json::Value = serde_json::from_str(lines[1]).expect("valid truncated JSON");
+    assert_eq!(cut["dup"], 3);
+    assert_eq!(cut["mid"], "from_event");
+    assert_eq!(cut["zz0"], "from_event_end");
+    assert_eq!(cut["aaa"], "before_event");
+    assert_eq!(cut["mmm"], "between_event");
+    let cut_zzz = cut["zzz"]
+        .as_str()
+        .expect("second pass must still reach and truncate zzz");
+    assert!(!cut_zzz.is_empty() && cut_zzz.len() < 350 && cut_zzz.bytes().all(|b| b == b'z'));
+    assert!(!lines[1].contains("shadowed_by_"));
+}

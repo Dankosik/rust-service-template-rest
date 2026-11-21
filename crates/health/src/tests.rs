@@ -272,6 +272,41 @@ async fn is_draining_stays_false_through_every_verdict_until_drain_starts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_stale_not_ready_verdict_reports_staleness_while_is_ready_stays_false() {
+    let (readiness, flag, _) = flaky(true);
+    let control = readiness.control();
+    let reader = control.reader();
+    let mut refresher = activate(readiness).await;
+    flag.store(false, Ordering::Relaxed);
+    for _ in 0..3 {
+        refresher.refresh().await;
+    }
+    assert!(!reader.is_ready());
+    std::assert_matches!(
+        reader.verdict(),
+        Err(NotReady::ProbeFailed { probe: "flaky", .. })
+    );
+
+    let stale_after = policy().stale_after();
+    tokio::time::advance(stale_after).await;
+    assert!(!reader.is_ready());
+    std::assert_matches!(
+        reader.verdict(),
+        Err(NotReady::ProbeFailed { probe: "flaky", .. })
+    );
+
+    tokio::time::advance(Duration::from_nanos(1)).await;
+    assert!(!reader.is_ready());
+    assert_eq!(
+        reader.verdict(),
+        Err(NotReady::Stale {
+            age: stale_after + Duration::from_nanos(1),
+            stale_after,
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn failed_refresh_only_absorbs_a_previous_ready_that_is_fresh_at_completion() {
     for previously_absorbed in [false, true] {
         for expired in [false, true] {

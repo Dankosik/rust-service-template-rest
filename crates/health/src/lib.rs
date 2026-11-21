@@ -120,11 +120,56 @@ const CHECKS_METRIC: &str = "readiness_checks_total";
 
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 
-fn outcome_label(outcome: &Result<(), ProbeFailure>) -> &'static str {
-    match outcome {
-        Ok(()) => "ok",
-        Err(ProbeFailure::TimedOut { .. }) => "timed_out",
-        Err(ProbeFailure::Failed { .. }) => "failed",
+static CHECK_METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+
+#[derive(Clone, Copy)]
+enum CheckOutcome {
+    Ok,
+    TimedOut,
+    Failed,
+}
+
+impl CheckOutcome {
+    const fn of(outcome: &Result<(), ProbeFailure>) -> Self {
+        match outcome {
+            Ok(()) => Self::Ok,
+            Err(ProbeFailure::TimedOut { .. }) => Self::TimedOut,
+            Err(ProbeFailure::Failed { .. }) => Self::Failed,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn metric_key(self) -> &'static metrics::Key {
+        static OK_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts(
+            "outcome",
+            CheckOutcome::Ok.label(),
+        )];
+        static TIMED_OUT_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts(
+            "outcome",
+            CheckOutcome::TimedOut.label(),
+        )];
+        static FAILED_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts(
+            "outcome",
+            CheckOutcome::Failed.label(),
+        )];
+        static OK: metrics::Key = metrics::Key::from_static_parts(CHECKS_METRIC, &OK_LABELS);
+        static TIMED_OUT: metrics::Key =
+            metrics::Key::from_static_parts(CHECKS_METRIC, &TIMED_OUT_LABELS);
+        static FAILED: metrics::Key =
+            metrics::Key::from_static_parts(CHECKS_METRIC, &FAILED_LABELS);
+        match self {
+            Self::Ok => &OK,
+            Self::TimedOut => &TIMED_OUT,
+            Self::Failed => &FAILED,
+        }
     }
 }
 
@@ -215,7 +260,7 @@ impl State {
             Self::NotEvaluated => None,
             Self::Evaluated(check) => Some(&*check),
         };
-        let stale_age = previous.and_then(|check| stale_age(check.checked_at, now, stale_after));
+        let stale_age = previous.and_then(|check| check.stale_age(now));
         let is_fresh = stale_age.is_none();
         let (verdict, event) = match (observed, previous.map(|check| &check.verdict)) {
             (Ok(()), Some(Verdict::Ready { .. })) if is_fresh => (
@@ -258,38 +303,43 @@ impl State {
                 (Verdict::NotReady(reason), RefreshEvent::Unchanged)
             }
         };
-        *self = Self::Evaluated(Check {
-            checked_at: now,
-            verdict,
-        });
+        *self = Self::Evaluated(Check::new(now, stale_after, verdict));
         Some(RefreshLog { stale_age, event })
     }
 
-    fn fresh_check(&self, now: Instant, stale_after: Duration) -> Result<&Check, NotReady> {
+    fn readiness(&self) -> (bool, Option<Instant>) {
+        let Self::Evaluated(check) = self else {
+            return (false, None);
+        };
+        if !check.verdict.is_ready() {
+            return (false, None);
+        }
+        if check
+            .stale_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            (false, None)
+        } else {
+            (true, check.stale_at)
+        }
+    }
+
+    fn verdict(&self, stale_after: Duration) -> Result<(), NotReady> {
         let check = match self {
             Self::Draining => return Err(NotReady::Draining),
             Self::NotEvaluated => return Err(NotReady::NotEvaluated),
             Self::Evaluated(check) => check,
         };
-        check_freshness(check.checked_at, now, stale_after)?;
-        Ok(check)
-    }
-
-    fn readiness(&self, now: Instant, stale_after: Duration) -> (bool, Option<Instant>) {
-        let checked_at = match self {
-            Self::Evaluated(check) if check.verdict.is_ready() => check.checked_at,
-            _ => return (false, None),
-        };
-        let deadline = stale_at(checked_at, stale_after);
-        if deadline.is_some_and(|deadline| now >= deadline) {
-            (false, None)
-        } else {
-            (true, deadline)
+        if let Some(deadline) = check.stale_at {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(NotReady::Stale {
+                    age: now.duration_since(check.checked_at),
+                    stale_after,
+                });
+            }
         }
-    }
-
-    fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
-        self.fresh_check(now, stale_after)?.verdict.to_result()
+        check.verdict.to_result()
     }
 }
 
@@ -315,7 +365,24 @@ impl Verdict {
 #[derive(Clone, Debug)]
 struct Check {
     checked_at: Instant,
+    stale_at: Option<Instant>,
     verdict: Verdict,
+}
+
+impl Check {
+    fn new(checked_at: Instant, stale_after: Duration, verdict: Verdict) -> Self {
+        Self {
+            checked_at,
+            stale_at: stale_at(checked_at, stale_after),
+            verdict,
+        }
+    }
+
+    fn stale_age(&self, now: Instant) -> Option<Duration> {
+        self.stale_at
+            .filter(|&deadline| now >= deadline)
+            .map(|_| now.duration_since(self.checked_at))
+    }
 }
 
 fn stale_at(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
@@ -324,20 +391,18 @@ fn stale_at(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
         .checked_add(Duration::from_nanos(1))
 }
 
-fn stale_age(checked_at: Instant, now: Instant, stale_after: Duration) -> Option<Duration> {
-    stale_at(checked_at, stale_after)
-        .filter(|&deadline| now >= deadline)
-        .map(|_| now.duration_since(checked_at))
-}
-
 fn check_freshness(
     checked_at: Instant,
     now: Instant,
     stale_after: Duration,
 ) -> Result<(), NotReady> {
-    match stale_age(checked_at, now, stale_after) {
-        Some(age) => Err(NotReady::Stale { age, stale_after }),
-        None => Ok(()),
+    if stale_at(checked_at, stale_after).is_some_and(|deadline| now >= deadline) {
+        Err(NotReady::Stale {
+            age: now.duration_since(checked_at),
+            stale_after,
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -476,25 +541,23 @@ impl PreparedReadiness {
     pub fn activate(self) -> Result<ReadinessRefresher, NotReady> {
         let control = &self.readiness.control;
         let mut admission = Ok(());
+        let stale_after = control.policy.stale_after();
         control.tx.send_if_modified(|state| {
             admission = if matches!(state, State::Draining) {
                 Err(NotReady::Draining)
             } else {
-                check_freshness(
-                    self.checked_at,
-                    Instant::now(),
-                    control.policy.stale_after(),
-                )
+                check_freshness(self.checked_at, Instant::now(), stale_after)
             };
             if admission.is_err() {
                 return false;
             }
-            *state = State::Evaluated(Check {
-                checked_at: self.checked_at,
-                verdict: Verdict::Ready {
+            *state = State::Evaluated(Check::new(
+                self.checked_at,
+                stale_after,
+                Verdict::Ready {
                     consecutive_failures: 0,
                 },
-            });
+            ));
             true
         });
         admission?;
@@ -578,7 +641,9 @@ impl Readiness {
                     .collect::<Result<(), _>>()
             }
         };
-        metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
+        let key = CheckOutcome::of(&observed).metric_key();
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &CHECK_METRIC_METADATA))
+            .increment(1);
         observed
     }
 }
@@ -605,7 +670,7 @@ async fn check_probe(
     metrics::counter!(
         PROBE_CHECKS_METRIC,
         "probe" => probe_name,
-        "outcome" => outcome_label(&outcome)
+        "outcome" => CheckOutcome::of(&outcome).label()
     )
     .increment(1);
     outcome
@@ -619,12 +684,11 @@ impl ReadinessReader {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        let (ready, _) = self.rx.borrow().readiness(Instant::now(), self.stale_after);
-        ready
+        self.rx.borrow().readiness().0
     }
 
     pub fn verdict(&self) -> Result<(), NotReady> {
-        self.rx.borrow().verdict(Instant::now(), self.stale_after)
+        self.rx.borrow().verdict(self.stale_after)
     }
 
     // template:begin grpc:health-changed-verdict
@@ -639,7 +703,7 @@ impl ReadinessReader {
         loop {
             let stale_deadline = {
                 let state = self.rx.borrow_and_update();
-                let (ready, stale_deadline) = state.readiness(Instant::now(), self.stale_after);
+                let (ready, stale_deadline) = state.readiness();
                 if ready != seen {
                     return Some(ready);
                 }

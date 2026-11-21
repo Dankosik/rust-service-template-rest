@@ -13,6 +13,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 
+macro_rules! static_metric_key {
+    ($name:expr, $(($key:expr, $value:expr)),+ $(,)?) => {{
+        static LABELS: [metrics::Label; [$($key),+].len()] = [
+            $(metrics::Label::from_static_parts($key, $value)),+
+        ];
+        static KEY: metrics::Key = metrics::Key::from_static_parts($name, &LABELS);
+        &KEY
+    }};
+}
+
+pub(crate) use static_metric_key;
+
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
