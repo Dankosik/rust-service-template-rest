@@ -10,7 +10,7 @@ use bytes::Bytes;
 use compact_str::CompactString;
 use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
-use http::{HeaderMap, Request, StatusCode, Uri, header};
+use http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header};
 use infra_jobs::{
     EnqueueError, Handler, Job, JobError, JobKind, KindName, KindsBuilder, Policy, RetrySchedule,
 };
@@ -117,7 +117,7 @@ impl Endpoint {
         timestamp: i64,
     ) -> Option<Request<Bytes>> {
         self.ready()?
-            .signed_request(delivery, message_id, timestamp)
+            .signed_request(delivery, message_id.to_owned(), timestamp)
     }
 }
 
@@ -210,7 +210,7 @@ impl Handler<Delivery> for Dispatcher {
             return Err(outcomes.fail(FailureKind::InvalidPayload));
         };
         let message_id = job.id().to_string();
-        let Some(request) = ready.signed_request(delivery, &message_id, timestamp) else {
+        let Some(request) = ready.signed_request(delivery, message_id, timestamp) else {
             return Err(outcomes.fail(FailureKind::InvalidPayload));
         };
         let response = ready
@@ -467,20 +467,20 @@ impl ReadyEndpoint {
     fn signed_request(
         &self,
         delivery: &Delivery,
-        message_id: &str,
+        message_id: String,
         timestamp: i64,
     ) -> Option<Request<Bytes>> {
+        let content_type = if delivery.content_type == JSON_CONTENT_TYPE {
+            producer::JSON_CONTENT_TYPE_HEADER
+        } else {
+            HeaderValue::from_str(&delivery.content_type).ok()?
+        };
         let mut request = Request::post(self.destination.clone())
-            .header(header::CONTENT_TYPE, delivery.content_type.as_str())
+            .header(header::CONTENT_TYPE, content_type)
             .body(delivery.body.clone())
             .ok()?;
         self.keys
-            .write_headers(
-                request.headers_mut(),
-                message_id.as_bytes(),
-                timestamp,
-                &delivery.body,
-            )
+            .write_headers_owned(request.headers_mut(), message_id, timestamp, &delivery.body)
             .ok()?;
         Some(request)
     }
@@ -557,6 +557,53 @@ mod tests {
         assert_eq!(request.uri().to_string(), destination);
         let endpoint = Endpoint::try_new(&format!("{destination}a"), ring()).unwrap();
         assert!(endpoint.signed_request(&delivery, "id", 0).is_none());
+    }
+
+    #[test]
+    fn signed_request_accepts_json_and_custom_content_types_and_rejects_invalid_headers() {
+        let keys = KeyRing::from_encoded(
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+            Some("whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD"),
+        )
+        .unwrap();
+        let endpoint = Endpoint::try_new("https://partner.example/events", keys.clone()).unwrap();
+        let body = bytes::Bytes::from_static(br#"{"ok":true}"#);
+
+        for content_type in [super::JSON_CONTENT_TYPE, "application/cloudevents+json"] {
+            let delivery = super::Delivery {
+                version: super::delivery_version(),
+                endpoint_id: "partner".into(),
+                content_type: content_type.into(),
+                body: body.clone(),
+            };
+            let request = endpoint
+                .signed_request(
+                    &delivery,
+                    "0194b4d2-7f2a-7b3c-8d4e-5f6a7b8c9d0e",
+                    1_700_000_000,
+                )
+                .expect("valid content_type signs");
+            assert_eq!(request.headers()[header::CONTENT_TYPE], content_type);
+            let verified = keys
+                .verify(
+                    request.headers(),
+                    &body,
+                    UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                )
+                .expect("signed request verifies");
+            assert_eq!(
+                verified.message_id(),
+                b"0194b4d2-7f2a-7b3c-8d4e-5f6a7b8c9d0e"
+            );
+        }
+
+        let invalid = super::Delivery {
+            version: super::delivery_version(),
+            endpoint_id: "partner".into(),
+            content_type: "application/json\n".into(),
+            body,
+        };
+        assert!(endpoint.signed_request(&invalid, "id", 0).is_none());
     }
 
     #[test]

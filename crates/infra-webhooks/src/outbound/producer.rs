@@ -11,6 +11,8 @@ use super::{Delivery, delivery_version};
 use crate::protocol::MAX_BODY_BYTES;
 
 pub const JSON_CONTENT_TYPE: &str = "application/json";
+pub(crate) const JSON_CONTENT_TYPE_HEADER: HeaderValue =
+    HeaderValue::from_static(JSON_CONTENT_TYPE);
 
 #[derive(Clone, Debug)]
 pub struct Producer {
@@ -61,13 +63,17 @@ impl Producer {
 
         let empty_len = Delivery::empty_serialized_len()?;
         let mut sizer = PayloadSizer::with_base(empty_len + encoded_body_len);
-        sizer
-            .add_str_with(content_type, |fragment| {
-                HeaderValue::from_bytes(fragment.as_bytes())
-                    .map(drop)
-                    .map_err(|_| OutboundError::InvalidContentType)
-            })
-            .await?;
+        if content_type == JSON_CONTENT_TYPE {
+            sizer.add_str(JSON_CONTENT_TYPE).await?;
+        } else {
+            sizer
+                .add_str_with(content_type, |fragment| {
+                    HeaderValue::from_bytes(fragment.as_bytes())
+                        .map(drop)
+                        .map_err(|_| OutboundError::InvalidContentType)
+                })
+                .await?;
+        }
         sizer.add_str(endpoint_id).await?;
         sizer.check_limit()?;
         Ok(())
@@ -145,6 +151,47 @@ mod tests {
         assert_matches!(
             outbound.preflight("partner", 0, &content_type).await,
             Err(super::OutboundError::InvalidContentType)
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_sizes_json_content_type_identically_to_serialized_delivery() {
+        let mut delivery = super::Delivery {
+            version: super::delivery_version(),
+            endpoint_id: String::new().into(),
+            content_type: super::JSON_CONTENT_TYPE.into(),
+            body: bytes::Bytes::from(vec![0xff; super::MAX_BODY_BYTES]),
+        };
+        let base_bytes = serde_json::to_vec(&delivery).unwrap().len();
+        let exact_endpoint = "e".repeat(infra_jobs::MAX_PAYLOAD_BYTES - base_bytes);
+        let over_endpoint = format!("{exact_endpoint}e");
+        delivery.endpoint_id = exact_endpoint.as_str().into();
+        assert_eq!(
+            serde_json::to_vec(&delivery).unwrap().len(),
+            infra_jobs::MAX_PAYLOAD_BYTES
+        );
+        let outbound = super::Producer::new([exact_endpoint.clone(), over_endpoint.clone()]);
+        assert!(
+            outbound
+                .preflight(
+                    &exact_endpoint,
+                    super::MAX_BODY_BYTES,
+                    super::JSON_CONTENT_TYPE,
+                )
+                .await
+                .is_ok()
+        );
+        assert_matches!(
+            outbound
+                .preflight(
+                    &over_endpoint,
+                    super::MAX_BODY_BYTES,
+                    super::JSON_CONTENT_TYPE,
+                )
+                .await,
+            Err(super::OutboundError::Enqueue(
+                infra_jobs::EnqueueError::PayloadTooLarge { bytes }
+            )) if bytes == infra_jobs::MAX_PAYLOAD_BYTES + 1
         );
     }
 

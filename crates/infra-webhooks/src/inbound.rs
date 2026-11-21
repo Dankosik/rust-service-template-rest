@@ -391,8 +391,37 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
     }
 }
 
+const CONTENT_TYPE_INLINE_BYTES: usize = 32;
+const CONTENT_TYPE_DECODE_SCRATCH_BYTES: usize = CONTENT_TYPE_INLINE_BYTES.next_multiple_of(3);
+
 #[derive(Clone, Deserialize, Serialize)]
-struct ContentType(#[serde(with = "crate::base64_bytes")] SmallVec<[u8; 32]>);
+struct ContentType(
+    #[serde(
+        serialize_with = "crate::base64_bytes::serialize",
+        deserialize_with = "deserialize_content_type"
+    )]
+    SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>,
+);
+
+fn deserialize_content_type<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>, D::Error> {
+    crate::base64_bytes::deserialize_with(deserializer, decode_content_type)
+}
+
+fn decode_content_type(
+    encoded: &str,
+) -> Result<SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>, base64::DecodeError> {
+    if base64::decoded_len_estimate(encoded.len()) <= CONTENT_TYPE_DECODE_SCRATCH_BYTES {
+        let mut scratch = [0; CONTENT_TYPE_DECODE_SCRATCH_BYTES];
+        match crate::base64_bytes::decode_slice(encoded, &mut scratch) {
+            Ok(len) => return Ok(SmallVec::from_slice(&scratch[..len])),
+            Err(base64::DecodeSliceError::DecodeError(error)) => return Err(error),
+            Err(base64::DecodeSliceError::OutputSliceTooSmall) => {}
+        }
+    }
+    crate::base64_bytes::decode_vec(encoded).map(SmallVec::from)
+}
 
 #[derive(Clone, derive_more::Debug, Deserialize, Serialize)]
 pub struct Incoming {
@@ -567,6 +596,58 @@ mod tests {
         )
         .expect("unpadded content_type");
         assert_eq!(unpadded_type.content_type(), Some(b"\xff".as_slice()));
+    }
+
+    #[test]
+    fn content_type_decodes_inline_through_32_bytes_and_preserves_base64_errors() {
+        use base64::{
+            Engine as _,
+            engine::general_purpose::{STANDARD, STANDARD_NO_PAD, STANDARD_PAD_INDIFFERENT},
+        };
+
+        let cases: &[(&[u8], bool)] = &[
+            (b"", false),
+            (b"application/json", false),
+            (&[b'a'; 30], false),
+            (b"application/json; charset=utf-8", false),
+            (&[b'b'; 32], false),
+            (b"application/x-www-form-urlencoded", true),
+            (&[b'c'; 34], true),
+            (&[b'd'; 64], true),
+        ];
+        for &(raw, expect_spilled) in cases {
+            for encoded in [STANDARD.encode(raw), STANDARD_NO_PAD.encode(raw)] {
+                let json = format!(
+                    r#"{{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":"{encoded}","body":""}}"#
+                );
+                let incoming: Incoming = serde_json::from_str(&json).expect("valid content_type");
+                assert_eq!(incoming.content_type(), Some(raw));
+                assert_eq!(
+                    incoming.content_type.as_ref().unwrap().0.spilled(),
+                    expect_spilled,
+                    "len {} ({encoded})",
+                    raw.len()
+                );
+            }
+        }
+
+        let long_bad = format!("{}!", "AAAA".repeat(12));
+        for bad in ["!", "A", "AA=A", "AAAA====", long_bad.as_str()] {
+            let expected = STANDARD_PAD_INDIFFERENT
+                .decode(bad)
+                .unwrap_err()
+                .to_string();
+            let json = format!(
+                r#"{{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":"{bad}","body":""}}"#
+            );
+            let error = serde_json::from_str::<Incoming>(&json)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&expected),
+                "bad {bad:?}: got {error:?}, expected {expected:?}"
+            );
+        }
     }
 
     #[test]

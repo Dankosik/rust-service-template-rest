@@ -24,6 +24,7 @@ const MAX_ENCODED_KEY_BYTES: usize =
     base64::encoded_len(MAX_KEY_BYTES, true).expect("maximum key fits");
 const TAG_BYTES: usize = 32;
 const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HMAC tag fits");
+const SINGLE_SIGNATURE_BYTES: usize = SIGNATURE_PREFIX.len() + ENCODED_TAG_BYTES;
 
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 
@@ -126,22 +127,39 @@ impl KeyRing {
         timestamp: i64,
         body: &[u8],
     ) -> Result<String, ProtocolError> {
-        ensure_body_size(body)?;
-        ensure_message_id(message_id)?;
-        let candidate_bytes = SIGNATURE_PREFIX.len() + ENCODED_TAG_BYTES;
-        let mut signatures = String::with_capacity(if self.previous.is_some() {
-            2 * candidate_bytes + 1
-        } else {
-            candidate_bytes
-        });
         let mut timestamp_buffer = NumBuffer::new();
         let timestamp = timestamp.format_into(&mut timestamp_buffer).as_bytes();
+        let signatures = self.signatures_bytes(message_id, timestamp, body)?;
+        String::from_utf8(signatures).map_err(|_| ProtocolError::InvalidSignature)
+    }
+
+    fn signatures_bytes(
+        &self,
+        message_id: &[u8],
+        timestamp: &[u8],
+        body: &[u8],
+    ) -> Result<Vec<u8>, ProtocolError> {
+        ensure_body_size(body)?;
+        ensure_message_id(message_id)?;
+        let mut signatures = Vec::with_capacity(if self.previous.is_some() {
+            2 * SINGLE_SIGNATURE_BYTES + 1
+        } else {
+            SINGLE_SIGNATURE_BYTES
+        });
         for key in self.keys() {
             if !signatures.is_empty() {
-                signatures.push(' ');
+                signatures.push(b' ');
             }
-            signatures.push_str(SIGNATURE_PREFIX);
-            STANDARD.encode_string(tag(key, message_id, timestamp, body), &mut signatures);
+            signatures.extend_from_slice(SIGNATURE_PREFIX.as_bytes());
+            let start = signatures.len();
+            signatures.resize(start + ENCODED_TAG_BYTES, 0);
+            let len = STANDARD
+                .encode_slice(
+                    tag(key, message_id, timestamp, body),
+                    &mut signatures[start..],
+                )
+                .map_err(|_| ProtocolError::InvalidSignature)?;
+            signatures.truncate(start + len);
         }
         Ok(signatures)
     }
@@ -153,13 +171,45 @@ impl KeyRing {
         timestamp: i64,
         body: &[u8],
     ) -> Result<(), ProtocolError> {
-        let signatures = self.signatures(message_id, timestamp, body)?;
-        let id =
-            HeaderValue::from_bytes(message_id).map_err(|_| ProtocolError::InvalidMessageId)?;
+        self.write_headers_with(
+            headers,
+            message_id,
+            timestamp,
+            body,
+            HeaderValue::from_bytes,
+        )
+    }
+
+    // template:begin webhooks:webhooks-protocol-write-headers-owned
+    pub(crate) fn write_headers_owned(
+        &self,
+        headers: &mut HeaderMap,
+        message_id: String,
+        timestamp: i64,
+        body: &[u8],
+    ) -> Result<(), ProtocolError> {
+        self.write_headers_with(headers, message_id, timestamp, body, HeaderValue::try_from)
+    }
+    // template:end webhooks:webhooks-protocol-write-headers-owned
+
+    fn write_headers_with<M: AsRef<[u8]>>(
+        &self,
+        headers: &mut HeaderMap,
+        message_id: M,
+        timestamp: i64,
+        body: &[u8],
+        into_id: impl FnOnce(M) -> Result<HeaderValue, http::header::InvalidHeaderValue>,
+    ) -> Result<(), ProtocolError> {
+        let mut timestamp_buffer = NumBuffer::new();
+        let timestamp_bytes = timestamp.format_into(&mut timestamp_buffer).as_bytes();
+        let signatures = self.signatures_bytes(message_id.as_ref(), timestamp_bytes, body)?;
+        let id = into_id(message_id).map_err(|_| ProtocolError::InvalidMessageId)?;
+        let timestamp = HeaderValue::from_bytes(timestamp_bytes)
+            .map_err(|_| ProtocolError::InvalidTimestamp)?;
         let signature =
             HeaderValue::try_from(signatures).map_err(|_| ProtocolError::InvalidSignature)?;
         headers.insert(WEBHOOK_ID, id);
-        headers.insert(WEBHOOK_TIMESTAMP, HeaderValue::from(timestamp));
+        headers.insert(WEBHOOK_TIMESTAMP, timestamp);
         headers.insert(WEBHOOK_SIGNATURE, signature);
         Ok(())
     }
@@ -173,27 +223,43 @@ impl KeyRing {
         ensure_body_size(body)?;
         let message_id = unambiguous_header(headers, &WEBHOOK_ID)?;
         ensure_message_id(message_id.as_bytes())?;
-        let timestamp = parse_timestamp(unambiguous_header(headers, &WEBHOOK_TIMESTAMP)?)?;
+        let timestamp_header = unambiguous_header(headers, &WEBHOOK_TIMESTAMP)?;
+        let timestamp = parse_timestamp(timestamp_header)?;
         ensure_timestamp_window(timestamp, now)?;
 
         let signatures = headers.get_all(&WEBHOOK_SIGNATURE);
-        if signatures.iter().next().is_none() {
-            return Err(ProtocolError::MissingHeader);
-        }
+        let mut values = signatures.iter();
+        let first = values.next().ok_or(ProtocolError::MissingHeader)?;
         let mut timestamp_buffer = NumBuffer::new();
-        let timestamp_bytes = timestamp.format_into(&mut timestamp_buffer).as_bytes();
-        let verify_key = |key: &SigningKey| {
-            matches_v1_signature(&signatures, || {
-                tag(key, message_id.as_bytes(), timestamp_bytes, body)
-            })
+        let timestamp_bytes = match timestamp_header.as_bytes() {
+            raw @ ([b'1'..=b'9', ..] | [b'0']) => raw,
+            _ => timestamp.format_into(&mut timestamp_buffer).as_bytes(),
         };
-        let matched = match verify_key(&self.active) {
-            SignatureMatch::Matched => true,
-            SignatureMatch::Mismatched => self
-                .previous
-                .as_ref()
-                .is_some_and(|key| verify_key(key) == SignatureMatch::Matched),
-            SignatureMatch::NoCandidates => false,
+        let matched = if first.as_bytes().len() <= SINGLE_SIGNATURE_BYTES && values.next().is_none()
+        {
+            decode_v1_tag(first.as_bytes()).is_some_and(|candidate| {
+                self.keys().any(|key| {
+                    constant_time::verify_slices_are_equal(
+                        tag(key, message_id.as_bytes(), timestamp_bytes, body).as_ref(),
+                        &candidate,
+                    )
+                    .is_ok()
+                })
+            })
+        } else {
+            let verify_key = |key: &SigningKey| {
+                matches_v1_signature(&signatures, || {
+                    tag(key, message_id.as_bytes(), timestamp_bytes, body)
+                })
+            };
+            match verify_key(&self.active) {
+                SignatureMatch::Matched => true,
+                SignatureMatch::Mismatched => self
+                    .previous
+                    .as_ref()
+                    .is_some_and(|key| verify_key(key) == SignatureMatch::Matched),
+                SignatureMatch::NoCandidates => false,
+            }
         };
         if matched {
             return Ok(VerifiedMessage {
@@ -325,25 +391,35 @@ enum SignatureMatch {
     NoCandidates,
 }
 
+fn decode_v1_tag(token: &[u8]) -> Option<[u8; TAG_BYTES]> {
+    let encoded = token.strip_prefix(SIGNATURE_PREFIX.as_bytes())?;
+    if encoded.len() != ENCODED_TAG_BYTES {
+        return None;
+    }
+    let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
+    (STANDARD.decode_slice(encoded, &mut scratch) == Ok(TAG_BYTES)).then(|| {
+        let mut decoded = [0; TAG_BYTES];
+        decoded.copy_from_slice(&scratch[..TAG_BYTES]);
+        decoded
+    })
+}
+
 fn matches_v1_signature(
     signatures: &GetAll<'_, HeaderValue>,
     make_tag: impl Fn() -> hmac::Tag,
 ) -> SignatureMatch {
     let expected = OnceCell::new();
-    let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
     let matched = signatures
         .iter()
         .filter(|value| value.as_bytes().contains(&b'='))
         .flat_map(|value| value.as_bytes().split(u8::is_ascii_whitespace))
-        .filter_map(|token| token.strip_prefix(SIGNATURE_PREFIX.as_bytes()))
-        .any(|encoded| {
-            encoded.len() == ENCODED_TAG_BYTES
-                && matches!(STANDARD.decode_slice(encoded, &mut scratch), Ok(TAG_BYTES))
-                && constant_time::verify_slices_are_equal(
-                    expected.get_or_init(&make_tag).as_ref(),
-                    &scratch[..TAG_BYTES],
-                )
-                .is_ok()
+        .filter_map(decode_v1_tag)
+        .any(|candidate| {
+            constant_time::verify_slices_are_equal(
+                expected.get_or_init(&make_tag).as_ref(),
+                &candidate,
+            )
+            .is_ok()
         });
     if expected.get().is_none() {
         SignatureMatch::NoCandidates
@@ -483,10 +559,46 @@ mod tests {
         assert_eq!(verified.message_id(), b"msg_roundtrip");
         assert_eq!(verified.timestamp(), 1_700_000_000);
 
+        // template:begin webhooks:webhooks-protocol-write-headers-owned-test
+        let mut owned_headers = HeaderMap::new();
+        keys.write_headers_owned(
+            &mut owned_headers,
+            "msg_roundtrip".to_owned(),
+            1_700_000_000,
+            UPSTREAM_BODY,
+        )
+        .unwrap();
+        assert_eq!(owned_headers, headers);
+        // template:end webhooks:webhooks-protocol-write-headers-owned-test
+
+        let mut untouched = HeaderMap::new();
         assert_eq!(
-            keys.write_headers(&mut headers, b"msg\nline", 1_700_000_000, UPSTREAM_BODY),
+            keys.write_headers(&mut untouched, b"msg\nline", 1_700_000_000, UPSTREAM_BODY),
             Err(ProtocolError::InvalidMessageId)
         );
+        assert!(untouched.is_empty());
+        // template:begin webhooks:webhooks-protocol-write-headers-owned-errors-test
+        assert_eq!(
+            keys.write_headers_owned(
+                &mut untouched,
+                "msg\nline".to_owned(),
+                1_700_000_000,
+                UPSTREAM_BODY,
+            ),
+            Err(ProtocolError::InvalidMessageId)
+        );
+        assert!(untouched.is_empty());
+        assert_eq!(
+            keys.write_headers_owned(
+                &mut untouched,
+                "msg\nline".to_owned(),
+                1_700_000_000,
+                &vec![0; MAX_BODY_BYTES + 1],
+            ),
+            Err(ProtocolError::BodyTooLarge)
+        );
+        assert!(untouched.is_empty());
+        // template:end webhooks:webhooks-protocol-write-headers-owned-errors-test
     }
 
     #[test]
@@ -555,6 +667,82 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn verify_normalizes_non_canonical_timestamps_and_handles_single_field_boundaries() {
+        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, Some(UPSTREAM_KEY)).unwrap();
+        let active_only = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
+        let previous_only = KeyRing::from_encoded(UPSTREAM_KEY, None).unwrap();
+        let body = UPSTREAM_BODY;
+
+        for (timestamp, raw_timestamp, now) in [
+            (0_i64, "0", UNIX_EPOCH),
+            (0, "00", UNIX_EPOCH),
+            (0, "+0", UNIX_EPOCH),
+            (0, "-0", UNIX_EPOCH),
+            (-1, "-1", UNIX_EPOCH),
+            (-1, "-01", UNIX_EPOCH),
+            (
+                1_700_000_000,
+                "1700000000",
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            ),
+            (
+                1_700_000_000,
+                "01700000000",
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            ),
+            (
+                1_700_000_000,
+                "+001700000000",
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            ),
+        ] {
+            let signature = active_only.signatures(b"msg_ts", timestamp, body).unwrap();
+            let verified = keys
+                .verify(&headers("msg_ts", raw_timestamp, &signature), body, now)
+                .expect("canonical and non-canonical timestamps must verify identically");
+            assert_eq!(verified.timestamp(), timestamp);
+        }
+
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let active_sig = active_only
+            .signatures(b"msg_b", 1_700_000_000, body)
+            .unwrap();
+        let prev_sig = previous_only
+            .signatures(b"msg_b", 1_700_000_000, body)
+            .unwrap();
+        assert_eq!(active_sig.len(), super::SINGLE_SIGNATURE_BYTES);
+        assert!(
+            keys.verify(
+                &headers("msg_b", "1700000000", &format!(" {prev_sig}")),
+                body,
+                now,
+            )
+            .is_ok()
+        );
+
+        let mut repeated = headers("msg_b", "1700000000", &format!("v1,{}", "A".repeat(44)));
+        repeated.append(
+            "webhook-signature",
+            HeaderValue::from_str(&prev_sig).unwrap(),
+        );
+        assert!(keys.verify(&repeated, body, now).is_ok());
+
+        let active_tag = active_sig.strip_prefix("v1,").unwrap();
+        for bad in [
+            format!("v2,{active_tag}"),
+            format!("v1,{} {}", "A".repeat(21), "A".repeat(22)),
+            format!("v1,{}", "A".repeat(44)),
+            active_sig.strip_suffix('=').unwrap().to_owned(),
+        ] {
+            assert_eq!(
+                keys.verify(&headers("msg_b", "1700000000", &bad), body, now),
+                Err(ProtocolError::InvalidSignature),
+                "bad signature {bad:?}"
+            );
+        }
     }
 
     #[test]
