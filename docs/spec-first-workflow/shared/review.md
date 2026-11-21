@@ -1,15 +1,20 @@
 # Review
 
-Use fresh independent review at two strategic boundaries—once at the end of
-preparation ([Plan Review](../phases/plan-review.md)) and once at assembled
-delivery ([Implementation Review](../phases/implementation-review.md))—plus
-standalone `research only` syntheses.
+Use fresh independent review at strategic preparation boundaries—[Design
+Review](../phases/design-review.md) before Planning on substantive
+architecture, and [Plan Review](../phases/plan-review.md) before ready
+`tasks.md`—and once at assembled delivery ([Implementation
+Review](../phases/implementation-review.md)), plus standalone `research only`
+syntheses.
 
 ## Trigger
 
-- **Preparation boundary:** run one fresh [Plan Review](../phases/plan-review.md)
-  before finalizing a ready `tasks.md` (or before closing a zero-delta
-  preparation claim).
+- **Preparation boundaries:**
+  - Run one fresh [Design Review](../phases/design-review.md) before Planning
+    whenever [Design Review
+    Gate](../phases/technical-design.md#design-review-gate) fires.
+  - Run one fresh [Plan Review](../phases/plan-review.md) before finalizing a
+    ready `tasks.md` (or before closing a zero-delta preparation claim).
 - **Standalone research:** run one fresh review under [Research](../phases/research.md#review).
 - **Implementation delivery (ledgers and Direct Work):** keep unit coding and
   tests moving along the ready frontier; select one review disposition at the
@@ -48,9 +53,10 @@ standalone `research only` syntheses.
   unjustified crate, dependency, layer, config key, or parallel path still
   fails.
 - **Bounded repair rounds:**
-  - *Plan / Research Review:* at most **one** bounded delta recheck (when repair
-    addresses only anchored findings without reslicing or changing interfaces);
-    if that still fails, run one fresh full review, then apply [Parent-Owned
+  - *Design / Plan / Research Review:* at most **one** bounded delta recheck
+    (when repair addresses only anchored findings without reslicing, reopening
+    a one-way door, or changing interfaces); if that still fails, run one fresh
+    full review, then apply [Parent-Owned
     Recovery](transition.md#parent-owned-recovery) instead of a third cycle.
   - *Implementation Review:* batch confirmed findings per pass and allow at
     most **two** repair rounds for the same defect class, using a fresh
@@ -65,6 +71,7 @@ standalone `research only` syntheses.
 | Fixed boundary | Adapter |
 | --- | --- |
 | Standalone research synthesis | [Research](../phases/research.md#review) |
+| Substantive design bundle (`spec.md`, `design.md`, optional `intent.md` / `research/*.md`) | [Design Review](../phases/design-review.md) |
 | Preparation bundle (`spec.md`, optional `design.md`, `tasks.md`, packets) | [Plan Review](../phases/plan-review.md) |
 | Assembled implementation delivery (ledger, Direct Work, or standalone review) | [Implementation Review](../phases/implementation-review.md) |
 
@@ -91,7 +98,7 @@ downgraded to a concern.
 
 | Scope | Classifications | Allowed verdicts |
 | --- | --- | --- |
-| Plan / Research review | `PHASE_DEFECT` (local repair), `UPSTREAM_GAP` (reopen user or external owner), `CONCERN` (bounded downstream risk with risk, owner, and closing action) | `PASS \| CONCERNS \| FAIL \| REVIEW_HANDOFF_INVALID` (`PASS \| FAIL` only on zero-delta checks) |
+| Design / Plan / Research review | `PHASE_DEFECT` (local repair), `UPSTREAM_GAP` (reopen user or external owner), `CONCERN` (bounded downstream risk with risk, owner, and closing action) | `PASS \| CONCERNS \| FAIL \| REVIEW_HANDOFF_INVALID` (`PASS \| FAIL` only on zero-delta checks) |
 | Implementation review | `TASK_DEFECT` (repair owning task), `INTEGRATION_DEFECT` (repair seam across tasks), `UPSTREAM_GAP` (invalid accepted requirement/design in candidate scope), `FOLLOW_UP` (non-blocking) | `PASS \| FAIL \| NEEDS_PARENT \| REVIEW_HANDOFF_INVALID` |
 
 - `FAIL`: witnessed in-scope defect (`PHASE_DEFECT`, `TASK_DEFECT`,

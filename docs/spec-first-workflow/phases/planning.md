@@ -1,9 +1,10 @@
 # Planning
 
-Continue autonomously in the same session from `specs/<task>/spec.md` (and
-`specs/<task>/design.md` if split). Turn closed decisions into executable
-**tracer-bullet** vertical slices, clear one fresh [Plan Review](plan-review.md),
-and stop at the ready handoff for a fresh Implementation session.
+Continue autonomously in the same session from `specs/<task>/spec.md` and
+`specs/<task>/design.md` (already cleared by [Design Review](design-review.md)
+when substantive). Turn closed decisions into executable **tracer-bullet**
+vertical slices, clear one fresh [Plan Review](plan-review.md), and stop at the
+ready handoff for a fresh Implementation session.
 
 ## Steps
 
@@ -56,11 +57,16 @@ and stop at the ready handoff for a fresh Implementation session.
      Lifecycle](../shared/review.md#lifecycle).
    - Verify every finding against primary sources, repair confirmed defects in
      place, and re-run a bounded delta recheck (or fresh review if resliced or
-     interfaces changed). Escalate to the user only for a confirmed
-     product/risk contradiction.
+     interfaces changed). If Planning or repair alters a **one-way door**,
+     runtime crossing, `S<n>` seam, or rollout gate in a `ready` `design.md`,
+     downgrade `design.md` to `status: draft` (`Design review: pending`) and
+     re-clear [Design Review](design-review.md) before finishing Planning.
+     Escalate to the user only for a confirmed product/risk contradiction.
    - Once review clears (`PASS` or bounded `CONCERNS` recorded in `Global
-     constraints` / packet `Reopen if`), flip `spec.md`, `design.md` (if
-     present), and `tasks.md` to `status: ready`, and stop at [Implementation
+     constraints` / packet `Reopen if`), flip `tasks.md` to `status: ready`
+     (plus `spec.md` when inline without `design.md`; `design.md` becomes
+     `status: ready` strictly through [Design Review](design-review.md)), and
+     stop at [Implementation
      Handoff](../shared/transition.md#implementation-handoff).
    - *Done when:* `tasks.md` is `status: ready`, review cleared, and the user
      has the one-screen plan overview and fresh-session launch message.

@@ -8,7 +8,7 @@ callable Task fields outrank public prose.
 - Keep preparation (Intake through Planning) in the root session, using fresh
   [Cursor subagents](https://cursor.com/docs/subagents#how-subagents-work)
   (omit `resume`) for wide scans, bounded specialists / `Design It Twice`, and
-  `Plan Review` / adjudication.
+  `Design Review` / `Plan Review` / adjudication.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator; Cursor reads `.agents/skills`
   directly.
