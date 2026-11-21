@@ -22,9 +22,9 @@ ready handoff for a fresh Implementation session.
      work awaiting acceptance), verify via [Plan
      Review](plan-review.md#zero-delta-check) and report directly without
      writing a ledger.
-   - *Done when:* every obligation (`R<n>`, `G<n>`, `D<n>`, `S<n>`, rollout
-     gates, durable doc updates, superseded cleanup) and affected caller is
-     mapped.
+   - *Done when:* every obligation (`R<n>`, `G<n>`, `Must not`, `D<n>`, `S<n>`,
+     rollout gates, durable doc updates, superseded cleanup) and affected caller
+     is mapped.
 
 2. **Choose the smallest coherent task graph.**
    - Default to **1 task** whenever one fresh Lead holds the change in its
@@ -44,9 +44,9 @@ ready handoff for a fresh Implementation session.
      Remove superseded orphan packets and clear Orchestrator runtime fields on a
      fresh draft with no integrated `[x]` tasks.
    - Verify on disk before review: acyclic topologically ordered DAG, every
-     `R<n>`/`D<n>`/`S<n>` traced, producer isolation satisfied, zero undeclared
-     lock or exhaustive-type collisions across concurrently eligible pairs, and
-     a shape-appropriate `Observable claim` per task.
+     `R<n>`/`G<n>`/`Must not`/`D<n>`/`S<n>` traced, producer isolation satisfied,
+     zero undeclared lock or exhaustive-type collisions across concurrently
+     eligible pairs, and a shape-appropriate `Observable claim` per task.
    - *Done when:* the on-disk bundle passes every structural and cold-start
      check.
 
@@ -106,7 +106,7 @@ Implementation owns [Ledger Runtime State](implementation.md#ledger-runtime-stat
 status: draft | ready | blocked | done
 Blocked stop: <missing input/decision and owner; omit unless blocked>
 Completion: <falsifiable assembled-request condition + any requested external outcome>
-Global constraints: <active rules, cross-task pinned identifiers, already-holds anchors, or carried CONCERNS; omit when none>
+Global constraints: <active rules, Must not prohibitions, cross-task pinned identifiers, already-holds anchors, or carried CONCERNS; omit when none>
 
 ## Tasks
 
@@ -133,7 +133,7 @@ Sources: <exact spec.md#r1-... / design.md#d1-... anchors, verified path::Symbol
 Provides: <exact compiling/behavioral contract consumed downstream, or none (leaf)>
 Boundary:
 - In scope: <primary responsibility, superseded cleanup, generated contracts, required durable doc update>
-- Out of scope: <exclusions, sibling surfaces, local stop before later gates>
+- Out of scope: <exclusions, Must not prohibitions, sibling surfaces, local stop before later gates>
 Mutable owners: <crate — subsystem>
 Exclusive locks: <narrowest canonical repo-relative shared file or ordered directory, or none>
 Final validation:
