@@ -363,7 +363,7 @@ mod tests {
             (
                 vec!["api".to_owned()],
                 [JwtAlgorithm::Rs256].as_slice(),
-                valid_age - Duration::from_secs(1),
+                valid_age.saturating_sub(Duration::from_secs(1)),
             ),
         ] {
             assert_eq!(

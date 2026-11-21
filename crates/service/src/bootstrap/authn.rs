@@ -10,7 +10,7 @@ use super::BootstrapError;
 const ISSUER_KEY: &str = "authn.issuer";
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum AuthnPreparationError {
+pub(crate) enum AuthnPreparationError {
     #[error("authentication preparation failed during Options: {0}")]
     Url(#[from] infra_bearerauthn::InvalidUrl),
     #[error("authentication preparation failed during Options: {0}")]
