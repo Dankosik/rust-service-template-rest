@@ -77,7 +77,17 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     use operation_context::Stopped;
     use tracing_subscriber::fmt::format::FmtSpan;
 
+    use crate::observe::{NamespaceMetrics, Operation, OperationGuard, SuccessOutcome};
     use crate::{MutationError, MutationFailure, UnknownOutcome};
+
+    let disabled_metrics = NamespaceMetrics::new(namespace!("disabled"));
+    let disabled_server = crate::ServerEndpoint {
+        host: "cache.example".to_owned(),
+        port: 6379,
+        database_index: 0,
+    };
+    OperationGuard::start(&disabled_metrics, Operation::Get, &disabled_server)
+        .succeed(SuccessOutcome::Miss);
 
     let captured = super::connection::CapturedLogs::default();
     let writer = captured.clone();
@@ -147,8 +157,14 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     assert!(!read.contains("cache.mutation.outcome"), "{read}");
     let refused = span("cache.mutation.outcome=\"not_applied\"");
     assert!(refused.contains("db.operation.name=\"DEL\""), "{refused}");
+    assert!(refused.contains("error.type=\"timeout\""), "{refused}");
+    assert!(refused.contains("otel.status_code=\"ERROR\""), "{refused}");
+    assert!(refused.contains("cache.outcome=\"timeout\""), "{refused}");
     let unknown = span("cache.mutation.outcome=\"outcome_unknown\"");
     assert!(unknown.contains("db.operation.name=\"SET\""), "{unknown}");
+    assert!(unknown.contains("error.type=\"io\""), "{unknown}");
+    assert!(unknown.contains("otel.status_code=\"ERROR\""), "{unknown}");
+    assert!(unknown.contains("cache.outcome=\"error\""), "{unknown}");
     let dropped = span("cache.outcome=\"cancelled\"");
     assert!(!dropped.contains("cache.mutation.outcome"), "{dropped}");
     assert!(

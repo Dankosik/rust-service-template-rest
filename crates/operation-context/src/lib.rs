@@ -203,7 +203,7 @@ impl OperationContext {
         BoundedContext {
             deadline,
             source,
-            cancellation: self.cancellation.child_token(),
+            cancellation: self.cancellation.clone(),
         }
     }
 
@@ -447,6 +447,21 @@ mod tests {
         assert_eq!(locally_limited.wait_stopped().await, BoundedStop::Timeout);
         assert_eq!(long_parent.check(), Ok(()));
         assert_eq!(unbounded_limited.check(), Err(BoundedStop::Timeout));
+
+        let root = OperationContext::unbounded();
+        let intermediate = root.child_context();
+        let detached = intermediate.bounded(Duration::from_secs(5));
+        drop(intermediate);
+        assert_eq!(detached.check(), Ok(()));
+        root.cancel();
+        assert_eq!(
+            detached.check(),
+            Err(BoundedStop::Parent(Stopped::Cancelled))
+        );
+        assert_eq!(
+            detached.wait_stopped().await,
+            BoundedStop::Parent(Stopped::Cancelled)
+        );
     }
 
     #[tokio::test(start_paused = true)]
