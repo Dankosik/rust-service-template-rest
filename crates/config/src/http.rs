@@ -241,23 +241,28 @@ impl<Propagation: Mode> HttpFields<Propagation> {
 }
 
 impl HttpInput {
-    pub(crate) fn admit(
-        self,
+    pub(crate) fn admit_drain_budget(
+        &self,
         tail: ShutdownTail,
         v: &mut Violations,
-    ) -> (Result<HttpConfig, Rejected>, Option<Duration>) {
-        let drain_budget = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v)
+    ) -> Option<Duration> {
+        validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v)
             .and_then(|()| self.admit_propagation_delay(v))
-            .ok();
-        let config = self
-            .admit_listener(drain_budget, v)
-            .map(|listener| HttpConfig {
-                listener,
-                grace_period: self.grace_period,
-                drain_timeout: self.drain_timeout,
-                readiness_propagation_delay: self.readiness_propagation_delay,
-            });
-        (config, drain_budget)
+            .ok()
+    }
+
+    pub(crate) fn admit(
+        self,
+        drain_budget: Option<Duration>,
+        v: &mut Violations,
+    ) -> Result<HttpConfig, Rejected> {
+        let listener = self.admit_listener(drain_budget, v)?;
+        Ok(HttpConfig {
+            listener,
+            grace_period: self.grace_period,
+            drain_timeout: self.drain_timeout,
+            readiness_propagation_delay: self.readiness_propagation_delay,
+        })
     }
 
     fn admit_propagation_delay(&self, v: &mut Violations) -> Result<Duration, Rejected> {
@@ -319,7 +324,10 @@ mod tests {
     use crate::validate::admit_with;
 
     fn admit(input: HttpInput) -> Result<HttpConfig, ValidationErrors> {
-        admit_with(|v| input.admit(super::NO_SHUTDOWN_TAIL, v).0)
+        admit_with(|v| {
+            let drain_budget = input.admit_drain_budget(super::NO_SHUTDOWN_TAIL, v);
+            input.admit(drain_budget, v)
+        })
     }
 
     #[test]
@@ -354,7 +362,11 @@ mod tests {
             drain_timeout: Duration::from_secs(25),
             ..HttpInput::default()
         };
-        let errors = admit_with(|v| tight.admit(tail, v).0).unwrap_err();
+        let errors = admit_with(|v| {
+            let drain_budget = tight.admit_drain_budget(tail, v);
+            tight.admit(drain_budget, v)
+        })
+        .unwrap_err();
         assert!(errors.names("http.grace_period"), "{errors}");
         assert!(
             errors

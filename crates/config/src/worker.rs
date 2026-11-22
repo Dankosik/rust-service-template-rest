@@ -25,7 +25,7 @@ pub(crate) struct WorkerInput {
     messaging: crate::messaging::MessagingInput,
     // template:end messaging:worker-input-messaging-field
     // template:begin webhooks:worker-input-webhooks-field
-    webhooks: crate::webhooks::WebhooksInput,
+    webhooks: crate::webhooks::WorkerWebhooksInput,
     // template:end webhooks:worker-input-webhooks-field
     // template:begin inbound-webhooks:worker-input-inbound-webhooks-field
     inbound_webhooks: crate::inbound_webhooks::WorkerInboundWebhooksInput,

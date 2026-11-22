@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 
 use secrecy::SecretString;
 
-use super::{WebhookEndpointInput, WebhooksInput};
+use super::{WebhookEndpointInput, WorkerWebhooksInput};
 use crate::LoadOptions;
 use crate::load::{ErrorKind, InputError, load_from, load_worker_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, load_worker_env, write};
@@ -11,21 +11,21 @@ use crate::validate::admit_with;
 
 #[test]
 fn defaults_are_inert() {
-    let config = admit_with(|v| Ok(WebhooksInput::default().admit(v))).unwrap();
+    let config = admit_with(|v| Ok(WorkerWebhooksInput::default().admit(v))).unwrap();
     assert!(config.endpoints.is_empty());
     assert_eq!(config.max_concurrent_deliveries, None);
 }
 
 #[test]
 fn a_zero_delivery_bound_fails_to_deserialize() {
-    let err = toml::from_str::<WebhooksInput>("max_concurrent_deliveries = 0")
+    let err = toml::from_str::<WorkerWebhooksInput>("max_concurrent_deliveries = 0")
         .err()
         .expect("zero max_concurrent_deliveries must fail to deserialize");
     assert!(
         err.to_string().contains("max_concurrent_deliveries"),
         "{err}"
     );
-    let input = toml::from_str::<WebhooksInput>("max_concurrent_deliveries = 4").unwrap();
+    let input = toml::from_str::<WorkerWebhooksInput>("max_concurrent_deliveries = 4").unwrap();
     let config = admit_with(|v| Ok(input.admit(v))).unwrap();
     assert_eq!(
         config.max_concurrent_deliveries.map(NonZeroU32::get),
@@ -35,7 +35,7 @@ fn a_zero_delivery_bound_fails_to_deserialize() {
 
 #[test]
 fn rejects_an_empty_endpoint_id() {
-    let mut input = WebhooksInput::default();
+    let mut input = WorkerWebhooksInput::default();
     input.endpoints.insert(
         String::new(),
         WebhookEndpointInput {
@@ -45,7 +45,7 @@ fn rejects_an_empty_endpoint_id() {
         },
     );
 
-    let mut invalid = WebhooksInput::default();
+    let mut invalid = WorkerWebhooksInput::default();
     invalid.endpoints.insert(
         String::new(),
         WebhookEndpointInput {
@@ -64,7 +64,7 @@ fn rejects_an_empty_endpoint_id() {
 
 #[test]
 fn rejects_empty_signing_secrets() {
-    let mut input = WebhooksInput::default();
+    let mut input = WorkerWebhooksInput::default();
     input.endpoints.insert(
         "partner".to_owned(),
         WebhookEndpointInput {

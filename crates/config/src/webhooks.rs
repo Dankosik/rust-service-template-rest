@@ -23,9 +23,9 @@ pub(crate) struct WebhooksFields<Endpoint, MaxConcurrent: Mode = Keep> {
     _mode: ModeMarker<MaxConcurrent>,
 }
 
-pub(crate) type ServiceWebhooksInput = WebhooksFields<serde::de::IgnoredAny, Skip>;
+pub(crate) type WebhooksInput = WebhooksFields<serde::de::IgnoredAny, Skip>;
 
-pub(crate) type WebhooksInput = WebhooksFields<WebhookEndpointInput>;
+pub(crate) type WorkerWebhooksInput = WebhooksFields<WebhookEndpointInput>;
 
 #[serde_with::serde_as]
 #[derive(Deserialize)]
@@ -38,24 +38,24 @@ pub(crate) struct WebhookEndpointInput {
     previous_secret: Option<SecretString>,
 }
 
-impl ServiceWebhooksInput {
-    pub(crate) fn admit(self, violations: &mut Violations) -> Vec<String> {
+impl WebhooksInput {
+    pub(crate) fn admit(self, v: &mut Violations) -> Vec<String> {
         for id in self.endpoints.keys() {
-            violations.check(validate_endpoint_id("webhooks.endpoints", id));
+            v.check(validate_endpoint_id("webhooks.endpoints", id));
         }
         self.endpoints.into_keys().collect()
     }
 }
 
-impl WebhooksInput {
-    pub(crate) fn admit(self, violations: &mut Violations) -> WebhooksConfig {
+impl WorkerWebhooksInput {
+    pub(crate) fn admit(self, v: &mut Violations) -> WebhooksConfig {
         let endpoints = self
             .endpoints
             .into_iter()
             .map(|(endpoint_id, endpoint)| {
-                violations.check(validate_endpoint_id("webhooks.endpoints", &endpoint_id));
+                v.check(validate_endpoint_id("webhooks.endpoints", &endpoint_id));
                 let key = format!("webhooks.endpoints.{endpoint_id}.secret");
-                violations.check(non_blank(&key, endpoint.secret.expose_secret()));
+                v.check(non_blank(&key, endpoint.secret.expose_secret()));
                 (
                     endpoint_id,
                     WebhookEndpointConfig {

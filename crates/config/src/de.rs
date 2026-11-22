@@ -111,11 +111,11 @@ enum Scalar<T> {
     Text(String),
 }
 
-impl<T: FromStr> Scalar<T> {
-    fn into_count<E: serde::de::Error>(self) -> Result<T, E> {
+impl<T> Scalar<T> {
+    fn into_value<E>(self, parse_text: impl FnOnce(&str) -> Result<T, E>) -> Result<T, E> {
         match self {
             Self::Typed(value) => Ok(value),
-            Self::Text(value) => value.parse().map_err(|_| invalid_count()),
+            Self::Text(value) => parse_text(&value),
         }
     }
 }
@@ -139,7 +139,7 @@ where
     {
         Scalar::deserialize(deserializer)
             .map_err(|_| invalid_count::<D::Error>())?
-            .into_count()
+            .into_value(|text| text.parse().map_err(|_| invalid_count()))
     }
 }
 
@@ -154,10 +154,9 @@ impl<'de> DeserializeAs<'de, f64> for StrictRatio {
     where
         D: Deserializer<'de>,
     {
-        match Scalar::<f64>::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
-            Scalar::Typed(value) => Ok(value),
-            Scalar::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
-        }
+        Scalar::<f64>::deserialize(deserializer)
+            .map_err(|_| invalid_ratio::<D::Error>())?
+            .into_value(|text| text.trim().parse().map_err(|_| invalid_ratio()))
     }
 }
 
