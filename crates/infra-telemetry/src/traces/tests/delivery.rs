@@ -226,7 +226,7 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     let files = tempfile::tempdir().expect("directory for trust files");
     let file = |scope, variable, name: &str| TrustFile {
         scope,
-        variable,
+        name: variable,
         path: files.path().join(name),
     };
     let signal = |variable, name: &str| file(EnvScope::Signal, variable, name);
@@ -239,14 +239,14 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     for (trust, diagnostic) in [
         (
             CollectorTrust {
-                certificate: Some(signal(CERTIFICATE_VARS[0], "absent.pem")),
+                certificate: Some(signal(CERTIFICATE_VARS[0].1, "absent.pem")),
                 ..CollectorTrust::default()
             },
             "could not read the OTLP trust file",
         ),
         (
             CollectorTrust {
-                certificate: Some(signal(CERTIFICATE_VARS[0], "large.pem")),
+                certificate: Some(signal(CERTIFICATE_VARS[0].1, "large.pem")),
                 ..CollectorTrust::default()
             },
             "exceeds the 1048576-byte limit",
@@ -254,36 +254,36 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         #[cfg(unix)]
         (
             CollectorTrust {
-                certificate: Some(signal(CERTIFICATE_VARS[0], "directory.pem")),
+                certificate: Some(signal(CERTIFICATE_VARS[0].1, "directory.pem")),
                 ..CollectorTrust::default()
             },
             "must select a regular OTLP trust file",
         ),
         (
             CollectorTrust {
-                certificate: Some(common(CERTIFICATE_VARS[1], "text.pem")),
+                certificate: Some(common(CERTIFICATE_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "must select a usable PEM certificate bundle",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
+                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
-                client_key: Some(common(CLIENT_KEY_VARS[1], "text.pem")),
+                client_key: Some(common(CLIENT_KEY_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
-                client_key: Some(common(CLIENT_KEY_VARS[1], "text.pem")),
+                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1].1, "text.pem")),
+                client_key: Some(common(CLIENT_KEY_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "usable PEM identity",
@@ -304,7 +304,7 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         let message = error.to_string();
         assert!(message.contains(diagnostic), "{message}");
         if let Some(certificate) = &trust.certificate {
-            assert!(message.contains(certificate.variable), "{message}");
+            assert!(message.contains(certificate.name), "{message}");
         }
         let records = format!("{error:?} {message}");
         for value in [
@@ -497,7 +497,7 @@ fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
         inner: exporter,
-        timeout: export_timeout(&|_: &str| None),
+        export_timeout: export_timeout_from_env(&|_: &str| None),
         drain: Arc::clone(&drain),
     })
     .with_batch_config(
@@ -523,11 +523,11 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             ("400 Bad Request", b"collector_failure_secret".to_vec()),
             ("200 OK", Vec::new()),
         ]);
-        let exporter = span_exporter(
+        let exporter = build_span_exporter(
             &format!("http://{}/v1/traces", collector.addr),
             HashMap::new(),
             &CollectorTrust::default(),
-            export_timeout(&|_: &str| None),
+            export_timeout_from_env(&|_: &str| None),
             None,
         )
         .unwrap();
@@ -598,11 +598,11 @@ fn an_inner_shutdown_error_survives_the_sdk_outer_success() {
 fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
     for allowance in [Duration::ZERO, SHUTDOWN_JOIN_SLACK] {
         let (collector, release, thread) = scripted_collector(vec![("200 OK", Vec::new())]);
-        let exporter = span_exporter(
+        let exporter = build_span_exporter(
             &format!("http://{}/v1/traces", collector.addr),
             HashMap::new(),
             &CollectorTrust::default(),
-            export_timeout(&|_: &str| None),
+            export_timeout_from_env(&|_: &str| None),
             None,
         )
         .unwrap();
@@ -681,18 +681,18 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                     tracing::info_span!("ordinary_span").in_scope(|| {
                         tracing::info!("ordinary_event");
                         let exporter = ObservedExporter {
-                            inner: span_exporter(
+                            inner: build_span_exporter(
                                 &format!("http://{}/{URL_SECRET}/v1/traces", collector.addr),
                                 HashMap::from([(
                                     "authorization".to_owned(),
                                     HEADER_SECRET.to_owned(),
                                 )]),
                                 &CollectorTrust::default(),
-                                export_timeout(&|_: &str| None),
+                                export_timeout_from_env(&|_: &str| None),
                                 None,
                             )
                             .unwrap(),
-                            timeout: export_timeout(&|_: &str| None),
+                            export_timeout: export_timeout_from_env(&|_: &str| None),
                             drain: Arc::default(),
                         };
                         let result = exporter

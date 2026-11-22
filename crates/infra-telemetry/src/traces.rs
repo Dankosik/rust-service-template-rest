@@ -1,6 +1,10 @@
 mod exporter;
 
-use exporter::{CollectorConfig, CollectorTrust, compression, export_timeout, span_exporter};
+use exporter::{
+    CollectorConfig, CollectorTrust, build_span_exporter, compression_from_env,
+    export_timeout_from_env, non_blank_str,
+};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -220,32 +224,24 @@ async fn prepare_tracer_provider(
             drain,
         });
     };
-    let timeout = export_timeout(&env);
-    let (compression, ignored_compression) = compression(&env);
-    let (batch_config, invalid_batch_sizes) = batch_config(&env);
+    let export_timeout = export_timeout_from_env(&env);
+    let (compression, ignored_compression) = compression_from_env(&env);
+    let (batch_config, invalid_batch_sizes) = batch_config_from_env(&env);
     let has_certificate_file = trust.certificate.is_some();
     let has_client_certificate = trust.client_certificate.is_some();
-    let deadline = tokio::time::Instant::now() + EXPORTER_PREPARATION_TIMEOUT;
-    let preparation = tokio::task::spawn_blocking(move || {
-        span_exporter(
-            collector.url.as_str(),
-            collector.headers,
-            &trust,
-            timeout,
-            compression,
-        )
-    });
-    let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
-        Ok(result) if tokio::time::Instant::now() < deadline => result
-            .map_err(|_| TracingError(TracingErrorKind::ClientThread))?
-            .map_err(TracingError)?,
-        _ => return Err(TracingError(TracingErrorKind::PreparationTimeout)),
-    };
+    let span_exporter = span_exporter_within_deadline(
+        collector.url,
+        collector.headers,
+        trust,
+        export_timeout,
+        compression,
+    )
+    .await?;
     let provider = builder
         .with_span_processor(
             sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                 inner: span_exporter,
-                timeout,
+                export_timeout,
                 drain: Arc::clone(&drain),
             })
             .with_batch_config(batch_config)
@@ -266,7 +262,26 @@ async fn prepare_tracer_provider(
     })
 }
 
-fn batch_config(
+async fn span_exporter_within_deadline(
+    url: reqwest::Url,
+    headers: HashMap<String, String>,
+    trust: CollectorTrust,
+    timeout: Duration,
+    compression: Option<opentelemetry_otlp::Compression>,
+) -> Result<opentelemetry_otlp::SpanExporter, TracingError> {
+    let deadline = tokio::time::Instant::now() + EXPORTER_PREPARATION_TIMEOUT;
+    let preparation = tokio::task::spawn_blocking(move || {
+        build_span_exporter(url.as_str(), headers, &trust, timeout, compression)
+    });
+    match tokio::time::timeout_at(deadline, preparation).await {
+        Ok(result) if tokio::time::Instant::now() < deadline => result
+            .map_err(|_| TracingError(TracingErrorKind::ClientThread))?
+            .map_err(TracingError),
+        _ => Err(TracingError(TracingErrorKind::PreparationTimeout)),
+    }
+}
+
+fn batch_config_from_env(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> (sdktrace::BatchConfig, Vec<&'static str>) {
     let mut invalid = Vec::new();
@@ -274,14 +289,14 @@ fn batch_config(
         let Some(value) = env(name).filter(|value| !value.is_empty()) else {
             return default;
         };
-        if let Some(size) = value
+        let Some(size) = value
             .to_str()
             .and_then(|text| text.parse::<std::num::NonZeroUsize>().ok())
-        {
-            return size.get();
-        }
-        invalid.push(name);
-        default
+        else {
+            invalid.push(name);
+            return default;
+        };
+        size.get()
     };
     let queue_size = parse_size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_CAPACITY);
     let batch_size = parse_size(
@@ -459,7 +474,7 @@ pub(crate) fn describe_metrics() {
 #[derive(Debug)]
 struct ObservedExporter<E> {
     inner: E,
-    timeout: Duration,
+    export_timeout: Duration,
     drain: Arc<Mutex<DrainObservation>>,
 }
 
@@ -474,13 +489,12 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
                 ("outcome", "ok"),
             ),
             Err(error) => {
-                let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
+                let failure = SdkFailure::classify(error, started.elapsed(), self.export_timeout);
                 DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
                 failure.export_metric_key()
             }
         };
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &EXPORT_METRIC_METADATA))
-            .increment(spans);
+        crate::metrics::static_counter(key, &EXPORT_METRIC_METADATA).increment(spans);
         result
     }
 
@@ -508,13 +522,10 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
 
 fn resource(options: &TracingOptions<'_>) -> Resource {
     static PROCESS_INSTANCE_ID: OnceLock<Uuid> = OnceLock::new();
-    let instance_id = options
-        .instance_id
-        .filter(|value| !value.trim().is_empty())
-        .map_or_else(
-            || PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string(),
-            str::to_owned,
-        );
+    let instance_id = non_blank_str(options.instance_id).map_or_else(
+        || PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string(),
+        str::to_owned,
+    );
     let attributes = [
         KeyValue::new(attribute::SERVICE_NAME, options.service_name.to_owned()),
         KeyValue::new(

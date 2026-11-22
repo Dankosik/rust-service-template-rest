@@ -60,7 +60,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
             .with_tracked_inactivity(false)
     });
     let (output, guard) = output::start(std::io::stdout()).map_err(LoggingError::WorkerStart)?;
-    let format = format::FormatLayer::new(output, options.format, otel.is_some());
+    let format_layer = format::FormatLayer::new(output, options.format, otel.is_some());
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
     let registry = registry.with(hotpath::sqlx_tracing_layer());
@@ -70,7 +70,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
         .with(aws_sdk_log_cap(options.level))
         // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
-        .with(format);
+        .with(format_layer);
     let max_level = subscriber.max_level_hint().unwrap_or(LevelFilter::TRACE);
     tracing_log::LogTracer::builder()
         .with_max_level(max_level.as_log())
@@ -79,8 +79,8 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
     let dispatch = tracing::Dispatch::new(subscriber);
     tracing::dispatcher::set_global_default(dispatch.clone())
         .map_err(|_| LoggingError::AlreadyInstalled)?;
-    if let Some(format) = dispatch.downcast_ref::<format::FormatLayer>() {
-        format.pin_global_dispatch(&dispatch);
+    if let Some(installed_layer) = dispatch.downcast_ref::<format::FormatLayer>() {
+        installed_layer.pin_global_dispatch(&dispatch);
     }
     Ok(guard)
 }
@@ -130,23 +130,23 @@ fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
 enum Admission {
     Always,
     Never,
-    Deferred,
-    Directive,
+    PerEvent,
+    ByFilter,
 }
 
 fn admission(metadata: &Metadata<'_>) -> Admission {
-    if sdk_diagnostics::is_denied_target(metadata.target()) {
+    if sdk_diagnostics::is_dependency_target(metadata.target()) {
         if sdk_diagnostics::is_known_diagnostic(metadata) {
             Admission::Always
         } else {
             Admission::Never
         }
     } else if metadata.target() == "log" {
-        Admission::Deferred
+        Admission::PerEvent
     } else if is_span_at_info_or_above(metadata) {
         Admission::Always
     } else {
-        Admission::Directive
+        Admission::ByFilter
     }
 }
 
@@ -162,16 +162,16 @@ where
         match admission(metadata) {
             Admission::Always => Interest::always(),
             Admission::Never => Interest::never(),
-            Admission::Deferred => Interest::sometimes(),
-            Admission::Directive => interest,
+            Admission::PerEvent => Interest::sometimes(),
+            Admission::ByFilter => interest,
         }
     }
 
     fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
         match admission(metadata) {
-            Admission::Always | Admission::Deferred => true,
+            Admission::Always | Admission::PerEvent => true,
             Admission::Never => false,
-            Admission::Directive => match self {
+            Admission::ByFilter => match self {
                 Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
                 Self::Env(filter) => filter.enabled(metadata, ctx),
             },
@@ -181,7 +181,7 @@ where
     fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
         let normalized = event.normalized_metadata();
         let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
-        if sdk_diagnostics::is_denied_target(metadata.target()) {
+        if sdk_diagnostics::is_dependency_target(metadata.target()) {
             sdk_diagnostics::observe(event, metadata);
             return false;
         }
@@ -247,7 +247,7 @@ fn is_within_target(target: &str, prefix: &str) -> bool {
 
 // template:begin object-storage:telemetry-sdk-log-cap
 fn aws_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
-    let named: Vec<String> = directive
+    let named_aws_targets: Vec<String> = directive
         .split(',')
         .filter_map(|segment| {
             let target = segment.split(['=', '[']).next()?.trim();
@@ -258,7 +258,9 @@ fn aws_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
         let target = metadata.target();
         *metadata.level() <= tracing::Level::INFO
             || !target.starts_with("aws_")
-            || named.iter().any(|name| is_within_target(target, name))
+            || named_aws_targets
+                .iter()
+                .any(|name| is_within_target(target, name))
     })
 }
 // template:end object-storage:telemetry-sdk-log-cap

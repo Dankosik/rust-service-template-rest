@@ -443,7 +443,7 @@ fn a_shallow_queue_is_gathered_for_the_whole_window() {
     let window = Duration::from_millis(20);
     let started = Instant::now();
 
-    gather(&records, window);
+    wait_for_backlog(&records, window);
 
     assert!(started.elapsed() >= window);
 }
@@ -454,7 +454,7 @@ fn a_queue_that_grows_deep_ends_the_gathering_before_its_window() {
     let (open, _closed) = crossbeam_channel::bounded(0);
     let (gathered_tx, gathered) = mpsc::sync_channel(1);
     let waiter = thread::spawn(move || {
-        gather(&records, Duration::from_secs(3600));
+        wait_for_backlog(&records, Duration::from_secs(3600));
         gathered_tx.send(records.len()).expect("report the queue");
     });
     let output = Output {

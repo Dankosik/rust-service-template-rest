@@ -73,8 +73,8 @@ static METRIC_METADATA: metrics::Metadata<'static> =
 
 static COUNTS: EnumMap<SdkEvent, AtomicU64> =
     EnumMap::from_array([const { AtomicU64::new(0) }; enum_len::<SdkEvent>()]);
-static DROPPED: Observed = Observed::new();
-static REJECTED: Observed = Observed::new();
+static DROPPED_SPANS: Observed = Observed::new();
+static REJECTED_SPANS: Observed = Observed::new();
 
 struct Observed {
     value: AtomicU64,
@@ -106,7 +106,7 @@ impl Observed {
     }
 }
 
-pub(super) fn is_denied_target(target: &str) -> bool {
+pub(super) fn is_dependency_target(target: &str) -> bool {
     [
         "opentelemetry",
         "opentelemetry_sdk",
@@ -174,12 +174,12 @@ pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
     match sdk_event {
         SdkEvent::SpansDropped => {
             if let Some(count) = numeric_field(event, "dropped_span_count") {
-                DROPPED.set(count);
+                DROPPED_SPANS.set(count);
             }
         }
         SdkEvent::PartialSuccess => {
             if let Some(count) = numeric_field(event, "rejected_spans") {
-                REJECTED.add(count);
+                REJECTED_SPANS.add(count);
             }
         }
         SdkEvent::SpanDroppingStarted
@@ -208,11 +208,10 @@ pub(super) fn describe_metrics() {
 
 pub(super) fn publish() {
     for (event, count) in &COUNTS {
-        let key = event.metric_key();
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METRIC_METADATA))
+        crate::metrics::static_counter(event.metric_key(), &METRIC_METADATA)
             .absolute(count.load(Ordering::Relaxed));
     }
-    if let Some(count) = DROPPED.get() {
+    if let Some(count) = DROPPED_SPANS.get() {
         #[expect(
             clippy::cast_precision_loss,
             reason = "Prometheus gauges use f64; the observation retains its exact u64 in the atomic"
@@ -220,7 +219,7 @@ pub(super) fn publish() {
         let count = count as f64;
         metrics::gauge!(QUEUE_DROPPED_METRIC).set(count);
     }
-    if let Some(count) = REJECTED.get() {
+    if let Some(count) = REJECTED_SPANS.get() {
         metrics::counter!(REJECTED_METRIC).absolute(count);
     }
 }

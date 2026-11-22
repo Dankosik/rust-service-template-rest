@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,26 +21,26 @@ use super::{EndpointSource, TracingErrorKind, TracingOptions};
 const OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE: &str = "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE";
 const OTEL_EXPORTER_OTLP_CLIENT_KEY: &str = "OTEL_EXPORTER_OTLP_CLIENT_KEY";
 
-pub(super) const CERTIFICATE_VARS: [&str; 2] = [
-    "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
-    "OTEL_EXPORTER_OTLP_CERTIFICATE",
+pub(super) const CERTIFICATE_VARS: [(EnvScope, &str); 2] = [
+    (EnvScope::Signal, "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE"),
+    (EnvScope::Common, "OTEL_EXPORTER_OTLP_CERTIFICATE"),
 ];
-pub(super) const CLIENT_CERTIFICATE_VARS: [&str; 2] = [
-    "OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
-    OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
+pub(super) const CLIENT_CERTIFICATE_VARS: [(EnvScope, &str); 2] = [
+    (
+        EnvScope::Signal,
+        "OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE",
+    ),
+    (EnvScope::Common, OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE),
 ];
-pub(super) const CLIENT_KEY_VARS: [&str; 2] = [
-    "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
-    OTEL_EXPORTER_OTLP_CLIENT_KEY,
+pub(super) const CLIENT_KEY_VARS: [(EnvScope, &str); 2] = [
+    (EnvScope::Signal, "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY"),
+    (EnvScope::Common, OTEL_EXPORTER_OTLP_CLIENT_KEY),
 ];
 const TRUST_FILE_MAX_BYTES: u64 = 1024 * 1024;
 
-fn is_blank(value: &OsStr) -> bool {
-    value.to_string_lossy().trim().is_empty()
-}
-
 fn non_blank(value: OsString) -> Option<OsString> {
-    (!is_blank(&value)).then_some(value)
+    let blank = value.to_string_lossy().trim().is_empty();
+    (!blank).then_some(value)
 }
 
 const TYPED_ENDPOINT: &str = "observability.otel.exporter.otlp_endpoint";
@@ -89,7 +89,7 @@ impl EnvSetting {
     }
 }
 
-fn non_blank_str(raw: Option<&str>) -> Option<&str> {
+pub(super) fn non_blank_str(raw: Option<&str>) -> Option<&str> {
     raw.filter(|value| !value.trim().is_empty())
 }
 
@@ -168,8 +168,8 @@ fn first_credential_name(
 ) -> Option<&'static str> {
     headers
         .map(SelectedHeaders::name)
-        .or_else(|| trust.client_certificate.as_ref().map(|file| file.variable))
-        .or_else(|| trust.client_key.as_ref().map(|file| file.variable))
+        .or_else(|| trust.client_certificate.as_ref().map(|file| file.name))
+        .or_else(|| trust.client_key.as_ref().map(|file| file.name))
 }
 
 impl CollectorConfig {
@@ -181,37 +181,39 @@ impl CollectorConfig {
         let standard = StandardEnv::from_env(env);
         let typed_endpoint = non_blank_str(options.otlp_endpoint);
         let typed_headers = non_blank_str(options.otlp_headers.map(ExposeSecret::expose_secret));
-        let (source, url, headers) =
+        let (source, url, selected_headers) =
             match (typed_endpoint, typed_headers, standard.headers.as_ref()) {
-                (Some(_), _, Some(headers)) => {
-                    return Err(TracingErrorKind::AmbientCredential { name: headers.name });
+                (Some(_), _, Some(env_headers)) => {
+                    return Err(TracingErrorKind::AmbientCredential {
+                        name: env_headers.name,
+                    });
                 }
                 (None, Some(_), _) => {
                     return Err(TracingErrorKind::UnboundCredential {
                         name: TYPED_HEADERS,
                     });
                 }
-                (Some(endpoint), headers, None) => (
+                (Some(endpoint), _, None) => (
                     EndpointSource::Typed,
                     parse_collector_url(endpoint, TYPED_ENDPOINT, UrlOrigin::Typed)?,
-                    headers.map(SelectedHeaders::Typed),
+                    typed_headers.map(SelectedHeaders::Typed),
                 ),
-                (None, None, headers) => {
-                    let headers = headers.map(SelectedHeaders::Env);
+                (None, None, env_headers) => {
+                    let env_headers = env_headers.map(SelectedHeaders::Env);
                     let Some(endpoint) = standard.endpoint() else {
-                        return match first_credential_name(headers, trust) {
+                        return match first_credential_name(env_headers, trust) {
                             Some(name) => Err(TracingErrorKind::UnboundCredential { name }),
                             None => Ok(None),
                         };
                     };
-                    (EndpointSource::Environment, endpoint.url()?, headers)
+                    (EndpointSource::Environment, endpoint.url()?, env_headers)
                 }
             };
-        verify_collector_security(&url, source, &standard, trust, headers)?;
+        verify_collector_security(&url, source, &standard, trust, selected_headers)?;
         Ok(Some(Self {
             source,
             url,
-            headers: headers
+            headers: selected_headers
                 .map(SelectedHeaders::parse)
                 .transpose()?
                 .unwrap_or_default(),
@@ -230,7 +232,7 @@ fn verify_collector_security(
         return match trust
             .certificate
             .as_ref()
-            .map(|file| file.variable)
+            .map(|file| file.name)
             .or_else(|| first_credential_name(headers, trust))
         {
             Some(name) => Err(TracingErrorKind::InsecureCollector { name }),
@@ -303,7 +305,7 @@ fn parse_collector_url(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TrustFile {
     pub(super) scope: EnvScope,
-    pub(super) variable: &'static str,
+    pub(super) name: &'static str,
     pub(super) path: PathBuf,
 }
 
@@ -311,7 +313,7 @@ impl TrustFile {
     const fn credential(&self) -> EnvCredential {
         EnvCredential {
             scope: self.scope,
-            name: self.variable,
+            name: self.name,
         }
     }
 
@@ -321,7 +323,7 @@ impl TrustFile {
         reason = "the blocking exporter preparation task owns TLS file reads"
     )]
     fn read(&self) -> Result<Zeroizing<Vec<u8>>, TracingErrorKind> {
-        let name = self.variable;
+        let name = self.name;
         let read_error = |error: io::Error| TracingErrorKind::TrustRead {
             name,
             kind: error.kind(),
@@ -339,11 +341,8 @@ impl TrustFile {
         if !metadata.is_file() {
             return Err(TracingErrorKind::TrustFileType { name });
         }
-        let max_bytes = usize::try_from(TRUST_FILE_MAX_BYTES).unwrap_or(usize::MAX);
-        let capacity = usize::try_from(metadata.len())
-            .unwrap_or(max_bytes)
-            .min(max_bytes)
-            .saturating_add(1);
+        let capacity =
+            usize::try_from(metadata.len().min(TRUST_FILE_MAX_BYTES) + 1).unwrap_or(usize::MAX);
         let mut pem = Zeroizing::new(Vec::with_capacity(capacity));
         file.take(TRUST_FILE_MAX_BYTES + 1)
             .read_to_end(&mut pem)
@@ -358,17 +357,10 @@ impl TrustFile {
     }
 
     fn load_certificates(&self) -> Result<Vec<reqwest::Certificate>, TracingErrorKind> {
-        let certificates = reqwest::Certificate::from_pem_bundle(&self.read()?).map_err(|_| {
-            TracingErrorKind::TrustPem {
-                name: self.variable,
-            }
-        })?;
-        if certificates.is_empty() {
-            return Err(TracingErrorKind::TrustPem {
-                name: self.variable,
-            });
-        }
-        Ok(certificates)
+        reqwest::Certificate::from_pem_bundle(&self.read()?)
+            .ok()
+            .filter(|certificates| !certificates.is_empty())
+            .ok_or(TracingErrorKind::TrustPem { name: self.name })
     }
 }
 
@@ -381,16 +373,14 @@ pub(super) struct CollectorTrust {
 
 impl CollectorTrust {
     pub(super) fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Self {
-        let file = |[signal, common]: [&'static str; 2]| {
-            [(EnvScope::Signal, signal), (EnvScope::Common, common)]
-                .into_iter()
-                .find_map(|(scope, variable)| {
-                    Some(TrustFile {
-                        scope,
-                        variable,
-                        path: env(variable).and_then(non_blank)?.into(),
-                    })
+        let file = |vars: [(EnvScope, &'static str); 2]| {
+            vars.into_iter().find_map(|(scope, name)| {
+                Some(TrustFile {
+                    scope,
+                    name,
+                    path: env(name).and_then(non_blank)?.into(),
                 })
+            })
         };
         Self {
             certificate: file(CERTIFICATE_VARS),
@@ -402,28 +392,16 @@ impl CollectorTrust {
     fn load_client_identity(&self) -> Result<Option<reqwest::Identity>, TracingErrorKind> {
         match (&self.client_certificate, &self.client_key) {
             (Some(certificate), Some(key)) => {
-                let key_pem = key.read()?;
-                let pem = if certificate.path.as_os_str() == key.path.as_os_str() {
-                    key_pem
-                } else {
-                    let cert_pem = certificate.read()?;
-                    let mut combined =
-                        Zeroizing::new(Vec::with_capacity(key_pem.len() + 1 + cert_pem.len()));
-                    combined.extend_from_slice(&key_pem);
-                    combined.push(b'\n');
-                    combined.extend_from_slice(&cert_pem);
-                    combined
-                };
-                reqwest::Identity::from_pem(&pem)
+                reqwest::Identity::from_pem(&identity_pem(certificate, key)?)
                     .map(Some)
                     .map_err(|_| TracingErrorKind::IdentityPem)
             }
             (Some(present), None) => Err(TracingErrorKind::IncompleteIdentity {
-                present: present.variable,
+                present: present.name,
                 missing: OTEL_EXPORTER_OTLP_CLIENT_KEY,
             }),
             (None, Some(present)) => Err(TracingErrorKind::IncompleteIdentity {
-                present: present.variable,
+                present: present.name,
                 missing: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE,
             }),
             (None, None) => Ok(None),
@@ -431,7 +409,23 @@ impl CollectorTrust {
     }
 }
 
-pub(super) fn span_exporter(
+fn identity_pem(
+    certificate: &TrustFile,
+    key: &TrustFile,
+) -> Result<Zeroizing<Vec<u8>>, TracingErrorKind> {
+    let key_pem = key.read()?;
+    if certificate.path.as_os_str() == key.path.as_os_str() {
+        return Ok(key_pem);
+    }
+    let cert_pem = certificate.read()?;
+    let mut combined = Zeroizing::new(Vec::with_capacity(key_pem.len() + 1 + cert_pem.len()));
+    combined.extend_from_slice(&key_pem);
+    combined.push(b'\n');
+    combined.extend_from_slice(&cert_pem);
+    Ok(combined)
+}
+
+pub(super) fn build_span_exporter(
     endpoint: &str,
     headers: HashMap<String, String>,
     trust: &CollectorTrust,
@@ -443,15 +437,15 @@ pub(super) fn span_exporter(
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
         .with_timeout(timeout)
         .with_endpoint(endpoint)
-        .with_headers(headers);
+        .with_headers(headers)
+        .with_http_client(collector_client(trust, timeout)?);
     if let Some(compression) = compression {
         builder = builder.with_compression(compression);
     }
-    builder = builder.with_http_client(collector_client(trust, timeout)?);
     builder.build().map_err(|_| TracingErrorKind::ExporterBuild)
 }
 
-pub(super) fn compression(
+pub(super) fn compression_from_env(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> (Option<opentelemetry_otlp::Compression>, Vec<&'static str>) {
     let mut ignored = Vec::new();
@@ -496,7 +490,7 @@ fn collector_client(
     builder.build().map_err(|_| TracingErrorKind::ClientBuild)
 }
 
-pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duration {
+pub(super) fn export_timeout_from_env(env: &impl Fn(&str) -> Option<OsString>) -> Duration {
     [
         OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
         OTEL_EXPORTER_OTLP_TIMEOUT,
@@ -515,34 +509,35 @@ fn parse_headers(
         if entry.trim().is_empty() {
             continue;
         }
-        let invalid = TracingErrorKind::InvalidHeader {
+        let invalid = || TracingErrorKind::InvalidHeader {
             name: setting_name,
             position: index + 1,
         };
-        let Some((name, value)) = entry.split_once('=') else {
-            return Err(invalid);
-        };
-        let (name, value) = (name.trim(), value.trim());
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            return Err(invalid);
-        };
-        if name == axum::http::header::HOST
-            || HeaderValue::from_str(value).is_err()
-            || decoded_otlp_header_value(value)
-                .is_some_and(|decoded| HeaderValue::from_str(&decoded).is_err())
-        {
-            return Err(invalid);
-        }
-        let key = if name == axum::http::header::USER_AGENT {
-            "User-Agent"
-        } else {
-            name.as_str()
-        };
-        if headers.insert(key.to_owned(), value.to_owned()).is_some() {
-            return Err(invalid);
+        let (key, value) = parse_header_entry(entry).ok_or_else(invalid)?;
+        if headers.insert(key, value.to_owned()).is_some() {
+            return Err(invalid());
         }
     }
     Ok(headers)
+}
+
+fn parse_header_entry(entry: &str) -> Option<(String, &str)> {
+    let (name, value) = entry.split_once('=')?;
+    let (name, value) = (name.trim(), value.trim());
+    let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
+    if name == axum::http::header::HOST
+        || HeaderValue::from_str(value).is_err()
+        || decoded_otlp_header_value(value)
+            .is_some_and(|decoded| HeaderValue::from_str(&decoded).is_err())
+    {
+        return None;
+    }
+    let key = if name == axum::http::header::USER_AGENT {
+        "User-Agent"
+    } else {
+        name.as_str()
+    };
+    Some((key.to_owned(), value))
 }
 
 fn decoded_otlp_header_value(value: &str) -> Option<Zeroizing<String>> {

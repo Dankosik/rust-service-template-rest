@@ -534,7 +534,7 @@ fn span_capacity(format: LoggingFormat) {
 
 #[test]
 fn a_buffer_reserves_no_more_than_its_limit() {
-    let mut bytes = Bytes::new(100, 8);
+    let mut bytes = Bytes::with_capacity(100, 8);
     for _ in 0..40 {
         bytes.append(b"abc");
     }
