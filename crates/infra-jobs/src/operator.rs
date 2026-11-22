@@ -459,7 +459,7 @@ enum RecoveryAction {
     Discard,
 }
 
-async fn lock_failed_target(
+async fn lock_recoverable_target(
     tx: &mut Tx<'_>,
     target: &RecoveryTarget,
     action: RecoveryAction,
@@ -470,17 +470,15 @@ async fn lock_failed_target(
         sqlx::query!(
             r#"
             SELECT job.kind, job.claim_generation, job.state,
-                   CASE
-                     WHEN job.kind IS DISTINCT FROM $2::text THEN true
-                     WHEN $3::bool THEN false
-                     ELSE outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,
+                   CASE WHEN job.kind = $2::text AND $3::bool
+                     THEN outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,
                                                   job.payload_text, job.payload) IS NOT NULL
-                   END AS "allowed!"
+                   END AS "payload_verified?"
             FROM background_jobs AS job WHERE job.id = $1 FOR UPDATE OF job
             "#,
             target.id.0,
             crate::RESERVED_OUTBOX_KIND,
-            matches!(action, RecoveryAction::Discard),
+            matches!(action, RecoveryAction::Redrive),
         )
         .fetch_optional(&mut *tx),
     )
@@ -491,7 +489,15 @@ async fn lock_failed_target(
     {
         return Err(OperatorError::Stale);
     }
-    if !row.allowed {
+    let allowed = match (
+        crate::RESERVED_OUTBOX_KIND == Some(row.kind.as_str()),
+        action,
+    ) {
+        (false, _) => true,
+        (true, RecoveryAction::Discard) => false,
+        (true, RecoveryAction::Redrive) => row.payload_verified == Some(true),
+    };
+    if !allowed {
         return Err(OperatorError::Conflict);
     }
     Ok(())
@@ -510,7 +516,7 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
 }
 
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
-    lock_failed_target(tx, target, RecoveryAction::Redrive).await?;
+    lock_recoverable_target(tx, target, RecoveryAction::Redrive).await?;
     let new_version = observed!(
         "redrive failed job",
         sqlx::query_scalar!(
@@ -539,7 +545,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
 }
 
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
-    lock_failed_target(tx, target, RecoveryAction::Discard).await?;
+    lock_recoverable_target(tx, target, RecoveryAction::Discard).await?;
     let result = observed!("discard failed job", sqlx::query!(
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
         target.id.0, target.kind, target.version

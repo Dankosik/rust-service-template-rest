@@ -194,7 +194,7 @@ async fn enqueue_inner<K: JobKind>(
             trace.trace_parent(),
             trace.trace_state(),
             id.0,
-            prepared.payload,
+            prepared.payload_text,
         )
         .execute(&mut *tx),
     )
@@ -241,10 +241,10 @@ pub async fn compare_live_payload<K: JobKind>(
         return Ok(LivePayloadComparison::NoLongerLive);
     };
     let same = if let Some(payload_text) = stored.payload_text {
-        payload_text == prepared.payload
+        payload_text == prepared.payload_text
     } else {
         let legacy = stored.legacy_payload.as_deref().unwrap_or_default();
-        legacy_payload_matches::<K>(legacy, &prepared.payload)?
+        legacy_payload_matches::<K>(legacy, &prepared.payload_text)?
     };
     Ok(if same {
         LivePayloadComparison::Same
@@ -264,7 +264,7 @@ fn legacy_payload_matches<K: JobKind>(legacy: &str, expected: &str) -> Result<bo
 
 #[derive(Debug)]
 struct Prepared<'a> {
-    payload: String,
+    payload_text: String,
     unique_key: Option<&'a str>,
     delay_micros: i64,
 }
@@ -285,30 +285,27 @@ fn prepare<'a, K: JobKind>(
         return Err(EnqueueError::InvalidUniqueKey);
     }
     let delay_micros = checked_delay_micros(delay)?;
-    let payload = encode_payload(payload)?;
-    serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
+    let payload_text = encode_payload(payload, 0)?;
+    serde_json::from_str::<K>(&payload_text).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
-        payload,
+        payload_text,
         unique_key,
         delay_micros,
     })
 }
 
-fn encode_payload(payload: &impl serde::Serialize) -> Result<String, EnqueueError> {
-    encode_payload_with_capacity(payload, 0)
-}
-
-fn encode_payload_with_capacity(
+fn encode_payload(
     payload: &impl serde::Serialize,
-    capacity: usize,
+    capacity_hint: usize,
 ) -> Result<String, EnqueueError> {
-    let encoded = json_payload::to_vec_bounded_with_capacity(payload, MAX_PAYLOAD_BYTES, capacity)
-        .map_err(|error| match error {
-            json_payload::EncodeError::Serialize(error) => EnqueueError::Serialize(error),
-            json_payload::EncodeError::TooLarge { bytes } => {
-                EnqueueError::PayloadTooLarge { bytes }
-            }
-        })?;
+    let encoded =
+        json_payload::to_vec_bounded_with_capacity(payload, MAX_PAYLOAD_BYTES, capacity_hint)
+            .map_err(|error| match error {
+                json_payload::EncodeError::Serialize(error) => EnqueueError::Serialize(error),
+                json_payload::EncodeError::TooLarge { bytes } => {
+                    EnqueueError::PayloadTooLarge { bytes }
+                }
+            })?;
     String::from_utf8(encoded).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -495,8 +492,8 @@ mod tests {
     fn payload_size_bound() {
         let exact = Raw("a".repeat(MAX_PAYLOAD_BYTES - 2));
         let prepared = prepare(&exact, Duration::ZERO, None).unwrap();
-        assert_eq!(prepared.payload.len(), MAX_PAYLOAD_BYTES);
-        assert_eq!(prepared.payload, format!("\"{}\"", exact.0));
+        assert_eq!(prepared.payload_text.len(), MAX_PAYLOAD_BYTES);
+        assert_eq!(prepared.payload_text, format!("\"{}\"", exact.0));
 
         for length in [MAX_PAYLOAD_BYTES - 1, MAX_PAYLOAD_BYTES * 8] {
             let too_big = Raw("a".repeat(length));
@@ -515,7 +512,7 @@ mod tests {
             ("b".to_owned(), "🦀".to_owned()),
         ]));
         let prepared = prepare(&payload, Duration::ZERO, None).unwrap();
-        assert_eq!(prepared.payload, r#"{"a":"é\n\"\\","b":"🦀"}"#);
+        assert_eq!(prepared.payload_text, r#"{"a":"é\n\"\\","b":"🦀"}"#);
     }
 
     #[test]

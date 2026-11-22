@@ -282,6 +282,12 @@ impl TransactionFailure {
     }
 }
 
+impl From<JobError> for TransactionFailure {
+    fn from(error: JobError) -> Self {
+        Self(error)
+    }
+}
+
 impl From<infra_postgres::TxError> for TransactionFailure {
     fn from(error: infra_postgres::TxError) -> Self {
         use infra_postgres::TxError;
@@ -452,21 +458,19 @@ async fn run_transactional<K: JobKind>(
         job.deadline(),
         infra_postgres::TxOptions::default(),
         async move |tx| {
-            handler.run(job, tx).await.map_err(TransactionFailure)?;
+            handler.run(job, tx).await?;
             let complete = crate::attempt::complete_query(fence);
             let completed = observed!("complete job", complete.execute(&mut *tx))
                 .await
                 .map_err(|error| TransactionFailure::completion(&error))?;
             if completed.rows_affected() == 0 {
-                return Err(TransactionFailure(JobError::retryable(
-                    "job claim is stale",
-                )));
+                return Err(JobError::retryable("job claim is stale").into());
             }
             Ok(Completion::Committed)
         },
     )
     .await
-    .map_err(|failure| failure.0)
+    .map_err(|failure: TransactionFailure| failure.0)
 }
 
 impl fmt::Debug for KindsBuilder {

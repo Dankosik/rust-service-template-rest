@@ -11,9 +11,7 @@ use metrics::Unit;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{
-    Operation, OperationError, WorkerGroup, backstop, observe_failure, observe_recovery,
-};
+use crate::engine::{Operation, OperationError, WorkerGroup, backstop, observe_operation};
 
 // template:begin outbox:jobs-maintenance-outbox-module
 mod outbox;
@@ -36,15 +34,15 @@ const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) async fn remove_expired(primary_group: &WorkerGroup) -> Result<u64, OperationError> {
     let mut pass = CleanupPass::start(JOBS_CLEANUP);
     loop {
-        let batch = match Box::pin(delete_batch(primary_group)).await {
-            Ok(batch) => batch,
+        let deleted_rows = match Box::pin(delete_batch(primary_group)).await {
+            Ok(deleted_rows) => deleted_rows,
             Err(error) => {
                 pass.fail();
                 return Err(error);
             }
         };
-        pass.committed(batch);
-        if batch < u64::from(RETENTION_BATCH_ROWS) {
+        pass.committed(deleted_rows);
+        if deleted_rows < u64::from(RETENTION_BATCH_ROWS) {
             return Ok(pass.complete());
         }
     }
@@ -55,10 +53,8 @@ pub(crate) async fn run_retention(primary_group: &WorkerGroup, cancel: Cancellat
         let mut schedule = CleanupSchedule::new(JOBS_CLEANUP);
         loop {
             schedule.next().await;
-            match remove_expired(primary_group).await {
-                Ok(_) => observe_recovery(primary_group, Operation::Retention),
-                Err(error) => observe_failure(primary_group, Operation::Retention, &error),
-            }
+            let result = remove_expired(primary_group).await;
+            observe_operation(primary_group, Operation::Retention, result);
         }
     }))
     .await;
@@ -66,7 +62,7 @@ pub(crate) async fn run_retention(primary_group: &WorkerGroup, cancel: Cancellat
 
 async fn in_maintenance_tx<T, F>(
     primary_group: &WorkerGroup,
-    timeout: Duration,
+    statement_timeout: Duration,
     work: F,
 ) -> Result<T, OperationError>
 where
@@ -77,7 +73,7 @@ where
         primary_group
             .pool
             .in_tx(async |tx| {
-                tx.set_statement_timeout(timeout).await?;
+                tx.set_statement_timeout(statement_timeout).await?;
                 work(tx).await
             })
             .await
@@ -111,10 +107,10 @@ pub(crate) async fn run_sampling(
     gauges: SampleGauges,
     cancel: CancellationToken,
 ) {
-    let reset = std::mem::DropGuard::new(gauges, |gauges| gauges.reset());
+    let gauges = std::mem::DropGuard::new(gauges, |gauges| gauges.reset());
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
-            run_kind_sampling(primary_group, kinds, &reset),
+            run_kind_sampling(primary_group, kinds, &gauges),
             run_population_sampling(primary_group),
         );
     }))
@@ -135,14 +131,9 @@ async fn run_kind_sampling(
             outbox.sample(primary_group).await;
         }
         // template:end outbox:jobs-maintenance-outbox-sampler
-        match sample_once(primary_group, kinds).await {
-            Ok(sample) => {
-                gauges.publish(&sample);
-                observe_recovery(primary_group, Operation::Sample);
-            }
-            Err(error) => {
-                observe_failure(primary_group, Operation::Sample, &error);
-            }
+        let result = sample_once(primary_group, kinds).await;
+        if let Some(sample) = observe_operation(primary_group, Operation::Sample, result) {
+            gauges.publish(&sample);
         }
     }
 }
@@ -264,8 +255,8 @@ async fn sample_once(
                             running.count AS \"running!\", \
                             failed.count AS \"failed!\", \
                             COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - LEAST(available.oldest, expired.oldest)), 0)::double precision \
-                                AS \"oldest_available_seconds!\", \
-                            EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\" \
+                                AS \"oldest_available_age_seconds!\", \
+                            EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at_unix_seconds!\" \
                      FROM sampled \
                      CROSS JOIN registered \
                      CROSS JOIN LATERAL ( \
@@ -343,8 +334,8 @@ struct SampleRow {
     scheduled: i64,
     running: i64,
     failed: i64,
-    oldest_available_seconds: f64,
-    observed_at: f64,
+    oldest_available_age_seconds: f64,
+    observed_at_unix_seconds: f64,
 }
 
 impl SampleRow {
@@ -354,7 +345,7 @@ impl SampleRow {
             scheduled: self.scheduled,
             running: self.running,
             failed: self.failed,
-            oldest_available_seconds: self.oldest_available_seconds,
+            oldest_available_age_seconds: self.oldest_available_age_seconds,
         }
     }
 }
@@ -365,21 +356,25 @@ struct KindQueueMetrics {
     scheduled: i64,
     running: i64,
     failed: i64,
-    oldest_available_seconds: f64,
+    oldest_available_age_seconds: f64,
 }
 
 struct Sample {
     rows: Vec<SampleRow>,
-    observed_at: f64,
+    observed_at_unix_seconds: f64,
 }
 
 fn decode_sample(rows: Vec<SampleRow>) -> Result<Sample, OperationError> {
-    let Some(observed_at) = rows.first().map(|row| row.observed_at) else {
+    let Some(observed_at_unix_seconds) = rows.first().map(|row| row.observed_at_unix_seconds)
+    else {
         return Err(OperationError::Statement(sqlx::Error::Decode(
             "jobs sample returned no rows".into(),
         )));
     };
-    Ok(Sample { rows, observed_at })
+    Ok(Sample {
+        rows,
+        observed_at_unix_seconds,
+    })
 }
 
 #[derive(Clone, Copy, Enum)]
@@ -422,7 +417,7 @@ impl KindGauges {
         self.live[LiveState::Running].set(gauge_count(queue_metrics.running));
         self.failed.set(gauge_count(queue_metrics.failed));
         self.oldest_available_age
-            .set(queue_metrics.oldest_available_seconds);
+            .set(queue_metrics.oldest_available_age_seconds);
     }
 
     fn reset(&self) {
@@ -458,7 +453,8 @@ impl SampleGauges {
                 gauges.publish(row.queue_metrics());
             }
         }
-        self.observation_timestamp.set(sample.observed_at);
+        self.observation_timestamp
+            .set(sample.observed_at_unix_seconds);
     }
 
     fn reset(&self) {

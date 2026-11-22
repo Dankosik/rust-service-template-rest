@@ -43,13 +43,13 @@ impl Carrier {
     pub(crate) fn from_stored(trace_parent: Option<String>, trace_state: Option<String>) -> Self {
         if trace_parent
             .as_deref()
-            .is_some_and(|value| !is_allowed(value, TRACEPARENT_MAX_BYTES))
+            .is_some_and(|value| !is_storable_header_value(value, TRACEPARENT_MAX_BYTES))
         {
             return Self::default();
         }
         let trace_state = trace_state.filter(|value| {
             !value.is_empty()
-                && is_allowed(value, TRACESTATE_MAX_BYTES)
+                && is_storable_header_value(value, TRACESTATE_MAX_BYTES)
                 && TraceState::from_str(value).is_ok()
         });
         Self {
@@ -122,7 +122,7 @@ fn truncated_state(value: String) -> String {
     members.join(",")
 }
 
-fn is_allowed(value: &str, max_bytes: usize) -> bool {
+fn is_storable_header_value(value: &str, max_bytes: usize) -> bool {
     value.len() <= max_bytes
         && value.is_ascii()
         && !value.bytes().any(|byte| byte.is_ascii_control())
