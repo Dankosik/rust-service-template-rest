@@ -427,7 +427,7 @@ pub(crate) struct SupervisorGuard {
     signals: Arc<EngineSignals>,
     job_id: crate::kind::JobId,
     kind: &'static str,
-    retired: bool,
+    disarmed: bool,
     _exit: DrainParticipant,
 }
 
@@ -443,19 +443,19 @@ impl SupervisorGuard {
             signals,
             job_id,
             kind,
-            retired: false,
+            disarmed: false,
             _exit: DrainParticipant::Supervisor(drain),
         }
     }
 
-    pub(crate) fn retire(&mut self) {
-        self.retired = true;
+    pub(crate) fn disarm(&mut self) {
+        self.disarmed = true;
     }
 }
 
 impl Drop for SupervisorGuard {
     fn drop(&mut self) {
-        if std::thread::panicking() || !self.retired {
+        if std::thread::panicking() || !self.disarmed {
             tracing::error!(
                 task = "attempt",
                 job.id = %self.job_id,
@@ -556,9 +556,6 @@ struct CleanupWindow {
 
 impl ForcedCleanup {
     fn begin(&self, budget: Duration) -> Instant {
-        if let Some(window) = self.window.get() {
-            return window.deadline;
-        }
         let started_at = Instant::now();
         let deadline = started_at
             .checked_add(budget)
@@ -663,11 +660,7 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
 
 pub(crate) fn observe_recovery(group: &WorkerGroup, operation: Operation) {
     let failing = &group.failing[operation];
-    if failing.load(Ordering::SeqCst)
-        && failing
-            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    {
+    if failing.load(Ordering::SeqCst) && failing.swap(false, Ordering::SeqCst) {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
     }
 }
@@ -827,7 +820,7 @@ mod tests {
                 crate::JobId(uuid::Uuid::nil()),
                 "ordinary",
             );
-            supervisor.retire();
+            supervisor.disarm();
             drop(claim_loop);
             let deadline = Instant::now() + budget;
             let mut finish = std::pin::pin!(started.cancel_and_finish(budget));
@@ -1044,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_panic_after_retirement_still_stops_its_start() {
+    fn supervisor_panic_after_disarm_still_stops_its_start() {
         let signals = Arc::new(EngineSignals::new(CancellationToken::new()));
         let guard = SupervisorGuard::new(
             Arc::default(),
@@ -1054,8 +1047,8 @@ mod tests {
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let mut guard = guard;
-            guard.retire();
-            panic!("retirement defect");
+            guard.disarm();
+            panic!("disarm defect");
         }));
         assert!(result.is_err());
         assert!(signals.stop.is_cancelled());

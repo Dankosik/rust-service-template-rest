@@ -384,7 +384,7 @@ impl KindsBuilder {
             K::NAME.as_str(),
             policy,
             KindMode::Ordinary,
-            Box::new(OrdinaryHandler {
+            Box::new(ErasedOrdinary {
                 handler,
                 payload: PhantomData,
             }),
@@ -401,7 +401,7 @@ impl KindsBuilder {
             K::NAME.as_str(),
             policy,
             KindMode::Ordinary,
-            Box::new(TransactionalHandlerEntry {
+            Box::new(ErasedTransactional {
                 handler,
                 payload: PhantomData,
             }),
@@ -499,7 +499,7 @@ impl Kinds {
                 crate::outbox::KIND,
                 policy,
                 KindMode::Outbox,
-                Box::new(OrdinaryHandler {
+                Box::new(ErasedOrdinary {
                     handler,
                     payload: PhantomData,
                 }),
@@ -543,16 +543,20 @@ pub enum KindError {
     InvalidMaxAttempts { kind: &'static str },
     #[error(
         "job kind {kind:?}: timeout must be between {} and {}",
-        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MIN_TIMEOUT),
-        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MAX_TIMEOUT)
+        friendly_duration(MIN_TIMEOUT),
+        friendly_duration(MAX_TIMEOUT)
     )]
     InvalidTimeout { kind: &'static str },
     #[error(
         "job kind {kind:?}: exponential retry max_base must be between {} and {}",
-        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MIN_TIMEOUT),
-        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MAX_DELAY)
+        friendly_duration(MIN_TIMEOUT),
+        friendly_duration(MAX_DELAY)
     )]
     InvalidRetryMaxBase { kind: &'static str },
+}
+
+fn friendly_duration(duration: Duration) -> String {
+    jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&duration)
 }
 
 pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
@@ -625,7 +629,7 @@ impl Registered {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Completion {
-    Pending,
+    Uncommitted,
     Committed,
 }
 
@@ -640,12 +644,12 @@ pub(crate) trait ErasedHandler: Send + Sync + 'static {
     ) -> Result<HandlerFuture<'_>, serde_json::Error>;
 }
 
-struct OrdinaryHandler<K, H> {
+struct ErasedOrdinary<K, H> {
     handler: H,
     payload: PhantomData<fn(K)>,
 }
 
-impl<K, H> ErasedHandler for OrdinaryHandler<K, H>
+impl<K, H> ErasedHandler for ErasedOrdinary<K, H>
 where
     K: DeserializeOwned + Send + Sync + 'static,
     H: Handler<K>,
@@ -663,17 +667,20 @@ where
             pool,
         };
         Ok(Box::pin(async move {
-            self.handler.run(job).await.map(|()| Completion::Pending)
+            self.handler
+                .run(job)
+                .await
+                .map(|()| Completion::Uncommitted)
         }))
     }
 }
 
-struct TransactionalHandlerEntry<K, H> {
+struct ErasedTransactional<K, H> {
     handler: H,
     payload: PhantomData<fn(K)>,
 }
 
-impl<K, H> ErasedHandler for TransactionalHandlerEntry<K, H>
+impl<K, H> ErasedHandler for ErasedTransactional<K, H>
 where
     K: JobKind,
     H: TransactionalHandler<K>,

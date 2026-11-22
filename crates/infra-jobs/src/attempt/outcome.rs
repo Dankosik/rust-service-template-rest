@@ -160,18 +160,14 @@ pub(super) struct Unacknowledged;
 pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
     match transition {
         Transition::Complete(Completion::Committed) => None,
-        Transition::Complete(Completion::Pending) => Some(WritePlan::CompleteBatched),
+        Transition::Complete(Completion::Uncommitted) => Some(WritePlan::CompleteBatched),
         Transition::Retry {
             summary,
             base_micros,
             floor_micros,
             ..
         } => {
-            let minimum_micros =
-                (base_micros - base_micros / RETRY_JITTER_HALF_DIVISOR).max(*floor_micros);
-            let jitter_micros = (base_micros / RETRY_JITTER_SPAN_DIVISOR)
-                .max(floor_micros / RETRY_JITTER_HALF_DIVISOR)
-                .min(saturating_micros(MAX_DELAY) - minimum_micros);
+            let (minimum_micros, jitter_micros) = retry_window(*base_micros, *floor_micros);
             Some(WritePlan::Single(Write::Retry {
                 summary,
                 minimum_micros,
@@ -189,7 +185,15 @@ pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
     }
 }
 
-pub(super) async fn send_outcome(
+fn retry_window(base_micros: i64, floor_micros: i64) -> (i64, i64) {
+    let minimum_micros = (base_micros - base_micros / RETRY_JITTER_HALF_DIVISOR).max(floor_micros);
+    let jitter_micros = (base_micros / RETRY_JITTER_SPAN_DIVISOR)
+        .max(floor_micros / RETRY_JITTER_HALF_DIVISOR)
+        .min(saturating_micros(MAX_DELAY) - minimum_micros);
+    (minimum_micros, jitter_micros)
+}
+
+pub(super) async fn send_write(
     group: &WorkerGroup,
     fence: ClaimFence,
     write: Write<'_>,
@@ -307,7 +311,7 @@ pub(super) enum HandlerOutcome {
     Cancelled,
 }
 
-pub(super) fn map_outcome(
+pub(super) fn transition_of(
     attempt: &AttemptId,
     policy: Policy,
     mode: KindMode,
@@ -440,7 +444,7 @@ mod tests {
             kind: "sample",
             number,
         };
-        map_outcome(
+        transition_of(
             &attempt,
             Policy::default(),
             KindMode::Ordinary,
@@ -461,8 +465,8 @@ mod tests {
     #[test]
     fn dispositions_preserve_cap_and_snooze() {
         std::assert_matches!(
-            outcome(HandlerOutcome::Success(Completion::Pending), 25),
-            Transition::Complete(Completion::Pending)
+            outcome(HandlerOutcome::Success(Completion::Uncommitted), 25),
+            Transition::Complete(Completion::Uncommitted)
         );
         std::assert_matches!(
             outcome(HandlerOutcome::Error(JobError::retryable("fail")), 25),
@@ -557,7 +561,7 @@ mod tests {
             ..Policy::default()
         };
         let outcome =
-            |handler_outcome| map_outcome(&attempt, policy, KindMode::Outbox, handler_outcome);
+            |handler_outcome| transition_of(&attempt, policy, KindMode::Outbox, handler_outcome);
         std::assert_matches!(
             outcome(HandlerOutcome::Timeout),
             Transition::Retry {
@@ -585,7 +589,7 @@ mod tests {
     #[test]
     fn a_completed_attempt_selects_the_completion_write_plan() {
         std::assert_matches!(
-            write_of(&Transition::Complete(Completion::Pending)),
+            write_of(&Transition::Complete(Completion::Uncommitted)),
             Some(WritePlan::CompleteBatched)
         );
         std::assert_matches!(write_of(&Transition::Complete(Completion::Committed)), None);

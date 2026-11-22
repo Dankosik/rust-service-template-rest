@@ -5,9 +5,7 @@ use infra_postgres::{CloseOutcome, ListenerPool};
 use sqlx::postgres::PgListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{
-    Engine, Operation, POLL_INTERVAL, WorkerGroup, observe_failure, observe_recovery,
-};
+use crate::engine::{Engine, Operation, POLL_INTERVAL, observe_failure, observe_recovery};
 
 const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(1);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -16,10 +14,8 @@ const RECONNECT_BASE_CAP: Duration = Duration::from_secs(15);
 type ReconnectBackoff = <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff;
 
 pub(crate) async fn run_listener(engine: &Engine, cancel: CancellationToken) {
-    let primary_group = engine.primary_group();
-    let listener_pool = primary_group.pool.listener_pool();
-    let _ =
-        Box::pin(cancel.run_until_cancelled(listen(primary_group, engine, &listener_pool))).await;
+    let listener_pool = engine.primary_group().pool.listener_pool();
+    let _ = Box::pin(cancel.run_until_cancelled(listen(engine, &listener_pool))).await;
     if listener_pool.close(LISTENER_CLOSE_BUDGET).await == CloseOutcome::TimedOut {
         tracing::warn!("jobs_listener_close_unconfirmed");
     }
@@ -41,14 +37,15 @@ fn next_reconnect_delay(backoff: &mut ReconnectBackoff) -> Duration {
         .min(RECONNECT_MAX_DELAY)
 }
 
-async fn listen(primary_group: &WorkerGroup, engine: &Engine, listener_pool: &ListenerPool) -> ! {
+async fn listen(engine: &Engine, listener_pool: &ListenerPool) -> ! {
+    let primary_group = engine.primary_group();
     let mut backoff = reconnect_backoff();
     loop {
         let error = match subscribe(listener_pool).await {
             Ok(listener) => {
                 backoff = reconnect_backoff();
                 observe_recovery(primary_group, Operation::Listen);
-                drain_notifications(engine, listener).await
+                forward_wakes(engine, listener).await
             }
             Err(error) => error,
         };
@@ -57,7 +54,7 @@ async fn listen(primary_group: &WorkerGroup, engine: &Engine, listener_pool: &Li
     }
 }
 
-async fn drain_notifications(engine: &Engine, mut listener: PgListener) -> sqlx::Error {
+async fn forward_wakes(engine: &Engine, mut listener: PgListener) -> sqlx::Error {
     for group in engine.groups() {
         group.claim_wake.notify_one();
     }

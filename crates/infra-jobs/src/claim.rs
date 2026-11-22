@@ -58,10 +58,7 @@ impl KindSlot {
 
 impl Drop for KindSlot {
     fn drop(&mut self) {
-        let Some(permit) = self.permit.take() else {
-            return;
-        };
-        drop(permit);
+        drop(self.permit.take());
         self.wake.notify_one();
     }
 }
@@ -213,18 +210,7 @@ async fn claim(
     policy: &PolicyBinds<'_>,
     requested: i64,
 ) -> Result<Vec<ClaimOutcome>, sqlx::Error> {
-    let claim_limits: smallvec::SmallVec<[i64; 8]> = policy
-        .registry
-        .iter()
-        .map(|registered| {
-            registered
-                .running_slots
-                .as_ref()
-                .map_or(requested, |slots| {
-                    requested.min(slot_count(slots.available_permits()))
-                })
-        })
-        .collect();
+    let claim_limits = policy.claim_limits(requested);
     let rescued_summary = "lease expired; rescued";
     observed!(
         "claim jobs",
@@ -381,6 +367,20 @@ impl<'a> PolicyBinds<'a> {
             is_outbox,
         }
     }
+
+    fn claim_limits(&self, requested: i64) -> smallvec::SmallVec<[i64; 8]> {
+        self.registry
+            .iter()
+            .map(|registered| {
+                registered
+                    .running_slots
+                    .as_ref()
+                    .map_or(requested, |slots| {
+                        requested.min(slot_count(slots.available_permits()))
+                    })
+            })
+            .collect()
+    }
 }
 
 fn lease_offset(timeout: Duration) -> Duration {
@@ -405,7 +405,7 @@ fn dispatch_outcomes(
                 attempt,
                 error_summary,
             } => {
-                attempt::record_exhausted(registered.metrics(), &attempt, &error_summary);
+                attempt::observe_exhausted(registered.metrics(), &attempt, &error_summary);
             }
             ClaimOutcome::Running {
                 job,
