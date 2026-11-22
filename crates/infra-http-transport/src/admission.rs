@@ -44,11 +44,11 @@ async fn wait_within<P, G, F: Future<Output = Result<P, AcquireError>>>(
             waited: Duration::ZERO,
         };
     }
-    let waiting = on_wait();
+    let wait_guard = on_wait();
     let started = Instant::now();
     let acquire_result = tokio::time::timeout(patience, acquire()).await;
     let waited = started.elapsed();
-    drop(waiting);
+    drop(wait_guard);
     match acquire_result {
         Ok(Ok(permit)) if waited < patience => Admission::Waited { permit, waited },
         _ => Admission::Shed { waited },

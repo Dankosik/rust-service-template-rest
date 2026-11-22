@@ -204,32 +204,23 @@ pub struct BoundListener {
 
 impl BoundListener {
     pub fn bind(addr: SocketAddr) -> Result<Self, BindError> {
-        let listener = listen(addr).map_err(|source| BindError { addr, source })?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|source| BindError { addr, source })?;
-        Ok(Self {
-            listener,
-            local_addr,
-        })
+        listen(addr).map_err(|source| BindError { addr, source })
     }
 
     pub fn serve(self, app: Router, options: Http1Options) -> Server {
-        let (driver, delegated) = http1_driver(options);
-        serve_plaintext(self, app, options.connections, driver, delegated)
+        serve_plaintext(self, app, options.connections, http1_driver(options))
     }
 
     // template:begin grpc:http-bound-listener-tls
     pub fn serve_tls(self, app: Router, options: Http1Options, tls: TlsOptions) -> Server {
-        let (driver, delegated) = http1_driver(options);
-        serve_tls(self, app, options.connections, driver, delegated, tls)
+        serve_tls(self, app, options.connections, http1_driver(options), tls)
     }
 
     pub fn serve_h2(self, app: Router, options: Http2Options, tls: Option<TlsOptions>) -> Server {
-        let (driver, delegated) = http2_driver(options);
+        let driver = http2_driver(options);
         match tls {
-            Some(tls) => serve_tls(self, app, options.connections, driver, delegated, tls),
-            None => serve_plaintext(self, app, options.connections, driver, delegated),
+            Some(tls) => serve_tls(self, app, options.connections, driver, tls),
+            None => serve_plaintext(self, app, options.connections, driver),
         }
     }
     // template:end grpc:http-bound-listener-tls
@@ -240,14 +231,12 @@ fn serve_plaintext(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
-    delegated: ListenerExecutor,
 ) -> Server {
     serve_listener(
         bound,
         app,
         limits,
         driver,
-        delegated,
         TransportScheme::Http,
         |stream, _| async move { Some(stream) },
     )
@@ -259,7 +248,6 @@ fn serve_tls(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
-    delegated: ListenerExecutor,
     tls: TlsOptions,
 ) -> Server {
     let TlsOptions {
@@ -277,7 +265,6 @@ fn serve_tls(
         app,
         limits,
         driver,
-        delegated,
         TransportScheme::Https,
         move |stream, peer| accept_tls(acceptor, stream, peer, handshake_timeout, protocol),
     )
@@ -309,7 +296,7 @@ async fn accept_tls(
 }
 // template:end grpc:http-serve-tls
 
-fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
+fn listen(addr: SocketAddr) -> std::io::Result<BoundListener> {
     let socket = match addr {
         SocketAddr::V4(_) => TcpSocket::new_v4(),
         SocketAddr::V6(_) => TcpSocket::new_v6(),
@@ -317,7 +304,12 @@ fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
     #[cfg(not(windows))]
     socket.set_reuseaddr(true)?;
     socket.bind(addr)?;
-    socket.listen(LISTEN_BACKLOG)
+    let listener = socket.listen(LISTEN_BACKLOG)?;
+    let local_addr = listener.local_addr()?;
+    Ok(BoundListener {
+        listener,
+        local_addr,
+    })
 }
 
 fn configure_accepted(stream: &TcpStream) {
@@ -462,6 +454,7 @@ impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
 
 struct ConnectionDriver {
     builder: auto::Builder<ListenerExecutor>,
+    executor: ListenerExecutor,
     // template:begin grpc:http2-driver-preface-budget
     protocol: DriverProtocol,
     // template:end grpc:http2-driver-preface-budget
@@ -477,7 +470,7 @@ const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 // template:end grpc:http2-wire-limits
 
-fn http1_driver(options: Http1Options) -> (ConnectionDriver, ListenerExecutor) {
+fn http1_driver(options: Http1Options) -> ConnectionDriver {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
     builder
@@ -490,13 +483,13 @@ fn http1_driver(options: Http1Options) -> (ConnectionDriver, ListenerExecutor) {
                 .max(usize::from(HTTP1_MIN_READ_BUFFER_BYTES)),
         )
         .keep_alive(true);
-    let driver = ConnectionDriver {
+    ConnectionDriver {
         builder: builder.http1_only(),
+        executor,
         // template:begin grpc:http1-driver-no-preface
         protocol: DriverProtocol::Http1,
         // template:end grpc:http1-driver-no-preface
-    };
-    (driver, executor)
+    }
 }
 
 // template:begin grpc:http2-driver
@@ -529,7 +522,7 @@ impl DriverProtocol {
     }
 }
 
-fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
+fn http2_driver(options: Http2Options) -> ConnectionDriver {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
     builder
@@ -541,13 +534,13 @@ fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
         .initial_stream_window_size(HTTP2_STREAM_WINDOW)
         .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
-    let driver = ConnectionDriver {
+    ConnectionDriver {
         builder: builder.http2_only(),
+        executor,
         protocol: DriverProtocol::Http2 {
             preface_timeout: options.preface_timeout,
         },
-    };
-    (driver, executor)
+    }
 }
 
 fn observe_http2_preface<IO>(
@@ -570,9 +563,6 @@ where
     let mut notify = Some(notify);
     let mut remaining_bytes = HTTP2_CLIENT_PREFACE_BYTES;
     let io = tokio_util::io::InspectReader::new(io, move |bytes| {
-        if remaining_bytes == 0 {
-            return;
-        }
         remaining_bytes = remaining_bytes.saturating_sub(bytes.len());
         if remaining_bytes == 0
             && let Some(notify) = notify.take()
@@ -600,7 +590,6 @@ fn serve_listener<F, Fut, IO>(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
-    delegated: ListenerExecutor,
     scheme: TransportScheme,
     prepare_io: F,
 ) -> Server
@@ -615,28 +604,10 @@ where
         force: CancellationToken::new(),
     };
     let connections = TaskTracker::new();
-    metrics::describe_counter!(
-        CONNECTIONS_REFUSED_METRIC,
-        metrics::Unit::Count,
-        "Accepted connections closed without a response because the connection cap was reached."
-    );
-    if limits.max_connections.is_some() {
-        connections_refused_counter().increment(0);
-    }
-    let (accept_failure_tx, accept_failure) = watch::channel(None);
-    let accept_failure_guard = DropGuard::new(
-        (Arc::clone(&connection_shutdown.drain), accept_failure_tx),
-        |(drain, accept_failure_tx)| {
-            let observed = if std::thread::panicking() {
-                AcceptFailure::Panicked
-            } else if !drain.is_cancelled() {
-                AcceptFailure::Ended
-            } else {
-                return;
-            };
-            accept_failure_tx.send_replace(Some(observed));
-        },
-    );
+    describe_connections_refused(limits.max_connections.is_some());
+    let (accept_failure_guard, accept_failure) =
+        accept_failure_signal(Arc::clone(&connection_shutdown.drain));
+    let delegated = driver.executor.clone();
     let context = Arc::new(ConnectionContext {
         app,
         driver,
@@ -663,6 +634,39 @@ where
         connections,
         delegated,
     }
+}
+
+fn describe_connections_refused(capped: bool) {
+    metrics::describe_counter!(
+        CONNECTIONS_REFUSED_METRIC,
+        metrics::Unit::Count,
+        "Accepted connections closed without a response because the connection cap was reached."
+    );
+    if capped {
+        connections_refused_counter().increment(0);
+    }
+}
+
+type AcceptFailureReporter = (Arc<CancellationToken>, watch::Sender<Option<AcceptFailure>>);
+
+fn accept_failure_signal(
+    drain: Arc<CancellationToken>,
+) -> (
+    DropGuard<AcceptFailureReporter, impl FnOnce(AcceptFailureReporter)>,
+    watch::Receiver<Option<AcceptFailure>>,
+) {
+    let (accept_failure_tx, accept_failure) = watch::channel(None);
+    let guard = DropGuard::new((drain, accept_failure_tx), |(drain, accept_failure_tx)| {
+        let observed = if std::thread::panicking() {
+            AcceptFailure::Panicked
+        } else if !drain.is_cancelled() {
+            AcceptFailure::Ended
+        } else {
+            return;
+        };
+        accept_failure_tx.send_replace(Some(observed));
+    });
+    (guard, accept_failure)
 }
 
 async fn accept_loop<F, Fut, IO>(
@@ -721,7 +725,6 @@ async fn accept_loop<F, Fut, IO>(
             prepare_io.clone(),
         ));
     }
-    drop(listener);
 }
 
 fn accept_retry_delay(error: &std::io::Error) -> Option<Duration> {

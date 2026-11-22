@@ -74,11 +74,11 @@ impl EndpointKeyOwners {
             keys.previous.as_ref().map(key_fingerprint),
         ];
         for fingerprint in fingerprints.iter().flatten() {
-            if let Some(owner) = self.owners.get(fingerprint)
-                && owner.as_str() != endpoint
+            if let Some(existing_owner) = self.owners.get(fingerprint)
+                && existing_owner.as_str() != endpoint
             {
                 return Err(SharedEndpointKey {
-                    first: owner.as_str().to_owned(),
+                    first: existing_owner.as_str().to_owned(),
                     second: endpoint.to_owned(),
                 });
             }
@@ -128,40 +128,31 @@ impl KeyRing {
         body: &[u8],
     ) -> Result<String, ProtocolError> {
         let mut timestamp_buffer = NumBuffer::new();
-        let timestamp = timestamp.format_into(&mut timestamp_buffer).as_bytes();
-        let signatures = self.signatures_bytes(message_id, timestamp, body)?;
-        String::from_utf8(signatures).map_err(|_| ProtocolError::InvalidSignature)
+        let timestamp_bytes = timestamp.format_into(&mut timestamp_buffer).as_bytes();
+        self.signature_header(message_id, timestamp_bytes, body)
     }
 
-    fn signatures_bytes(
+    fn signature_header(
         &self,
         message_id: &[u8],
         timestamp: &[u8],
         body: &[u8],
-    ) -> Result<Vec<u8>, ProtocolError> {
+    ) -> Result<String, ProtocolError> {
         ensure_body_size(body)?;
         ensure_message_id(message_id)?;
-        let mut signatures = Vec::with_capacity(if self.previous.is_some() {
+        let mut header = String::with_capacity(if self.previous.is_some() {
             2 * SINGLE_SIGNATURE_BYTES + 1
         } else {
             SINGLE_SIGNATURE_BYTES
         });
         for key in self.keys() {
-            if !signatures.is_empty() {
-                signatures.push(b' ');
+            if !header.is_empty() {
+                header.push(' ');
             }
-            signatures.extend_from_slice(SIGNATURE_PREFIX.as_bytes());
-            let start = signatures.len();
-            signatures.resize(start + ENCODED_TAG_BYTES, 0);
-            let len = STANDARD
-                .encode_slice(
-                    tag(key, message_id, timestamp, body),
-                    &mut signatures[start..],
-                )
-                .map_err(|_| ProtocolError::InvalidSignature)?;
-            signatures.truncate(start + len);
+            header.push_str(SIGNATURE_PREFIX);
+            STANDARD.encode_string(tag(key, message_id, timestamp, body), &mut header);
         }
-        Ok(signatures)
+        Ok(header)
     }
 
     pub fn write_headers(
@@ -202,7 +193,7 @@ impl KeyRing {
     ) -> Result<(), ProtocolError> {
         let mut timestamp_buffer = NumBuffer::new();
         let timestamp_bytes = timestamp.format_into(&mut timestamp_buffer).as_bytes();
-        let signatures = self.signatures_bytes(message_id.as_ref(), timestamp_bytes, body)?;
+        let signatures = self.signature_header(message_id.as_ref(), timestamp_bytes, body)?;
         let id = into_id(message_id).map_err(|_| ProtocolError::InvalidMessageId)?;
         let timestamp = HeaderValue::from_bytes(timestamp_bytes)
             .map_err(|_| ProtocolError::InvalidTimestamp)?;
@@ -226,32 +217,37 @@ impl KeyRing {
         let timestamp_header = unambiguous_header(headers, &WEBHOOK_TIMESTAMP)?;
         let timestamp = parse_timestamp(timestamp_header)?;
         ensure_timestamp_window(timestamp, now)?;
-
-        let signatures = headers.get_all(&WEBHOOK_SIGNATURE);
-        let mut values = signatures.iter();
-        let first = values.next().ok_or(ProtocolError::MissingHeader)?;
         let mut timestamp_buffer = NumBuffer::new();
         let timestamp_bytes = match timestamp_header.as_bytes() {
             raw @ ([b'1'..=b'9', ..] | [b'0']) => raw,
             _ => timestamp.format_into(&mut timestamp_buffer).as_bytes(),
         };
+        self.verify_signatures(&headers.get_all(&WEBHOOK_SIGNATURE), |key| {
+            tag(key, message_id.as_bytes(), timestamp_bytes, body)
+        })?;
+        Ok(VerifiedMessage {
+            message_id: Bytes::copy_from_slice(message_id.as_bytes()),
+            timestamp,
+        })
+    }
+
+    fn verify_signatures(
+        &self,
+        signatures: &GetAll<'_, HeaderValue>,
+        tag_for: impl Fn(&SigningKey) -> hmac::Tag,
+    ) -> Result<(), ProtocolError> {
+        let mut values = signatures.iter();
+        let first = values.next().ok_or(ProtocolError::MissingHeader)?;
         let matched = if first.as_bytes().len() <= SINGLE_SIGNATURE_BYTES && values.next().is_none()
         {
             decode_v1_tag(first.as_bytes()).is_some_and(|candidate| {
                 self.keys().any(|key| {
-                    constant_time::verify_slices_are_equal(
-                        tag(key, message_id.as_bytes(), timestamp_bytes, body).as_ref(),
-                        &candidate,
-                    )
-                    .is_ok()
+                    constant_time::verify_slices_are_equal(tag_for(key).as_ref(), &candidate)
+                        .is_ok()
                 })
             })
         } else {
-            let verify_key = |key: &SigningKey| {
-                matches_v1_signature(&signatures, || {
-                    tag(key, message_id.as_bytes(), timestamp_bytes, body)
-                })
-            };
+            let verify_key = |key: &SigningKey| matches_v1_signature(signatures, || tag_for(key));
             match verify_key(&self.active) {
                 SignatureMatch::Matched => true,
                 SignatureMatch::Mismatched => self
@@ -261,13 +257,7 @@ impl KeyRing {
                 SignatureMatch::NoCandidates => false,
             }
         };
-        if matched {
-            return Ok(VerifiedMessage {
-                message_id: Bytes::copy_from_slice(message_id.as_bytes()),
-                timestamp,
-            });
-        }
-        Err(ProtocolError::InvalidSignature)
+        matched.then_some(()).ok_or(ProtocolError::InvalidSignature)
     }
 }
 

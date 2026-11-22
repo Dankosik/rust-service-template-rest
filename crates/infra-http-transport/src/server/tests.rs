@@ -269,13 +269,11 @@ async fn accept_panic_after_stop_is_still_observed() {
     let stop = Arc::new(std::sync::OnceLock::new());
     let marker = PanicOnClone(stop.clone());
     let listener = BoundListener::bind(loopback()).unwrap();
-    let (driver, delegated) = http1_driver(options());
     let server = serve_listener(
         listener,
         app(),
         options().connections,
-        driver,
-        delegated,
+        http1_driver(options()),
         TransportScheme::Http,
         move |stream, _| {
             let _ = &marker;
