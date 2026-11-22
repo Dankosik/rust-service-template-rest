@@ -603,10 +603,7 @@ impl TemporalWorkerInput {
     ) -> Result<TemporalWorkerConfig, ValidationErrors> {
         admit_with(|v| {
             let app = self.app.admit(build, v);
-            let raw_drain_timeout = self.http.drain_timeout();
-            let http_drain_timeout = (Duration::from_secs(1)..=Duration::from_mins(10))
-                .contains(&raw_drain_timeout)
-                .then_some(raw_drain_timeout);
+            let http_drain_timeout = self.http.valid_drain_timeout();
             let http = self.http.admit(shutdown_tail, v);
             self.health.validate(v);
             self.log.validate(v);

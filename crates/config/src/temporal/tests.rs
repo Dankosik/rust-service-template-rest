@@ -110,6 +110,37 @@ fn debug_output_redacts_secrets_paths_endpoint_and_proxy() {
     ] {
         assert!(!rendered.contains(sensitive), "{sensitive}: {rendered}");
     }
+    for marker in [
+        "api_key_file: false",
+        "client_cert_path: true",
+        "client_key_path: true",
+        "root_ca_path: true",
+    ] {
+        assert!(rendered.contains(marker), "{marker}: {rendered}");
+    }
+
+    let cfg_with_key_file = admit(
+        TemporalInput {
+            enabled: true,
+            endpoint: Some("https://private-temporal.example:7233".to_owned()),
+            api_key_file: Some(PathBuf::from("/run/secrets/temporal-api-key.txt")),
+            ..TemporalInput::default()
+        },
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let rendered_key_file = format!("{cfg_with_key_file:?}");
+    for sensitive in ["temporal-api-key.txt", "/run/secrets/"] {
+        assert!(
+            !rendered_key_file.contains(sensitive),
+            "{sensitive}: {rendered_key_file}"
+        );
+    }
+    assert!(
+        rendered_key_file.contains("api_key_file: true"),
+        "{rendered_key_file}"
+    );
 }
 
 #[test]
@@ -502,6 +533,78 @@ fn dynamic_mtls_rotation_requires_mtls_and_forbids_dns_lb_or_proxy() {
 }
 
 #[test]
+fn mtls_rotation_deserializes_snake_case_values_and_rejects_invalid() {
+    let static_cfg = load_env(&[
+        ("APP__TEMPORAL__ENABLED", "true"),
+        ("APP__TEMPORAL__ENDPOINT", "https://temporal.example:7233"),
+        (
+            "APP__TEMPORAL__CLIENT_CERT_PATH",
+            "/etc/temporal/client.crt",
+        ),
+        ("APP__TEMPORAL__CLIENT_KEY_PATH", "/etc/temporal/client.key"),
+        ("APP__TEMPORAL__MTLS_ROTATION", "static"),
+    ]);
+    assert_eq!(
+        static_cfg.temporal().unwrap().mtls_rotation(),
+        TemporalTlsRotation::Static
+    );
+
+    let dynamic_cfg = load_env(&[
+        ("APP__TEMPORAL__ENABLED", "true"),
+        ("APP__TEMPORAL__ENDPOINT", "https://temporal.example:7233"),
+        (
+            "APP__TEMPORAL__CLIENT_CERT_PATH",
+            "/etc/temporal/client.crt",
+        ),
+        ("APP__TEMPORAL__CLIENT_KEY_PATH", "/etc/temporal/client.key"),
+        ("APP__TEMPORAL__DNS_LOAD_BALANCING", "false"),
+        ("APP__TEMPORAL__MTLS_ROTATION", "dynamic"),
+    ]);
+    assert_eq!(
+        dynamic_cfg.temporal().unwrap().mtls_rotation(),
+        TemporalTlsRotation::Dynamic
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let toml_file = write(
+        &dir,
+        "mtls-dynamic.toml",
+        concat!(
+            "[temporal]\n",
+            "enabled = true\n",
+            "endpoint = \"https://temporal.example:7233\"\n",
+            "client_cert_path = \"/etc/temporal/client.crt\"\n",
+            "client_key_path = \"/etc/temporal/client.key\"\n",
+            "dns_load_balancing = false\n",
+            "mtls_rotation = \"dynamic\"\n",
+        ),
+    );
+    let toml_cfg = load_from(
+        &LoadOptions {
+            config: Some(toml_file),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap();
+    assert_eq!(
+        toml_cfg.temporal().unwrap().mtls_rotation(),
+        TemporalTlsRotation::Dynamic
+    );
+
+    for invalid in ["Dynamic", "Static", "rolling"] {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__TEMPORAL__MTLS_ROTATION", invalid)]),
+        )
+        .unwrap_err();
+        assert_matches!(err.0, ErrorKind::Deserialize(_), "{invalid:?}: {err}");
+    }
+}
+
+#[test]
 fn proxy_url_mutual_exclusion_and_blank_path_clearing() {
     let conflict = admit(
         TemporalInput {
@@ -730,6 +833,20 @@ fn duration_and_payload_bounds_and_keep_alive_ordering_are_enforced() {
     )
     .unwrap_err();
     assert!(equal_ka.names("temporal.keep_alive_timeout"), "{equal_ka}");
+
+    let greater_ka = admit(
+        TemporalInput {
+            keep_alive_interval: Duration::from_secs(30),
+            keep_alive_timeout: Duration::from_secs(31),
+            ..enabled_https_input()
+        },
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        greater_ka.names("temporal.keep_alive_timeout"),
+        "{greater_ka}"
+    );
 }
 
 #[test]

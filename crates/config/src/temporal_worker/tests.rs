@@ -200,6 +200,14 @@ fn nested_shutdown_budget_boundaries_are_enforced() {
             "{var}: {zero}"
         );
     }
+
+    let out_of_range_drain = load_with_tail(&[("APP__HTTP__DRAIN_TIMEOUT", "0s")]).unwrap_err();
+    let drain_errors = out_of_range_drain.validation_errors().unwrap();
+    assert!(drain_errors.names("http.drain_timeout"), "{drain_errors}");
+    assert!(
+        !drain_errors.names("temporal_worker.graceful_shutdown_period"),
+        "{drain_errors}"
+    );
 }
 
 #[test]
@@ -484,7 +492,69 @@ fn per_queue_sticky_cache_checks_effective_pollers_and_slots() {
 }
 
 #[test]
-fn tuner_bounds_mode_exclusions_and_activity_rate_limits_are_validated() {
+fn per_queue_cache_cap_and_activity_rate_limits_are_validated() {
+    for (var, val, key) in [
+        (
+            "APP__TEMPORAL_WORKER__QUEUES__ORDERS__MAX_CACHED_WORKFLOWS",
+            "100001",
+            "temporal_worker.queues.orders.max_cached_workflows",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "0",
+            "temporal_worker.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "-2.5",
+            "temporal_worker.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "NaN",
+            "temporal_worker.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "inf",
+            "temporal_worker.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "-inf",
+            "temporal_worker.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__QUEUES__ORDERS__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "0",
+            "temporal_worker.queues.orders.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__QUEUES__ORDERS__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "-2.5",
+            "temporal_worker.queues.orders.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__QUEUES__ORDERS__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "NaN",
+            "temporal_worker.queues.orders.max_worker_activities_per_second",
+        ),
+        (
+            "APP__TEMPORAL_WORKER__QUEUES__ORDERS__MAX_WORKER_ACTIVITIES_PER_SECOND",
+            "inf",
+            "temporal_worker.queues.orders.max_worker_activities_per_second",
+        ),
+    ] {
+        let err = load_with_tail(&[(var, val)]).unwrap_err();
+        assert!(
+            err.validation_errors().is_some_and(|e| e.names(key)),
+            "{var}={val}: {err}"
+        );
+    }
+}
+
+#[test]
+fn tuner_bounds_and_mode_exclusions_are_validated() {
     let ratio_bounds_ok = load_with_tail(&[
         ("APP__TEMPORAL_WORKER__TUNER__TARGET_MEMORY", "0.05"),
         ("APP__TEMPORAL_WORKER__TUNER__TARGET_CPU", "0.95"),
@@ -513,16 +583,6 @@ fn tuner_bounds_mode_exclusions_and_activity_rate_limits_are_validated() {
             "APP__TEMPORAL_WORKER__TUNER__TARGET_MEMORY",
             "NaN",
             "temporal_worker.tuner.target_memory",
-        ),
-        (
-            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
-            "0",
-            "temporal_worker.max_worker_activities_per_second",
-        ),
-        (
-            "APP__TEMPORAL_WORKER__MAX_WORKER_ACTIVITIES_PER_SECOND",
-            "-2.5",
-            "temporal_worker.max_worker_activities_per_second",
         ),
     ] {
         let err = load_with_tail(&[(var, val)]).unwrap_err();
@@ -631,6 +691,24 @@ fn deployment_defaults_and_worker_versioning_requirements_are_enforced() {
     assert!(
         errors.names("temporal_worker.deployment.build_id"),
         "{errors}"
+    );
+
+    let control_char_overrides = load_with_tail(&[
+        (
+            "APP__TEMPORAL_WORKER__DEPLOYMENT__DEPLOYMENT_NAME",
+            "orders\nprod",
+        ),
+        ("APP__TEMPORAL_WORKER__DEPLOYMENT__BUILD_ID", "1.2.3\tdev"),
+    ])
+    .unwrap_err();
+    let control_errors = control_char_overrides.validation_errors().unwrap();
+    assert!(
+        control_errors.names("temporal_worker.deployment.deployment_name"),
+        "{control_errors}"
+    );
+    assert!(
+        control_errors.names("temporal_worker.deployment.build_id"),
+        "{control_errors}"
     );
 }
 

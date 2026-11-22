@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use bytesize::ByteSize;
@@ -15,6 +16,8 @@ use crate::validate::{Rejected, ValidationError, Violations, duration_range, non
 
 const MAX_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024 * 1024;
+const GRACE_AND_DRAIN_RANGE: RangeInclusive<Duration> =
+    Duration::from_secs(1)..=Duration::from_mins(10);
 
 pub(crate) type HttpInput = HttpFields;
 
@@ -166,13 +169,16 @@ fn validate_grace_and_drain(
     tail: ShutdownTail,
     v: &mut Violations,
 ) -> Result<(), Rejected> {
-    let range = Duration::from_secs(1)..=Duration::from_mins(10);
     let grace = v.record(duration_range(
         "http.grace_period",
         grace_period,
-        range.clone(),
+        GRACE_AND_DRAIN_RANGE,
     ));
-    let drain = v.record(duration_range("http.drain_timeout", drain_timeout, range));
+    let drain = v.record(duration_range(
+        "http.drain_timeout",
+        drain_timeout,
+        GRACE_AND_DRAIN_RANGE,
+    ));
     grace.and(drain)?;
     if drain_timeout > grace_period {
         return Err(v.reject(ValidationError::new(
@@ -202,8 +208,10 @@ fn validate_grace_and_drain(
 impl<Propagation: Mode, const DEFAULT_GRACE_SECS: u64, const DEFAULT_DRAIN_SECS: u64>
     HttpFields<Propagation, DEFAULT_GRACE_SECS, DEFAULT_DRAIN_SECS>
 {
-    pub(crate) const fn drain_timeout(&self) -> Duration {
-        self.drain_timeout
+    pub(crate) fn valid_drain_timeout(&self) -> Option<Duration> {
+        GRACE_AND_DRAIN_RANGE
+            .contains(&self.drain_timeout)
+            .then_some(self.drain_timeout)
     }
 
     fn admit_listener(
