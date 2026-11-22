@@ -392,12 +392,16 @@
         "test/tests/outbound_http.rs"
       ]
     },
+    "hyper-rustls": {
+      "when": {"any": [{"outbound_http": "bounded"}, {"clickhouse": "http"}]},
+      "remove_when_unselected": []
+    },
     "service-test-tls": {
       "when": {"any": [{"service_auth": "jwt"}, {"outbound_auth": "oauth2-client-credentials"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "tls-fixtures": {
-      "when": {"any": [{"authn": "!none"}, {"outbound_http": "bounded"}, {"grpc": "enabled"}, {"cache": "redis"}, {"database": "postgres"}, {"object_storage": "s3"}]},
+      "when": {"any": [{"authn": "!none"}, {"outbound_http": "bounded"}, {"grpc": "enabled"}, {"cache": "redis"}, {"database": "postgres"}, {"object_storage": "s3"}, {"clickhouse": "http"}]},
       "remove_when_unselected": [
         "crates/tls-test-support/"
       ]
@@ -517,7 +521,7 @@
       "remove_when_unselected": []
     },
     "integration": {
-      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}]},
+      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}, {"clickhouse": "http"}]},
       "remove_when_unselected": [
         "env/docker-compose.yml",
         "scripts/integration.py",
@@ -574,8 +578,15 @@
       ]
     },
     "rustls": {
-      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}]},
+      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}, {"clickhouse": "http"}]},
       "remove_when_unselected": []
+    },
+    "clickhouse": {
+      "when": {"clickhouse": "http"},
+      "remove_when_unselected": [
+        "crates/infra-clickhouse/",
+        "env/clickhouse/"
+      ]
     },
     "cache": {
       "when": {"cache": "redis"},

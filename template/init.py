@@ -36,6 +36,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "inbound_webhooks": ("none", "standard-webhooks"),
     "cache": ("none", "redis"),
     "object_storage": ("none", "s3"),
+    "clickhouse": ("none", "http"),
     "service_auth": ("none", "jwt"),
     "agent_harness": harness.HARNESS_CHOICES,
 }
@@ -89,6 +90,7 @@ class InitInputs:
     inbound_webhooks: str = "none"
     cache: str = "none"
     object_storage: str = "none"
+    clickhouse: str = "none"
     service_auth: str = "none"
     agent_harness: str = "all"
 

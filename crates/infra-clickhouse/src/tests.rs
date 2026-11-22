@@ -1,0 +1,909 @@
+use std::net::SocketAddr;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use http::{Method, Request, Response, StatusCode};
+use http_body_util::{BodyExt as _, Full};
+use hyper::body::{Bytes, Incoming};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use operation_context::OperationContext;
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
+use tls_test_support::TlsMaterial;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+use crate::{
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions, ClientCertificate,
+    CloseOutcome, HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row,
+    StartError, UnknownOutcome, error,
+};
+
+fn base_options(url: String) -> ClickHouseOptions {
+    ClickHouseOptions {
+        url,
+        database: "app".to_owned(),
+        username: Some("app".to_owned()),
+        password: Some(SecretString::from("app")),
+        password_file: None,
+        root_ca_path: None,
+        client_certificate: None,
+        allow_plaintext: true,
+        allow_unauthenticated: false,
+        query_settings: QuerySettings::Client,
+        query_timeout: Duration::from_secs(5),
+        insert_timeout: Duration::from_secs(5),
+        max_concurrency: 32,
+        max_result_rows: 100_000,
+        max_result_bytes: 16 * 1024 * 1024,
+        http_response_buffer_size: 2 * 1024 * 1024,
+        max_memory_usage: Some(512 * 1024 * 1024),
+        propagate_trace_context: true,
+    }
+}
+
+fn encode_varuint(mut value: usize, out: &mut Vec<u8>) {
+    loop {
+        let mut byte = u8::try_from(value & 0x7f).expect("masked to 7 bits");
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn encode_ch_str(s: &str, out: &mut Vec<u8>) {
+    encode_varuint(s.len(), out);
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn rbwnat_u64_rows(col_name: &str, values: &[u64]) -> Bytes {
+    let mut out = Vec::new();
+    encode_varuint(1, &mut out);
+    encode_ch_str(col_name, &mut out);
+    encode_ch_str("UInt64", &mut out);
+    for &v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    Bytes::from(out)
+}
+
+fn rbwnat_describe_id_column() -> Bytes {
+    let mut out = Vec::new();
+    encode_varuint(7, &mut out);
+    for col in [
+        "name",
+        "type",
+        "default_type",
+        "default_expression",
+        "comment",
+        "codec_expression",
+        "ttl_expression",
+    ] {
+        encode_ch_str(col, &mut out);
+    }
+    for _ in 0..7 {
+        encode_ch_str("String", &mut out);
+    }
+    encode_ch_str("id", &mut out);
+    encode_ch_str("UInt64", &mut out);
+    for _ in 0..5 {
+        encode_ch_str("", &mut out);
+    }
+    Bytes::from(out)
+}
+
+#[derive(Clone, Debug)]
+struct CapturedRequest {
+    method: Method,
+    uri: String,
+    content_type: Option<String>,
+    body: Bytes,
+}
+
+#[derive(Debug, Deserialize, Serialize, Row)]
+#[clickhouse(crate = "crate::__clickhouse")]
+struct SampleRow {
+    id: u64,
+}
+
+async fn spawn_http_capture_server(
+    captured: Arc<Mutex<Vec<CapturedRequest>>>,
+) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let captured_conn = Arc::clone(&captured);
+            tokio::spawn(serve_capture_conn(stream, captured_conn));
+        }
+    });
+    (addr, handle)
+}
+
+async fn serve_capture_conn(stream: TcpStream, captured: Arc<Mutex<Vec<CapturedRequest>>>) {
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let captured_req = Arc::clone(&captured);
+        async move {
+            let method = req.method().clone();
+            let uri = req.uri().to_string();
+            let content_type = req
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let body = req
+                .into_body()
+                .collect()
+                .await
+                .expect("collect body")
+                .to_bytes();
+            let body_text = String::from_utf8_lossy(&body);
+            let resp_body = if body_text.contains("two_rows") {
+                rbwnat_u64_rows("id", &[10, 20])
+            } else {
+                rbwnat_u64_rows("id", &[42])
+            };
+            captured_req.lock().await.push(CapturedRequest {
+                method,
+                uri,
+                content_type,
+                body,
+            });
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(
+                        "X-ClickHouse-Summary",
+                        r#"{"read_rows":"1","read_bytes":"8"}"#,
+                    )
+                    .body(Full::new(resp_body))
+                    .expect("build response"),
+            )
+        }
+    });
+    let _ = http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), svc)
+        .await;
+}
+
+#[tokio::test]
+async fn a4_1_and_a4_3_compile_and_send_futures() {
+    fn assert_send<F: Future + Send>(_: &F) {}
+
+    let client = ClickHouse::start(base_options("http://127.0.0.1:8123".to_owned()))
+        .await
+        .expect("start plaintext dev client");
+    assert_eq!(HISTOGRAMS[0].0, "clickhouse_operation_duration_seconds");
+    assert_eq!(HISTOGRAMS[0].1.len(), 12);
+
+    let ctx = OperationContext::unbounded();
+    let rows = [SampleRow { id: 1 }];
+    let batch_fut = client.insert_batch(
+        &ctx,
+        "batch_smoke",
+        "events",
+        &rows,
+        BatchInsertOptions::new(),
+    );
+    assert_send(&batch_fut);
+    let async_fut = client.insert_async(
+        &ctx,
+        "async_smoke",
+        "events",
+        &rows,
+        AsyncInsertOptions::new(),
+    );
+    assert_send(&async_fut);
+    let read_fut = client
+        .query("read_smoke", "SELECT 1")
+        .fetch_one::<SampleRow>(&ctx);
+    assert_send(&read_fut);
+
+    assert_eq!(
+        client.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test]
+async fn a4_4_and_a4_6_cursor_metrics_bounds_and_multipart_params() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, server) = spawn_http_capture_server(Arc::clone(&captured)).await;
+
+    let ch = ClickHouse::start(base_options(format!("http://{addr}")))
+        .await
+        .expect("start");
+    let ctx = OperationContext::with_timeout(Duration::from_secs(2));
+
+    let secret_str = "super-secret-param-value";
+    let uid = uuid::Uuid::new_v4();
+    let date = time::Date::from_calendar_date(2026, time::Month::March, 15).expect("date");
+    let dt = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("dt");
+    let slice_items: &[&str] = &["alpha", "beta"];
+
+    let row = ch
+        .query("param_probe", "SELECT id FROM t WHERE s = {s:String}")
+        .param("s", secret_str)
+        .param("flag", true)
+        .param("num", 7_i64)
+        .param("flt", 1.5_f64)
+        .param("uid", uid)
+        .param("d", date)
+        .param("dt", dt)
+        .param("opt", Option::<u32>::None)
+        .param("arr", slice_items)
+        .param("vec", vec![1_i32, 2_i32])
+        .fetch_one::<SampleRow>(&ctx)
+        .await
+        .expect("fetch_one");
+    assert_eq!(row.id, 42);
+
+    let reqs = captured.lock().await;
+    assert_eq!(reqs.len(), 1);
+    let req = &reqs[0];
+    assert_eq!(req.method, Method::POST);
+    assert!(
+        !req.uri.contains("param_")
+            && !req.uri.contains(secret_str)
+            && !req.uri.contains(&uid.to_string()),
+        "URI leaked bound parameters: {}",
+        req.uri
+    );
+    assert!(
+        req.uri.contains("wait_end_of_query=1"),
+        "missing wait_end_of_query: {}",
+        req.uri
+    );
+    assert!(
+        req.uri.contains("buffer_size="),
+        "missing buffer_size: {}",
+        req.uri
+    );
+    assert!(
+        req.uri.contains("query_id="),
+        "missing query_id: {}",
+        req.uri
+    );
+    let ct = req.content_type.as_deref().unwrap_or("");
+    assert!(
+        ct.starts_with("multipart/form-data; boundary="),
+        "unexpected content-type: {ct}"
+    );
+    let body_text = String::from_utf8_lossy(&req.body);
+    assert!(body_text.contains("name=\"param_s\""));
+    assert!(body_text.contains(secret_str));
+    assert!(body_text.contains(&uid.to_string()));
+    assert!(body_text.contains("2026-03-15"));
+    assert!(body_text.contains("['alpha','beta']"));
+    drop(reqs);
+
+    let err = ch
+        .query("row_limit_probe", "SELECT two_rows")
+        .max_result_rows(NonZeroU64::new(1).expect("nz"))
+        .fetch_all::<SampleRow>(&ctx)
+        .await
+        .expect_err("2 rows with limit 1 must fail");
+    assert_eq!(err, QueryError::TooLarge);
+
+    let err_bytes = ch
+        .query("byte_limit_probe", "SELECT two_rows")
+        .max_result_bytes(NonZeroUsize::new(10).expect("nz"))
+        .fetch_all::<SampleRow>(&ctx)
+        .await
+        .expect_err("byte limit must fail");
+    assert_eq!(err_bytes, QueryError::TooLarge);
+
+    let raw_client = clickhouse::Client::default().with_url(format!("http://{addr}"));
+    let mut cursor = raw_client
+        .query("SELECT id")
+        .fetch::<SampleRow>()
+        .expect("cursor");
+    assert!(cursor.next().await.expect("row").is_some());
+    assert_eq!(cursor.returned_rows(), 1);
+    assert!(cursor.decoded_bytes() > 0);
+    let summary = cursor.summary().expect("summary header");
+    assert_eq!(summary.read_rows(), Some(1));
+
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    server.abort();
+}
+
+async fn serve_metadata_conn(stream: TcpStream, describe_calls: Arc<Mutex<Vec<String>>>) {
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let describe_req = Arc::clone(&describe_calls);
+        async move {
+            let uri = req.uri().to_string();
+            let body = req.into_body().collect().await.expect("body").to_bytes();
+            let body_str = String::from_utf8_lossy(&body);
+            if uri.contains("DESCRIBE") || body_str.contains("DESCRIBE") {
+                describe_req.lock().await.push(uri);
+                return Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(rbwnat_describe_id_column()))
+                        .expect("resp"),
+                );
+            }
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::new()))
+                    .expect("resp"),
+            )
+        }
+    });
+    let _ = http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), svc)
+        .await;
+}
+
+#[tokio::test]
+async fn a4_5_with_database_isolates_metadata_while_with_password_and_header_preserve_cache_and_pool()
+ {
+    let tcp_accepts = Arc::new(AtomicUsize::new(0));
+    let describe_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let tcp_accepts_srv = Arc::clone(&tcp_accepts);
+    let describe_srv = Arc::clone(&describe_calls);
+
+    let server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tcp_accepts_srv.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(serve_metadata_conn(stream, Arc::clone(&describe_srv)));
+        }
+    });
+
+    let hyper_client = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+        .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build(HttpConnector::new());
+    let base =
+        clickhouse::Client::with_http_client(hyper_client).with_url(format!("http://{addr}"));
+    let client_a = base.clone().with_database("db_a");
+    let client_b = base.clone().with_database("db_b");
+
+    let mut ins = client_a
+        .insert::<SampleRow>("events")
+        .await
+        .expect("ins a1");
+    ins.write(&SampleRow { id: 1 }).await.expect("w");
+    ins.end().await.expect("e");
+
+    let client_a_rotated = client_a
+        .clone()
+        .with_password("new_pw")
+        .with_header("X-Rotation", "2");
+    let mut ins2 = client_a_rotated
+        .insert::<SampleRow>("events")
+        .await
+        .expect("ins a2");
+    ins2.write(&SampleRow { id: 2 }).await.expect("w");
+    ins2.end().await.expect("e");
+
+    let mut ins3 = client_b
+        .insert::<SampleRow>("events")
+        .await
+        .expect("ins b1");
+    ins3.write(&SampleRow { id: 3 }).await.expect("w");
+    ins3.end().await.expect("e");
+
+    let describes = describe_calls.lock().await;
+    assert_eq!(
+        describes.len(),
+        2,
+        "expected 1 DESCRIBE per db, got: {describes:?}"
+    );
+    assert!(describes[0].contains("database=db_a"));
+    assert!(describes[1].contains("database=db_b"));
+    assert_eq!(
+        tcp_accepts.load(Ordering::SeqCst),
+        1,
+        "expected connection pool reuse across with_password/with_header/with_database"
+    );
+
+    server.abort();
+}
+
+fn bad_response_for_query(body_str: &str) -> (StatusCode, &'static str) {
+    if body_str.contains("ch_500_158") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Code: 158. DB::Exception: limit exceeded",
+        );
+    }
+    if body_str.contains("empty_400") {
+        return (StatusCode::BAD_REQUEST, "");
+    }
+    if body_str.contains("prose_400") {
+        return (StatusCode::BAD_REQUEST, "400 rows written");
+    }
+    if body_str.contains("empty_401") {
+        return (StatusCode::UNAUTHORIZED, "");
+    }
+    if body_str.contains("prose_401") {
+        return (StatusCode::UNAUTHORIZED, "401 custom text");
+    }
+    if body_str.contains("body_401") {
+        return (StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    if body_str.contains("empty_403") {
+        return (StatusCode::FORBIDDEN, "");
+    }
+    if body_str.contains("empty_413") {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "");
+    }
+    if body_str.contains("body_413") {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "request entity too large");
+    }
+    (StatusCode::INTERNAL_SERVER_ERROR, "")
+}
+
+async fn spawn_bad_response_server() -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind bad");
+    let addr = listener.local_addr().expect("bad addr");
+    let handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let svc = service_fn(|req: Request<Incoming>| async move {
+                    let body = req.into_body().collect().await.expect("body").to_bytes();
+                    let body_str = String::from_utf8_lossy(&body);
+                    let (status, resp_body) = bad_response_for_query(&body_str);
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(status)
+                            .body(Full::new(Bytes::from_static(resp_body.as_bytes())))
+                            .expect("resp"),
+                    )
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), svc)
+                    .await;
+            });
+        }
+    });
+    (addr, handle)
+}
+
+#[tokio::test]
+async fn a4_7_error_network_is_connect_and_bad_response_probes() {
+    let closed_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let closed_addr = closed_listener.local_addr().expect("addr");
+    drop(closed_listener);
+
+    let raw_closed = clickhouse::Client::default().with_url(format!("http://{closed_addr}"));
+    let err = raw_closed
+        .query("SELECT 1")
+        .fetch_one::<u64>()
+        .await
+        .expect_err("connect refused");
+    assert!(matches!(err, clickhouse::error::Error::Network(_)));
+    assert!(error::is_hyper_connect_error(&err));
+
+    let tls_material = TlsMaterial::new("localhost");
+    let tls_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tls");
+    let tls_addr = tls_listener.local_addr().expect("tls addr");
+    let acceptor = tls_material.acceptor();
+    let tls_srv = tokio::spawn(async move {
+        if let Ok((tcp, _)) = tls_listener.accept().await {
+            let _ = acceptor.accept(tcp).await;
+        }
+    });
+
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let tls_cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls_cfg)
+        .https_only()
+        .enable_http1()
+        .wrap_connector(http);
+    let hyper_tls =
+        hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector);
+    let raw_tls = clickhouse::Client::with_http_client(hyper_tls)
+        .with_url(format!("https://127.0.0.1:{}", tls_addr.port()));
+    let tls_err = raw_tls
+        .query("SELECT 1")
+        .fetch_one::<u64>()
+        .await
+        .expect_err("untrusted cert handshake fail");
+    assert!(matches!(tls_err, clickhouse::error::Error::Network(_)));
+    assert!(error::is_hyper_connect_error(&tls_err));
+    tls_srv.abort();
+}
+
+#[tokio::test]
+async fn a4_7_bad_response_loopback_probes() {
+    let (bad_addr, bad_srv) = spawn_bad_response_server().await;
+    let bad_client = clickhouse::Client::default().with_url(format!("http://{bad_addr}"));
+
+    let err_158 = bad_client
+        .query("SELECT ch_500_158")
+        .fetch_one::<u64>()
+        .await
+        .expect_err("158");
+    assert!(
+        matches!(&err_158, clickhouse::error::Error::BadResponse(s) if s.starts_with("Code: 158"))
+    );
+    assert_eq!(error::classify_query_error(&err_158), QueryError::TooLarge);
+
+    let loopback_cases = [
+        (
+            "SELECT empty_400",
+            "400 Bad Request",
+            QueryError::Rejected,
+            InsertFailure::Rejected,
+            InsertError::NotApplied(InsertFailure::Rejected),
+        ),
+        (
+            "SELECT empty_401",
+            "401 Unauthorized",
+            QueryError::Rejected,
+            InsertFailure::Rejected,
+            InsertError::NotApplied(InsertFailure::Rejected),
+        ),
+        (
+            "SELECT empty_403",
+            "403 Forbidden",
+            QueryError::Rejected,
+            InsertFailure::Rejected,
+            InsertError::NotApplied(InsertFailure::Rejected),
+        ),
+        (
+            "SELECT empty_413",
+            "413 Payload Too Large",
+            QueryError::Unavailable,
+            InsertFailure::Unavailable,
+            InsertError::NotApplied(InsertFailure::TooLarge),
+        ),
+        (
+            "SELECT prose_400",
+            "400 rows written",
+            QueryError::Unavailable,
+            InsertFailure::Unavailable,
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+        ),
+        (
+            "SELECT prose_401",
+            "401 custom text",
+            QueryError::Unavailable,
+            InsertFailure::Unavailable,
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+        ),
+        (
+            "SELECT body_401",
+            "unauthorized",
+            QueryError::Unavailable,
+            InsertFailure::Unavailable,
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+        ),
+        (
+            "SELECT body_413",
+            "request entity too large",
+            QueryError::Unavailable,
+            InsertFailure::Unavailable,
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+        ),
+    ];
+
+    for (sql, expected_reason, expected_query, expected_metadata, expected_insert) in loopback_cases
+    {
+        let err = bad_client
+            .query(sql)
+            .fetch_one::<u64>()
+            .await
+            .expect_err(sql);
+        assert!(
+            matches!(&err, clickhouse::error::Error::BadResponse(s) if s == expected_reason),
+            "sql={sql}: expected BadResponse({expected_reason:?}), got {err:?}"
+        );
+        assert_eq!(error::classify_query_error(&err), expected_query, "{sql}");
+        assert_eq!(
+            error::classify_metadata_error(&err),
+            expected_metadata,
+            "{sql}"
+        );
+        assert_eq!(
+            error::classify_post_dispatch_insert_error(&err),
+            expected_insert,
+            "{sql}"
+        );
+    }
+
+    bad_srv.abort();
+}
+
+#[test]
+fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
+    let canonical_cases = [
+        (
+            "400 Bad Request",
+            Some(400),
+            QueryError::Rejected,
+            InsertFailure::Rejected,
+            InsertError::NotApplied(InsertFailure::Rejected),
+        ),
+        (
+            "401 Unauthorized",
+            Some(401),
+            QueryError::Rejected,
+            InsertFailure::Rejected,
+            InsertError::NotApplied(InsertFailure::Rejected),
+        ),
+        (
+            "403 Forbidden",
+            Some(403),
+            QueryError::Rejected,
+            InsertFailure::Rejected,
+            InsertError::NotApplied(InsertFailure::Rejected),
+        ),
+        (
+            "413 Payload Too Large",
+            Some(413),
+            QueryError::Unavailable,
+            InsertFailure::Unavailable,
+            InsertError::NotApplied(InsertFailure::TooLarge),
+        ),
+    ];
+
+    for (reason, expected_status, expected_query, expected_metadata, expected_insert) in
+        canonical_cases
+    {
+        assert_eq!(
+            error::extract_http_status_from_bad_response(reason),
+            expected_status,
+            "{reason}"
+        );
+        let ch_err = clickhouse::error::Error::BadResponse(reason.to_owned());
+        assert_eq!(
+            error::classify_query_error(&ch_err),
+            expected_query,
+            "{reason}"
+        );
+        assert_eq!(
+            error::classify_metadata_error(&ch_err),
+            expected_metadata,
+            "{reason}"
+        );
+        assert_eq!(
+            error::classify_post_dispatch_insert_error(&ch_err),
+            expected_insert,
+            "{reason}"
+        );
+    }
+
+    for prose in [
+        "400 rows written",
+        "401 custom text",
+        "403 proxy denied",
+        "413 request entity too large",
+        "400 Bad Request extra",
+        " 400 Bad Request",
+        "404 Not Found",
+        "500 Internal Server Error",
+        "unauthorized",
+        "request entity too large",
+    ] {
+        assert_eq!(
+            error::extract_http_status_from_bad_response(prose),
+            None,
+            "{prose}"
+        );
+        let ch_err = clickhouse::error::Error::BadResponse(prose.to_owned());
+        assert_eq!(
+            error::classify_query_error(&ch_err),
+            QueryError::Unavailable,
+            "{prose}"
+        );
+        assert_eq!(
+            error::classify_metadata_error(&ch_err),
+            InsertFailure::Unavailable,
+            "{prose}"
+        );
+        assert_eq!(
+            error::classify_post_dispatch_insert_error(&ch_err),
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+            "{prose}"
+        );
+    }
+}
+
+async fn handle_raw_insert_capture_conn(
+    mut stream: TcpStream,
+    received_inserts: Arc<Mutex<Vec<Vec<u8>>>>,
+) {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let mut describe_handled = false;
+    loop {
+        let read_res =
+            tokio::time::timeout(Duration::from_millis(200), stream.read(&mut tmp)).await;
+        let Ok(Ok(n)) = read_res else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if !describe_handled
+            && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            && String::from_utf8_lossy(&buf).contains("DESCRIBE TABLE")
+        {
+            let head_str = String::from_utf8_lossy(&buf[..pos]);
+            let content_len = head_str
+                .lines()
+                .find_map(|line| {
+                    let (k, v) = line.split_once(':')?;
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if buf.len() >= pos + 4 + content_len {
+                let resp_body = rbwnat_describe_id_column();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                    resp_body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&resp_body).await;
+                let _ = stream.flush().await;
+                buf.drain(..pos + 4 + content_len);
+                describe_handled = true;
+            }
+        }
+    }
+    if !buf.is_empty() {
+        received_inserts.lock().await.push(buf);
+    }
+}
+
+#[tokio::test]
+async fn a4_8_idx_zero_serialization_error_wire_capture() {
+    #[derive(Row)]
+    #[clickhouse(crate = "crate::__clickhouse")]
+    struct FailRow {
+        id: u64,
+    }
+
+    impl Serialize for FailRow {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(format!("boom {}", self.id)))
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let received_inserts = Arc::new(Mutex::new(Vec::new()));
+    let received_srv = Arc::clone(&received_inserts);
+
+    let srv = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(handle_raw_insert_capture_conn(
+                stream,
+                Arc::clone(&received_srv),
+            ));
+        }
+    });
+
+    let ch = ClickHouse::start(base_options(format!("http://{addr}")))
+        .await
+        .expect("start");
+    let ctx = OperationContext::unbounded();
+    let err = ch
+        .insert_batch(
+            &ctx,
+            "fail_idx0",
+            "events",
+            &[FailRow { id: 1 }],
+            BatchInsertOptions::new(),
+        )
+        .await
+        .expect_err("idx 0 serialize must fail");
+    assert_eq!(err, InsertError::NotApplied(InsertFailure::Encode));
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    drop(ch);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let inserts = received_inserts.lock().await;
+    assert!(
+        inserts.len() <= 1,
+        "expected at most 1 INSERT HTTP connection, got {}",
+        inserts.len()
+    );
+    for raw in inserts.iter() {
+        let text = String::from_utf8_lossy(raw);
+        let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+            panic!("expected complete HTTP headers or empty stream, got: {text}");
+        };
+        let body = &raw[pos + 4..];
+        assert!(
+            body.is_empty(),
+            "expected 0 HTTP body bytes on idx==0 serialize failure, got {} bytes: {:?}",
+            body.len(),
+            body
+        );
+    }
+    srv.abort();
+}
+
+#[tokio::test]
+async fn start_admission_rejects_bad_urls_secrets_and_allows_mtls() {
+    let err_plain = ClickHouse::start(ClickHouseOptions {
+        allow_plaintext: false,
+        ..base_options("http://127.0.0.1:8123".to_owned())
+    })
+    .await
+    .expect_err("plaintext refused");
+    assert!(matches!(err_plain, StartError(_)));
+
+    let err_userinfo =
+        ClickHouse::start(base_options("https://user:pass@127.0.0.1:8123".to_owned()))
+            .await
+            .expect_err("userinfo refused");
+    assert!(matches!(err_userinfo, StartError(_)));
+
+    let err_dotseg = ClickHouse::start(base_options("https://127.0.0.1:8123/a/../b".to_owned()))
+        .await
+        .expect_err("dot segment refused");
+    assert!(matches!(err_dotseg, StartError(_)));
+
+    let tls = TlsMaterial::new("localhost");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca_path = dir.path().join("ca.pem");
+    let cert_path = dir.path().join("client.pem");
+    let key_path = dir.path().join("client.key");
+    let pw_path = dir.path().join("password");
+    tokio::fs::write(&ca_path, &tls.root_pem)
+        .await
+        .expect("write ca");
+    tokio::fs::write(&cert_path, &tls.cert_pem)
+        .await
+        .expect("write cert");
+    tokio::fs::write(&key_path, &tls.key_pem)
+        .await
+        .expect("write key");
+    tokio::fs::write(&pw_path, "pw-from-file\n")
+        .await
+        .expect("write pw");
+
+    let mut opts = base_options("https://localhost:8443/prefix/".to_owned());
+    opts.allow_plaintext = false;
+    opts.password = None;
+    opts.password_file = Some(pw_path);
+    opts.root_ca_path = Some(ca_path);
+    opts.client_certificate = Some(ClientCertificate {
+        cert_path,
+        key_path,
+    });
+
+    let ch = ClickHouse::start(opts)
+        .await
+        .expect("mtls + password_file start");
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}

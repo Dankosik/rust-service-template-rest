@@ -24,6 +24,7 @@
         "members": [
           "crates/infra-bearerauthn/Cargo.toml",
           "crates/infra-cache/Cargo.toml",
+          "crates/infra-clickhouse/Cargo.toml",
           "crates/infra-grpc/Cargo.toml",
           "crates/infra-http/Cargo.toml",
           "crates/infra-jobs/Cargo.toml",
@@ -39,6 +40,7 @@
     "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
     "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
     "crates/infra-cache/Cargo.toml": {"role": "cache"},
+    "crates/infra-clickhouse/Cargo.toml": {"role": "feature-provider"},
     "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
     "crates/infra-grpc-core/Cargo.toml": {"role": "grpc-core"},
     "crates/infra-http/Cargo.toml": {"role": "http"},
@@ -116,6 +118,10 @@
         },
         "crates/infra-object-storage/Cargo.toml": {
           "reason": "Features own keys and policy for object operations and presigned GET.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-clickhouse/Cargo.toml": {
+          "reason": "Features own analytical queries, row schemas, and batch/async insert calls.",
           "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
