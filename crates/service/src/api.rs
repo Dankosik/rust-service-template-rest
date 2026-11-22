@@ -68,6 +68,8 @@ pub fn contract() -> Result<HttpContract<AppState>, ContractError> {
     #[cfg(test)]
     let contract = contract.merge(crate::bootstrap::outbound_tests::route()?)?;
     // template:end outbound-auth:service-api-outbound-test-route
+    #[cfg(test)]
+    let contract = contract.merge(crate::bootstrap::temporal::test_route()?)?;
     Ok(contract.with_probes("/")?)
 }
 

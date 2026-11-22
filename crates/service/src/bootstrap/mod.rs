@@ -27,6 +27,7 @@ mod service_auth;
 mod shutdown;
 mod signals;
 mod telemetry;
+pub(crate) mod temporal;
 // template:begin inbound-webhooks:bootstrap-webhooks-module
 mod inbound_webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
@@ -89,6 +90,8 @@ pub(crate) enum BootstrapError {
     #[error("object storage configuration: {0}")]
     ObjectStorage(#[from] infra_object_storage::ConfigError),
     // template:end object-storage:service-bootstrap-object-storage-errors
+    #[error("temporal startup: {0}")]
+    Temporal(#[from] infra_temporal::ConnectError),
     #[error("startup admission: {0}")]
     Admission(#[from] health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -477,6 +480,16 @@ async fn start(
         .map(object_storage::open)
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
+    let temporal = if let Some(settings) = config.temporal() {
+        let connection =
+            temporal::open(settings, config, background, &mut dependencies.temporal).await?;
+        if settings.readiness_critical() {
+            probes.push(BoxedProbe::new(connection.probe()));
+        }
+        Some(connection.client())
+    } else {
+        None
+    };
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
     let webhook_state = inbound_webhooks::prepare(config, postgres_pool.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
@@ -506,6 +519,7 @@ async fn start(
         // template:begin service-auth:bootstrap-service-auth-route-state
         service_tokens: service_auth.tokens,
         // template:end service-auth:bootstrap-service-auth-route-state
+        temporal,
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start

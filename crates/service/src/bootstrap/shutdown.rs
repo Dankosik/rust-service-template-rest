@@ -15,6 +15,7 @@ use infra_postgres::{CloseOutcome, PoolStartup};
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
+use infra_temporal::TemporalStartup;
 use service_config::{HttpConfig, ShutdownTail};
 use tokio::time::Instant;
 
@@ -106,6 +107,7 @@ pub(crate) struct Dependencies {
     // template:begin object-storage:service-shutdown-dependencies-object-storage-field
     pub(crate) object_storage: Option<ObjectStorage>,
     // template:end object-storage:service-shutdown-dependencies-object-storage-field
+    pub(crate) temporal: Option<TemporalStartup>,
 }
 
 impl Dependencies {
@@ -124,6 +126,7 @@ impl Dependencies {
             // template:begin object-storage:service-shutdown-dependencies-object-storage-destructure
             object_storage,
             // template:end object-storage:service-shutdown-dependencies-object-storage-destructure
+            temporal,
         } = self;
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
@@ -168,8 +171,24 @@ impl Dependencies {
             // template:end postgres:shutdown-dependencies-postgres-close
             Outcome::Graceful
         };
-        let (cache_outcome, postgres_outcome) = tokio::join!(cache_close, postgres_close);
-        cache_outcome.max(postgres_outcome)
+        let temporal_close = async {
+            if let Some(temporal) = temporal {
+                return match temporal.close(deadline).await {
+                    infra_temporal::CloseOutcome::Complete => {
+                        tracing::info!("temporal_closed");
+                        Outcome::Graceful
+                    }
+                    infra_temporal::CloseOutcome::TimedOut => {
+                        tracing::warn!("temporal outlived its close budget");
+                        Outcome::Degraded
+                    }
+                };
+            }
+            Outcome::Graceful
+        };
+        let (cache_outcome, postgres_outcome, temporal_outcome) =
+            tokio::join!(cache_close, postgres_close, temporal_close);
+        cache_outcome.max(postgres_outcome).max(temporal_outcome)
     }
 }
 

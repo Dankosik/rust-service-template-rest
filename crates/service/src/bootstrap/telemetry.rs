@@ -4,31 +4,34 @@ use service_config::{Config, TracesSampler};
 use super::BootstrapError;
 
 pub(super) fn install_metrics() -> Result<Metrics, BootstrapError> {
-    Ok(Metrics::install(
-        &[
-            infra_http::HISTOGRAMS,
-            // template:begin authn:bootstrap-authn-histograms
-            infra_bearerauthn::HISTOGRAMS,
-            // template:end authn:bootstrap-authn-histograms
-            // template:begin postgres:bootstrap-postgres-histograms
-            infra_postgres::HISTOGRAMS,
-            // template:end postgres:bootstrap-postgres-histograms
-            // template:begin outbound-http:service-bootstrap-outbound-histogram
-            infra_outbound_http::HISTOGRAMS,
-            // template:end outbound-http:service-bootstrap-outbound-histogram
-            // template:begin grpc:bootstrap-grpc-histograms
-            infra_grpc::HISTOGRAMS,
-            infra_outbound_grpc::HISTOGRAMS,
-            // template:end grpc:bootstrap-grpc-histograms
-            // template:begin cache:service-bootstrap-cache-histogram
-            infra_cache::HISTOGRAMS,
-            // template:end cache:service-bootstrap-cache-histogram
-            // template:begin object-storage:service-bootstrap-object-storage-histogram
-            infra_object_storage::HISTOGRAMS,
-            // template:end object-storage:service-bootstrap-object-storage-histogram
-        ]
-        .concat(),
-    )?)
+    Ok(Metrics::install(&histogram_specs())?)
+}
+
+fn histogram_specs() -> Vec<(&'static str, &'static [f64])> {
+    [
+        infra_http::HISTOGRAMS,
+        // template:begin authn:bootstrap-authn-histograms
+        infra_bearerauthn::HISTOGRAMS,
+        // template:end authn:bootstrap-authn-histograms
+        // template:begin postgres:bootstrap-postgres-histograms
+        infra_postgres::HISTOGRAMS,
+        // template:end postgres:bootstrap-postgres-histograms
+        // template:begin outbound-http:service-bootstrap-outbound-histogram
+        infra_outbound_http::HISTOGRAMS,
+        // template:end outbound-http:service-bootstrap-outbound-histogram
+        // template:begin grpc:bootstrap-grpc-histograms
+        infra_grpc::HISTOGRAMS,
+        infra_outbound_grpc::HISTOGRAMS,
+        // template:end grpc:bootstrap-grpc-histograms
+        // template:begin cache:service-bootstrap-cache-histogram
+        infra_cache::HISTOGRAMS,
+        // template:end cache:service-bootstrap-cache-histogram
+        // template:begin object-storage:service-bootstrap-object-storage-histogram
+        infra_object_storage::HISTOGRAMS,
+        // template:end object-storage:service-bootstrap-object-storage-histogram
+        infra_temporal::HISTOGRAMS,
+    ]
+    .concat()
 }
 
 pub(super) fn tracing_options(config: &Config) -> TracingOptions<'_> {
@@ -71,6 +74,7 @@ pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         // template:begin service-auth:bootstrap-startup-log-service-auth
         service_auth.mode = config.service_auth().mode(),
         // template:end service-auth:bootstrap-startup-log-service-auth
+        temporal.enabled = config.temporal().is_some(),
         tracing.exporter = exporter.as_str(),
         "service_starting"
     );
@@ -98,5 +102,16 @@ mod tests {
         let options = tracing_options(&config);
         std::assert_matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn install_metrics_registers_every_temporal_histogram_bucket_set() {
+        let specs = histogram_specs();
+        for &(name, buckets) in infra_temporal::HISTOGRAMS {
+            assert!(
+                specs.contains(&(name, buckets)),
+                "missing Temporal histogram spec {name}"
+            );
+        }
     }
 }

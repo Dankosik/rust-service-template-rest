@@ -16,4 +16,5 @@ pub struct AppState {
     // template:begin service-auth:service-state-service-tokens-field
     pub service_tokens: infra_serviceauth::TokenSource,
     // template:end service-auth:service-state-service-tokens-field
+    pub temporal: Option<infra_temporal::TemporalClient>,
 }
