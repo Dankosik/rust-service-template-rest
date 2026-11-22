@@ -183,7 +183,7 @@ fn api_key_in_file_is_refused_in_service_and_worker_while_empty_placeholder_is_a
 
 #[test]
 fn api_key_from_env_preserves_scalar_strings_and_rejects_non_header_ascii() {
-    for secret in ["00123", "TRUE"] {
+    for secret in ["token", "00123", "TRUE"] {
         let cfg = load_env(&[
             ("APP__TEMPORAL__ENABLED", "true"),
             ("APP__TEMPORAL__ENDPOINT", "https://temporal.example:7233"),
@@ -199,6 +199,11 @@ fn api_key_from_env_preserves_scalar_strings_and_rejects_non_header_ascii() {
     }
 
     for invalid in [
+        "",
+        "   ",
+        " token-secret",
+        "token-secret ",
+        " token-secret ",
         "bad\ntoken-secret",
         "bad\rtoken-secret",
         "bad\ttoken-secret",
@@ -219,6 +224,25 @@ fn api_key_from_env_preserves_scalar_strings_and_rejects_non_header_ascii() {
             !format!("{errors:?}").contains("token-secret"),
             "{errors:?}"
         );
+    }
+
+    for padded in [" token-secret ", "token-secret ", " token-secret"] {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__TEMPORAL__ENABLED", "true"),
+                ("APP__TEMPORAL__ENDPOINT", "https://temporal.example:7233"),
+                ("APP__TEMPORAL__API_KEY", padded),
+            ]),
+        )
+        .unwrap_err();
+        assert_matches!(
+            &err.0,
+            ErrorKind::Validate(errors) if errors.names("temporal.api_key"),
+            "{padded:?}: {err}"
+        );
+        assert!(!err.to_string().contains("token-secret"), "{err}");
     }
 }
 
@@ -322,6 +346,110 @@ fn plaintext_rules_enforce_https_unless_local_dev_or_trusted_network() {
         ("APP__TEMPORAL__TRUSTED_NETWORK", "true"),
     ]);
     assert!(trusted_http.temporal().unwrap().trusted_network());
+}
+
+#[test]
+fn http_endpoint_rejects_tls_options_while_allowing_plaintext_api_key_auth() {
+    for (allow_plaintext, trusted_network, local_dev) in [(true, false, true), (false, true, false)]
+    {
+        let base_http = || TemporalInput {
+            enabled: true,
+            endpoint: Some("http://127.0.0.1:7233".to_owned()),
+            allow_plaintext,
+            trusted_network,
+            ..TemporalInput::default()
+        };
+
+        let rejected_cases: [(TemporalInput, &[&str]); 6] = [
+            (
+                TemporalInput {
+                    root_ca_path: Some(PathBuf::from("/etc/temporal/ca.crt")),
+                    ..base_http()
+                },
+                &["temporal.root_ca_path"],
+            ),
+            (
+                TemporalInput {
+                    client_cert_path: Some(PathBuf::from("/etc/temporal/client.crt")),
+                    client_key_path: Some(PathBuf::from("/etc/temporal/client.key")),
+                    ..base_http()
+                },
+                &["temporal.client_cert_path", "temporal.client_key_path"],
+            ),
+            (
+                TemporalInput {
+                    client_cert_path: Some(PathBuf::from("/etc/temporal/client.crt")),
+                    client_key_path: Some(PathBuf::from("/etc/temporal/client.key")),
+                    mtls_rotation: TemporalTlsRotation::Dynamic,
+                    dns_load_balancing: false,
+                    ..base_http()
+                },
+                &[
+                    "temporal.client_cert_path",
+                    "temporal.client_key_path",
+                    "temporal.mtls_rotation",
+                ],
+            ),
+            (
+                TemporalInput {
+                    mtls_rotation: TemporalTlsRotation::Dynamic,
+                    dns_load_balancing: false,
+                    ..base_http()
+                },
+                &["temporal.mtls_rotation"],
+            ),
+            (
+                TemporalInput {
+                    client_cert_path: Some(PathBuf::from("/etc/temporal/client.crt")),
+                    ..base_http()
+                },
+                &["temporal.client_cert_path", "temporal.client_key_path"],
+            ),
+            (
+                TemporalInput {
+                    client_key_path: Some(PathBuf::from("/etc/temporal/client.key")),
+                    ..base_http()
+                },
+                &["temporal.client_cert_path", "temporal.client_key_path"],
+            ),
+        ];
+
+        for (input, expected_keys) in rejected_cases {
+            let errors = admit(input, local_dev).unwrap_err();
+            for key in expected_keys {
+                assert!(errors.names(key), "missing {key}: {errors}");
+            }
+        }
+
+        let http_api_key_file = admit(
+            TemporalInput {
+                api_key_file: Some(PathBuf::from("/run/secrets/temporal.key")),
+                ..base_http()
+            },
+            local_dev,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            http_api_key_file.api_key_file(),
+            Some(Path::new("/run/secrets/temporal.key"))
+        );
+        assert_eq!(http_api_key_file.root_ca_path(), None);
+
+        let http_api_key = admit(
+            TemporalInput {
+                api_key: Some(SecretString::from("token-plain".to_owned())),
+                ..base_http()
+            },
+            local_dev,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            http_api_key.api_key().map(ExposeSecret::expose_secret),
+            Some("token-plain")
+        );
+    }
 }
 
 #[test]

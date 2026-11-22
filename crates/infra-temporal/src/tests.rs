@@ -73,7 +73,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use url::Url;
 
-use crate::connection::proxy_options_from_url;
+use crate::connection::{
+    build_connection_options, build_tls_setup, load_initial_api_key, proxy_options_from_url,
+};
 use crate::credentials::load_api_key_file;
 use crate::error::{map_result_error, map_start_error, map_start_status, map_update_error};
 use crate::payload::{ClassifiedPayloadError, build_data_converter, classify_payload_error};
@@ -2668,6 +2670,363 @@ async fn proxy_url_validation_admits_only_plaintext_http_without_userinfo() {
     let proxy_opts = proxy_options_from_url(&valid_url).unwrap();
     assert_eq!(proxy_opts.target_addr, "proxy.internal:8080");
     assert_eq!(proxy_opts.basic_auth, None);
+}
+
+#[tokio::test]
+async fn http_endpoints_reject_tls_options_even_with_plaintext_or_trusted_network() {
+    let tls_cases: [(&str, TemporalTlsOptions); 5] = [
+        (
+            "root_ca",
+            TemporalTlsOptions {
+                server_root_ca_path: Some("/etc/temporal/ca.pem".into()),
+                domain: None,
+                mtls: None,
+            },
+        ),
+        (
+            "domain",
+            TemporalTlsOptions {
+                server_root_ca_path: None,
+                domain: Some("temporal.internal".to_owned()),
+                mtls: None,
+            },
+        ),
+        (
+            "mtls_static",
+            TemporalTlsOptions {
+                server_root_ca_path: None,
+                domain: None,
+                mtls: Some(TemporalMtlsOptions {
+                    client_cert_path: "/etc/temporal/client.crt".into(),
+                    client_key_path: "/etc/temporal/client.key".into(),
+                    rotation: TlsRotationMode::Static,
+                }),
+            },
+        ),
+        (
+            "mtls_dynamic",
+            TemporalTlsOptions {
+                server_root_ca_path: None,
+                domain: None,
+                mtls: Some(TemporalMtlsOptions {
+                    client_cert_path: "/etc/temporal/client.crt".into(),
+                    client_key_path: "/etc/temporal/client.key".into(),
+                    rotation: TlsRotationMode::Dynamic,
+                }),
+            },
+        ),
+        (
+            "empty_tls",
+            TemporalTlsOptions {
+                server_root_ca_path: None,
+                domain: None,
+                mtls: None,
+            },
+        ),
+    ];
+
+    for (allow_plaintext, trusted_network) in [(true, false), (false, true)] {
+        for (label, tls) in &tls_cases {
+            let mut opts = base_options();
+            opts.endpoint = Url::parse("http://127.0.0.1:7233").unwrap();
+            opts.allow_plaintext = allow_plaintext;
+            opts.trusted_network = trusted_network;
+            opts.dns_load_balancing = false;
+            opts.tls = Some(tls.clone());
+            let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded())
+                .with_service_override(simple_callback(|_| Ok(Vec::new())));
+            let err = startup.admit(CancellationToken::new()).await.unwrap_err();
+            assert!(
+                matches!(err, ConnectError::InvalidConfig(_)),
+                "allow_plaintext={allow_plaintext} trusted_network={trusted_network} case={label}: {err:?}"
+            );
+        }
+    }
+}
+
+async fn build_conn_opts_for_test(
+    options: &TemporalOptions,
+) -> (temporalio_client::ConnectionOptions, bool) {
+    options.validate().expect("options validate");
+    let reader = Arc::new(Semaphore::new(1));
+    let op = OperationContext::with_timeout(Duration::from_secs(5));
+    let connect_budget = op.bounded(options.connect_timeout);
+    let cancel = CancellationToken::new();
+    let initial_api_key = load_initial_api_key(&options.auth, &reader, &connect_budget, &cancel)
+        .await
+        .expect("api key loads");
+    let (tls_options, mtls_watch_seed) =
+        build_tls_setup(options, &reader, &connect_budget, &cancel)
+            .await
+            .expect("tls setup succeeds");
+    let meter = WorkspaceMetricsMeter::new(METRIC_PREFIX);
+    let conn_opts = build_connection_options(
+        options,
+        &meter,
+        options.connect_timeout,
+        tls_options,
+        initial_api_key.as_ref(),
+        None,
+    );
+    (conn_opts, mtls_watch_seed.is_some())
+}
+
+fn https_base_options() -> TemporalOptions {
+    let mut opts = base_options();
+    opts.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
+    opts.allow_plaintext = false;
+    opts.allow_unauthenticated = false;
+    opts
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary certificate files verify build_tls_setup and build_connection_options"
+)]
+async fn https_connection_options_always_enable_tls_and_configure_ca_and_mtls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ca_pem, _) = generate_cert_and_key("temporal-ca.test");
+    let (cert_pem, key_pem) = generate_cert_and_key("temporal-client.test");
+    let ca_path = dir.path().join("ca.pem");
+    let cert_path = dir.path().join("client.crt");
+    let key_path = dir.path().join("client.key");
+    std::fs::write(&ca_path, &ca_pem).unwrap();
+    std::fs::write(&cert_path, &cert_pem).unwrap();
+    std::fs::write(&key_path, &key_pem).unwrap();
+
+    let mut https_api_key = https_base_options();
+    https_api_key.auth = TemporalAuth::ApiKey(Zeroizing::new("inline-secret".to_owned()));
+    assert!(https_api_key.tls_active());
+    let (conn_opts, has_mtls_watch) = build_conn_opts_for_test(&https_api_key).await;
+    let tls = conn_opts
+        .tls_options
+        .expect("https with ApiKey and tls: None must populate tls_options");
+    assert!(tls.server_root_ca_cert.is_none());
+    assert!(tls.domain.is_none());
+    assert!(tls.client_tls_options.is_none());
+    assert!(tls.client_cert_resolver.is_none());
+    assert_eq!(conn_opts.api_key.as_deref(), Some("inline-secret"));
+    assert!(!has_mtls_watch);
+
+    let mut https_unauth = https_base_options();
+    https_unauth.allow_unauthenticated = true;
+    let (conn_opts, _) = build_conn_opts_for_test(&https_unauth).await;
+    assert!(conn_opts.tls_options.is_some());
+
+    let mut https_custom_ca = https_api_key;
+    https_custom_ca.tls = Some(TemporalTlsOptions {
+        server_root_ca_path: Some(ca_path.clone()),
+        domain: Some("temporal.internal".to_owned()),
+        mtls: None,
+    });
+    let (conn_opts, has_mtls_watch) = build_conn_opts_for_test(&https_custom_ca).await;
+    let tls = conn_opts.tls_options.expect("custom CA sets tls_options");
+    assert_eq!(tls.server_root_ca_cert.as_deref(), Some(ca_pem.as_bytes()));
+    assert_eq!(tls.domain.as_deref(), Some("temporal.internal"));
+    assert!(tls.client_tls_options.is_none());
+    assert!(tls.client_cert_resolver.is_none());
+    assert!(!has_mtls_watch);
+
+    let mut https_static_mtls = https_base_options();
+    https_static_mtls.tls = Some(TemporalTlsOptions {
+        server_root_ca_path: Some(ca_path),
+        domain: None,
+        mtls: Some(TemporalMtlsOptions {
+            client_cert_path: cert_path.clone(),
+            client_key_path: key_path.clone(),
+            rotation: TlsRotationMode::Static,
+        }),
+    });
+    let (conn_opts, has_mtls_watch) = build_conn_opts_for_test(&https_static_mtls).await;
+    let tls = conn_opts.tls_options.expect("static mTLS sets tls_options");
+    assert!(tls.server_root_ca_cert.is_some());
+    let client_tls = tls
+        .client_tls_options
+        .expect("static mTLS sets client_tls_options");
+    assert_eq!(client_tls.client_cert, cert_pem.as_bytes());
+    assert_eq!(client_tls.client_private_key, key_pem.as_bytes());
+    assert!(tls.client_cert_resolver.is_none());
+    assert!(!has_mtls_watch);
+
+    let mut https_dynamic_mtls = https_base_options();
+    https_dynamic_mtls.dns_load_balancing = false;
+    https_dynamic_mtls.tls = Some(TemporalTlsOptions {
+        server_root_ca_path: None,
+        domain: None,
+        mtls: Some(TemporalMtlsOptions {
+            client_cert_path: cert_path,
+            client_key_path: key_path,
+            rotation: TlsRotationMode::Dynamic,
+        }),
+    });
+    let (conn_opts, has_mtls_watch) = build_conn_opts_for_test(&https_dynamic_mtls).await;
+    let tls = conn_opts
+        .tls_options
+        .expect("dynamic mTLS sets tls_options");
+    assert!(tls.client_tls_options.is_none());
+    assert!(tls.client_cert_resolver.is_some());
+    assert!(has_mtls_watch);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary credential file verifies plaintext http:// build_connection_options"
+)]
+async fn http_connection_options_keep_tls_disabled_even_with_api_key_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    let api_key_path = dir.path().join("api.key");
+    std::fs::write(&api_key_path, "file-secret\n").unwrap();
+
+    let http_plain = base_options();
+    assert!(!http_plain.tls_active());
+    let (conn_opts, has_mtls_watch) = build_conn_opts_for_test(&http_plain).await;
+    assert!(conn_opts.tls_options.is_none());
+    assert!(!has_mtls_watch);
+
+    let mut http_api_key_file = base_options();
+    http_api_key_file.auth = TemporalAuth::ApiKeyFile(api_key_path);
+    assert!(!http_api_key_file.tls_active());
+    let (conn_opts, _) = build_conn_opts_for_test(&http_api_key_file).await;
+    assert!(conn_opts.tls_options.is_none());
+    assert_eq!(conn_opts.api_key.as_deref(), Some("file-secret"));
+
+    let mut http_trusted_api_key = base_options();
+    http_trusted_api_key.allow_plaintext = false;
+    http_trusted_api_key.trusted_network = true;
+    http_trusted_api_key.auth = TemporalAuth::ApiKey(Zeroizing::new("net-secret".to_owned()));
+    assert!(!http_trusted_api_key.tls_active());
+    let (conn_opts, _) = build_conn_opts_for_test(&http_trusted_api_key).await;
+    assert!(conn_opts.tls_options.is_none());
+    assert_eq!(conn_opts.api_key.as_deref(), Some("net-secret"));
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary credential file verifies plaintext http:// ApiKeyFile admission"
+)]
+async fn inline_api_key_rejects_invalid_values_and_sends_bearer_header_on_rpcs() {
+    for invalid in [
+        "",
+        "   ",
+        " tok-secret",
+        "tok-secret ",
+        " tok-secret ",
+        "tok-secret\n",
+        "tok-secret\r",
+        "tok-secret\t",
+        "tok-secret\x7f",
+        "tok-secret-é",
+    ] {
+        let mut opts = https_base_options();
+        opts.auth = TemporalAuth::ApiKey(Zeroizing::new(invalid.to_owned()));
+        let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded())
+            .with_service_override(simple_callback(|_| Ok(Vec::new())));
+        let err = startup.admit(CancellationToken::new()).await.unwrap_err();
+        assert!(
+            matches!(err, ConnectError::InvalidConfig(_)),
+            "{invalid:?}: {err:?}"
+        );
+        let rendered = format!("{err}; {err:?}");
+        assert!(!rendered.contains("tok-secret"), "{rendered}");
+    }
+
+    let captured_auth = Arc::new(Mutex::new(Vec::new()));
+    let mut opts = base_options();
+    opts.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
+    opts.allow_plaintext = false;
+    opts.allow_unauthenticated = false;
+    opts.auth = TemporalAuth::ApiKey(Zeroizing::new("inline-bearer-token".to_owned()));
+    let (startup, conn) = admit_with_callback(
+        opts,
+        recording_describe_callback(Arc::clone(&captured_auth)),
+    )
+    .await;
+    assert!(startup.watcher_steps().is_none());
+    conn.probe().check().await.expect("inline api key succeeds");
+    assert_eq!(
+        last_auth(&captured_auth).as_deref(),
+        Some("Bearer inline-bearer-token")
+    );
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let api_key_path = dir.path().join("http-api.key");
+    std::fs::write(&api_key_path, "http-file-token\n").unwrap();
+    let http_captured = Arc::new(Mutex::new(Vec::new()));
+    let mut http_opts = base_options();
+    http_opts.endpoint = Url::parse("http://127.0.0.1:7233").unwrap();
+    http_opts.allow_plaintext = true;
+    http_opts.auth = TemporalAuth::ApiKeyFile(api_key_path);
+    let (http_startup, http_conn) = admit_with_callback(
+        http_opts,
+        recording_describe_callback(Arc::clone(&http_captured)),
+    )
+    .await;
+    http_conn
+        .probe()
+        .check()
+        .await
+        .expect("http api key file succeeds");
+    assert_eq!(
+        last_auth(&http_captured).as_deref(),
+        Some("Bearer http-file-token")
+    );
+    assert_eq!(
+        http_startup
+            .close(Instant::now() + Duration::from_secs(1))
+            .await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary credential file verifies close timeout and watcher task abort"
+)]
+async fn close_times_out_and_aborts_hung_credential_watcher() {
+    let dir = tempfile::tempdir().unwrap();
+    let api_key_path = dir.path().join("timeout-api.key");
+    std::fs::write(&api_key_path, "token-timeout-v1\n").unwrap();
+
+    let mut opts = base_options();
+    opts.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
+    opts.auth = TemporalAuth::ApiKeyFile(api_key_path);
+    opts.credential_refresh_interval = Duration::from_secs(60);
+
+    let (mut startup, conn) = admit_with_callback(
+        opts,
+        simple_callback(|_| Ok(DescribeNamespaceResponse::default().encode_to_vec())),
+    )
+    .await;
+
+    let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<()>();
+    let started = Arc::new(Notify::new());
+    let started_task = Arc::clone(&started);
+    let hung_task = tokio::spawn(async move {
+        let _drop_guard = drop_tx;
+        started_task.notify_one();
+        std::future::pending::<()>().await;
+    });
+    started.notified().await;
+    startup.replace_watcher_task(hung_task);
+
+    let past_deadline = Instant::now()
+        .checked_sub(Duration::from_millis(1))
+        .unwrap_or_else(Instant::now);
+    assert_eq!(startup.close(past_deadline).await, CloseOutcome::TimedOut);
+
+    let drop_result = tokio::time::timeout(Duration::from_secs(1), drop_rx)
+        .await
+        .expect("timed out waiting for aborted watcher task to drop guard");
+    assert!(drop_result.is_err());
+    assert!(conn.probe().check().await.is_err());
 }
 
 #[cfg(feature = "worker")]

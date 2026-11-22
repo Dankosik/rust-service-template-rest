@@ -280,9 +280,9 @@ impl TemporalInput {
             ));
         }
 
-        let tls_active = endpoint.as_ref().is_ok_and(|url| url.scheme() == "https");
+        let endpoint_scheme = endpoint.as_ref().ok().map(Url::scheme);
         let client_pair =
-            self.admit_auth_and_mtls(local_development, tls_active, has_proxy_input, v);
+            self.admit_auth_and_mtls(local_development, endpoint_scheme, has_proxy_input, v);
         self.validate_timings(v);
         let max_payload_bytes = v.record(nonzero_usize_range(
             "temporal.max_payload_bytes",
@@ -348,7 +348,7 @@ impl TemporalInput {
     fn admit_auth_and_mtls(
         &mut self,
         local_development: bool,
-        tls_active: bool,
+        endpoint_scheme: Option<&str>,
         has_proxy_input: bool,
         v: &mut Violations,
     ) -> Result<Option<(PathBuf, PathBuf)>, Rejected> {
@@ -362,6 +362,8 @@ impl TemporalInput {
             v.check(validate_api_key(secret.expose_secret()));
         }
 
+        let has_client_cert = self.client_cert_path.is_some();
+        let has_client_key = self.client_key_path.is_some();
         let client_pair = v.record(optional_pair(
             "temporal.client_cert_path",
             self.client_cert_path.take(),
@@ -369,6 +371,33 @@ impl TemporalInput {
             self.client_key_path.take(),
         ));
         let has_mtls = matches!(client_pair, Ok(Some(_)));
+
+        if endpoint_scheme == Some("http") {
+            if self.root_ca_path.is_some() {
+                v.reject(ValidationError::new(
+                    "temporal.root_ca_path",
+                    "cannot be set for http:// temporal.endpoint",
+                ));
+            }
+            if has_client_cert {
+                v.reject(ValidationError::new(
+                    "temporal.client_cert_path",
+                    "cannot be set for http:// temporal.endpoint",
+                ));
+            }
+            if has_client_key {
+                v.reject(ValidationError::new(
+                    "temporal.client_key_path",
+                    "cannot be set for http:// temporal.endpoint",
+                ));
+            }
+            if self.mtls_rotation == TemporalTlsRotation::Dynamic {
+                v.reject(ValidationError::new(
+                    "temporal.mtls_rotation",
+                    "dynamic rotation requires an https:// temporal.endpoint",
+                ));
+            }
+        }
 
         if self.mtls_rotation == TemporalTlsRotation::Dynamic {
             if !has_mtls {
@@ -391,6 +420,7 @@ impl TemporalInput {
             }
         }
 
+        let tls_active = endpoint_scheme == Some("https");
         let has_auth = self.api_key.is_some() || self.api_key_file.is_some() || has_mtls;
         let unauth_allowed =
             (self.allow_unauthenticated && local_development) || self.trusted_network;
@@ -500,10 +530,13 @@ fn validate_identity(raw: &str) -> Result<String, ValidationError> {
 }
 
 fn validate_api_key(raw: &str) -> Result<(), ValidationError> {
-    if raw.trim().is_empty() || !raw.bytes().all(|byte| matches!(byte, 0x20..=0x7E)) {
+    if raw.is_empty()
+        || raw.trim_ascii() != raw
+        || !raw.bytes().all(|byte| matches!(byte, 0x20..=0x7E))
+    {
         return Err(ValidationError::new(
             "temporal.api_key",
-            "must be non-blank printable ASCII (0x20..=0x7E)",
+            "must be non-blank printable ASCII (0x20..=0x7E) without leading or trailing whitespace",
         ));
     }
     Ok(())

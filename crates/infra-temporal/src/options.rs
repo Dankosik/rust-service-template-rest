@@ -142,15 +142,22 @@ impl TemporalOptions {
     }
 
     pub(crate) fn tls_active(&self) -> bool {
-        self.endpoint.scheme() == "https" || self.tls.is_some() || self.has_api_key()
+        self.endpoint.scheme() == "https"
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConnectError> {
         validate_endpoint(&self.endpoint)?;
-        if self.endpoint.scheme() == "http" && !self.allow_plaintext && !self.trusted_network {
-            return Err(ConnectError::InvalidConfig(
-                "plaintext endpoint requires allow_plaintext or trusted_network",
-            ));
+        if self.endpoint.scheme() == "http" {
+            if !self.allow_plaintext && !self.trusted_network {
+                return Err(ConnectError::InvalidConfig(
+                    "plaintext endpoint requires allow_plaintext or trusted_network",
+                ));
+            }
+            if self.tls.is_some() {
+                return Err(ConnectError::InvalidConfig(
+                    "tls options require an https endpoint",
+                ));
+            }
         }
 
         validate_namespace(&self.namespace)?;

@@ -97,19 +97,19 @@ impl fmt::Debug for TemporalStartup {
     }
 }
 
-struct InitialApiKey {
+pub(crate) struct InitialApiKey {
     value: Zeroizing<String>,
     watch: Option<(PathBuf, [u8; 32])>,
 }
 
-struct MtlsWatchSeed {
+pub(crate) struct MtlsWatchSeed {
     cert_path: PathBuf,
     key_path: PathBuf,
     digest: [u8; 32],
     resolver: Arc<RotatingClientCertResolver>,
 }
 
-async fn load_initial_api_key(
+pub(crate) async fn load_initial_api_key(
     auth: &TemporalAuth,
     reader: &Arc<Semaphore>,
     connect_budget: &operation_context::BoundedContext,
@@ -136,7 +136,7 @@ async fn load_initial_api_key(
     }
 }
 
-async fn build_tls_setup(
+pub(crate) async fn build_tls_setup(
     options: &TemporalOptions,
     reader: &Arc<Semaphore>,
     connect_budget: &operation_context::BoundedContext,
@@ -210,7 +210,7 @@ async fn build_tls_setup(
     Ok((Some(tls), mtls_watch_seed))
 }
 
-fn build_connection_options(
+pub(crate) fn build_connection_options(
     options: &TemporalOptions,
     meter: &WorkspaceMetricsMeter,
     remaining_connect: Duration,
