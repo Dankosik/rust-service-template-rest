@@ -275,52 +275,15 @@ pub(crate) fn validate_jwt_claims(
     token_profile: TokenProfile,
     now: Duration,
 ) -> Result<VerifiedClaims, VerificationError> {
-    let invalid = VerificationError::invalid;
-    let payload =
-        String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let (not_before, expiry, identifiers, scopes, actor) = {
-        let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
-            .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-        let scope = claims.scope.resolve(token_profile, claims.scp)?;
-        let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
-            (claims.iss, claims.aud, claims.exp)
-        else {
-            return Err(invalid(VerificationReason::MissingClaim));
-        };
-        let not_before = claims.nbf.map(|NumericDate(date)| date);
-        check_lifetime(expiry, not_before, now)?;
-        policy.check_issuer_and_audience(&issuer, &audience)?;
-        let identifiers = match token_profile {
-            // RFC 9068 §2.2
-            TokenProfile::Rfc9068 => {
-                let (Some(subject), Some(client_id), Some(_), Some(_)) = (
-                    non_empty(claims.sub),
-                    non_empty(claims.client_id),
-                    claims.iat,
-                    claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
-                ) else {
-                    return Err(invalid(VerificationReason::MissingClaim));
-                };
-                Identifiers::Subject {
-                    subject,
-                    client_id: Some(client_id),
-                }
-            }
-            TokenProfile::ResourceServer => {
-                let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
-                    .into_iter()
-                    .find_map(non_empty);
-                Identifiers::from_claims(non_empty(claims.sub), client_id)?
-            }
-        };
-        let scopes = Scopes::from_claim(scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
-        let actor = claims
-            .act
-            .map(parse_actor)
-            .transpose()
-            .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
-        (not_before, expiry, identifiers, scopes, actor)
-    };
+    let payload = String::from_utf8(payload)
+        .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
+    let JwtClaimFields {
+        not_before,
+        expiry,
+        identifiers,
+        scopes,
+        actor,
+    } = read_jwt_claims(&payload, policy, token_profile, now)?;
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
@@ -336,6 +299,71 @@ pub(crate) fn validate_jwt_claims(
     })
 }
 
+struct JwtClaimFields {
+    not_before: Option<Duration>,
+    expiry: Duration,
+    identifiers: Identifiers,
+    scopes: Scopes,
+    actor: Option<Actor>,
+}
+
+fn read_jwt_claims(
+    payload: &str,
+    policy: &ClaimPolicy,
+    token_profile: TokenProfile,
+    now: Duration,
+) -> Result<JwtClaimFields, VerificationError> {
+    let invalid = VerificationError::invalid;
+    let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(payload)
+        .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
+    let effective_scope = claims.scope.resolve(token_profile, claims.scp)?;
+    let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
+        (claims.iss, claims.aud, claims.exp)
+    else {
+        return Err(invalid(VerificationReason::MissingClaim));
+    };
+    let not_before = claims.nbf.map(|NumericDate(date)| date);
+    check_lifetime(expiry, not_before, now)?;
+    policy.check_issuer_and_audience(&issuer, &audience)?;
+    let identifiers = match token_profile {
+        // RFC 9068 §2.2
+        TokenProfile::Rfc9068 => {
+            let (Some(subject), Some(client_id), Some(_), Some(_)) = (
+                non_empty(claims.sub),
+                non_empty(claims.client_id),
+                claims.iat,
+                claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
+            ) else {
+                return Err(invalid(VerificationReason::MissingClaim));
+            };
+            Identifiers::Subject {
+                subject,
+                client_id: Some(client_id),
+            }
+        }
+        TokenProfile::ResourceServer => {
+            let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
+                .into_iter()
+                .find_map(non_empty);
+            Identifiers::from_claims(non_empty(claims.sub), client_id)?
+        }
+    };
+    let scopes =
+        Scopes::from_claim(effective_scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
+    let actor = claims
+        .act
+        .map(parse_actor)
+        .transpose()
+        .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
+    Ok(JwtClaimFields {
+        not_before,
+        expiry,
+        identifiers,
+        scopes,
+        actor,
+    })
+}
+
 /// RFC 7519 §2
 struct NumericDate(Duration);
 
@@ -347,11 +375,11 @@ impl NumericDate {
         }
 
         let (mantissa, exponent) = number.split_once(['e', 'E']).unwrap_or((number, "0"));
-        let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
-        if !unsigned.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        let magnitude = mantissa.strip_prefix('-').unwrap_or(mantissa);
+        if !magnitude.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             return None;
         }
-        let (whole, fractional) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let (whole, fractional) = magnitude.split_once('.').unwrap_or((magnitude, ""));
         let digits = whole.bytes().chain(fractional.bytes());
         let Some(first_nonzero) = digits.clone().position(|digit| digit != b'0') else {
             return Some(Self(Duration::ZERO));
@@ -376,13 +404,14 @@ impl NumericDate {
             return Some(Self(Duration::from_nanos(1)));
         }
 
-        let mut significant_digits = digits.skip(first_nonzero);
-        let whole_nanoseconds = (0..nanosecond_digits).fold(0_u128, |value, _| {
-            let digit = significant_digits.next().map_or(0, |digit| digit - b'0');
-            value * 10 + u128::from(digit)
-        });
+        let mut significant_digits = digits.skip(first_nonzero).map(|digit| digit - b'0');
+        let mut whole_nanoseconds = 0_u128;
+        for _ in 0..nanosecond_digits {
+            whole_nanoseconds =
+                whole_nanoseconds * 10 + u128::from(significant_digits.next().unwrap_or(0));
+        }
         let nanoseconds =
-            whole_nanoseconds + u128::from(significant_digits.any(|digit| digit != b'0'));
+            whole_nanoseconds + u128::from(significant_digits.any(|digit| digit != 0));
         (nanoseconds <= Duration::MAX.as_nanos())
             .then(|| Self(Duration::from_nanos_u128(nanoseconds)))
     }
@@ -415,17 +444,18 @@ pub(crate) fn validate_introspection_claims(
     policy: &ClaimPolicy,
     now: Duration,
 ) -> Result<VerifiedClaims, VerificationError> {
-    let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
+    let malformed_response = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
     let payload = std::str::from_utf8(response_body)
-        .map_err(|_| malformed())?
+        .map_err(|_| malformed_response())?
         .trim_matches([' ', '\t', '\r', '\n']);
     let JsonObject(envelope) =
-        serde_json::from_str::<JsonObject<Envelope>>(payload).map_err(|_| malformed())?;
+        serde_json::from_str::<JsonObject<Envelope>>(payload).map_err(|_| malformed_response())?;
     if !envelope.active {
         return Err(invalid(VerificationReason::Inactive));
     }
-    let claims: ActiveClaims<'_> = serde_json::from_str(payload).map_err(|_| malformed())?;
+    let claims: ActiveClaims<'_> =
+        serde_json::from_str(payload).map_err(|_| malformed_response())?;
     let (Some(BorrowableString(issuer)), Some(audience), Some(expiry)) =
         (claims.iss, claims.aud, claims.exp)
     else {
@@ -444,7 +474,7 @@ pub(crate) fn validate_introspection_claims(
         .act
         .map(parse_actor)
         .transpose()
-        .map_err(|EmptyActorSubject| malformed())?;
+        .map_err(|EmptyActorSubject| malformed_response())?;
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(

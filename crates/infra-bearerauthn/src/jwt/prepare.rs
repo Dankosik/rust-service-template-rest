@@ -22,11 +22,10 @@ const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("JwtOptions([REDACTED])")]
 pub struct JwtOptions {
-    issuer: IssuerUrl,
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: AllowedAlgorithms,
-    jwks_uri: Option<EndpointUrl>,
+    source: JwksSource,
     jwks_max_age: Duration,
 }
 
@@ -43,12 +42,15 @@ impl JwtOptions {
             return Err(OptionsError);
         }
         let claim_policy = ClaimPolicy::try_new(issuer.as_str(), audiences)?;
+        let source = match jwks_uri {
+            Some(uri) => JwksSource::Configured(uri),
+            None => JwksSource::Discovery(issuer),
+        };
         Ok(Self {
-            issuer,
             claim_policy,
             token_profile,
             algorithms: allowed_algorithms(algorithms),
-            jwks_uri,
+            source,
             jwks_max_age,
         })
     }
@@ -58,8 +60,11 @@ pub async fn prepare_jwt(
     options: JwtOptions,
 ) -> Result<(Verifier, RefreshDriver), PreparationError> {
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let provider = ProviderClient::try_new().map_err(PreparationError::from);
-    let provider = enforce_startup_deadline(startup_deadline, PreparationPhase::Client, provider)?;
+    let provider = enforce_startup_deadline(
+        startup_deadline,
+        PreparationPhase::Client,
+        ProviderClient::try_new().map_err(PreparationError::from),
+    )?;
     prepare_with_provider(options, provider, startup_deadline).await
 }
 
@@ -73,18 +78,13 @@ async fn prepare_with_provider(
         "Rejected JWKS entries by closed reason"
     );
     let JwtOptions {
-        issuer,
         claim_policy,
         token_profile,
         algorithms,
-        jwks_uri,
+        source,
         jwks_max_age,
     } = options;
-    let source = match jwks_uri {
-        Some(uri) => JwksSource::Configured(uri),
-        None => JwksSource::Discovery(issuer),
-    };
-    let key_set = source
+    let fetched = source
         .fetch(&provider, algorithms, startup_deadline)
         .await
         .and_then(|keys| {
@@ -95,11 +95,7 @@ async fn prepare_with_provider(
             }
         })
         .map_err(PreparationError::from);
-    let phase = key_set
-        .as_ref()
-        .err()
-        .map_or(PreparationPhase::Jwks, PreparationError::phase);
-    let key_set = enforce_startup_deadline(startup_deadline, phase, key_set)?;
+    let key_set = enforce_startup_deadline(startup_deadline, PreparationPhase::Jwks, fetched)?;
     let key_store = KeyStore::new(key_set);
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
@@ -118,10 +114,14 @@ async fn prepare_with_provider(
 
 fn enforce_startup_deadline<T>(
     deadline: Instant,
-    phase: PreparationPhase,
+    step_phase: PreparationPhase,
     result: Result<T, PreparationError>,
 ) -> Result<T, PreparationError> {
     if Instant::now() >= deadline {
+        let phase = result
+            .as_ref()
+            .err()
+            .map_or(step_phase, PreparationError::phase);
         return Err(PreparationError::Timeout(phase));
     }
     result
@@ -129,7 +129,7 @@ fn enforce_startup_deadline<T>(
 
 impl DiscoveryError {
     fn issuer_mismatch(configured: &IssuerUrl, discovered: String) -> Self {
-        let discovered = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
+        let echoed = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
             && IssuerUrl::parse(&discovered).is_ok()
         {
             discovered
@@ -138,7 +138,7 @@ impl DiscoveryError {
         };
         Self::IssuerMismatch {
             configured: configured.as_str().to_owned(),
-            discovered,
+            discovered: echoed,
         }
     }
 }
@@ -184,7 +184,7 @@ async fn fetch_metadata(
     deadline: Instant,
 ) -> Result<Discovery, DiscoveryError> {
     let bytes = provider
-        .get_document(url, Document::Discovery, Some(deadline))
+        .get_document(url, Document::Discovery, deadline)
         .await
         .map_err(DiscoveryError::Fetch)?;
     serde_json::from_slice::<JsonObject<Discovery>>(&bytes)
@@ -881,15 +881,17 @@ mod tests {
                     .unwrap();
                     let url = format!("https://{FIXTURE_HOST}:{}/keys", address.port());
                     let url = url::Url::parse(&url).unwrap();
-                    let mut pending = Box::pin(provider.get_document(&url, Document::Jwks, None));
+                    let mut pending = Box::pin(provider.get_document(
+                        &url,
+                        Document::Jwks,
+                        tokio::time::Instant::now() + Duration::from_secs(60),
+                    ));
                     assert!(futures_util::poll!(pending.as_mut()).is_pending());
                     drop(pending);
 
                     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
                     assert_eq!(
-                        provider
-                            .get_document(&url, Document::Jwks, Some(deadline))
-                            .await,
+                        provider.get_document(&url, Document::Jwks, deadline).await,
                         Err(ProviderFailure::Timeout)
                     );
                 });
