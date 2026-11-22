@@ -19,7 +19,7 @@ use super::{
     exchange_target, nonzero, service_target, token_context,
 };
 use crate::{
-    IssuerUrl, PrivateKeyJwt, Registration, ServiceTokenTarget, ServiceTokens,
+    IssuerUrl, OnBehalfOf, PrivateKeyJwt, Registration, ServiceTokenTarget, ServiceTokens,
     test_support::HttpOptions, token::Token,
 };
 
@@ -510,7 +510,10 @@ async fn one_registration_issues_recipient_specific_service_tokens_and_exchanges
                 EXCHANGE_CAPACITY,
             )
             .unwrap()
-            .exchange(&subject, acquisition_deadline(&token_context()))
+            .acquire_for_request(
+                &OnBehalfOf::try_new(subject).unwrap(),
+                acquisition_deadline(&token_context()),
+            )
             .await
             .unwrap();
         let exchanged = claims(&exchanged);
@@ -659,7 +662,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
         AcquisitionError::Rejected(Rejection::InvalidScope)
     );
 
-    let subject = SecretString::from("not-a-token");
+    let subject = OnBehalfOf::try_new(SecretString::from("not-a-token")).unwrap();
     assert_eq!(
         registered
             .exchange_tokens(
@@ -668,7 +671,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
                 EXCHANGE_CAPACITY,
             )
             .unwrap()
-            .exchange(&subject, acquisition_deadline(&token_context()))
+            .acquire_for_request(&subject, acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidRequest)

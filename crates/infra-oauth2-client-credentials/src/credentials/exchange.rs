@@ -181,6 +181,16 @@ impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
     }
 }
 
+enum FastLookup {
+    Hit(Arc<Token>),
+    Pending(PendingLookup),
+}
+
+enum PendingLookup {
+    Missed(SubjectKey),
+    Deferred,
+}
+
 impl ExchangeTokens {
     pub(super) fn try_new(
         registration: Arc<RegistrationState>,
@@ -219,12 +229,17 @@ impl ExchangeTokens {
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         self.check_active(deadline)?;
-        let mut registration_closed = self.0.registration.closed.clone();
-        let acquired = tokio::select! {
-            biased;
-            stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
-            _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
-            result = self.exchange(subject.as_secret(), deadline) => result,
+        let acquired = match self.lookup_if_budgeted(subject.as_secret()) {
+            FastLookup::Hit(token) => Ok(token),
+            FastLookup::Pending(pending) => {
+                let mut registration_closed = self.0.registration.closed.clone();
+                tokio::select! {
+                    biased;
+                    stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
+                    _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
+                    result = self.exchange_pending(pending, subject.as_secret(), deadline) => result,
+                }
+            }
         };
         self.check_active(deadline)?;
         let acquired = acquired?;
@@ -232,31 +247,45 @@ impl ExchangeTokens {
         Ok(acquired)
     }
 
+    fn lookup_if_budgeted(&self, subject: &SecretString) -> FastLookup {
+        if !tokio::task::coop::has_budget_remaining() {
+            return FastLookup::Pending(PendingLookup::Deferred);
+        }
+        let key = SubjectKey::of(subject);
+        self.0.state.reusable(key).map_or(
+            FastLookup::Pending(PendingLookup::Missed(key)),
+            FastLookup::Hit,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn cache(&self) -> &ExchangedTokenCache {
         &self.0.state.cache
     }
 
-    pub(crate) async fn exchange(
+    async fn exchange_pending(
         &self,
+        pending: PendingLookup,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        let key = SubjectKey::of(subject);
-        let registration = &self.0.registration;
-        registration.check_active(deadline)?;
-        let result = if let Some(token) = self.0.state.reusable(key) {
-            Ok(token)
-        } else {
-            tokio::time::timeout_at(
-                deadline.cutoff,
-                self.acquire_exchange(key, subject, deadline),
-            )
-            .await
-            .map_err(|_| deadline.expiry_error())?
+        let key = match pending {
+            PendingLookup::Missed(key) => key,
+            PendingLookup::Deferred => {
+                let key = SubjectKey::of(subject);
+                self.0.registration.check_active(deadline)?;
+                if let Some(token) = self.0.state.reusable(key) {
+                    return Ok(token);
+                }
+                key
+            }
         };
-        registration.check_active(deadline)?;
-        result
+        tokio::time::timeout_at(
+            deadline.cutoff,
+            self.acquire_exchange(key, subject, deadline),
+        )
+        .await
+        .map_err(|_| deadline.expiry_error())?
     }
 
     async fn acquire_exchange(

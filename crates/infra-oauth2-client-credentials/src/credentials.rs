@@ -183,17 +183,20 @@ mod service_cache {
         ) -> Option<Arc<Token>> {
             let active = self.active.load();
             if let Some(service) = active.as_deref()
-                && service.token.is_reusable(now)
                 && now < service.refresh_after
+                && !service.token.is_rejected()
             {
                 return Some(Arc::clone(&service.token));
             }
             drop(active);
             let failure = self.writer.lock();
             let active = self.active.load();
-            let service = active
-                .as_deref()
-                .filter(|service| service.token.is_reusable(now))?;
+            let (service, reuse_until) = active.as_deref().and_then(|service| {
+                service
+                    .token
+                    .reusable_until(now)
+                    .map(|reuse_until| (service, reuse_until))
+            })?;
             let token = Arc::clone(&service.token);
             if now >= service.refresh_after
                 && failure
@@ -202,7 +205,7 @@ mod service_cache {
                     .is_none()
                 && try_queue(&token)
             {
-                self.store_deferred(service, now);
+                self.store_deferred(service, now, reuse_until);
             }
             Some(token)
         }
@@ -245,8 +248,10 @@ mod service_cache {
             *failure = None;
             if let Some(reuse_until) = token.reusable_until(now) {
                 self.store_active(Arc::new(token), reuse_until);
-            } else if let Some(service) = self.active.load().as_deref() {
-                self.store_deferred(service, now);
+            } else if let Some(service) = self.active.load().as_deref()
+                && let Some(reuse_until) = service.token.reusable_until(now)
+            {
+                self.store_deferred(service, now, reuse_until);
             }
         }
 
@@ -258,11 +263,11 @@ mod service_cache {
             })));
         }
 
-        fn store_deferred(&self, service: &ServiceToken, from: Instant) {
+        fn store_deferred(&self, service: &ServiceToken, from: Instant, reuse_until: Instant) {
             let next = from + refresh_retry();
             self.active.store(Some(Arc::new(ServiceToken {
                 token: Arc::clone(&service.token),
-                refresh_after: service.refresh_after.max(next),
+                refresh_after: service.refresh_after.max(next).min(reuse_until),
             })));
         }
 

@@ -16,7 +16,6 @@ use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_util::either::Either;
-use tokio_util::sync::DropGuard;
 use tonic::body::Body;
 use tonic::client::{ResponseStatusObserver as DecodedStatusObserver, TrackResponseStatus};
 use tonic::transport::{Channel, Endpoint};
@@ -26,8 +25,9 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::ClientError;
 use crate::call::{
-    ClientCustody, ClientGuards, ClientObservation, StatusHook, attach_client_response,
-    client_deadline_status, client_stopped_status, guard_upload,
+    ClientCustody, ClientGuards, ClientObservation, LifetimeGuard, StatusHook,
+    attach_client_response, cancel_on_drop, client_deadline_status, client_stopped_status,
+    guard_upload,
 };
 use crate::tls::ClientTlsMaterial;
 
@@ -344,12 +344,11 @@ pub struct PreparedCall {
     #[debug(skip)]
     request: Request<Body>,
     opening: OperationContext,
-    lifetime: OperationContext,
     watch_stop: bool,
     #[debug(skip)]
     call: crate::observe::Call,
-    #[debug(skip)]
-    cancel_on_drop: DropGuard,
+    #[debug("{:?}", &**lifetime)]
+    lifetime: LifetimeGuard,
     #[debug(skip)]
     permit: Option<OwnedSemaphorePermit>,
     #[debug(skip)]
@@ -392,10 +391,9 @@ impl PreparedCall {
             channel: inner.channel.clone(),
             request,
             opening: contexts.opening,
-            lifetime: contexts.lifetime,
             watch_stop: contexts.watch_stop,
             call,
-            cancel_on_drop: contexts.cancel_on_drop,
+            lifetime: contexts.lifetime,
             permit,
             on_status: None,
         })
@@ -449,10 +447,9 @@ impl PreparedCall {
             mut channel,
             request,
             opening,
-            lifetime,
             watch_stop,
             call,
-            cancel_on_drop,
+            lifetime,
             permit,
             on_status,
         } = self;
@@ -496,11 +493,10 @@ impl PreparedCall {
             response,
             observation,
             ClientCustody {
-                lifetime,
                 watch_stop,
                 guards: ClientGuards {
                     upload_guard,
-                    cancel_on_drop,
+                    lifetime,
                 },
                 on_status,
             },
@@ -583,9 +579,8 @@ fn parse_destination(
 
 struct CallContexts {
     opening: OperationContext,
-    lifetime: OperationContext,
+    lifetime: LifetimeGuard,
     watch_stop: bool,
-    cancel_on_drop: DropGuard,
 }
 
 fn derive_call_contexts(
@@ -606,14 +601,13 @@ fn derive_call_contexts(
     );
     let lifetime = OperationContext::new(
         earliest(lifetime_before_parent, parent_deadline),
-        cancellation.clone(),
+        cancellation,
     );
     let watch_stop = has_parent || lifetime.deadline().is_some();
     CallContexts {
         opening,
-        lifetime,
+        lifetime: cancel_on_drop(lifetime),
         watch_stop,
-        cancel_on_drop: cancellation.drop_guard(),
     }
 }
 
@@ -919,14 +913,15 @@ mod tests {
         )
         .build()
         .unwrap();
-        let pending = ResponseFuture::from_prepared(
-            PreparedCall::prepare(&client, Request::new(Body::empty())),
-            |prepared| async move {
-                drop(prepared);
-                Ok(Response::new(Body::empty()))
-            },
-        );
+        let prepared = PreparedCall::prepare(&client, Request::new(Body::empty())).unwrap();
+        let opening = prepared.opening_context().clone();
+        assert!(!opening.cancellation().is_cancelled());
+        let pending = ResponseFuture::from_prepared(Ok(prepared), |prepared| async move {
+            drop(prepared);
+            Ok(Response::new(Body::empty()))
+        });
         assert_eq!(format!("{pending:?}"), "ResponseFuture { .. }");
         assert!(pending.await.is_ok());
+        assert!(opening.cancellation().is_cancelled());
     }
 }
