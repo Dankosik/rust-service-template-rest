@@ -8,31 +8,40 @@ use std::borrow::Cow;
 )]
 pub fn escape(token: &str) -> Cow<'_, str> {
     let bytes = token.as_bytes();
-    let Some(first) = bytes.iter().position(|byte| matches!(byte, b'~' | b'/')) else {
+    let Some(first_special) = bytes.iter().position(|&byte| is_special(byte)) else {
         return Cow::Borrowed(token);
     };
-    let tail = &token[first + 1..];
-    let remaining = tail
-        .bytes()
-        .filter(|byte| matches!(byte, b'~' | b'/'))
-        .count();
-    let mut escaped = String::with_capacity(token.len() + 1 + remaining);
-    escaped.push_str(&token[..first]);
-    escaped.push_str(if bytes[first] == b'~' { "~0" } else { "~1" });
-    if remaining == 0 {
+    let tail = &token[first_special + 1..];
+    let tail_specials = tail.bytes().filter(|&byte| is_special(byte)).count();
+    let mut escaped = String::with_capacity(token.len() + 1 + tail_specials);
+    escaped.push_str(&token[..first_special]);
+    escaped.push_str(escape_special(bytes[first_special]));
+    if tail_specials == 0 {
         escaped.push_str(tail);
         return Cow::Owned(escaped);
     }
     let mut start = 0;
     for (index, byte) in tail.bytes().enumerate() {
-        if matches!(byte, b'~' | b'/') {
+        if is_special(byte) {
             escaped.push_str(&tail[start..index]);
-            escaped.push_str(if byte == b'~' { "~0" } else { "~1" });
+            escaped.push_str(escape_special(byte));
             start = index + 1;
         }
     }
     escaped.push_str(&tail[start..]);
     Cow::Owned(escaped)
+}
+
+/// RFC 6901 §3
+const fn is_special(byte: u8) -> bool {
+    matches!(byte, b'~' | b'/')
+}
+
+const fn escape_special(special: u8) -> &'static str {
+    match special {
+        b'~' => "~0",
+        _ => "~1",
+    }
 }
 
 #[cfg(test)]

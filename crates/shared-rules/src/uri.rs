@@ -1,6 +1,6 @@
 #[must_use]
 pub fn http_origin_port(scheme: &str, authority: &str, host: &str) -> Option<u16> {
-    let default = match scheme {
+    let default_port = match scheme {
         "http" => 80,
         "https" => 443,
         _ => return None,
@@ -9,7 +9,7 @@ pub fn http_origin_port(scheme: &str, authority: &str, host: &str) -> Option<u16
         return None;
     }
     match authority.strip_prefix(host)? {
-        "" | ":" => Some(default),
+        "" | ":" => Some(default_port),
         suffix => {
             let digits = suffix.strip_prefix(':')?;
             if !digits.as_bytes().first()?.is_ascii_digit() {
