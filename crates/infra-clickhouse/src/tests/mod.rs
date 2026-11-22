@@ -1,3 +1,10 @@
+mod a7_stress;
+mod admission;
+mod faults;
+mod metadata;
+mod rotation;
+mod telemetry;
+
 use std::net::SocketAddr;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -11,6 +18,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusRecorder};
 use operation_context::OperationContext;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -21,12 +29,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions, ClientCertificate,
-    CloseOutcome, HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row,
-    StartError, UnknownOutcome, error,
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions, CloseOutcome,
+    HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row, UnknownOutcome, error,
 };
 
-fn base_options(url: String) -> ClickHouseOptions {
+pub(super) fn base_options(url: String) -> ClickHouseOptions {
     ClickHouseOptions {
         url,
         database: "app".to_owned(),
@@ -49,7 +56,17 @@ fn base_options(url: String) -> ClickHouseOptions {
     }
 }
 
-fn encode_varuint(mut value: usize, out: &mut Vec<u8>) {
+pub(super) fn prometheus_recorder() -> PrometheusRecorder {
+    let mut builder = PrometheusBuilder::new();
+    for &(name, buckets) in HISTOGRAMS {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+            .expect("valid clickhouse histogram buckets");
+    }
+    builder.build_recorder()
+}
+
+pub(super) fn encode_varuint(mut value: usize, out: &mut Vec<u8>) {
     loop {
         let mut byte = u8::try_from(value & 0x7f).expect("masked to 7 bits");
         value >>= 7;
@@ -63,12 +80,12 @@ fn encode_varuint(mut value: usize, out: &mut Vec<u8>) {
     }
 }
 
-fn encode_ch_str(s: &str, out: &mut Vec<u8>) {
+pub(super) fn encode_ch_str(s: &str, out: &mut Vec<u8>) {
     encode_varuint(s.len(), out);
     out.extend_from_slice(s.as_bytes());
 }
 
-fn rbwnat_u64_rows(col_name: &str, values: &[u64]) -> Bytes {
+pub(super) fn rbwnat_u64_rows(col_name: &str, values: &[u64]) -> Bytes {
     let mut out = Vec::new();
     encode_varuint(1, &mut out);
     encode_ch_str(col_name, &mut out);
@@ -79,7 +96,7 @@ fn rbwnat_u64_rows(col_name: &str, values: &[u64]) -> Bytes {
     Bytes::from(out)
 }
 
-fn rbwnat_describe_id_column() -> Bytes {
+pub(super) fn rbwnat_describe_id_column() -> Bytes {
     let mut out = Vec::new();
     encode_varuint(7, &mut out);
     for col in [
@@ -105,17 +122,41 @@ fn rbwnat_describe_id_column() -> Bytes {
 }
 
 #[derive(Clone, Debug)]
-struct CapturedRequest {
-    method: Method,
-    uri: String,
-    content_type: Option<String>,
-    body: Bytes,
+pub(super) struct CapturedRequest {
+    pub(super) method: Method,
+    pub(super) uri: String,
+    pub(super) content_type: Option<String>,
+    pub(super) body: Bytes,
 }
 
-#[derive(Debug, Deserialize, Serialize, Row)]
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Row)]
 #[clickhouse(crate = "crate::__clickhouse")]
-struct SampleRow {
-    id: u64,
+pub(super) struct SampleRow {
+    pub(super) id: u64,
+}
+
+pub(super) async fn spawn_http_server<F, Fut>(handler: F) -> (SocketAddr, JoinHandle<()>)
+where
+    F: Fn(Request<Incoming>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Response<Full<Bytes>>> + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let h = handler.clone();
+            tokio::spawn(async move {
+                let svc = service_fn(move |req| {
+                    let h = h.clone();
+                    async move { Ok::<_, hyper::Error>(h(req).await) }
+                });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), svc)
+                    .await;
+            });
+        }
+    });
+    (addr, handle)
 }
 
 async fn spawn_http_capture_server(
@@ -847,63 +888,4 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
         );
     }
     srv.abort();
-}
-
-#[tokio::test]
-async fn start_admission_rejects_bad_urls_secrets_and_allows_mtls() {
-    let err_plain = ClickHouse::start(ClickHouseOptions {
-        allow_plaintext: false,
-        ..base_options("http://127.0.0.1:8123".to_owned())
-    })
-    .await
-    .expect_err("plaintext refused");
-    assert!(matches!(err_plain, StartError(_)));
-
-    let err_userinfo =
-        ClickHouse::start(base_options("https://user:pass@127.0.0.1:8123".to_owned()))
-            .await
-            .expect_err("userinfo refused");
-    assert!(matches!(err_userinfo, StartError(_)));
-
-    let err_dotseg = ClickHouse::start(base_options("https://127.0.0.1:8123/a/../b".to_owned()))
-        .await
-        .expect_err("dot segment refused");
-    assert!(matches!(err_dotseg, StartError(_)));
-
-    let tls = TlsMaterial::new("localhost");
-    let dir = tempfile::tempdir().expect("tempdir");
-    let ca_path = dir.path().join("ca.pem");
-    let cert_path = dir.path().join("client.pem");
-    let key_path = dir.path().join("client.key");
-    let pw_path = dir.path().join("password");
-    tokio::fs::write(&ca_path, &tls.root_pem)
-        .await
-        .expect("write ca");
-    tokio::fs::write(&cert_path, &tls.cert_pem)
-        .await
-        .expect("write cert");
-    tokio::fs::write(&key_path, &tls.key_pem)
-        .await
-        .expect("write key");
-    tokio::fs::write(&pw_path, "pw-from-file\n")
-        .await
-        .expect("write pw");
-
-    let mut opts = base_options("https://localhost:8443/prefix/".to_owned());
-    opts.allow_plaintext = false;
-    opts.password = None;
-    opts.password_file = Some(pw_path);
-    opts.root_ca_path = Some(ca_path);
-    opts.client_certificate = Some(ClientCertificate {
-        cert_path,
-        key_path,
-    });
-
-    let ch = ClickHouse::start(opts)
-        .await
-        .expect("mtls + password_file start");
-    assert_eq!(
-        ch.close(Duration::from_secs(1)).await,
-        CloseOutcome::Complete
-    );
 }

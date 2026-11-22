@@ -11,6 +11,7 @@ use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::error::StartErrorKind;
+use crate::observe::EndpointMetadata;
 use crate::{ClickHouseOptions, ClientCertificate, QuerySettings};
 
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -37,6 +38,9 @@ const MAX_MEMORY_USAGE: u64 = 64 * 1024 * 1024 * 1024;
 
 pub(crate) struct Admitted {
     pub(crate) client: clickhouse::Client,
+    pub(crate) endpoint: EndpointMetadata,
+    pub(crate) password: Option<Zeroizing<String>>,
+    pub(crate) password_file: Option<PathBuf>,
     pub(crate) query_settings: QuerySettings,
     pub(crate) query_timeout: Duration,
     pub(crate) insert_timeout: Duration,
@@ -45,7 +49,14 @@ pub(crate) struct Admitted {
     pub(crate) max_result_bytes: usize,
     pub(crate) http_response_buffer_size: usize,
     pub(crate) max_memory_usage: Option<u64>,
-    pub(crate) _password_file: Option<PathBuf>,
+    pub(crate) propagate_trace_context: bool,
+}
+
+struct AdmittedUrl {
+    normalized: String,
+    is_https: bool,
+    host: String,
+    port: u16,
 }
 
 struct AdmittedCredentials {
@@ -56,11 +67,11 @@ struct AdmittedCredentials {
 
 pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorKind> {
     validate_limits(options)?;
-    let (normalized_url, is_https) = validate_url(&options.url, options.allow_plaintext)?;
+    let url = validate_url(&options.url, options.allow_plaintext)?;
     validate_printable_non_blank(&options.database, StartErrorKind::InvalidDatabase)?;
     let creds = admit_credentials(options)?;
     let tls = admit_tls(
-        is_https,
+        url.is_https,
         options.root_ca_path.as_deref(),
         options.client_certificate.as_ref(),
     )?;
@@ -97,17 +108,24 @@ pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorK
         .build(connector);
 
     let mut client = clickhouse::Client::with_http_client(hyper_client)
-        .with_url(normalized_url)
+        .with_url(url.normalized)
         .with_database(&options.database);
     if let Some(user) = creds.username {
         client = client.with_user(user);
     }
-    if let Some(secret) = creds.password {
+    if let Some(ref secret) = creds.password {
         client = client.with_password(secret.as_str());
     }
 
     Ok(Admitted {
         client,
+        endpoint: EndpointMetadata {
+            database: options.database.clone(),
+            host: url.host,
+            port: url.port,
+        },
+        password: creds.password,
+        password_file: creds.password_file,
         query_settings: options.query_settings,
         query_timeout: options.query_timeout,
         insert_timeout: options.insert_timeout,
@@ -116,7 +134,7 @@ pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorK
         max_result_bytes: options.max_result_bytes,
         http_response_buffer_size: options.http_response_buffer_size,
         max_memory_usage: options.max_memory_usage,
-        _password_file: creds.password_file,
+        propagate_trace_context: options.propagate_trace_context,
     })
 }
 
@@ -143,8 +161,12 @@ fn validate_limits(options: &ClickHouseOptions) -> Result<(), StartErrorKind> {
     Ok(())
 }
 
-fn validate_url(raw: &str, allow_plaintext: bool) -> Result<(String, bool), StartErrorKind> {
-    if raw.bytes().any(is_ascii_ctl) || raw.contains('?') || raw.contains('#') {
+fn validate_url(raw: &str, allow_plaintext: bool) -> Result<AdmittedUrl, StartErrorKind> {
+    if shared_rules::uri::has_whitespace_or_control(raw)
+        || shared_rules::uri::authority_has_userinfo(raw)
+        || raw.contains('?')
+        || raw.contains('#')
+    {
         return Err(StartErrorKind::InvalidUrl);
     }
     let parsed = Url::parse(raw).map_err(|_| StartErrorKind::InvalidUrl)?;
@@ -189,7 +211,19 @@ fn validate_url(raw: &str, allow_plaintext: bool) -> Result<(String, bool), Star
     let mut normalized = parsed;
     let clean_path = normalized.path().trim_end_matches('/').to_owned();
     normalized.set_path(&clean_path);
-    Ok((normalized.into(), is_https))
+    let host = normalized
+        .host_str()
+        .ok_or(StartErrorKind::InvalidUrl)?
+        .to_owned();
+    let port = normalized
+        .port_or_known_default()
+        .ok_or(StartErrorKind::InvalidUrl)?;
+    Ok(AdmittedUrl {
+        normalized: normalized.into(),
+        is_https,
+        host,
+        port,
+    })
 }
 
 fn admit_credentials(options: &ClickHouseOptions) -> Result<AdmittedCredentials, StartErrorKind> {
@@ -334,11 +368,11 @@ fn read_client_certificate(
     Ok((chain, key))
 }
 
-fn read_password_file(path: &Path) -> Result<Zeroizing<String>, StartErrorKind> {
+pub(crate) fn read_password_file(path: &Path) -> Result<Zeroizing<String>, StartErrorKind> {
     let mut bytes = read_secret_file(path, MAX_PASSWORD_FILE_BYTES)
         .map_err(|error| StartErrorKind::PasswordFile { kind: error.kind() })?;
     let raw = std::mem::take(&mut *bytes);
-    let content = String::from_utf8(raw)
+    let mut content = String::from_utf8(raw)
         .map(Zeroizing::new)
         .map_err(|error| {
             error.into_bytes().zeroize();
@@ -346,11 +380,13 @@ fn read_password_file(path: &Path) -> Result<Zeroizing<String>, StartErrorKind> 
                 kind: ErrorKind::InvalidData,
             }
         })?;
-    let trimmed = shared_rules::secret_file::value(content.to_string());
+    let trimmed = Zeroizing::new(shared_rules::secret_file::value(std::mem::take(
+        &mut *content,
+    )));
     if trimmed.is_empty() || trimmed.bytes().any(is_ascii_ctl) {
         return Err(StartErrorKind::PasswordFileEmpty);
     }
-    Ok(Zeroizing::new(trimmed))
+    Ok(trimmed)
 }
 
 #[expect(

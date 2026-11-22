@@ -1,0 +1,133 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
+use tokio_util::task::AbortOnDropHandle;
+use zeroize::Zeroizing;
+
+use crate::Shared;
+use crate::admission::read_password_file;
+use crate::error::StartErrorKind;
+use crate::observe::PasswordRefreshOutcome;
+
+pub(crate) const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(derive_more::Debug)]
+#[debug("ActiveCredentials {{ cred_epoch: {}, .. }}", self.cred_epoch)]
+pub(crate) struct ActiveCredentials {
+    pub(crate) cred_epoch: u64,
+    pub(crate) read_client: clickhouse::Client,
+    pub(crate) password: Option<Zeroizing<String>>,
+}
+
+#[derive(Clone, Copy)]
+enum RefreshReadFailure {
+    Start(StartErrorKind),
+    Busy,
+    TimedOut,
+    Panicked,
+}
+
+impl RefreshReadFailure {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Start(StartErrorKind::PasswordFile { .. }) => "io_error",
+            Self::Start(_) => "empty_or_invalid",
+            Self::Busy => "read_busy",
+            Self::TimedOut => "timed_out",
+            Self::Panicked => "panicked",
+        }
+    }
+}
+
+pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf) {
+    let reading = Arc::new(Semaphore::new(1));
+    let mut warned_read_failure = false;
+    let mut next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
+
+    loop {
+        tokio::select! {
+            biased;
+            () = shared.shutdown.cancelled() => return,
+            () = tokio::time::sleep_until(next_refresh) => {}
+        }
+        next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
+
+        let result = tokio::select! {
+            biased;
+            () = shared.shutdown.cancelled() => return,
+            result = read_once(&reading, &path) => result,
+        };
+
+        if shared.shutdown.is_cancelled() {
+            return;
+        }
+
+        match result {
+            Ok(new_password) => {
+                warned_read_failure = false;
+                let current = shared.credentials.load();
+                if current.password.as_deref().map(String::as_str) == Some(new_password.as_str()) {
+                    shared
+                        .metrics
+                        .record_password_refresh(PasswordRefreshOutcome::Unchanged);
+                } else {
+                    let next_epoch = current.cred_epoch.saturating_add(1);
+                    let next_client = current
+                        .read_client
+                        .clone()
+                        .with_password(new_password.as_str());
+                    shared.credentials.store(Arc::new(ActiveCredentials {
+                        cred_epoch: next_epoch,
+                        read_client: next_client,
+                        password: Some(new_password),
+                    }));
+                    shared
+                        .metrics
+                        .record_password_refresh(PasswordRefreshOutcome::Updated);
+                    tracing::info!(
+                        server.address = %shared.endpoint.host,
+                        server.port = shared.endpoint.port,
+                        cred_epoch = next_epoch,
+                        "clickhouse_password_reloaded"
+                    );
+                }
+            }
+            Err(failure) => {
+                shared
+                    .metrics
+                    .record_password_refresh(PasswordRefreshOutcome::ReadFailed);
+                if !std::mem::replace(&mut warned_read_failure, true) {
+                    tracing::warn!(
+                        server.address = %shared.endpoint.host,
+                        server.port = shared.endpoint.port,
+                        reason = failure.reason(),
+                        "clickhouse_password_file_unreadable"
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn read_once(
+    reading: &Arc<Semaphore>,
+    path: &std::path::Path,
+) -> Result<Zeroizing<String>, RefreshReadFailure> {
+    let permit = Arc::clone(reading)
+        .try_acquire_owned()
+        .map_err(|_| RefreshReadFailure::Busy)?;
+    let path = path.to_path_buf();
+    let handle = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        read_password_file(&path)
+    }));
+    tokio::time::timeout(PASSWORD_READ_TIMEOUT, handle)
+        .await
+        .map_err(|_| RefreshReadFailure::TimedOut)?
+        .map_err(|_| RefreshReadFailure::Panicked)?
+        .map_err(RefreshReadFailure::Start)
+}

@@ -5,8 +5,10 @@ use std::time::Duration;
 use operation_context::{BoundedStop, OperationContext};
 use serde::Serialize;
 use smallvec::SmallVec;
+use tracing::Instrument as _;
 
 use crate::error::{QueryError, classify_query_error};
+use crate::observe::{Operation, OperationGuard};
 use crate::{ClickHouse, QuerySettings, within_bounded};
 
 mod sealed {
@@ -183,7 +185,7 @@ impl<T: Clone + Into<Self>> From<&[T]> for Param {
 #[derive(Debug)]
 pub struct Query<'a> {
     client: &'a ClickHouse,
-    _summary: &'static str,
+    summary: &'static str,
     sql: &'a str,
     params: SmallVec<[(&'a str, Param); 4]>,
     timeout: Option<Duration>,
@@ -195,7 +197,7 @@ impl<'a> Query<'a> {
     pub(crate) fn new(client: &'a ClickHouse, summary: &'static str, sql: &'a str) -> Self {
         Self {
             client,
-            _summary: summary,
+            summary,
             sql,
             params: SmallVec::new(),
             timeout: None,
@@ -225,125 +227,195 @@ impl<'a> Query<'a> {
     }
 
     pub async fn fetch_one<R: ReadRow>(self, ctx: &OperationContext) -> Result<R, QueryError> {
-        let mut rows = self.execute_bounded::<R>(ctx, Some(2)).await?;
-        match rows.len() {
-            0 => Err(QueryError::NotFound),
-            1 => Ok(rows.remove(0)),
-            _ => Err(QueryError::TooManyRows),
-        }
+        self.execute_bounded::<R, _>(ctx, Operation::FetchOne, Some(2), |mut rows| {
+            match rows.len() {
+                0 => Err(QueryError::NotFound),
+                1 => Ok(rows.remove(0)),
+                _ => Err(QueryError::TooManyRows),
+            }
+        })
+        .await
     }
 
     pub async fn fetch_optional<R: ReadRow>(
         self,
         ctx: &OperationContext,
     ) -> Result<Option<R>, QueryError> {
-        let mut rows = self.execute_bounded::<R>(ctx, Some(2)).await?;
-        match rows.len() {
-            0 => Ok(None),
-            1 => Ok(Some(rows.remove(0))),
-            _ => Err(QueryError::TooManyRows),
-        }
+        self.execute_bounded::<R, _>(
+            ctx,
+            Operation::FetchOptional,
+            Some(2),
+            |mut rows| match rows.len() {
+                0 => Ok(None),
+                1 => Ok(Some(rows.remove(0))),
+                _ => Err(QueryError::TooManyRows),
+            },
+        )
+        .await
     }
 
     pub async fn fetch_all<R: ReadRow>(self, ctx: &OperationContext) -> Result<Vec<R>, QueryError> {
-        self.execute_bounded::<R>(ctx, None).await
+        self.execute_bounded::<R, _>(ctx, Operation::FetchAll, None, Ok)
+            .await
     }
 
-    async fn execute_bounded<R: ReadRow>(
+    async fn execute_bounded<R: ReadRow, T>(
         self,
         ctx: &OperationContext,
+        operation: Operation,
         cardinality_cap: Option<usize>,
-    ) -> Result<Vec<R>, QueryError> {
-        let inner = &self.client.inner;
-        if inner.closing.load(Ordering::Acquire) {
+        finish_rows: impl FnOnce(Vec<R>) -> Result<T, QueryError>,
+    ) -> Result<T, QueryError> {
+        let shared = &self.client.inner.shared;
+        if shared.closing.load(Ordering::Acquire) {
             return Err(QueryError::Unavailable);
         }
         ctx.check().map_err(QueryError::Stopped)?;
         validate_query_inputs(self.sql, &self.params, self.timeout)?;
 
-        let _permit = inner
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| QueryError::Busy)?;
-        let _task_token = inner.tasks.token();
-        let effective_timeout = inner
-            .query_timeout
-            .min(self.timeout.unwrap_or(inner.query_timeout));
-        let effective_max_rows = inner.max_result_rows.min(
-            self.max_result_rows
-                .map_or(inner.max_result_rows, NonZeroU64::get),
-        );
-        let effective_max_bytes = inner.max_result_bytes.min(
-            self.max_result_bytes
-                .map_or(inner.max_result_bytes, NonZeroUsize::get),
-        );
+        let Ok(_permit) = shared.permits.clone().try_acquire_owned() else {
+            shared.metrics.record_admission_refused(operation);
+            return Err(QueryError::Busy);
+        };
+        let _task_token = shared.tasks.token();
 
-        let bounded = ctx.bounded(effective_timeout);
-        bounded.check().map_err(stop_to_query_error)?;
-        let remaining = bounded.remaining();
-        let buffer_size = inner.http_response_buffer_size.min(effective_max_bytes);
-        let query_id = uuid::Uuid::new_v4().to_string();
+        let guard =
+            OperationGuard::start(&shared.metrics, operation, self.summary, &shared.endpoint);
+        let span = guard.span();
+        let result = async {
+            let effective_timeout = shared
+                .query_timeout
+                .min(self.timeout.unwrap_or(shared.query_timeout));
+            let effective_max_rows = shared.max_result_rows.min(
+                self.max_result_rows
+                    .map_or(shared.max_result_rows, NonZeroU64::get),
+            );
+            let effective_max_bytes = shared.max_result_bytes.min(
+                self.max_result_bytes
+                    .map_or(shared.max_result_bytes, NonZeroUsize::get),
+            );
 
-        let mut ch_query = inner
-            .base_client
-            .query_raw(self.sql)
-            .with_setting("wait_end_of_query", "1")
-            .with_setting("buffer_size", buffer_size.to_string())
-            .with_setting("query_id", query_id);
+            let bounded = ctx.bounded(effective_timeout);
+            bounded.check().map_err(stop_to_query_error)?;
 
-        if inner.query_settings == QuerySettings::Client {
-            let max_exec_secs = remaining
-                .as_secs()
-                .saturating_add(u64::from(remaining.subsec_nanos() > 0))
-                .max(1);
-            ch_query = ch_query
-                .with_setting("max_execution_time", max_exec_secs.to_string())
-                .with_setting("timeout_overflow_mode", "throw")
-                .with_setting("result_overflow_mode", "throw")
-                .with_setting("max_result_rows", effective_max_rows.to_string())
-                .with_setting("max_result_bytes", effective_max_bytes.to_string())
-                .with_setting("cancel_http_readonly_queries_on_client_close", "1");
-            if let Some(mem) = inner.max_memory_usage {
-                ch_query = ch_query.with_setting("max_memory_usage", mem.to_string());
+            let creds = shared.credentials.load();
+            let mut client = creds.read_client.clone();
+            if shared.propagate_trace_context {
+                client = guard.inject_trace_context(client);
             }
+            let ch_query = build_clickhouse_query(
+                &client,
+                shared,
+                self.sql,
+                self.params,
+                bounded.remaining(),
+                effective_max_rows,
+                effective_max_bytes,
+            );
+            bounded.check().map_err(stop_to_query_error)?;
+            let cursor = ch_query
+                .fetch::<R>()
+                .map_err(|err| classify_query_error(&err))?;
+
+            consume_bounded_rows(
+                cursor,
+                &bounded,
+                effective_max_rows,
+                effective_max_bytes,
+                cardinality_cap,
+                finish_rows,
+            )
+            .await
         }
+        .instrument(span)
+        .await;
+        guard.finish_query(result)
+    }
+}
 
-        for (name, value) in self.params {
-            ch_query = ch_query.param(name, value);
+fn build_clickhouse_query(
+    client: &clickhouse::Client,
+    shared: &crate::Shared,
+    sql: &str,
+    params: SmallVec<[(&str, Param); 4]>,
+    remaining: Duration,
+    effective_max_rows: u64,
+    effective_max_bytes: usize,
+) -> clickhouse::query::Query {
+    let buffer_size = shared.http_response_buffer_size.min(effective_max_bytes);
+    let query_id = uuid::Uuid::new_v4().to_string();
+    let mut ch_query = client
+        .query_raw(sql)
+        .with_setting("wait_end_of_query", "1")
+        .with_setting("buffer_size", buffer_size.to_string())
+        .with_setting("query_id", query_id);
+
+    if shared.query_settings == QuerySettings::Client {
+        let max_exec_secs = remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+            .max(1);
+        ch_query = ch_query
+            .with_setting("max_execution_time", max_exec_secs.to_string())
+            .with_setting("timeout_overflow_mode", "throw")
+            .with_setting("result_overflow_mode", "throw")
+            .with_setting("max_result_rows", effective_max_rows.to_string())
+            .with_setting("max_result_bytes", effective_max_bytes.to_string())
+            .with_setting("cancel_http_readonly_queries_on_client_close", "1");
+        if let Some(mem) = shared.max_memory_usage {
+            ch_query = ch_query.with_setting("max_memory_usage", mem.to_string());
         }
+    }
 
-        let mut cursor = ch_query
-            .fetch::<R>()
-            .map_err(|err| classify_query_error(&err))?;
+    for (name, value) in params {
+        ch_query = ch_query.param(name, value);
+    }
+    ch_query
+}
 
-        let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
-        let mut rows = Vec::new();
-        loop {
-            let next = within_bounded(&bounded, cursor.next())
-                .await
-                .map_err(stop_to_query_error)?;
-            match next {
-                Ok(Some(row)) => {
-                    if cursor.decoded_bytes() > max_bytes_u64
-                        || cursor.returned_rows() > effective_max_rows
-                    {
-                        return Err(QueryError::TooLarge);
-                    }
-                    rows.push(row);
-                    if let Some(cap) = cardinality_cap
-                        && rows.len() >= cap
-                    {
-                        return Ok(rows);
-                    }
+async fn consume_bounded_rows<R: ReadRow, T>(
+    mut cursor: clickhouse::query::RowCursor<R>,
+    bounded: &operation_context::BoundedContext,
+    effective_max_rows: u64,
+    effective_max_bytes: usize,
+    cardinality_cap: Option<usize>,
+    finish_rows: impl FnOnce(Vec<R>) -> Result<T, QueryError>,
+) -> Result<(T, u64, u64), QueryError> {
+    let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
+    let mut rows = Vec::new();
+    loop {
+        let next = within_bounded(bounded, cursor.next())
+            .await
+            .map_err(stop_to_query_error)?;
+        match next {
+            Ok(Some(row)) => {
+                if cursor.decoded_bytes() > max_bytes_u64
+                    || cursor.returned_rows() > effective_max_rows
+                {
+                    return Err(QueryError::TooLarge);
                 }
-                Ok(None) => {
-                    if cursor.decoded_bytes() > max_bytes_u64 {
-                        return Err(QueryError::TooLarge);
-                    }
-                    return Ok(rows);
+                rows.push(row);
+                if let Some(cap) = cardinality_cap
+                    && rows.len() >= cap
+                {
+                    let returned_rows = cursor.returned_rows();
+                    let decoded_bytes = cursor.decoded_bytes();
+                    return finish_rows(rows).map(|value| (value, returned_rows, decoded_bytes));
                 }
-                Err(err) => return Err(classify_query_error(&err)),
+            }
+            Ok(None) => {
+                if cursor.decoded_bytes() > max_bytes_u64 {
+                    return Err(QueryError::TooLarge);
+                }
+                let returned_rows = cursor.returned_rows();
+                let decoded_bytes = cursor.decoded_bytes();
+                return finish_rows(rows).map(|value| (value, returned_rows, decoded_bytes));
+            }
+            Err(err) => {
+                if let Some(stop) = bounded.stopped() {
+                    return Err(stop_to_query_error(stop));
+                }
+                return Err(classify_query_error(&err));
             }
         }
     }

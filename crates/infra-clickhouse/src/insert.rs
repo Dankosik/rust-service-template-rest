@@ -2,11 +2,14 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use operation_context::{BoundedStop, OperationContext};
+use tracing::Instrument as _;
 
 use crate::error::{
-    InsertError, InsertFailure, UnknownOutcome, classify_metadata_error,
-    classify_post_dispatch_insert_error, is_local_serialization_error,
+    InsertError, InsertFailure, UnknownOutcome, classify_post_dispatch_insert_error,
+    is_local_serialization_error,
 };
+use crate::metadata::{self, is_schema_drift_error};
+use crate::observe::{InsertModeLabel, Operation, OperationGuard};
 use crate::{ClickHouse, within_bounded};
 
 const MAX_TABLE_BYTES: usize = 128;
@@ -89,6 +92,7 @@ pub struct InsertReport {
     pub rows: u64,
 }
 
+#[derive(Clone, Copy)]
 enum InsertMode<'a> {
     Batch { dedup_token: Option<&'a str> },
     Async { dedup: AsyncDeduplication<'a> },
@@ -140,13 +144,14 @@ impl ClickHouse {
     async fn execute_insert<R: WriteRow>(
         &self,
         ctx: &OperationContext,
-        _summary: &'static str,
+        summary: &'static str,
         table: &str,
         rows: &[R],
         timeout: Option<Duration>,
         mode: InsertMode<'_>,
     ) -> Result<InsertReport, InsertError> {
-        if self.inner.closing.load(Ordering::Acquire) {
+        let shared = &self.inner.shared;
+        if shared.closing.load(Ordering::Acquire) {
             return Err(InsertError::NotApplied(InsertFailure::Unavailable));
         }
         ctx.check()
@@ -156,76 +161,136 @@ impl ClickHouse {
             return Ok(InsertReport { rows: 0 });
         }
 
-        let _permit = self
-            .inner
-            .permits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| InsertError::NotApplied(InsertFailure::Busy))?;
-        let _task_token = self.inner.tasks.token();
+        let (operation, mode_label) = match mode {
+            InsertMode::Batch { .. } => (Operation::InsertBatch, InsertModeLabel::Batch),
+            InsertMode::Async { .. } => (Operation::InsertAsync, InsertModeLabel::Async),
+        };
+        let Ok(_permit) = shared.permits.clone().try_acquire_owned() else {
+            shared.metrics.record_admission_refused(operation);
+            return Err(InsertError::NotApplied(InsertFailure::Busy));
+        };
+        let _task_token = shared.tasks.token();
 
-        let effective_timeout = self
-            .inner
-            .insert_timeout
-            .min(timeout.unwrap_or(self.inner.insert_timeout));
-        let bounded = ctx.bounded(effective_timeout);
-        bounded.check().map_err(pre_dispatch_stop)?;
+        let mut guard =
+            OperationGuard::start(&shared.metrics, operation, summary, &shared.endpoint);
+        let span = guard.span();
+        let result = async {
+            let effective_timeout = shared
+                .insert_timeout
+                .min(timeout.unwrap_or(shared.insert_timeout));
+            let bounded = ctx.bounded(effective_timeout);
+            bounded.check().map_err(pre_dispatch_stop)?;
 
-        let mut insert = within_bounded(&bounded, self.inner.base_client.insert::<R>(table))
+            let creds_snap = shared.credentials.load();
+            let slot =
+                shared
+                    .table_slots
+                    .get_or_create(table, &creds_snap, &shared.endpoint.database);
+            let (insert, observed_gen) = metadata::prepare_insert::<R>(
+                &slot,
+                table,
+                &shared.credentials,
+                &guard,
+                shared.propagate_trace_context,
+                &bounded,
+            )
+            .await?;
+
+            bounded.check().map_err(pre_dispatch_stop)?;
+            let insert = configure_insert(insert, bounded.remaining(), mode);
+            guard.mark_dispatched();
+            write_and_end_insert(
+                insert,
+                rows,
+                &bounded,
+                &slot,
+                observed_gen,
+                &shared.credentials,
+            )
             .await
-            .map_err(pre_dispatch_stop)?
-            .map_err(|err| InsertError::NotApplied(classify_metadata_error(&err)))?;
+        }
+        .instrument(span)
+        .await;
+        guard.finish_insert(mode_label, result)
+    }
+}
 
-        let remaining = bounded.remaining();
-        insert = insert
-            .with_timeouts(Some(remaining), Some(remaining))
-            .with_setting("query_id", uuid::Uuid::new_v4().to_string());
-
-        match mode {
-            InsertMode::Batch { dedup_token } => {
-                insert = insert.with_setting("async_insert", "0");
-                if let Some(token) = dedup_token {
-                    insert = insert.with_setting("insert_deduplication_token", token);
-                }
+fn configure_insert<R: WriteRow>(
+    insert: clickhouse::insert::Insert<R>,
+    remaining: Duration,
+    mode: InsertMode<'_>,
+) -> clickhouse::insert::Insert<R> {
+    let mut insert = insert
+        .with_timeouts(Some(remaining), Some(remaining))
+        .with_setting("query_id", uuid::Uuid::new_v4().to_string());
+    match mode {
+        InsertMode::Batch { dedup_token } => {
+            insert = insert.with_setting("async_insert", "0");
+            if let Some(token) = dedup_token {
+                insert = insert.with_setting("insert_deduplication_token", token);
             }
-            InsertMode::Async { dedup } => {
-                insert = insert
-                    .with_setting("async_insert", "1")
-                    .with_setting("wait_for_async_insert", "1");
-                match dedup {
-                    AsyncDeduplication::Disabled => {}
-                    AsyncDeduplication::ByPayloadHash => {
-                        insert = insert.with_setting("async_insert_deduplicate", "1");
-                    }
-                    AsyncDeduplication::ByToken(token) => {
-                        insert = insert
-                            .with_setting("async_insert_deduplicate", "1")
-                            .with_setting("insert_deduplication_token", token);
-                    }
+        }
+        InsertMode::Async { dedup } => {
+            insert = insert
+                .with_setting("async_insert", "1")
+                .with_setting("wait_for_async_insert", "1");
+            match dedup {
+                AsyncDeduplication::Disabled => {}
+                AsyncDeduplication::ByPayloadHash => {
+                    insert = insert.with_setting("async_insert_deduplicate", "1");
+                }
+                AsyncDeduplication::ByToken(token) => {
+                    insert = insert
+                        .with_setting("async_insert_deduplicate", "1")
+                        .with_setting("insert_deduplication_token", token);
                 }
             }
         }
+    }
+    insert
+}
 
-        for (idx, row) in rows.iter().enumerate() {
-            match within_bounded(&bounded, insert.write(row)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    if idx == 0 && is_local_serialization_error(&err) {
-                        return Err(InsertError::NotApplied(InsertFailure::Encode));
-                    }
-                    return Err(classify_post_dispatch_insert_error(&err));
+async fn write_and_end_insert<R: WriteRow>(
+    mut insert: clickhouse::insert::Insert<R>,
+    rows: &[R],
+    bounded: &operation_context::BoundedContext,
+    slot: &metadata::TableSlot,
+    observed_gen: u64,
+    credentials: &arc_swap::ArcSwap<crate::credentials::ActiveCredentials>,
+) -> Result<InsertReport, InsertError> {
+    for (idx, row) in rows.iter().enumerate() {
+        match within_bounded(bounded, insert.write(row)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if is_schema_drift_error(&err) {
+                    slot.invalidate_if_gen(observed_gen, &credentials.load());
                 }
-                Err(stop) => return Err(post_dispatch_stop(stop)),
+                if idx == 0 && is_local_serialization_error(&err) {
+                    return Err(InsertError::NotApplied(InsertFailure::Encode));
+                }
+                if let Some(stop) = bounded.stopped() {
+                    return Err(post_dispatch_stop(stop));
+                }
+                return Err(classify_post_dispatch_insert_error(&err));
             }
+            Err(stop) => return Err(post_dispatch_stop(stop)),
         }
+    }
 
-        match within_bounded(&bounded, insert.end()).await {
-            Ok(Ok(())) => Ok(InsertReport {
-                rows: u64::try_from(rows.len()).unwrap_or(u64::MAX),
-            }),
-            Ok(Err(err)) => Err(classify_post_dispatch_insert_error(&err)),
-            Err(stop) => Err(post_dispatch_stop(stop)),
+    match within_bounded(bounded, insert.end()).await {
+        Ok(Ok(())) => Ok(InsertReport {
+            rows: u64::try_from(rows.len()).unwrap_or(u64::MAX),
+        }),
+        Ok(Err(err)) => {
+            if is_schema_drift_error(&err) {
+                slot.invalidate_if_gen(observed_gen, &credentials.load());
+            }
+            if let Some(stop) = bounded.stopped() {
+                return Err(post_dispatch_stop(stop));
+            }
+            Err(classify_post_dispatch_insert_error(&err))
         }
+        Err(stop) => Err(post_dispatch_stop(stop)),
     }
 }
 
@@ -265,7 +330,7 @@ fn is_valid_table_name(table: &str) -> bool {
         })
 }
 
-const fn pre_dispatch_stop(stop: BoundedStop) -> InsertError {
+pub(crate) const fn pre_dispatch_stop(stop: BoundedStop) -> InsertError {
     match stop {
         BoundedStop::Parent(stopped) => InsertError::NotApplied(InsertFailure::Stopped(stopped)),
         BoundedStop::Timeout => InsertError::NotApplied(InsertFailure::Unavailable),

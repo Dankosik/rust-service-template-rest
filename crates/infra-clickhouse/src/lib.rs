@@ -1,6 +1,8 @@
 mod admission;
+mod credentials;
 mod error;
 mod insert;
+mod metadata;
 mod observe;
 mod query;
 
@@ -14,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use operation_context::{BoundedContext, BoundedStop};
 use secrecy::SecretString;
 use tokio::sync::Semaphore;
@@ -28,12 +31,15 @@ pub mod serde {
 }
 
 use self::admission::Admitted;
+use self::credentials::ActiveCredentials;
 use self::error::StartErrorKind;
 pub use self::error::{InsertError, InsertFailure, QueryError, StartError, UnknownOutcome};
 pub use self::insert::{
     AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, InsertReport, WriteRow,
 };
+use self::metadata::TableSlotRegistry;
 pub use self::observe::HISTOGRAMS;
+use self::observe::{ClientMetrics, EndpointMetadata};
 pub use self::query::{Param, Query, ReadRow};
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -84,11 +90,25 @@ pub enum CloseOutcome {
 #[derive(Clone, derive_more::Debug)]
 #[debug("ClickHouse {{ .. }}")]
 pub struct ClickHouse {
-    inner: Arc<Inner>,
+    inner: Arc<ClientHandle>,
 }
 
-struct Inner {
-    base_client: clickhouse::Client,
+struct ClientHandle {
+    shared: Arc<Shared>,
+}
+
+impl Drop for ClientHandle {
+    fn drop(&mut self) {
+        self.shared.closing.store(true, Ordering::Release);
+        self.shared.shutdown.cancel();
+    }
+}
+
+pub(crate) struct Shared {
+    credentials: ArcSwap<ActiveCredentials>,
+    table_slots: TableSlotRegistry,
+    endpoint: EndpointMetadata,
+    metrics: ClientMetrics,
     query_settings: QuerySettings,
     query_timeout: Duration,
     insert_timeout: Duration,
@@ -96,17 +116,11 @@ struct Inner {
     max_result_bytes: usize,
     http_response_buffer_size: usize,
     max_memory_usage: Option<u64>,
+    propagate_trace_context: bool,
     permits: Arc<Semaphore>,
     closing: AtomicBool,
     shutdown: CancellationToken,
     tasks: TaskTracker,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        self.closing.store(true, Ordering::Release);
-        self.shutdown.cancel();
-    }
 }
 
 impl ClickHouse {
@@ -123,21 +137,38 @@ impl ClickHouse {
     }
 
     fn from_admitted(admitted: Admitted) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                base_client: admitted.client,
-                query_settings: admitted.query_settings,
-                query_timeout: admitted.query_timeout,
-                insert_timeout: admitted.insert_timeout,
-                max_result_rows: admitted.max_result_rows,
-                max_result_bytes: admitted.max_result_bytes,
-                http_response_buffer_size: admitted.http_response_buffer_size,
-                max_memory_usage: admitted.max_memory_usage,
-                permits: Arc::new(Semaphore::new(admitted.max_concurrency)),
-                closing: AtomicBool::new(false),
-                shutdown: CancellationToken::new(),
-                tasks: TaskTracker::new(),
+        observe::describe();
+        let metrics = ClientMetrics::register();
+        let shared = Arc::new(Shared {
+            credentials: ArcSwap::from_pointee(ActiveCredentials {
+                cred_epoch: 1,
+                read_client: admitted.client,
+                password: admitted.password,
             }),
+            table_slots: TableSlotRegistry::new(),
+            endpoint: admitted.endpoint,
+            metrics,
+            query_settings: admitted.query_settings,
+            query_timeout: admitted.query_timeout,
+            insert_timeout: admitted.insert_timeout,
+            max_result_rows: admitted.max_result_rows,
+            max_result_bytes: admitted.max_result_bytes,
+            http_response_buffer_size: admitted.http_response_buffer_size,
+            max_memory_usage: admitted.max_memory_usage,
+            propagate_trace_context: admitted.propagate_trace_context,
+            permits: Arc::new(Semaphore::new(admitted.max_concurrency)),
+            closing: AtomicBool::new(false),
+            shutdown: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+        });
+        if let Some(password_file) = admitted.password_file {
+            shared.tasks.spawn(credentials::run_password_refresh(
+                Arc::clone(&shared),
+                password_file,
+            ));
+        }
+        Self {
+            inner: Arc::new(ClientHandle { shared }),
         }
     }
 
@@ -146,10 +177,11 @@ impl ClickHouse {
     }
 
     pub async fn close(&self, budget: Duration) -> CloseOutcome {
-        self.inner.closing.store(true, Ordering::Release);
-        self.inner.shutdown.cancel();
-        self.inner.tasks.close();
-        if tokio::time::timeout(budget, self.inner.tasks.wait())
+        let shared = &self.inner.shared;
+        shared.closing.store(true, Ordering::Release);
+        shared.shutdown.cancel();
+        shared.tasks.close();
+        if tokio::time::timeout(budget, shared.tasks.wait())
             .await
             .is_ok()
         {
