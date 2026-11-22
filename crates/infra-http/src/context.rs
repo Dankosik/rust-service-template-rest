@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
@@ -30,7 +31,7 @@ pub struct RequestContext {
 }
 
 #[derive(Debug, Default)]
-struct RequestTracking {
+pub(super) struct RequestTracking {
     pending: AtomicUsize,
     pending_at_deadline: AtomicBool,
     // template:begin object-storage:http-request-put-outcomes
@@ -75,30 +76,37 @@ impl RequestContext {
             None => body,
         }
     }
-    // template:end object-storage:http-observe-put-outcomes
 
-    fn stopped_response(&self, reason: Stopped, version: Version) -> Response {
-        if reason == Stopped::Deadline
-            && self.tracking.as_ref().is_some_and(|tracking| {
-                tracking.pending.load(Ordering::Acquire) != 0
-                    || tracking.pending_at_deadline.load(Ordering::Relaxed)
-            })
-        {
-            return upload_timeout_response(version);
-        }
-        let problem = Problem::from(reason);
-        // template:begin object-storage:http-stopped-put-outcome
-        if self
-            .tracking
-            .as_ref()
-            .and_then(|tracking| tracking.put_outcomes.get())
-            .is_some_and(infra_object_storage::PutOutcomes::has_unconfirmed_write)
-        {
-            return pending_problem(crate::object_storage::unconfirmed_write(problem));
-        }
-        // template:end object-storage:http-stopped-put-outcome
-        pending_problem(problem)
+    pub(super) fn body_read_tracker(&self) -> Option<BodyReadTracker<Arc<RequestTracking>>> {
+        let (tracking, deadline) = self.tracking.as_ref().zip(self.operation.deadline())?;
+        Some(BodyReadTracker::new(Arc::clone(tracking), deadline))
     }
+    // template:end object-storage:http-observe-put-outcomes
+}
+
+fn stopped_response(
+    tracking: Option<&RequestTracking>,
+    reason: Stopped,
+    version: Version,
+) -> Response {
+    if reason == Stopped::Deadline
+        && tracking.is_some_and(|tracking| {
+            tracking.pending.load(Ordering::Acquire) != 0
+                || tracking.pending_at_deadline.load(Ordering::Relaxed)
+        })
+    {
+        return upload_timeout_response(version);
+    }
+    let problem = Problem::from(reason);
+    // template:begin object-storage:http-stopped-put-outcome
+    if tracking
+        .and_then(|tracking| tracking.put_outcomes.get())
+        .is_some_and(infra_object_storage::PutOutcomes::has_unconfirmed_write)
+    {
+        return pending_problem(crate::object_storage::unconfirmed_write(problem));
+    }
+    // template:end object-storage:http-stopped-put-outcome
+    pending_problem(problem)
 }
 
 pub(crate) async fn read_request_bytes(
@@ -119,17 +127,17 @@ pub(crate) async fn collect_body(
 }
 // template:end http-idempotency:http-idempotency-collect-body
 
-pub(crate) struct BodyReadTracker {
-    target: Option<(Arc<RequestTracking>, Deadline)>,
+pub(crate) struct BodyReadTracker<T: Deref<Target = RequestTracking>> {
+    tracking: T,
+    deadline: Deadline,
     pending: bool,
 }
 
-impl BodyReadTracker {
-    pub(crate) fn new(context: Option<&RequestContext>) -> Self {
-        let target =
-            context.and_then(|context| context.tracking.clone().zip(context.operation.deadline()));
+impl<T: Deref<Target = RequestTracking>> BodyReadTracker<T> {
+    fn new(tracking: T, deadline: Deadline) -> Self {
         Self {
-            target,
+            tracking,
+            deadline,
             pending: false,
         }
     }
@@ -137,23 +145,20 @@ impl BodyReadTracker {
     fn clear_pending(&mut self) {
         if self.pending {
             self.pending = false;
-            if let Some((tracking, deadline)) = &self.target {
-                if deadline.expired() {
-                    tracking.pending_at_deadline.store(true, Ordering::Relaxed);
-                }
-                tracking.pending.fetch_sub(1, Ordering::Release);
+            if self.deadline.expired() {
+                self.tracking
+                    .pending_at_deadline
+                    .store(true, Ordering::Relaxed);
             }
+            self.tracking.pending.fetch_sub(1, Ordering::Release);
         }
     }
 
-    pub(crate) fn poll_with<T>(&mut self, poll: impl FnOnce() -> Poll<T>) -> Poll<T> {
+    pub(crate) fn poll_with<R>(&mut self, poll: impl FnOnce() -> Poll<R>) -> Poll<R> {
         let polled = poll();
         if polled.is_pending() {
-            if !self.pending
-                && let Some((tracking, deadline)) = &self.target
-                && !deadline.expired()
-            {
-                tracking.pending.fetch_add(1, Ordering::Relaxed);
+            if !self.pending && !self.deadline.expired() {
+                self.tracking.pending.fetch_add(1, Ordering::Relaxed);
                 self.pending = true;
             }
         } else {
@@ -163,17 +168,22 @@ impl BodyReadTracker {
     }
 }
 
-impl Drop for BodyReadTracker {
+impl<T: Deref<Target = RequestTracking>> Drop for BodyReadTracker<T> {
     fn drop(&mut self) {
         self.clear_pending();
     }
 }
 
 async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
-    let mut tracker = BodyReadTracker::new(context);
-    if tracker.target.is_none() {
+    let Some((tracking, deadline)) = context.and_then(|context| {
+        context
+            .tracking
+            .as_deref()
+            .zip(context.operation.deadline())
+    }) else {
         return read.await;
-    }
+    };
+    let mut tracker = BodyReadTracker::new(tracking, deadline);
     let mut read = std::pin::pin!(read);
     std::future::poll_fn(|cx| tracker.poll_with(|| read.as_mut().poll(cx))).await
 }
@@ -284,14 +294,15 @@ pub(crate) fn missing_extension<T>() -> Response {
 
 pub(crate) type CancelGuard = std::mem::DropGuard<OperationContext, fn(OperationContext)>;
 
-pub(crate) fn attach_request_id(response: &mut Response, id: Option<RequestId>) {
-    complete_problem(response, id.as_ref().map(RequestId::header_value));
+pub(crate) fn attach_request_id(response: &mut Response, id: Option<RequestId>) -> Option<Code> {
+    let problem_code = complete_problem(response, id.as_ref().map(RequestId::header_value));
     if let Some(id) = id {
         response
             .headers_mut()
             .insert(REQUEST_ID_HEADER, id.header_value().clone());
         response.extensions_mut().insert(id);
     }
+    problem_code
 }
 
 pub(crate) async fn enforce_request_budget<P, F, Fut>(
@@ -305,37 +316,39 @@ where
     F: FnOnce(Request) -> Fut,
     Fut: Future<Output = Response>,
 {
-    let response_context = OperationContext::unbounded();
-    let cancel_guard: CancelGuard =
-        std::mem::DropGuard::new(response_context.clone(), |context| context.cancel());
     let origin = arrived.unwrap_or_else(tokio::time::Instant::now);
     let deadline = Deadline::new(origin, budget);
+    let cancel_guard: CancelGuard =
+        std::mem::DropGuard::new(OperationContext::from_deadline(deadline), |context| {
+            context.cancel();
+        });
     let track_request = !request.body().is_end_stream();
     // template:begin object-storage:http-opening-put-outcomes
     let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
-    let context = RequestContext {
-        operation: OperationContext::new(Some(deadline), response_context.cancellation().clone()),
-        tracking: track_request.then(Arc::default),
+    let tracking: Option<Arc<RequestTracking>> = track_request.then(Arc::default);
+    let version = request.version();
+    let extensions = request.extensions_mut();
+    extensions.insert(ResponseContext(OperationContext::new(
+        None,
+        cancel_guard.cancellation().clone(),
+    )));
+    extensions.insert(RequestContext {
+        operation: OperationContext::clone(&cancel_guard),
+        tracking: tracking.clone(),
         // template:begin request-budget:http-request-deadline-field-init
         deadline: RequestDeadline::from_deadline(deadline, budget),
         // template:end request-budget:http-request-deadline-field-init
-    };
-    let version = request.version();
-    request
-        .extensions_mut()
-        .insert(ResponseContext(response_context));
-    request.extensions_mut().insert(context.clone());
+    });
     let outcome = {
         let _permit = permit;
-        context.operation.run(run(request)).await
+        cancel_guard.run(run(request)).await
     };
     match outcome {
         Ok(response) => (response, Some(cancel_guard)),
         Err(reason) => {
-            context.operation.cancel();
-            let _ = std::mem::DropGuard::dismiss(cancel_guard);
-            (context.stopped_response(reason, version), None)
+            drop(cancel_guard);
+            (stopped_response(tracking.as_deref(), reason, version), None)
         }
     }
 }

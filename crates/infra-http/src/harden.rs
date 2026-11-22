@@ -61,10 +61,29 @@ pub(crate) fn harden(routes: Router, options: &HardenOptions) -> Router {
     assemble(routes, options, ProbeRoutes::default())
 }
 
+static ADMISSION_METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+static ADMISSION_WAIT_KEY: metrics::Key =
+    metrics::Key::from_static_name(observe::ADMISSION_WAIT_METRIC);
+static SHED_REQUESTS_KEY: metrics::Key =
+    metrics::Key::from_static_name(observe::SHED_REQUESTS_METRIC);
+
+fn admission_wait_histogram() -> metrics::Histogram {
+    metrics::with_recorder(|recorder| {
+        recorder.register_histogram(&ADMISSION_WAIT_KEY, &ADMISSION_METRIC_METADATA)
+    })
+}
+
+fn shed_requests_counter() -> metrics::Counter {
+    metrics::with_recorder(|recorder| {
+        recorder.register_counter(&SHED_REQUESTS_KEY, &ADMISSION_METRIC_METADATA)
+    })
+}
+
 pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRoutes) -> Router {
     observe::describe();
     let admission = options.max_in_flight.map(|limit| {
-        metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(0);
+        shed_requests_counter().increment(0);
         Admission {
             permits: Semaphore::new(limit.get() as usize),
             max_wait: options.admission_wait.min(options.request_timeout),
@@ -120,12 +139,12 @@ async fn handle(
 
     let traced = async {
         let (mut response, cancel_guard) = run_admitted(&state, is_probe, request, next).await;
-        context::attach_request_id(&mut response, response_id);
-        (response, cancel_guard)
+        let problem_code = context::attach_request_id(&mut response, response_id);
+        (response, cancel_guard, problem_code)
     }
     .instrument(span);
 
-    let (mut response, cancel_guard) = match fallback {
+    let (mut response, cancel_guard, problem_code) = match fallback {
         None => traced.await,
         Some(context) => traced.with_context(context).await,
     };
@@ -141,7 +160,7 @@ async fn handle(
             .insert(CONNECTION, HeaderValue::from_static("close"));
     }
 
-    observation.finish(response, cancel_guard)
+    observation.finish(response, cancel_guard, problem_code)
 }
 
 async fn run_admitted(
@@ -162,12 +181,12 @@ async fn run_admitted(
             {
                 infra_http_transport::Admission::Immediate(permit) => (Some(arrived), Some(permit)),
                 infra_http_transport::Admission::Waited { permit, waited } => {
-                    metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
+                    admission_wait_histogram().record(waited);
                     (Some(arrived), Some(permit))
                 }
                 infra_http_transport::Admission::Shed { waited } => {
-                    metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(waited);
-                    metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
+                    admission_wait_histogram().record(waited);
+                    shed_requests_counter().increment(1);
                     return (shed_response(), None);
                 }
             }

@@ -282,25 +282,28 @@ pub(crate) fn pending_problem(problem: Problem) -> Response {
     problem.attach_to(Response::new(Body::empty()))
 }
 
-pub(crate) fn complete_problem(response: &mut Response, request_id: Option<&HeaderValue>) {
-    let Some(problem) = response.extensions().get::<Problem>() else {
-        return;
-    };
-    let id = request_id.and_then(|value| value.to_str().ok());
-    if !response.body().is_end_stream() && (id.is_none() || problem.request_id.as_deref() == id) {
-        return;
+pub(crate) fn complete_problem(
+    response: &mut Response,
+    request_id: Option<&HeaderValue>,
+) -> Option<Code> {
+    if response.extensions().is_empty() {
+        return None;
     }
-    let Some(problem) = response.extensions_mut().get_mut::<Problem>() else {
-        return;
-    };
+    let body_empty = response.body().is_end_stream();
+    let problem = response.extensions_mut().get_mut::<Problem>()?;
+    let code = problem.code;
+    let id = request_id.and_then(|value| value.to_str().ok());
+    if !body_empty && (id.is_none() || problem.request_id.as_deref() == id) {
+        return Some(code);
+    }
     if let Some(id) = id {
         problem.request_id = Some(CompactString::from(id));
     }
-    let Some(body) = problem.encode_body() else {
-        return;
-    };
-    *response.body_mut() = body;
-    response.headers_mut().remove(CONTENT_LENGTH);
+    if let Some(body) = problem.encode_body() {
+        *response.body_mut() = body;
+        response.headers_mut().remove(CONTENT_LENGTH);
+    }
+    Some(code)
 }
 
 const U64_MAX_PLUS_ONE_SECS: &str = "18446744073709551616";
@@ -459,10 +462,16 @@ mod tests {
         let req_2 = HeaderValue::from_static("req-2");
         let request_id = RequestId::new(req_1.clone());
 
+        let mut plain = Response::new(Body::from("ok"));
+        assert_eq!(complete_problem(&mut plain, Some(&req_1)), None);
+
         let mut already_encoded = Problem::new(Code::BadRequest)
             .with_request_id(Some(&request_id))
             .attach_to(Response::new(Body::from("pre-encoded")));
-        complete_problem(&mut already_encoded, Some(&req_1));
+        assert_eq!(
+            complete_problem(&mut already_encoded, Some(&req_1)),
+            Some(Code::BadRequest)
+        );
         let bytes = already_encoded
             .into_body()
             .collect()
@@ -474,13 +483,28 @@ mod tests {
         let mut stale_id = Problem::new(Code::BadRequest)
             .with_request_id(Some(&request_id))
             .attach_to(Response::new(Body::from("pre-encoded")));
-        complete_problem(&mut stale_id, Some(&req_2));
+        assert_eq!(
+            complete_problem(&mut stale_id, Some(&req_2)),
+            Some(Code::BadRequest)
+        );
         assert_eq!(body_json(stale_id).await["request_id"], "req-2");
 
         let mut pending =
             pending_problem(Problem::new(Code::BadRequest).with_request_id(Some(&request_id)));
-        complete_problem(&mut pending, Some(&req_1));
+        assert_eq!(
+            complete_problem(&mut pending, Some(&req_1)),
+            Some(Code::BadRequest)
+        );
         assert_eq!(body_json(pending).await["request_id"], "req-1");
+
+        let mut pending_without_id = pending_problem(Problem::new(Code::BadRequest));
+        assert_eq!(
+            complete_problem(&mut pending_without_id, None),
+            Some(Code::BadRequest)
+        );
+        let body = body_json(pending_without_id).await;
+        assert_eq!(body["code"], "bad_request");
+        assert!(body.get("request_id").is_none());
     }
 
     #[test]

@@ -183,9 +183,14 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
     )]
     let routes = Router::new().route("/problem", get(handler));
     let app = harden(routes, &options());
-    for (path, existing_id, status) in [
-        ("/problem", None, StatusCode::BAD_REQUEST),
-        ("/missing", Some("outer-id"), StatusCode::NOT_FOUND),
+    for (path, existing_id, status, expected_code) in [
+        ("/problem", None, StatusCode::BAD_REQUEST, "\"bad_request\""),
+        (
+            "/missing",
+            Some("outer-id"),
+            StatusCode::NOT_FOUND,
+            "\"not_found\"",
+        ),
     ] {
         let mut request = request(Method::GET, path);
         request
@@ -212,10 +217,10 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
             "{path}"
         );
         assert!(
-            events
-                .snapshot()
-                .iter()
-                .any(|event| event.field("request_id") == Some("\"client-id\"")),
+            events.snapshot().iter().any(|event| {
+                event.field("request_id") == Some("\"client-id\"")
+                    && event.field("problem_code") == Some(expected_code)
+            }),
             "{path}"
         );
     }
@@ -500,6 +505,11 @@ fn holding_routes(started: Arc<AtomicUsize>, gate: Arc<tokio::sync::Notify>) -> 
 
 #[tokio::test]
 async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let started = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new(tokio::sync::Notify::new());
     #[expect(
@@ -538,6 +548,18 @@ async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
         .expect("served once a permit frees")
         .unwrap();
     assert_eq!(served.status(), StatusCode::OK);
+    let wait_samples =
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find_map(|(key, _, _, value)| {
+                (key.key().name() == observe::ADMISSION_WAIT_METRIC).then_some(value)
+            });
+    std::assert_matches!(
+        wait_samples,
+        Some(DebugValue::Histogram(samples)) if samples.len() == 1 && samples[0].into_inner() > 0.0
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -708,6 +730,11 @@ async fn http1_responses_ask_the_client_to_reconnect_only_while_draining() {
 
 #[tokio::test(start_paused = true)]
 async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let started = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(tokio::sync::Notify::new());
     let handler_1 = {
@@ -763,10 +790,25 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     assert_eq!(json["code"], "service_unavailable");
     assert_eq!(json["detail"], service_failure::AT_CAPACITY_DETAIL);
 
+    let metrics = snapshotter.snapshot().into_vec();
+    let wait_samples = metrics.iter().find_map(|(key, _, _, value)| {
+        (key.key().name() == observe::ADMISSION_WAIT_METRIC).then_some(value)
+    });
+    std::assert_matches!(
+        wait_samples,
+        Some(DebugValue::Histogram(samples))
+            if samples.len() == 1 && samples[0].into_inner() >= patience.as_secs_f64()
+    );
+    let shed_count = metrics.iter().find_map(|(key, _, _, value)| {
+        (key.key().name() == observe::SHED_REQUESTS_METRIC).then_some(value)
+    });
+    assert_eq!(shed_count, Some(&DebugValue::Counter(1)));
+
     let shed_events = events.take();
     assert!(shed_events.iter().any(|event| {
         event.message() == Some("http_request")
             && event.field("termination") == Some("\"load_shed\"")
+            && event.field("problem_code") == Some("\"service_unavailable\"")
     }));
 
     gate.notify_one();

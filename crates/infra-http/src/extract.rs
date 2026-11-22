@@ -56,10 +56,7 @@ where
     }
 }
 
-pub(crate) fn is_json_media_type(value: &str) -> bool {
-    if value.eq_ignore_ascii_case("application/json") {
-        return true;
-    }
+fn parse_json_media_type(value: &str) -> bool {
     mediatype::MediaType::parse(value).is_ok_and(|media_type| {
         media_type.ty == mediatype::names::APPLICATION
             && (media_type.subty == mediatype::names::JSON
@@ -71,10 +68,15 @@ pub(crate) fn is_json_media_type(value: &str) -> bool {
     })
 }
 
+pub(crate) fn is_json_media_type(value: &str) -> bool {
+    value.eq_ignore_ascii_case("application/json") || parse_json_media_type(value)
+}
+
 pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> Result<(), Problem> {
-    let json = content_type
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_json_media_type);
+    let json = content_type.is_some_and(|value| {
+        value.as_bytes().eq_ignore_ascii_case(b"application/json")
+            || value.to_str().is_ok_and(parse_json_media_type)
+    });
     if json {
         Ok(())
     } else {
@@ -853,6 +855,11 @@ mod tests {
             "APPLICATION/JSON",
         ] {
             assert!(is_json_media_type(accepted), "{accepted:?}");
+            let header = HeaderValue::from_str(accepted).unwrap();
+            assert!(
+                require_json_content_type(Some(&header)).is_ok(),
+                "{accepted:?}"
+            );
         }
         for rejected in [
             "text/json",
@@ -866,6 +873,23 @@ mod tests {
             "application/json; charset=\"unterminated",
         ] {
             assert!(!is_json_media_type(rejected), "{rejected:?}");
+            let header = HeaderValue::from_str(rejected).unwrap();
+            assert_eq!(
+                require_json_content_type(Some(&header)).unwrap_err().code(),
+                Code::UnsupportedMediaType,
+                "{rejected:?}"
+            );
         }
+        let non_ascii_same_len = HeaderValue::from_bytes(b"application/jso\xff").unwrap();
+        assert_eq!(
+            require_json_content_type(Some(&non_ascii_same_len))
+                .unwrap_err()
+                .code(),
+            Code::UnsupportedMediaType
+        );
+        assert_eq!(
+            require_json_content_type(None).unwrap_err().code(),
+            Code::UnsupportedMediaType
+        );
     }
 }
