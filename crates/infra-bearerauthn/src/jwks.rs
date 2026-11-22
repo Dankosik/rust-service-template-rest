@@ -218,22 +218,26 @@ fn parse_jwks_entries(
             Err(reason) => rejected[reason] += 1,
         }
     }
-    if configured
-        .into_iter()
-        .filter(|&(algorithm, enabled)| enabled && algorithm.family() == KeyFamily::Rsa)
+    if enabled_in_family(configured, KeyFamily::Rsa)
         .nth(1)
         .is_some()
     {
-        let conflicts = reject_conflicting_rsa_keys(&mut keys);
-        if conflicts != 0 {
-            rejected[KeyRejection::AlgorithmBinding] += conflicts;
-        }
+        rejected[KeyRejection::AlgorithmBinding] += reject_conflicting_rsa_keys(&mut keys);
     }
     Ok(ParsedKeySet { keys, rejected })
 }
 
-fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, JwksError> {
-    for (reason, &count) in &parsed.rejected {
+fn enabled_in_family(
+    allowed: AllowedAlgorithms,
+    family: KeyFamily,
+) -> impl Iterator<Item = JwtAlgorithm> {
+    allowed.into_iter().filter_map(move |(algorithm, enabled)| {
+        (enabled && algorithm.family() == family).then_some(algorithm)
+    })
+}
+
+fn report_rejections(rejected: &EnumMap<KeyRejection, u64>) {
+    for (reason, &count) in rejected {
         if count == 0 {
             continue;
         }
@@ -244,6 +248,10 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, J
         );
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
+}
+
+fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, JwksError> {
+    report_rejections(&parsed.rejected);
     if parsed.has_non_encryption_rejections_without_keys() {
         return Err(JwksError::NoUsableKeys);
     }
@@ -330,9 +338,7 @@ fn bind_algorithm(
             .and_then(JwtAlgorithm::from_jsonwebtoken)
             .filter(|&algorithm| configured[algorithm] && algorithm.family() == family)
     } else {
-        let mut matching = configured.into_iter().filter_map(|(algorithm, enabled)| {
-            (enabled && algorithm.family() == family).then_some(algorithm)
-        });
+        let mut matching = enabled_in_family(configured, family);
         let algorithm = matching.next()?;
         matching.next().is_none().then_some(algorithm)
     }

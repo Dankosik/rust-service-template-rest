@@ -105,7 +105,7 @@ pub(crate) struct IntrospectionVerifier {
     endpoint: crate::EndpointUrl,
     client_id: String,
     client_secret: secrecy::SecretString,
-    policy: ClaimPolicy,
+    claim_policy: ClaimPolicy,
     provider: ProviderClient,
     permits: Semaphore,
     cache: Option<PositiveCache>,
@@ -193,7 +193,7 @@ impl IntrospectionVerifier {
             endpoint: options.endpoint,
             client_id: options.client_id,
             client_secret: options.client_secret,
-            policy: options.claim_policy,
+            claim_policy: options.claim_policy,
             provider,
             permits: Semaphore::new(options.provider_concurrency.get()),
             cache: options.cache.map(|cache| PositiveCache {
@@ -233,13 +233,12 @@ impl IntrospectionVerifier {
             {
                 return Ok(value.principal);
             }
-            let token_text = token.as_str();
             let filled = cache
                 .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
                     let unix_now = unix_now.clone();
-                    let token = secrecy::SecretString::from(token_text);
+                    let secret_token = secrecy::SecretString::from(token.as_str());
                     async move {
                         if let Some(value) = retained.get(&key)
                             && value.is_reusable_at(unix_now()?)
@@ -248,7 +247,7 @@ impl IntrospectionVerifier {
                         }
                         let value = verifier
                             .introspect(
-                                token.expose_secret(),
+                                secret_token.expose_secret(),
                                 StopProbe::Waiter(&last_waiter_stop),
                                 &unix_now,
                             )
@@ -285,7 +284,7 @@ impl IntrospectionVerifier {
                 caller_stop,
             )
             .await?;
-        validate_introspection_claims(&response, &self.policy, unix_now()?)
+        validate_introspection_claims(&response, &self.claim_policy, unix_now()?)
     }
 }
 
@@ -1273,7 +1272,7 @@ mod tests {
             if replacement {
                 let newer = validate_introspection_claims(
                     &active_response("new", base + 600),
-                    &verifier.policy,
+                    &verifier.claim_policy,
                     Duration::from_secs(base),
                 )
                 .unwrap();
