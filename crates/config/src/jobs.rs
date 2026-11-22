@@ -53,8 +53,8 @@ pub struct JobsConfig {
 }
 
 impl JobsConfig {
-    pub(crate) fn validate(&self, violations: &mut Violations) {
-        violations.check(int_range(
+    pub(crate) fn validate(&self, v: &mut Violations) {
+        v.check(int_range(
             "jobs.max_workers",
             self.max_workers.get(),
             1..=500,

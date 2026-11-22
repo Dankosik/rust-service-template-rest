@@ -53,22 +53,22 @@ fn matches_pattern(pattern: &str, key: &str) -> bool {
 }
 
 pub(crate) fn first_secret_key(table: &toml::Table) -> Option<String> {
-    let mut path = Vec::new();
-    find_secret(table, &mut path)
+    let mut segments = Vec::new();
+    find_secret(table, &mut segments)
 }
 
-fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
+fn find_secret<'a>(table: &'a toml::Table, segments: &mut Vec<&'a str>) -> Option<String> {
     for (key, value) in table {
-        path.push(key);
-        let dotted = path.join(".");
+        segments.push(key);
+        let dotted = segments.join(".");
         let found = if is_secret_key(&dotted) && has_value(value) {
             Some(dotted)
         } else {
             value
                 .as_table()
-                .and_then(|nested| find_secret(nested, path))
+                .and_then(|nested| find_secret(nested, segments))
         };
-        path.pop();
+        segments.pop();
         if found.is_some() {
             return found;
         }

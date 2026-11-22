@@ -98,7 +98,12 @@ pub(super) fn collect_variables(
         None => Variables::new(),
     };
     variables.extend(read_environment(environment)?);
-    for (name, child) in &variables {
+    reject_overlapping_variables(&variables)?;
+    Ok(variables)
+}
+
+fn reject_overlapping_variables(variables: &Variables) -> Result<(), InputError> {
+    for (name, child) in variables {
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
             if let Some(parent) = name.get(..end).and_then(|prefix| variables.get(prefix)) {
                 return Err(InputError::OverlappingVariables {
@@ -108,7 +113,7 @@ pub(super) fn collect_variables(
             }
         }
     }
-    Ok(variables)
+    Ok(())
 }
 
 fn read_environment(
@@ -146,10 +151,10 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, InputError> {
         return read_projected_secrets(dir, generation);
     }
 
-    let variables = read_secret_files(dir, dir);
+    let scanned = read_secret_files(dir, dir);
     match projected_generation(dir)? {
         Some(generation) => read_projected_secrets(dir, generation),
-        None => variables,
+        None => scanned,
     }
 }
 
@@ -161,11 +166,11 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
             generation = projected_generation(dir)?;
             continue;
         };
-        let variables = read_secret_files(dir, &scan_dir);
+        let scanned = read_secret_files(dir, &scan_dir);
         let current = projected_generation(dir)?;
-        let removed_mid_scan = attempt < SECRETS_SNAPSHOT_ATTEMPTS && is_not_found(&variables);
+        let removed_mid_scan = attempt < SECRETS_SNAPSHOT_ATTEMPTS && is_not_found(&scanned);
         if current.as_ref() == Some(&scan_dir) && !removed_mid_scan {
-            return variables;
+            return scanned;
         }
         generation = current;
     }
@@ -179,9 +184,9 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
     })
 }
 
-fn is_not_found(variables: &Result<Variables, InputError>) -> bool {
+fn is_not_found(scanned: &Result<Variables, InputError>) -> bool {
     matches!(
-        variables,
+        scanned,
         Err(InputError::ReadSecretsDir { error, .. } | InputError::ReadSecret { error, .. })
             if error.kind() == io::ErrorKind::NotFound
     )
@@ -192,17 +197,16 @@ fn is_not_found(variables: &Result<Variables, InputError>) -> bool {
     reason = "pre-runtime configuration admission checks the volume publication link"
 )]
 fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, InputError> {
+    let unreadable = |error| InputError::ReadSecretsDir {
+        path: dir.to_owned(),
+        error,
+    };
     let link = dir.join("..data");
     match fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.is_symlink() => {}
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(InputError::ReadSecretsDir {
-                path: dir.to_owned(),
-                error,
-            });
-        }
+        Err(error) => return Err(unreadable(error)),
     }
     let target = match fs::read_link(link) {
         Ok(target) => target,
@@ -214,21 +218,19 @@ fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, InputError> {
         {
             return Ok(None);
         }
-        Err(error) => {
-            return Err(InputError::ReadSecretsDir {
-                path: dir.to_owned(),
-                error,
-            });
-        }
+        Err(error) => return Err(unreadable(error)),
     };
-    // https://github.com/kubernetes/kubernetes/blob/master/pkg/volume/util/atomic_writer.go
-    let timestamped_child = target.file_name() == Some(target.as_os_str())
+    Ok(is_timestamped_generation(&target).then(|| dir.join(target)))
+}
+
+// https://github.com/kubernetes/kubernetes/blob/master/pkg/volume/util/atomic_writer.go
+fn is_timestamped_generation(target: &Path) -> bool {
+    target.file_name() == Some(target.as_os_str())
         && target
             .as_os_str()
             .as_encoded_bytes()
             .strip_prefix(b"..")
-            .is_some_and(|name| name.first().is_some_and(u8::is_ascii_digit));
-    Ok(timestamped_child.then(|| dir.join(target)))
+            .is_some_and(|name| name.first().is_some_and(u8::is_ascii_digit))
 }
 
 #[expect(

@@ -93,11 +93,10 @@ pub struct PostgresConfig {
 fn admit_dsn(
     enabled: bool,
     dsn: Option<SecretString>,
-    violations: &mut Violations,
+    v: &mut Violations,
 ) -> Result<Option<SecretString>, Rejected> {
     if enabled {
-        violations
-            .record(required("postgres.dsn", dsn, "postgres.enabled = true"))
+        v.record(required("postgres.dsn", dsn, "postgres.enabled = true"))
             .map(Some)
     } else {
         Ok(None)
@@ -105,13 +104,10 @@ fn admit_dsn(
 }
 
 impl PostgresInput {
-    pub(crate) fn admit(
-        self,
-        violations: &mut Violations,
-    ) -> Result<Option<PostgresConfig>, Rejected> {
-        let dsn = admit_dsn(self.enabled, self.dsn, violations);
+    pub(crate) fn admit(self, v: &mut Violations) -> Result<Option<PostgresConfig>, Rejected> {
+        let dsn = admit_dsn(self.enabled, self.dsn, v);
         let max_connections = self.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
-        violations.check(int_range(
+        v.check(int_range(
             "postgres.max_connections",
             max_connections.get(),
             1..=500,
@@ -139,10 +135,10 @@ impl OperatorPostgresInput {
     pub(crate) fn admit(
         self,
         local_development: bool,
-        violations: &mut Violations,
+        v: &mut Violations,
     ) -> Result<Option<OperatorPostgresConfig>, Rejected> {
         Ok(
-            admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| OperatorPostgresConfig {
+            admit_dsn(self.enabled, self.dsn, v)?.map(|dsn| OperatorPostgresConfig {
                 local_development,
                 dsn,
                 password_file: self.password_file,
@@ -161,11 +157,8 @@ pub struct MigrationPostgresConfig {
 }
 
 impl MigrationPostgresInput {
-    fn admit(
-        self,
-        violations: &mut Violations,
-    ) -> Result<Option<MigrationPostgresConfig>, Rejected> {
-        violations.check(duration_range(
+    fn admit(self, v: &mut Violations) -> Result<Option<MigrationPostgresConfig>, Rejected> {
+        v.check(duration_range(
             "postgres.migration_deadline",
             self.migration_deadline,
             Duration::from_secs(1)..=Duration::from_hours(24),
@@ -175,7 +168,7 @@ impl MigrationPostgresInput {
             None => (self.dsn, self.password_file),
         };
         Ok(
-            admit_dsn(self.enabled, dsn, violations)?.map(|dsn| MigrationPostgresConfig {
+            admit_dsn(self.enabled, dsn, v)?.map(|dsn| MigrationPostgresConfig {
                 dsn,
                 password_file,
                 migration_deadline: self.migration_deadline,

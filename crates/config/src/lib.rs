@@ -136,7 +136,7 @@ pub(crate) struct ConfigInput {
     inbound_webhooks: inbound_webhooks::InboundWebhooksInput,
     // template:end inbound-webhooks:config-inbound-webhooks-input-field
     // template:begin webhooks:config-outbound-webhooks-input-field
-    webhooks: webhooks::ServiceWebhooksInput,
+    webhooks: webhooks::WebhooksInput,
     // template:end webhooks:config-outbound-webhooks-input-field
     health: HealthConfig,
     log: LogConfig,
@@ -170,11 +170,8 @@ impl ConfigInput {
     ) -> Result<Config, ValidationErrors> {
         admit_with(|v| {
             let app = self.app.admit(build, v);
-            #[allow(
-                unused_variables,
-                reason = "only the gRPC profile consumes the HTTP drain budget"
-            )]
-            let (http, drain_budget) = self.http.admit(shutdown_tail, v);
+            let drain_budget = self.http.admit_drain_budget(shutdown_tail, v);
+            let http = self.http.admit(drain_budget, v);
             // template:begin service-auth:config-grpc-enabled
             let grpc_enabled = self.grpc.enabled;
             // template:end service-auth:config-grpc-enabled

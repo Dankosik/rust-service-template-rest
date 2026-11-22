@@ -37,9 +37,9 @@ impl HttpIdempotencyConfig {
         )
     }
 
-    pub(crate) fn validate(&self, violations: &mut Violations) {
+    pub(crate) fn validate(&self, v: &mut Violations) {
         if let Some(retention) = self.retention {
-            violations.check(duration_range(
+            v.check(duration_range(
                 Self::RETENTION_KEY,
                 retention,
                 Duration::from_mins(1)..=Duration::from_hours(30 * 24),

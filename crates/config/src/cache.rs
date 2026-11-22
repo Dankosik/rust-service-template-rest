@@ -6,7 +6,7 @@ use bytesize::ByteSize;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::app::local_development_only;
+use crate::app::insecure_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{Rejected, Violations, duration_range, nonzero_usize_range, optional_pair};
 
@@ -83,12 +83,12 @@ impl CacheInput {
         local_development: bool,
         v: &mut Violations,
     ) -> Result<Option<CacheConfig>, Rejected> {
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "cache.allow_plaintext",
             self.allow_plaintext,
             local_development,
         ));
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "cache.allow_unauthenticated",
             self.allow_unauthenticated,
             local_development,
@@ -119,25 +119,25 @@ impl CacheInput {
             self.max_value_bytes.as_u64(),
             1..=shared_rules::cache::MAX_ENTRY_BYTES,
         ));
-        let client_certificate =
-            client_certificate?.map(|(cert_path, key_path)| CacheClientCertificate {
-                cert_path,
-                key_path,
-            });
-        let max_concurrency = max_concurrency?;
-        let max_key_bytes = max_key_bytes?;
-        let max_value_bytes = max_value_bytes?;
-        Ok(self.dsn.map(|dsn| CacheConfig {
+        let Some(dsn) = self.dsn else {
+            return Ok(None);
+        };
+        Ok(Some(CacheConfig {
             dsn,
             password_file: self.password_file,
             root_ca_path: self.root_ca_path,
-            client_certificate,
+            client_certificate: client_certificate?.map(|(cert_path, key_path)| {
+                CacheClientCertificate {
+                    cert_path,
+                    key_path,
+                }
+            }),
             allow_plaintext: self.allow_plaintext,
             allow_unauthenticated: self.allow_unauthenticated,
             command_timeout: self.command_timeout,
-            max_concurrency,
-            max_key_bytes,
-            max_value_bytes,
+            max_concurrency: max_concurrency?,
+            max_key_bytes: max_key_bytes?,
+            max_value_bytes: max_value_bytes?,
         }))
     }
 }
