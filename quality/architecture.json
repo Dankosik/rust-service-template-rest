@@ -148,6 +148,10 @@
         "crates/infra-postgres/Cargo.toml": {
           "reason": "The idempotency inbound contract re-exports PostgreSQL Tx.",
           "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-temporal/Cargo.toml": {
+          "reason": "HTTP routes project Temporal client failures into RFC 9457 Problem responses.",
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },

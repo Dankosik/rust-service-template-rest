@@ -23,20 +23,45 @@ test-support = ["worker"]
 integration = ["worker"]
 
 [dependencies]
+arc-swap = { workspace = true }
+compact_str = { workspace = true }
+erased-serde = { workspace = true, features = ["std"] }
+futures-util = { workspace = true, features = ["alloc"] }
 health = { workspace = true }
 json-payload = { workspace = true }
 metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
 operation-context = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+serde_json = { workspace = true, features = ["std"] }
+sha2 = { workspace = true }
+shared-rules = { workspace = true }
 temporalio-client = { workspace = true, features = ["tls-aws-lc", "vendored-protox", "dynamic-tls"] }
 temporalio-common = { workspace = true, features = ["vendored-protox"] }
 temporalio-sdk = { workspace = true, optional = true, features = ["dynamic-tls"] }
 temporalio-sdk-core = { workspace = true, optional = true, features = ["dynamic-tls"] }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-opentelemetry = { workspace = true }
+url = { workspace = true }
+zeroize = { workspace = true, features = ["alloc"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 futures = { workspace = true, features = ["alloc", "std"] }
+metrics-exporter-prometheus = { workspace = true }
 metrics-util = { workspace = true, features = ["debugging"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+prost = { workspace = true }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+serde = { workspace = true, features = ["std", "derive"] }
+tempfile = { workspace = true, features = ["getrandom"] }
 temporalio-macros = { workspace = true }
 temporalio-workflow = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true, features = ["registry"] }

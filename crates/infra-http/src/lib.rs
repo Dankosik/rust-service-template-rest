@@ -5,6 +5,7 @@ pub mod extract;
 pub mod object_storage;
 // template:end object-storage:http-object-storage-module
 pub mod problem;
+pub mod temporal;
 // template:begin authn:infra-http-authn-module
 pub mod authn;
 // template:end authn:infra-http-authn-module

@@ -12,6 +12,22 @@ use temporalio_common::telemetry::{TaskQueueLabelStrategy, TelemetryOptions};
 
 pub const METRIC_PREFIX: &str = "temporal_";
 
+const CREDENTIAL_RELOADS_METRIC: &str = "temporal_credential_reloads_total";
+const DRAIN_FORCED_METRIC: &str = "temporal_drain_forced_total";
+
+pub fn describe_metrics() {
+    metrics::describe_counter!(
+        CREDENTIAL_RELOADS_METRIC,
+        metrics::Unit::Count,
+        "Completed live Temporal credential reload attempts by credential kind and outcome."
+    );
+    metrics::describe_counter!(
+        DRAIN_FORCED_METRIC,
+        metrics::Unit::Count,
+        "Forced Temporal worker shutdown drains that preempted active activities."
+    );
+}
+
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (
         "temporal_request_latency",
@@ -85,6 +101,19 @@ impl WorkspaceMetricsMeter {
             .metric_prefix(String::new())
             .task_queue_label_strategy(TaskQueueLabelStrategy::UseNormal)
             .build()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "crate-internal worker drain counter consumed by the worker module"
+    )]
+    pub(crate) fn record_drain_forced() {
+        metrics::counter!(DRAIN_FORCED_METRIC).increment(1);
+    }
+
+    pub(crate) fn record_credential_reload(kind: &'static str, outcome: &'static str) {
+        metrics::counter!(CREDENTIAL_RELOADS_METRIC, "kind" => kind, "outcome" => outcome)
+            .increment(1);
     }
 
     fn instrument_name(&self, raw: &str) -> Arc<str> {

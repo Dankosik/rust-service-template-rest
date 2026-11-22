@@ -33,6 +33,7 @@ infra-bearerauthn = { workspace = true }
 # template:begin object-storage:http-object-storage-dependencies
 infra-object-storage = { workspace = true }
 # template:end object-storage:http-object-storage-dependencies
+infra-temporal = { workspace = true }
 # template:begin http-idempotency:http-idempotency-dependencies
 const_format = { workspace = true }
 const-hex = { workspace = true }
