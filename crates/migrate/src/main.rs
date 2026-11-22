@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use infra_postgres::{Dsn, DsnError, SslPolicy};
 use infra_telemetry::{
-    LoggerGuard, LoggingFormat, LoggingOptions, install_panic_hook, install_subscriber,
+    LoggerGuard, LoggingError, LoggingFormat, LoggingOptions, install_panic_hook,
+    install_subscriber,
 };
 use migrate::{MIGRATOR, RECORD_TARGET, Report, RunFailure, RunOptions};
 use secrecy::ExposeSecret;
@@ -32,7 +33,7 @@ impl RunContext {
         }
     }
 
-    fn finish_config_failure(self, message: String) -> ExitCode {
+    fn finish_setup_failure(self, message: String) -> ExitCode {
         let level = record_level("info");
         let Ok(logger) = install_subscriber(&LoggingOptions {
             level: &level,
@@ -138,29 +139,21 @@ impl Failure {
 }
 
 fn main() -> ExitCode {
-    let run = RunContext::start();
+    let context = RunContext::start();
     let options = LoadOptions::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
     let config = service_config::load_migration(&options, BUILD_INFO);
-    let log = match &config {
+    let log_config = match &config {
         Ok(config) => config.log(),
         Err(MigrationLoadError::PostgresDisabled { log }) => log,
-        Err(err) => return run.finish_config_failure(err.to_string()),
+        Err(err) => return context.finish_setup_failure(err.to_string()),
     };
-    let level = record_level(&log.level);
-    let logger = match install_subscriber(&LoggingOptions {
-        level: &level,
-        format: match log.format {
-            service_config::LogFormat::Json => LoggingFormat::Json,
-            service_config::LogFormat::Text => LoggingFormat::Text,
-        },
-        tracer_provider: None,
-    }) {
+    let logger = match install_logger(log_config) {
         Ok(logger) => logger,
-        Err(err) => return run.finish_config_failure(format!("install logger: {err}")),
+        Err(err) => return context.finish_setup_failure(format!("install logger: {err}")),
     };
     let config = match config {
         Ok(config) => config,
-        Err(err) => return run.finish_run(None, logger, Err(Failure::Setup(err.to_string()))),
+        Err(err) => return context.finish_run(None, logger, Err(Failure::Setup(err.to_string()))),
     };
     install_panic_hook();
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -168,11 +161,23 @@ fn main() -> ExitCode {
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => return run.finish_run(None, logger, Err(Failure::Runtime(err))),
+        Err(err) => return context.finish_run(None, logger, Err(Failure::Runtime(err))),
     };
 
-    let outcome = runtime.block_on(apply(&config, run.target));
-    run.finish_run(Some(runtime), logger, outcome)
+    let outcome = runtime.block_on(apply(&config, context.target));
+    context.finish_run(Some(runtime), logger, outcome)
+}
+
+fn install_logger(log_config: &service_config::LogConfig) -> Result<LoggerGuard, LoggingError> {
+    let level = record_level(&log_config.level);
+    install_subscriber(&LoggingOptions {
+        level: &level,
+        format: match log_config.format {
+            service_config::LogFormat::Json => LoggingFormat::Json,
+            service_config::LogFormat::Text => LoggingFormat::Text,
+        },
+        tracer_provider: None,
+    })
 }
 
 #[expect(
@@ -215,26 +220,34 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
 }
 
 async fn run_until_stop(options: &RunOptions<'_>) -> Result<Report, Failure> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut interrupt = signal(SignalKind::interrupt()).map_err(Failure::Signals)?;
-        let mut terminate = signal(SignalKind::terminate()).map_err(Failure::Signals)?;
+    let stop = stop_signal()?;
+    tokio::select! {
+        biased;
+        result = migrate::run(&MIGRATOR, options) => Ok(result?),
+        signal = stop => Err(Failure::Interrupted(signal)),
+    }
+}
+
+#[cfg(unix)]
+fn stop_signal() -> Result<impl Future<Output = &'static str>, Failure> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt()).map_err(Failure::Signals)?;
+    let mut terminate = signal(SignalKind::terminate()).map_err(Failure::Signals)?;
+    Ok(async move {
         tokio::select! {
             biased;
-            result = migrate::run(&MIGRATOR, options) => Ok(result?),
-            _ = terminate.recv() => Err(Failure::Interrupted("SIGTERM")),
-            _ = interrupt.recv() => Err(Failure::Interrupted("SIGINT")),
+            _ = terminate.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
         }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::select! {
-            biased;
-            result = migrate::run(&MIGRATOR, options) => Ok(result?),
-            _ = tokio::signal::ctrl_c() => Err(Failure::Interrupted("ctrl-c")),
-        }
-    }
+    })
+}
+
+#[cfg(not(unix))]
+fn stop_signal() -> Result<impl Future<Output = &'static str>, Failure> {
+    Ok(async {
+        let _ = tokio::signal::ctrl_c().await;
+        "ctrl-c"
+    })
 }
 
 #[cfg(all(test, unix))]

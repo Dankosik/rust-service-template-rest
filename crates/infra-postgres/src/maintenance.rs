@@ -59,8 +59,8 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     cleanup: CleanupName,
     runs_metric: Option<&'static str>,
     cancel: &CancellationToken,
-    mut pass: impl FnMut() -> P,
-    mut sample: impl FnMut() -> S,
+    mut run_pass: impl FnMut() -> P,
+    mut read_sample: impl FnMut() -> S,
 ) where
     P: Future<Output = Result<PassEnd, E>>,
     S: Future<Output = Result<PopulationSample, MaintenanceFailure>>,
@@ -69,26 +69,26 @@ pub async fn run_scheduled_cleanup<E, P, S>(
         return;
     }
     let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(cleanup));
-    let passes = async {
+    let pass_loop = async {
         let mut schedule = CleanupSchedule::new(cleanup);
         while !cancel.is_cancelled() {
             schedule.next().await;
             if cancel.is_cancelled() {
                 return;
             }
-            let outcome = match pass().await {
+            let outcome_label = match run_pass().await {
                 Ok(PassEnd::Cancelled) => return,
                 Ok(PassEnd::Completed) => "completed",
                 Err(_) => "failed",
             };
             if let Some(metric) = runs_metric {
-                metrics::counter!(metric, "outcome" => outcome).increment(1);
+                metrics::counter!(metric, "outcome" => outcome_label).increment(1);
             }
         }
     };
-    let observation = async {
+    let observation_loop = async {
         while !cancel.is_cancelled() {
-            observer.sample(sample()).await;
+            observer.sample(read_sample()).await;
             if cancel.is_cancelled() {
                 return;
             }
@@ -96,7 +96,7 @@ pub async fn run_scheduled_cleanup<E, P, S>(
         }
     };
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        tokio::join!(passes, observation);
+        tokio::join!(pass_loop, observation_loop);
     }))
     .await;
 }

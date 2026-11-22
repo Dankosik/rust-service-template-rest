@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::mem::DropGuard;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -369,10 +370,8 @@ impl TransactionInner<'_> {
 
     fn fail(self, error: &TxError) {
         let source = error.driver();
-        match sqlstate(source) {
-            Some(code) => self.span.record("error.type", code.as_ref()),
-            None => self.span.record("error.type", failure_cause(source)),
-        };
+        let error_type = sqlstate(source).unwrap_or_else(|| Cow::Borrowed(failure_cause(source)));
+        self.span.record("error.type", error_type.as_ref());
         self.span.record("otel.status_code", "ERROR");
         self.finish(TransactionOutcome::of(error));
     }

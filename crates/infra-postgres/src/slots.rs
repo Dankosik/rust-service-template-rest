@@ -51,27 +51,34 @@ impl RegularQueue {
 
     fn pop(&mut self) -> Option<DequeuedWaiter> {
         let active = self.0.as_mut()?;
-        let newest_first = active.waiters.len() > 1
-            && Instant::now().saturating_duration_since(active.since) > STANDING_AFTER;
+        let newest_first = active.waiters.len() > 1 && active.since.elapsed() > STANDING_AFTER;
         let (_, grant) = if newest_first {
             active.waiters.pop_last()
         } else {
             active.waiters.pop_first()
         }?;
-        let emptied_queue = self.0.take_if(|active| active.waiters.is_empty());
-        Some(DequeuedWaiter {
-            grant,
-            emptied_queue,
-        })
+        Some(self.dequeued(grant))
     }
 
     fn remove(&mut self, id: u64) -> Option<DequeuedWaiter> {
         let grant = self.0.as_mut()?.waiters.remove(&id)?;
-        let emptied_queue = self.0.take_if(|active| active.waiters.is_empty());
-        Some(DequeuedWaiter {
+        Some(self.dequeued(grant))
+    }
+
+    fn dequeued(&mut self, grant: oneshot::Sender<()>) -> DequeuedWaiter {
+        DequeuedWaiter {
             grant,
-            emptied_queue,
-        })
+            emptied_queue: self.0.take_if(|active| active.waiters.is_empty()),
+        }
+    }
+}
+
+impl DequeuedWaiter {
+    fn probe(grant: oneshot::Sender<()>) -> Self {
+        Self {
+            grant,
+            emptied_queue: None,
+        }
     }
 }
 
@@ -100,9 +107,8 @@ impl Slots {
     pub(super) async fn take(&self, queue: Queue, deadline: Instant) -> Result<Slot<'_>, Elapsed> {
         let (id, granted) = {
             let mut state = self.state.lock();
-            if let Some(free) = state.free.checked_sub(1) {
-                state.free = free;
-                drop(state);
+            if state.free > 0 {
+                state.free -= 1;
                 return Ok(Slot(self));
             }
             let id = state.next_waiter;
@@ -125,17 +131,15 @@ impl Slots {
     fn release(&self) {
         let handoff = {
             let mut state = self.state.lock();
-            if let Some((_, grant)) = state.probes.pop_first() {
-                Some(DequeuedWaiter {
-                    grant,
-                    emptied_queue: None,
-                })
-            } else if let Some(waiter) = state.regular.pop() {
-                Some(waiter)
-            } else {
+            let handoff = state
+                .probes
+                .pop_first()
+                .map(|(_, grant)| DequeuedWaiter::probe(grant))
+                .or_else(|| state.regular.pop());
+            if handoff.is_none() {
                 state.free += 1;
-                None
             }
+            handoff
         };
         if let Some(DequeuedWaiter {
             grant,
@@ -151,10 +155,7 @@ impl Slots {
         let removed = {
             let mut state = self.state.lock();
             match queue {
-                Queue::Probe => state.probes.remove(&id).map(|grant| DequeuedWaiter {
-                    grant,
-                    emptied_queue: None,
-                }),
+                Queue::Probe => state.probes.remove(&id).map(DequeuedWaiter::probe),
                 Queue::Regular => state.regular.remove(id),
             }
         };

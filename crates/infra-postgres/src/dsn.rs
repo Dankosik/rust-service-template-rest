@@ -159,9 +159,10 @@ impl Dsn {
         password_file: Option<&Path>,
         ssl_policy: SslPolicy,
     ) -> Result<Self, DsnError> {
-        Self::admit_from(raw, password_file, ssl_policy, |name| {
+        Self::admit_kind(raw, password_file, ssl_policy, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
+        .map_err(DsnError)
     }
 
     #[cfg(test)]
@@ -169,19 +170,7 @@ impl Dsn {
     where
         F: Fn(&str) -> bool,
     {
-        Self::admit_from(raw, None, SslPolicy::AllowLocalDevelopment, is_env_set)
-    }
-
-    fn admit_from<F>(
-        raw: &str,
-        password_file: Option<&Path>,
-        ssl_policy: SslPolicy,
-        is_env_set: F,
-    ) -> Result<Self, DsnError>
-    where
-        F: Fn(&str) -> bool,
-    {
-        Self::admit_kind(raw, password_file, ssl_policy, is_env_set).map_err(DsnError)
+        Self::admit_kind(raw, None, SslPolicy::AllowLocalDevelopment, is_env_set).map_err(DsnError)
     }
 
     fn admit_kind<F>(
@@ -301,30 +290,34 @@ fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnErro
 }
 
 fn check_parameters(url: &Url) -> Result<(), DsnErrorKind> {
-    let mut verifies_certificate = None;
+    let mut sslmode_verifies = None;
     let mut has_root_cert = false;
     for (key, value) in url.query_pairs() {
         match key.as_ref() {
-            "sslmode" if verifies_certificate.is_none() => {
-                verifies_certificate = Some(match value.as_ref() {
+            "sslmode" => {
+                if sslmode_verifies.is_some() {
+                    return Err(DsnErrorKind::Repeated(QueryParameter::SslMode));
+                }
+                sslmode_verifies = Some(match value.as_ref() {
                     "disable" | "require" => false,
                     "verify-ca" | "verify-full" => true,
                     _ => return Err(DsnErrorKind::SslMode),
                 });
             }
-            "sslrootcert" if !has_root_cert => {
+            "sslrootcert" => {
+                if has_root_cert {
+                    return Err(DsnErrorKind::Repeated(QueryParameter::SslRootCert));
+                }
                 if !Path::new(value.as_ref()).is_absolute() {
                     return Err(DsnErrorKind::RootCertPath);
                 }
                 has_root_cert = true;
             }
-            "sslmode" => return Err(DsnErrorKind::Repeated(QueryParameter::SslMode)),
-            "sslrootcert" => return Err(DsnErrorKind::Repeated(QueryParameter::SslRootCert)),
             _ => return Err(DsnErrorKind::Parameter),
         }
     }
     let verifies_certificate =
-        verifies_certificate.ok_or(DsnErrorKind::Missing(RequiredComponent::SslMode))?;
+        sslmode_verifies.ok_or(DsnErrorKind::Missing(RequiredComponent::SslMode))?;
     if has_root_cert && !verifies_certificate {
         return Err(DsnErrorKind::RootCertWithoutVerification);
     }
@@ -501,7 +494,8 @@ mod tests {
             let raw = format!("postgres://app:pw@h:5432/app?sslmode={mode}");
             let dsn = parse(&raw).unwrap();
             assert_eq!(dsn.ssl_mode_name(), mode);
-            let production = Dsn::admit_from(&raw, None, SslPolicy::VerifyFull, |_| false);
+            let production =
+                Dsn::admit_kind(&raw, None, SslPolicy::VerifyFull, |_| false).map_err(DsnError);
             if mode == "verify-full" {
                 assert!(production.is_ok());
             } else {
@@ -621,9 +615,10 @@ mod tests {
         let file = dir.path().join("password");
         let without_password = "postgres://app@db.internal:5432/app?sslmode=require";
         let admit = |raw: &str| {
-            Dsn::admit_from(raw, Some(&file), SslPolicy::AllowLocalDevelopment, |_| {
+            Dsn::admit_kind(raw, Some(&file), SslPolicy::AllowLocalDevelopment, |_| {
                 false
             })
+            .map_err(DsnError)
         };
 
         assert_eq!(

@@ -130,7 +130,7 @@ impl RunFailure {
 pub const RECORD_TARGET: &str = "migrate_record";
 
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
-    deadline_instant(options.deadline)?;
+    ensure_deadline_representable(options.deadline)?;
     let session = SessionOptions {
         application_name: options.application_name,
         statement_timeout: options.statement_timeout,
@@ -157,6 +157,10 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
     }
     drop(tokio::time::timeout_at(deadline_at, conn.close()).await);
     Ok(report)
+}
+
+fn ensure_deadline_representable(deadline: Duration) -> Result<(), RunError> {
+    deadline_instant(deadline).map(drop)
 }
 
 fn deadline_instant(deadline: Duration) -> Result<tokio::time::Instant, RunError> {

@@ -203,11 +203,11 @@ impl Store {
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<WriteOutcome<T>, R>,
     {
         scope.validate_caller()?;
-        attempted(
+        settle(
             self.inner
                 .pool
                 .in_tx_with(READ_COMMITTED, async |tx| {
-                    self.work_in_tx(tx, scope, fingerprint, work).await
+                    self.attempt_in_tx(tx, scope, fingerprint, work).await
                 })
                 .await,
         )
@@ -225,17 +225,17 @@ impl Store {
         W: AsyncFnOnce(&mut BudgetedTx<'_>) -> Result<WriteOutcome<T>, R>,
     {
         scope.validate_caller()?;
-        attempted(
+        settle(
             self.inner
                 .pool
                 .in_tx_with_deadline(deadline, READ_COMMITTED, async |tx| {
-                    self.work_in_tx(tx, scope, fingerprint, work).await
+                    self.attempt_in_tx(tx, scope, fingerprint, work).await
                 })
                 .await,
         )
     }
 
-    async fn work_in_tx<M: TxMode, T: RefusalMode, W, R>(
+    async fn attempt_in_tx<M: TxMode, T: RefusalMode, W, R>(
         &self,
         tx: &mut Tx<'_, M>,
         scope: &ScopeKey,
@@ -284,7 +284,7 @@ impl Store {
     }
 }
 
-fn attempted<R>(outcome: Result<Written, Stop<R>>) -> Result<Attempted<R>, AttemptError> {
+fn settle<R>(outcome: Result<Written, Stop<R>>) -> Result<Attempted<R>, AttemptError> {
     match outcome {
         Ok(Written::Success(record)) => Ok(Attempted::Committed(record)),
         Ok(Written::TerminalRefusal(record)) => Ok(Attempted::TerminalRefusal(record)),
@@ -340,14 +340,21 @@ async fn arbitrate(
     if let (Some(stored_fingerprint), Some(status), Some(headers)) =
         (probe.fingerprint, probe.status, probe.headers)
     {
-        return decide_live(stored_fingerprint, status, headers, probe.body, fingerprint).map(Some);
+        let row = StoredRow {
+            fingerprint: stored_fingerprint,
+            status,
+            headers,
+            body: probe.body,
+        };
+        return decide_live(row, fingerprint).map(Some);
     }
     if !probe.acquired {
         return Ok(Some(Decision::InProgress));
     }
     observed!(
         "read idempotency record",
-        sqlx::query!(
+        sqlx::query_as!(
+            StoredRow,
             "SELECT fingerprint AS \"fingerprint: Digest\", status, \
              headers AS \"headers: Vec<HeaderPair>\", \
              CASE WHEN fingerprint = $2 THEN body END AS body \
@@ -360,31 +367,25 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "read_record"))?
-    .map(|record| {
-        decide_live(
-            record.fingerprint,
-            record.status,
-            record.headers,
-            record.body,
-            fingerprint,
-        )
-    })
+    .map(|row| decide_live(row, fingerprint))
     .transpose()
 }
 
-fn decide_live(
-    stored_fingerprint: Digest,
+struct StoredRow {
+    fingerprint: Digest,
     status: i16,
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
-    fingerprint: &RequestFingerprint,
-) -> Result<Decision, AttemptError> {
-    if &stored_fingerprint != fingerprint.as_bytes() {
+}
+
+fn decide_live(row: StoredRow, fingerprint: &RequestFingerprint) -> Result<Decision, AttemptError> {
+    if &row.fingerprint != fingerprint.as_bytes() {
         return Ok(Decision::Mismatch);
     }
-    let body =
-        body.ok_or_else(|| log_failure("decode_record", AttemptError::Integrity, "decode"))?;
-    Record::decode(status, headers, Bytes::from(body))
+    let body = row
+        .body
+        .ok_or_else(|| log_failure("decode_record", AttemptError::Integrity, "decode"))?;
+    Record::decode(row.status, row.headers, Bytes::from(body))
         .map(|record| Decision::Replay(Box::new(record)))
         .map_err(|err| log_failure("decode_record", AttemptError::Integrity, err.cause()))
 }
@@ -405,7 +406,7 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    let written = observed!(
+    let inserted = observed!(
         "write idempotency record",
         sqlx::query!(
             "WITH locked AS MATERIALIZED ( \
@@ -435,7 +436,7 @@ async fn write(
     )
     .await
     .map_err(|err| sql_failed(&err, "write_record"))?;
-    if written.rows_affected() == 1 {
+    if inserted.rows_affected() == 1 {
         Ok(())
     } else {
         Err(log_failure(
@@ -494,21 +495,31 @@ fn log_sql_failure(
     class: AttemptError,
     commit_outcome: Option<&'static str>,
 ) -> AttemptError {
+    emit_failure(
+        phase,
+        class,
+        commit_outcome,
+        sqlstate(err).as_deref(),
+        failure_cause(err),
+    )
+}
+
+fn log_failure(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
+    emit_failure(phase, class, None, None, cause)
+}
+
+fn emit_failure(
+    phase: &'static str,
+    class: AttemptError,
+    commit_outcome: Option<&'static str>,
+    sqlstate: Option<&str>,
+    cause: &'static str,
+) -> AttemptError {
     tracing::warn!(
         phase,
         failure_class = %class,
         commit_outcome,
-        sqlstate = sqlstate(err).as_deref(),
-        cause = failure_cause(err),
-        "http_idempotency_store_failed"
-    );
-    class
-}
-
-fn log_failure(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
-    tracing::warn!(
-        phase,
-        failure_class = %class,
+        sqlstate,
         cause,
         "http_idempotency_store_failed"
     );

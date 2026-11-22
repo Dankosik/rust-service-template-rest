@@ -237,7 +237,7 @@ fn terminal_fixture() {
             started: Instant::now(),
             target: Some(7),
         }
-        .finish_config_failure("bad config".to_owned());
+        .finish_setup_failure("bad config".to_owned());
         std::process::exit(i32::from(result != ExitCode::SUCCESS));
     }
     let level = if scenario == "warn" {

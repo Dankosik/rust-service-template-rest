@@ -34,7 +34,7 @@ pub enum StartupError {
 
 impl Store {
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        let writable = observed!("check idempotency session", async {
+        let session_check = observed!("check idempotency session", async {
             let mut connection = self.inner.pool.acquire("check idempotency startup").await?;
             sqlx::query_scalar!(
                 "SELECT NOT pg_is_in_recovery() \
@@ -43,7 +43,7 @@ impl Store {
             .fetch_one(&mut *connection)
             .await
         });
-        match tokio::time::timeout(STARTUP_CHECK_BUDGET, writable).await {
+        match tokio::time::timeout(STARTUP_CHECK_BUDGET, session_check).await {
             Ok(Ok(true)) => Ok(()),
             Ok(Ok(false)) => Err(StartupError::NotWritable),
             Ok(Err(err)) => {

@@ -368,17 +368,14 @@ impl MaintenanceAttempt<'_> {
         self.record_sample_at(sample, MaintenanceClock::now());
     }
 
-    fn validated_receipt_time(
+    fn consistent_receipt_time(
         &self,
-        sample: PopulationSample,
         received: MaintenanceClock,
+        observed_at: f64,
+        oldest: Option<f64>,
     ) -> Option<f64> {
         let received_at = received.wall?;
         let requested_at = self.requested.wall?;
-        let PopulationSample {
-            observed_at_unix_seconds: observed_at,
-            oldest_at_unix_seconds: oldest,
-        } = sample;
         let valid = self.requested.agrees_with(self.observer.previous_clock)
             && received.agrees_with(self.requested)
             && observed_at.is_finite()
@@ -391,14 +388,14 @@ impl MaintenanceAttempt<'_> {
     }
 
     fn record_sample_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
-        let Some(received_at) = self.validated_receipt_time(sample, received) else {
-            self.failed_at(FailureCause::ClockInvalid, received);
-            return;
-        };
         let PopulationSample {
             observed_at_unix_seconds: observed_at,
             oldest_at_unix_seconds: oldest,
         } = sample;
+        let Some(received_at) = self.consistent_receipt_time(received, observed_at, oldest) else {
+            self.failed_at(FailureCause::ClockInvalid, received);
+            return;
+        };
         self.observer.previous_clock = received;
         self.observer.last_attempt_success.set(0.0);
         self.observer.database_observed.set(observed_at);
@@ -419,18 +416,18 @@ impl MaintenanceAttempt<'_> {
         self.observer.failing = false;
     }
 
-    fn failed(self, failure: FailureCause) {
-        self.failed_at(failure, MaintenanceClock::now());
+    fn failed(self, cause: FailureCause) {
+        self.failed_at(cause, MaintenanceClock::now());
     }
 
-    fn failed_at(mut self, failure: FailureCause, clock: MaintenanceClock) {
+    fn failed_at(mut self, cause: FailureCause, clock: MaintenanceClock) {
         self.outcome = AttemptOutcome::Failed;
         self.observer.previous_clock = clock;
-        if failure == FailureCause::ClockInvalid {
+        if cause == FailureCause::ClockInvalid {
             self.observer.clock_valid.set(0.0);
         }
         self.observer
-            .record_unsuccessful(UnsuccessfulOutcome::Failed(failure));
+            .record_unsuccessful(UnsuccessfulOutcome::Failed(cause));
     }
 }
 
