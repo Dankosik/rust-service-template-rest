@@ -3,11 +3,11 @@ use std::time::Duration;
 use async_nats::rustls::crypto::{GetRandomFailed, SecureRandom};
 use async_nats::{ConnectErrorKind, ToServerAddrs as _};
 use futures_util::FutureExt as _;
-use operation_context::{Deadline, OperationContext};
+use operation_context::OperationContext;
 use secrecy::ExposeSecret as _;
 use tokio::sync::watch;
 
-use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
+use crate::budget::{BROKER_OPERATION_BUDGET, BrokerBudget, bounded_operation, bounded_with};
 use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
 use crate::messaging::{CloseOutcome, Credentials, MessagingOptions, TransportSecurity};
@@ -45,10 +45,8 @@ impl NativeConnection {
             ));
         }
         let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
-        let connect_deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
-        let connect_budget = connect_deadline.remaining();
-        let connect_context =
-            OperationContext::new(Some(connect_deadline), context.cancellation().clone());
+        let connect_budget = BrokerBudget::from_context(context);
+        let connect_remaining = connect_budget.remaining();
         let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
         let mut connect = connect_options(options.credentials.as_ref(), context)
             .await?
@@ -64,7 +62,7 @@ impl NativeConnection {
                 }
                 std::future::ready(())
             });
-        if let Some(instant) = connect_deadline.instant() {
+        if let Some(instant) = connect_budget.deadline().instant() {
             connect = connect.initial_connect_deadline(instant);
         }
         if tls_first {
@@ -75,11 +73,11 @@ impl NativeConnection {
         if let Some(root_ca) = options.root_ca_path.clone() {
             connect = connect.add_root_certificates(root_ca);
         }
-        let client = bounded_operation(&connect_context, async {
+        let client = bounded_with(connect_budget, async {
             connect
                 .connect(servers)
                 .await
-                .map_err(|error| connect_failure(&error, connect_budget))
+                .map_err(|error| connect_failure(&error, connect_remaining))
         })
         .await?;
         Ok(Self {
@@ -89,8 +87,7 @@ impl NativeConnection {
     }
 
     pub(crate) async fn close(&self, context: &OperationContext) -> CloseOutcome {
-        let deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
-        let bounded = OperationContext::new(Some(deadline), context.cancellation().clone());
+        let budget = BrokerBudget::from_context(context);
         let client = &self.client;
         let mut closed_event = self.closed_event.clone();
         let closed_now = || client.wait_closed().now_or_never() == Some(true);
@@ -110,12 +107,12 @@ impl NativeConnection {
                 CloseOutcome::UnobservedClose
             }
         };
-        let outcome = if bounded.stopped().is_some() {
+        let outcome = if budget.stopped().is_some() {
             CloseOutcome::WaitInterrupted
         } else {
             tokio::select! {
                 biased;
-                _ = bounded.wait_stopped() => CloseOutcome::WaitInterrupted,
+                _ = budget.wait_stopped() => CloseOutcome::WaitInterrupted,
                 result = drain => result,
             }
         };
@@ -124,10 +121,10 @@ impl NativeConnection {
             CloseOutcome::WaitInterrupted => client.force_close(),
             CloseOutcome::UnobservedClose => {
                 client.force_close();
-                if bounded.stopped().is_none() {
+                if budget.stopped().is_none() {
                     tokio::select! {
                         biased;
-                        _ = bounded.wait_stopped() => {}
+                        _ = budget.wait_stopped() => {}
                         _ = client.wait_closed() => {}
                     }
                 }

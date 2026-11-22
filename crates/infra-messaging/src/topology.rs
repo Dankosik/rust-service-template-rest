@@ -6,12 +6,15 @@ use async_nats::jetstream::consumer::{Config as ConsumerConfig, IntoConsumerConf
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
+use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::{
-    Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, PersistenceMode,
-    RetentionPolicy, StorageType, Stream,
+    Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, Info as StreamInfo,
+    PersistenceMode, RetentionPolicy, StorageType, Stream,
 };
 // template:begin outbox:messaging-outbox-topology-imports
 use async_nats::jetstream::stream::{DiscardPolicy, SubjectTransform};
+
+use crate::budget::{BrokerBudget, bounded_with};
 // template:end outbox:messaging-outbox-topology-imports
 use async_nats::jetstream::{Context, ErrorCode};
 use operation_context::OperationContext;
@@ -375,25 +378,30 @@ fn wildcard_index(output: &str) -> Option<usize> {
 
 pub(crate) async fn recheck_outbox_source(
     shared: &crate::messaging::Shared,
-    context: &OperationContext,
+    budget: BrokerBudget<'_>,
 ) -> Result<(), crate::PublishError> {
     use crate::PublishRejection;
 
-    let source = get_stream(&shared.jetstream, &shared.source_stream, "source", context)
-        .await
-        .map_err(|error| match error {
-            MessagingError::Cancelled | MessagingError::TimedOut { .. } => {
-                PublishRejection::ContextStopped
-            }
-            MessagingError::Configuration(_)
-            | MessagingError::Connection
-            | MessagingError::Authentication
-            | MessagingError::Topology
-            | MessagingError::OutboxSource(_)
-            | MessagingError::Unavailable
-            | MessagingError::Bounds => PublishRejection::BrokerRefused,
-        })?;
-    let config = &source.cached_info().config;
+    let info = bounded_with(budget, async {
+        map_stream_error(
+            fetch_stream_info(&shared.jetstream, &shared.source_stream_info_subject).await,
+            "source",
+        )
+    })
+    .await
+    .map_err(|error| match error {
+        MessagingError::Cancelled | MessagingError::TimedOut { .. } => {
+            PublishRejection::ContextStopped
+        }
+        MessagingError::Configuration(_)
+        | MessagingError::Connection
+        | MessagingError::Authentication
+        | MessagingError::Topology
+        | MessagingError::OutboxSource(_)
+        | MessagingError::Unavailable
+        | MessagingError::Bounds => PublishRejection::BrokerRefused,
+    })?;
+    let config = &info.config;
     if let Err(refusal) = validate_stream_publication(config) {
         report_refusal("source_stream", refusal, shared.envelope_limit_bytes, None);
         return Err(PublishRejection::BrokerRefused.into());
@@ -409,6 +417,30 @@ pub(crate) async fn recheck_outbox_source(
 }
 // template:end outbox:messaging-outbox-topology-validation
 
+pub(crate) async fn fetch_stream_info(
+    jetstream: &Context,
+    info_subject: &async_nats::Subject,
+) -> Result<StreamInfo, GetStreamError> {
+    let response: Response<StreamInfo> = jetstream
+        .request(wire::BorrowedSubject(info_subject), &())
+        .await
+        .map_err(|error| GetStreamError::with_source(GetStreamErrorKind::Request, error))?;
+    match response {
+        Response::Err { error } => Err(GetStreamError::new(GetStreamErrorKind::JetStream(error))),
+        Response::Ok(info) => Ok(info),
+    }
+}
+
+fn map_stream_error<T>(
+    result: Result<T, GetStreamError>,
+    role: &'static str,
+) -> Result<T, MessagingError> {
+    result.map_err(|error| {
+        let broker = stream_broker_error(&error);
+        report_topology_failure("get_stream", Some(role), &error, broker.as_ref())
+    })
+}
+
 async fn get_stream(
     jetstream: &async_nats::jetstream::Context,
     name: &str,
@@ -416,10 +448,7 @@ async fn get_stream(
     context: &OperationContext,
 ) -> Result<Stream, MessagingError> {
     bounded_operation(context, async {
-        jetstream.get_stream(name).await.map_err(|error| {
-            let broker = stream_broker_error(&error);
-            report_topology_failure("get_stream", Some(role), &error, broker.as_ref())
-        })
+        map_stream_error(jetstream.get_stream(name).await, role)
     })
     .await
 }

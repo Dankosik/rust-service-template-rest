@@ -295,8 +295,15 @@ fn prepare<'a, K: JobKind>(
 }
 
 fn encode_payload(payload: &impl serde::Serialize) -> Result<String, EnqueueError> {
-    let encoded =
-        json_payload::to_vec_bounded(payload, MAX_PAYLOAD_BYTES).map_err(|error| match error {
+    encode_payload_with_capacity(payload, 0)
+}
+
+fn encode_payload_with_capacity(
+    payload: &impl serde::Serialize,
+    capacity: usize,
+) -> Result<String, EnqueueError> {
+    let encoded = json_payload::to_vec_bounded_with_capacity(payload, MAX_PAYLOAD_BYTES, capacity)
+        .map_err(|error| match error {
             json_payload::EncodeError::Serialize(error) => EnqueueError::Serialize(error),
             json_payload::EncodeError::TooLarge { bytes } => {
                 EnqueueError::PayloadTooLarge { bytes }

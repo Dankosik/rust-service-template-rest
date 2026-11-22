@@ -135,8 +135,8 @@ impl<K, P> Job<K, P> {
     }
 
     #[must_use]
-    pub fn cancellation(&self) -> CancellationToken {
-        self.attempt.cancellation.clone()
+    pub const fn cancellation(&self) -> &CancellationToken {
+        &self.attempt.cancellation
     }
 
     #[must_use]

@@ -74,9 +74,36 @@ where
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct BoundHandler(Arc<dyn ErasedEventHandler>);
+
+impl std::fmt::Debug for BoundHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BoundHandler")
+    }
+}
+
+impl BoundHandler {
+    pub(crate) async fn dispatch(
+        &self,
+        envelope: InboundEnvelopeRef<'_>,
+        context: OperationContext,
+    ) -> Result<(), DispatchError> {
+        let run = self
+            .0
+            .call(
+                envelope.message_id,
+                envelope.occurred_at,
+                envelope.payload,
+                context,
+            )
+            .map_err(|_| DispatchError::Undecodable)?;
+        run.await.map_err(DispatchError::Handler)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
-    Unhandled,
     Undecodable,
     Handler(HandlerError),
 }
@@ -417,30 +444,14 @@ impl Registry {
         self.routes().filter(|(_, entry)| entry.handler.is_some())
     }
 
-    pub(crate) async fn dispatch(
-        &self,
-        subject: &str,
-        envelope: InboundEnvelopeRef<'_>,
-        context: OperationContext,
-    ) -> Result<(), DispatchError> {
-        let routes: &HashMap<RouteKey<'_>, RegisteredRoute> = &self.routes;
-        let handler = routes
-            .get(&RouteKey {
-                event_type: envelope.event_type,
-                schema_version: envelope.schema_version,
-            })
-            .filter(|entry| entry.subject.as_str() == subject)
-            .and_then(|entry| entry.handler.as_ref())
-            .ok_or(DispatchError::Unhandled)?;
-        let run = handler
-            .call(
-                envelope.message_id,
-                envelope.occurred_at,
-                envelope.payload,
-                context,
-            )
-            .map_err(|_| DispatchError::Undecodable)?;
-        run.await.map_err(DispatchError::Handler)
+    pub(crate) fn into_handled_routes(
+        self,
+    ) -> impl Iterator<Item = (RouteKey<'static>, async_nats::Subject, BoundHandler)> {
+        self.routes.into_iter().filter_map(|(key, entry)| {
+            entry
+                .handler
+                .map(|handler| (key, entry.subject, BoundHandler(handler)))
+        })
     }
 }
 
@@ -590,7 +601,17 @@ mod tests {
         }
     }
 
-    async fn dispatch(
+    fn handled_handler(registry: Registry, subject: &str, key: RouteKey<'_>) -> BoundHandler {
+        let routes: Vec<_> = registry.into_handled_routes().collect();
+        assert_eq!(routes.len(), 1);
+        let (route_key, route_subject, handler) = routes.into_iter().next().unwrap();
+        assert_eq!(route_key, key);
+        assert_eq!(route_subject.as_str(), subject);
+        handler
+    }
+
+    async fn dispatch_bound(
+        handler: &BoundHandler,
         subject: &str,
         event_type: &str,
         schema: &str,
@@ -604,41 +625,44 @@ mod tests {
         headers.insert(crate::wire::header_name::NATS_MSG_ID, "event-1");
         let envelope =
             crate::wire::decode_envelope_ref(subject, &headers, payload.as_bytes()).unwrap();
-        registry()
-            .dispatch(subject, envelope, OperationContext::unbounded())
+        handler
+            .dispatch(envelope, OperationContext::unbounded())
             .await
     }
 
     #[tokio::test]
-    async fn a_delivery_no_handler_claims_is_told_apart_from_a_handler_rejection() {
-        let payload = r#"{"quantity":1}"#;
+    async fn handled_routes_exclude_publish_only_routes_and_preserve_handler_outcomes() {
+        let handler = handled_handler(registry(), "orders.created", route_key::<Created>());
         assert_eq!(
-            dispatch("orders.created", "order.created", "v2", payload).await,
+            dispatch_bound(
+                &handler,
+                "orders.created",
+                "order.created",
+                "v2",
+                r#"{"quantity":1}"#,
+            )
+            .await,
             Ok(())
         );
-        for (subject, event_type, schema) in [
-            ("orders.created", "order.created", "v3"),
-            ("orders.created", "order.cancelled", "v1"),
-            ("orders.shipped", "order.created", "v2"),
-            ("orders.shipped", "order.shipped", "v1"),
-        ] {
-            assert_eq!(
-                dispatch(subject, event_type, schema, payload).await,
-                Err(DispatchError::Unhandled),
-                "{subject} {event_type} {schema}"
-            );
-        }
         assert_eq!(
-            dispatch("orders.created", "order.created", "v2", r#"{"quantity":0}"#).await,
+            dispatch_bound(
+                &handler,
+                "orders.created",
+                "order.created",
+                "v2",
+                r#"{"quantity":0}"#,
+            )
+            .await,
             Err(DispatchError::Handler(HandlerError::Permanent))
         );
     }
 
     #[tokio::test]
     async fn a_payload_the_handler_type_cannot_read_never_reaches_the_handler() {
+        let handler = handled_handler(registry(), "orders.created", route_key::<Created>());
         for payload in [r#"{"quantity":"many"}"#, r#"{"count":1}"#, "not json"] {
             assert_eq!(
-                dispatch("orders.created", "order.created", "v2", payload).await,
+                dispatch_bound(&handler, "orders.created", "order.created", "v2", payload).await,
                 Err(DispatchError::Undecodable),
                 "{payload}"
             );
@@ -686,9 +710,10 @@ mod tests {
         let envelope =
             crate::wire::decode_envelope_ref(prepared.subject(), &headers, prepared.payload())
                 .unwrap();
+        let handler = handled_handler(registry, "orders.created", route_key::<Created>());
         assert_eq!(
-            registry
-                .dispatch("orders.created", envelope, OperationContext::unbounded())
+            handler
+                .dispatch(envelope, OperationContext::unbounded())
                 .await,
             Ok(())
         );

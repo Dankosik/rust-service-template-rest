@@ -200,7 +200,7 @@ impl Consumer {
         let delivery_bytes = pull_delivery_bytes(
             shared.max_payload_bytes,
             subject_bytes,
-            &shared.source_stream,
+            shared.source_stream.as_str(),
             &options.durable_name,
             server.domain.as_deref(),
         )
@@ -208,7 +208,7 @@ impl Consumer {
         let retained_pull_bytes = pull_delivery_bytes(
             PUBLICATION_WINDOW_BYTES - wire::HEADER_LIMIT_BYTES,
             subject_bytes,
-            &shared.source_stream,
+            shared.source_stream.as_str(),
             &options.durable_name,
             server.domain.as_deref(),
         )
@@ -233,7 +233,7 @@ impl Consumer {
             context,
             bind_durable(
                 &shared.jetstream,
-                &shared.source_stream,
+                shared.source_stream.as_str(),
                 &options.durable_name,
                 config,
             ),
@@ -360,14 +360,14 @@ impl Consumer {
                         mode = PullMode::Normal;
                     }
                 }
+                BatchEnd::Closed => mode = PullMode::Normal,
                 BatchEnd::Stopped => break 'pulls,
-                BatchEnd::Incomplete(incomplete) => match self
-                    .recover_incomplete_batch(incomplete, mode, drain)
-                    .await?
-                {
-                    ControlFlow::Continue(next_mode) => mode = next_mode,
-                    ControlFlow::Break(()) => break 'pulls,
-                },
+                BatchEnd::Failed(failure) => {
+                    match self.recover_failed_batch(failure, mode, drain).await? {
+                        ControlFlow::Continue(next_mode) => mode = next_mode,
+                        ControlFlow::Break(()) => break 'pulls,
+                    }
+                }
             }
         }
         while let Some(joined) = deliveries.join_next().await {
@@ -376,25 +376,24 @@ impl Consumer {
         Ok(())
     }
 
-    async fn recover_incomplete_batch(
+    async fn recover_failed_batch(
         &self,
-        incomplete: BatchIncomplete,
+        failure: BatchFailure,
         mode: PullMode,
         drain: &CancellationToken,
     ) -> Result<ControlFlow<(), PullMode>, ConsumerError> {
         if self.recheck_durable_consumer(drain).await?.is_break() {
             return Ok(ControlFlow::Break(()));
         }
-        match incomplete {
-            BatchIncomplete::MaxBytesExceededBeforeFirstDelivery => {
+        match failure {
+            BatchFailure::MaxBytesExceededBeforeFirstDelivery => {
                 pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
                 if mode == PullMode::SingleRetainedMessage {
                     return Err(ConsumerError::RetainedMessageTooLarge);
                 }
                 Ok(ControlFlow::Continue(PullMode::SingleRetainedMessage))
             }
-            BatchIncomplete::Closed => Ok(ControlFlow::Continue(PullMode::Normal)),
-            BatchIncomplete::Failed { phase, error_kind } => {
+            BatchFailure::Stream { phase, error_kind } => {
                 pull_failed(phase, error_kind);
                 if wait_for_backoff(drain).await.is_break() {
                     return Ok(ControlFlow::Break(()));
@@ -535,7 +534,7 @@ impl Consumer {
             .dispatch_batch_messages(&mut messages, deliveries, drain, budget)
             .await;
         match &result {
-            Ok(BatchEnd::Stopped | BatchEnd::Incomplete(_)) => {
+            Ok(BatchEnd::Stopped | BatchEnd::Closed | BatchEnd::Failed(_)) => {
                 release_prefetched_messages(
                     messages,
                     budget.messages,
@@ -583,23 +582,23 @@ impl Consumer {
                 },
                 next = messages.next() => match next {
                     Some(Ok(message)) => message,
-                    None => return Ok(BatchEnd::Incomplete(BatchIncomplete::Closed)),
+                    None => return Ok(BatchEnd::Closed),
                     Some(Err(error)) => {
                         let failure = classify_batch_receive_error(&error);
                         if remaining == budget.messages
                             && matches!(failure, BatchReceiveError::MaxBytesExceeded)
                         {
-                            return Ok(BatchEnd::Incomplete(
-                                BatchIncomplete::MaxBytesExceededBeforeFirstDelivery,
+                            return Ok(BatchEnd::Failed(
+                                BatchFailure::MaxBytesExceededBeforeFirstDelivery,
                             ));
                         }
-                        return Ok(BatchEnd::Incomplete(BatchIncomplete::Failed {
+                        return Ok(BatchEnd::Failed(BatchFailure::Stream {
                             phase: "batch_receive",
                             error_kind: failure.label(),
                         }));
                     }
                 },
-                () = &mut deadline => return Ok(BatchEnd::Incomplete(BatchIncomplete::Failed {
+                () = &mut deadline => return Ok(BatchEnd::Failed(BatchFailure::Stream {
                     phase: "batch_receive",
                     error_kind: "local_timeout",
                 })),
@@ -618,7 +617,7 @@ impl Consumer {
                     DurableStatus::Lost => return Err(ConsumerError::ConsumerLost),
                     DurableStatus::Unavailable(error) => {
                         release_message(&message, drain, &self.handler.filter_subject).await;
-                        return Ok(BatchEnd::Incomplete(BatchIncomplete::Failed {
+                        return Ok(BatchEnd::Failed(BatchFailure::Stream {
                             phase: "consumer_info",
                             error_kind: consumer_info_error_kind(&error.kind()),
                         }));
@@ -662,15 +661,15 @@ enum BatchOpen {
 #[derive(Clone, Copy, Debug)]
 enum BatchEnd {
     Filled,
+    Closed,
     Stopped,
-    Incomplete(BatchIncomplete),
+    Failed(BatchFailure),
 }
 
 #[derive(Clone, Copy, Debug)]
-enum BatchIncomplete {
-    Closed,
+enum BatchFailure {
     MaxBytesExceededBeforeFirstDelivery,
-    Failed {
+    Stream {
         phase: &'static str,
         error_kind: &'static str,
     },

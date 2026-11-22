@@ -91,7 +91,8 @@ enum StartupPhase {
 pub(crate) struct Shared {
     pub(crate) connection: NativeConnection,
     pub(crate) jetstream: async_nats::jetstream::Context,
-    pub(crate) source_stream: String,
+    pub(crate) source_stream: async_nats::HeaderValue,
+    pub(crate) source_stream_info_subject: async_nats::Subject,
     pub(crate) max_payload_bytes: usize,
     pub(crate) envelope_limit_bytes: usize,
     topology: TopologyAdmission,
@@ -267,10 +268,18 @@ impl MessagingStartup {
             &config.context,
         )
         .await?;
+        let source_stream = config
+            .options
+            .source_stream
+            .parse::<async_nats::HeaderValue>()
+            .map_err(|_| MessagingError::Topology)?;
+        let source_stream_info_subject =
+            async_nats::Subject::from(format!("STREAM.INFO.{}", source_stream.as_str()));
         let messaging = Messaging {
             shared: Arc::new(Shared {
                 jetstream,
-                source_stream: config.options.source_stream.clone(),
+                source_stream,
+                source_stream_info_subject,
                 max_payload_bytes: config.options.max_payload_bytes,
                 envelope_limit_bytes: config.envelope_limit_bytes,
                 topology,

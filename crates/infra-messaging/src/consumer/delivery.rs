@@ -12,12 +12,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use super::ConsumerError;
-use crate::budget::BROKER_OPERATION_BUDGET;
+use crate::budget::{BROKER_OPERATION_BUDGET, BrokerBudget};
 use crate::error::{HandlerError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{Outcomes, record_span_outcome};
 use crate::producer::send_publication;
-use crate::registry::{DispatchError, Registry};
+use crate::registry::{BoundHandler, DispatchError, Registry};
 use crate::topology::ConsumerAdmission;
 use crate::wire;
 
@@ -39,8 +39,7 @@ const SETTLEMENT_FAILURES_TOTAL: &str = "messaging_settlement_failures_total";
 #[derive(Debug)]
 pub(super) struct DeliveryHandler {
     shared: Arc<Shared>,
-    registry: Registry,
-    metrics: HandlerMetrics,
+    handlers: RegisteredHandlers,
     pub(super) abort: CancellationToken,
     pub(super) filter_subject: String,
     span_name: String,
@@ -57,13 +56,43 @@ struct EventMetrics {
 }
 
 #[derive(Debug)]
-struct HandlerMetrics {
-    registered: foldhash::HashMap<&'static str, EventMetrics>,
+struct HandledRoute {
+    schema_version: u16,
+    subject: Subject,
+    handler: BoundHandler,
+}
+
+#[derive(Debug)]
+struct EventDispatch {
+    metrics: EventMetrics,
+    routes: Vec<HandledRoute>,
+}
+
+#[derive(Clone, Copy)]
+struct DispatchTarget<'a> {
+    metrics: &'a EventMetrics,
+    routes: &'a [HandledRoute],
+}
+
+impl<'a> DispatchTarget<'a> {
+    fn handler(self, subject: &str, schema_version: u16) -> Option<&'a BoundHandler> {
+        self.routes
+            .iter()
+            .find(|route| {
+                route.schema_version == schema_version && route.subject.as_str() == subject
+            })
+            .map(|route| &route.handler)
+    }
+}
+
+#[derive(Debug)]
+struct RegisteredHandlers {
+    registered: foldhash::HashMap<&'static str, EventDispatch>,
     unregistered: EventMetrics,
 }
 
-impl HandlerMetrics {
-    fn register(registry: &Registry) -> Self {
+impl RegisteredHandlers {
+    fn from_registry(registry: Registry) -> Self {
         let event = |event_type| EventMetrics {
             event_type,
             outcomes: Outcomes::register(
@@ -74,19 +103,38 @@ impl HandlerMetrics {
                 Outcome::label,
             ),
         };
+        let mut registered = foldhash::HashMap::<&'static str, EventDispatch>::default();
+        for (key, subject, handler) in registry.into_handled_routes() {
+            registered
+                .entry(key.event_type)
+                .or_insert_with(|| EventDispatch {
+                    metrics: event(key.event_type),
+                    routes: Vec::new(),
+                })
+                .routes
+                .push(HandledRoute {
+                    schema_version: key.schema_version,
+                    subject,
+                    handler,
+                });
+        }
         Self {
-            registered: registry
-                .handled_routes()
-                .map(|(key, _)| (key.event_type, event(key.event_type)))
-                .collect(),
+            registered,
             unregistered: event(UNREGISTERED),
         }
     }
 
-    fn get(&self, event_type: &str) -> &EventMetrics {
-        self.registered
-            .get(event_type)
-            .unwrap_or(&self.unregistered)
+    fn resolve(&self, event_type: &str) -> DispatchTarget<'_> {
+        match self.registered.get(event_type) {
+            Some(entry) => DispatchTarget {
+                metrics: &entry.metrics,
+                routes: &entry.routes,
+            },
+            None => DispatchTarget {
+                metrics: &self.unregistered,
+                routes: &[],
+            },
+        }
     }
 }
 
@@ -175,8 +223,7 @@ impl DeliveryHandler {
         let filter_subject = admission.options.filter_subject;
         Self {
             shared,
-            metrics: HandlerMetrics::register(&registry),
-            registry,
+            handlers: RegisteredHandlers::from_registry(registry),
             abort: CancellationToken::new(),
             span_name: format!("process {filter_subject}"),
             filter_subject,
@@ -213,14 +260,14 @@ impl DeliveryHandler {
                 )
                 .await;
         };
-        let metrics = self.metrics.get(envelope.event_type);
+        let target = self.handlers.resolve(envelope.event_type);
         if delivery_attempt > MAX_DELIVERIES {
             return self
                 .dead_letter(
                     &message,
                     &info,
                     wire::DeadLetterReason::Exhausted,
-                    metrics.event_type,
+                    target.metrics.event_type,
                 )
                 .await;
         }
@@ -238,7 +285,7 @@ impl DeliveryHandler {
             otel.status_code = tracing::field::Empty,
         );
         crate::trace::set_remote_parent(&span, headers);
-        self.process(&message, &info, envelope, metrics, delivery_attempt)
+        self.process(&message, &info, envelope, target, delivery_attempt)
             .instrument(span)
             .await
     }
@@ -248,19 +295,18 @@ impl DeliveryHandler {
         message: &Message,
         info: &Info<'_>,
         envelope: wire::InboundEnvelopeRef<'_>,
-        metrics: &EventMetrics,
+        target: DispatchTarget<'_>,
         delivery_attempt: usize,
     ) -> Result<(), ConsumerError> {
         let started = Instant::now();
         let outcome = run_handler(
-            &self.registry,
-            message.subject.as_ref(),
+            target.handler(message.subject.as_ref(), envelope.schema_version),
             envelope,
             &self.abort,
         )
         .await;
-        metrics.outcomes.record(outcome, started.elapsed());
-        let event_type = metrics.event_type;
+        target.metrics.outcomes.record(outcome, started.elapsed());
+        let event_type = target.metrics.event_type;
         let label = outcome.label();
         record_span_outcome(
             &tracing::Span::current(),
@@ -324,12 +370,9 @@ impl DeliveryHandler {
         };
         let reason = reason.label();
 
-        let context = OperationContext::new(
-            Some(Deadline::after(BROKER_OPERATION_BUDGET)),
-            self.abort.clone(),
-        );
+        let budget = BrokerBudget::new(Deadline::after(BROKER_OPERATION_BUDGET), &self.abort);
         let result =
-            send_publication(&self.shared, &self.dead_letter_subject, message, &context).await;
+            send_publication(&self.shared, &self.dead_letter_subject, message, budget).await;
         let outcome = match &result {
             Ok(_) => "accepted",
             Err(PublishError::Ambiguous) => "ambiguous",
@@ -389,15 +432,20 @@ impl DeliveryHandler {
 }
 
 async fn run_handler(
-    registry: &Registry,
-    subject: &str,
+    handler: Option<&BoundHandler>,
     envelope: wire::InboundEnvelopeRef<'_>,
     cancel: &CancellationToken,
 ) -> Outcome {
+    if cancel.is_cancelled() {
+        return Outcome::Retryable;
+    }
+    let Some(handler) = handler else {
+        return Outcome::Unhandled;
+    };
     let deadline = Deadline::after(HANDLER_TIMEOUT);
     let context = OperationContext::new(Some(deadline), cancel.child_token());
     let _ended = context.cancellation().drop_guard_ref();
-    let dispatch = registry.dispatch(subject, envelope, context.clone());
+    let dispatch = handler.dispatch(envelope, context.clone());
     let stopped = |reason| match reason {
         Stopped::Deadline => Outcome::TimedOut,
         Stopped::Cancelled => Outcome::Retryable,
@@ -410,7 +458,6 @@ async fn run_handler(
         Ok(Ok(())) => Outcome::Success,
         Ok(Err(DispatchError::Handler(HandlerError::Permanent))) => Outcome::Permanent,
         Ok(Err(DispatchError::Handler(HandlerError::Retryable))) => Outcome::Retryable,
-        Ok(Err(DispatchError::Unhandled)) => Outcome::Unhandled,
         Ok(Err(DispatchError::Undecodable)) => Outcome::Undecodable,
         Err(_) => Outcome::Panicked,
     }
@@ -536,6 +583,14 @@ mod tests {
         const SCHEMA_VERSION: u16 = 1;
     }
 
+    #[derive(serde::Deserialize)]
+    struct CreatedV2;
+
+    impl EventPayload for CreatedV2 {
+        const EVENT_TYPE: &'static str = Created::EVENT_TYPE;
+        const SCHEMA_VERSION: u16 = 2;
+    }
+
     struct Shipped;
 
     impl EventPayload for Shipped {
@@ -548,22 +603,31 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
             let created = Route::<Created>::new("orders.created");
+            let created_v2 = Route::<CreatedV2>::new("orders.created.v2");
             let mut registry = Registry::default();
             registry.declare(&created).unwrap().handle(accept);
+            registry.declare(&created_v2).unwrap().handle(accept);
             registry
                 .declare(&Route::<Shipped>::new("orders.shipped"))
                 .unwrap();
-            let metrics = HandlerMetrics::register(&registry);
+            let handlers = RegisteredHandlers::from_registry(registry);
 
-            let handled = metrics.get("order.created");
-            assert_eq!(handled.event_type, "order.created");
-            handled
+            let target = handlers.resolve("order.created");
+            assert_eq!(target.metrics.event_type, "order.created");
+            assert!(target.handler("orders.created", 1).is_some());
+            assert!(target.handler("orders.created.v2", 2).is_some());
+            assert!(target.handler("orders.created", 2).is_none());
+            assert!(target.handler("orders.created", 3).is_none());
+            target
+                .metrics
                 .outcomes
                 .record(Outcome::Retryable, Duration::from_millis(5));
             for unhandled in ["order.shipped", "sentinel.publisher.chosen"] {
-                let metrics = metrics.get(unhandled);
-                assert_eq!(metrics.event_type, UNREGISTERED);
-                metrics
+                let target = handlers.resolve(unhandled);
+                assert_eq!(target.metrics.event_type, UNREGISTERED);
+                assert!(target.handler("orders.shipped", 1).is_none());
+                target
+                    .metrics
                     .outcomes
                     .record(Outcome::Permanent, Duration::from_millis(5));
             }
@@ -577,6 +641,22 @@ mod tests {
             assert!(scrape.contains(line), "{line} is missing from:\n{scrape}");
         }
         assert!(!scrape.contains("order.shipped") && !scrape.contains("sentinel"));
+    }
+
+    async fn dispatch_test(
+        registry: Registry,
+        subject: &str,
+        envelope: wire::InboundEnvelopeRef<'_>,
+        cancel: &CancellationToken,
+    ) -> Outcome {
+        let handlers = RegisteredHandlers::from_registry(registry);
+        let target = handlers.resolve(envelope.event_type);
+        run_handler(
+            target.handler(subject, envelope.schema_version),
+            envelope,
+            cancel,
+        )
+        .await
     }
 
     fn created_envelope() -> wire::InboundEnvelopeRef<'static> {
@@ -629,7 +709,7 @@ mod tests {
 
             let delivery = CancellationToken::new();
             let outcome =
-                run_handler(&registry, "orders.created", created_envelope(), &delivery).await;
+                dispatch_test(registry, "orders.created", created_envelope(), &delivery).await;
 
             assert_eq!(outcome.label(), expected);
             let handler_token = token_rx.await.unwrap();
@@ -658,8 +738,8 @@ mod tests {
                     result
                 },
             );
-            let outcome = run_handler(
-                &registry,
+            let outcome = dispatch_test(
+                registry,
                 "orders.created",
                 created_envelope(),
                 &CancellationToken::new(),
@@ -680,7 +760,95 @@ mod tests {
         );
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let outcome = run_handler(&registry, "orders.created", created_envelope(), &cancel).await;
+        let outcome = dispatch_test(
+            registry.clone(),
+            "orders.created",
+            created_envelope(),
+            &cancel,
+        )
+        .await;
         assert_eq!(outcome.label(), "retryable");
+
+        let unhandled_cancelled =
+            dispatch_test(registry, "orders.other", created_envelope(), &cancel).await;
+        assert_eq!(unhandled_cancelled.label(), "retryable");
+    }
+
+    #[tokio::test]
+    async fn registered_handlers_distinguish_unhandled_routes_from_handler_outcomes() {
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<Created>::new("orders.created"))
+            .unwrap()
+            .handle(|event: Event<Created>, _: OperationContext| async move {
+                if event.id == "reject" {
+                    Err(HandlerError::Permanent)
+                } else {
+                    Ok(())
+                }
+            });
+        registry
+            .declare(&Route::<CreatedV2>::new("orders.created.v2"))
+            .unwrap()
+            .handle(accept);
+        registry
+            .declare(&Route::<Shipped>::new("orders.shipped"))
+            .unwrap();
+        let handlers = RegisteredHandlers::from_registry(registry);
+        let cancel = CancellationToken::new();
+        let cancel_ref = &cancel;
+
+        let run = |subject: &str,
+                   event_type: &'static str,
+                   schema_version: u16,
+                   message_id: &'static str,
+                   payload: &'static [u8]| {
+            let target = handlers.resolve(event_type);
+            let metric_event_type = target.metrics.event_type;
+            let handler = target.handler(subject, schema_version);
+            let envelope = wire::InboundEnvelopeRef {
+                message_id,
+                event_type,
+                schema_version,
+                occurred_at: time::UtcDateTime::UNIX_EPOCH,
+                payload,
+            };
+            async move {
+                (
+                    metric_event_type,
+                    run_handler(handler, envelope, cancel_ref).await,
+                )
+            }
+        };
+
+        assert_eq!(
+            run("orders.created", "order.created", 1, "ok", b"null").await,
+            ("order.created", Outcome::Success)
+        );
+        assert_eq!(
+            run("orders.created.v2", "order.created", 2, "ok", b"null").await,
+            ("order.created", Outcome::Success)
+        );
+        assert_eq!(
+            run("orders.created", "order.created", 1, "reject", b"null").await,
+            ("order.created", Outcome::Permanent)
+        );
+        assert_eq!(
+            run("orders.created", "order.created", 1, "ok", b"123").await,
+            ("order.created", Outcome::Undecodable)
+        );
+        for (subject, event_type, schema_version, expected_metric) in [
+            ("orders.created", "order.created", 3, "order.created"),
+            ("orders.other", "order.created", 1, "order.created"),
+            ("orders.created", "order.created", 2, "order.created"),
+            ("orders.shipped", "order.shipped", 1, UNREGISTERED),
+            ("orders.created", "order.cancelled", 1, UNREGISTERED),
+        ] {
+            assert_eq!(
+                run(subject, event_type, schema_version, "ok", b"null").await,
+                (expected_metric, Outcome::Unhandled),
+                "{subject} {event_type} v{schema_version}"
+            );
+        }
     }
 }
