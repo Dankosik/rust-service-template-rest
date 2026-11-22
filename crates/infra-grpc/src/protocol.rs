@@ -7,30 +7,26 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
 /// gRPC over HTTP/2 §Requests and RFC 9110 §§5.6.2, 5.6.4, 5.6.6.
 pub(crate) fn has_native_content_type(headers: &HeaderMap) -> bool {
     let mut values = headers.get_all(http::header::CONTENT_TYPE).iter();
-    let Some(value) = values.next() else {
+    let (Some(value), None) = (values.next(), values.next()) else {
         return false;
     };
-    if values.next().is_some() {
-        return false;
-    }
     let bytes = value.as_bytes();
-    if bytes == tonic::metadata::GRPC_CONTENT_TYPE.as_bytes() || bytes == b"application/grpc+proto"
-    {
-        return true;
-    }
-    is_native_grpc_media_type(bytes)
+    bytes == tonic::metadata::GRPC_CONTENT_TYPE.as_bytes()
+        || bytes == b"application/grpc+proto"
+        || is_native_grpc_media_type(bytes)
 }
 
+const NATIVE_MEDIA_TYPE: &[u8] = b"application/grpc";
+
 fn is_native_grpc_media_type(bytes: &[u8]) -> bool {
-    let Some((prefix, mut rest)) = skip_ows(bytes).split_at_checked(b"application/grpc".len())
-    else {
+    let Some((prefix, mut rest)) = skip_ows(bytes).split_at_checked(NATIVE_MEDIA_TYPE.len()) else {
         return false;
     };
-    if !prefix.eq_ignore_ascii_case(b"application/grpc") {
+    if !prefix.eq_ignore_ascii_case(NATIVE_MEDIA_TYPE) {
         return false;
     }
     if let Some(after_plus) = rest.strip_prefix(b"+") {
-        let Some(after_suffix) = take_token(after_plus) else {
+        let Some(after_suffix) = skip_token(after_plus) else {
             return false;
         };
         rest = after_suffix;
@@ -44,13 +40,13 @@ fn is_native_grpc_media_type(bytes: &[u8]) -> bool {
         if rest.is_empty() || rest.starts_with(b";") {
             continue;
         }
-        let Some(after_name) = take_token(rest) else {
+        let Some(after_name) = skip_token(rest) else {
             return false;
         };
         let Some(after_eq) = after_name.strip_prefix(b"=") else {
             return false;
         };
-        let Some(after_value) = take_parameter_value(after_eq) else {
+        let Some(after_value) = skip_parameter_value(after_eq) else {
             return false;
         };
         rest = after_value;
@@ -65,7 +61,7 @@ fn skip_ows(bytes: &[u8]) -> &[u8] {
     &bytes[start..]
 }
 
-fn take_token(bytes: &[u8]) -> Option<&[u8]> {
+fn skip_token(bytes: &[u8]) -> Option<&[u8]> {
     let end = bytes
         .iter()
         .position(|&byte| !shared_rules::rfc9110::is_tchar(byte))
@@ -73,15 +69,15 @@ fn take_token(bytes: &[u8]) -> Option<&[u8]> {
     (end > 0).then(|| &bytes[end..])
 }
 
-fn take_parameter_value(bytes: &[u8]) -> Option<&[u8]> {
+fn skip_parameter_value(bytes: &[u8]) -> Option<&[u8]> {
     if bytes.starts_with(b"\"") {
-        take_quoted_string(bytes)
+        skip_quoted_string(bytes)
     } else {
-        take_token(bytes)
+        skip_token(bytes)
     }
 }
 
-fn take_quoted_string(bytes: &[u8]) -> Option<&[u8]> {
+fn skip_quoted_string(bytes: &[u8]) -> Option<&[u8]> {
     let mut rest = bytes.strip_prefix(b"\"")?;
     while let Some((&byte, after)) = rest.split_first() {
         match byte {
