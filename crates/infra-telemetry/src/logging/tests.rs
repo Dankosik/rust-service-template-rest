@@ -691,3 +691,67 @@ fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
     assert!(!quiet.contains("sdk info"), "{quiet}");
 }
 // template:end object-storage:telemetry-sdk-log-cap-test
+
+#[test]
+fn temporal_sdk_debug_and_trace_records_stay_capped_unless_explicitly_named() {
+    let emit = |level: &str| {
+        let buffer = Buffer::default();
+        let (layer, guard) = buffer.layer(LoggingFormat::Text, false);
+        let filter = admission_filter(level).expect("valid directive");
+        let dispatch = tracing::Dispatch::new(
+            Registry::default()
+                .with(filter)
+                .with(temporal_sdk_log_cap(level))
+                .with(layer),
+        );
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::debug!(target: "temporalio_sdk_core::worker::workflow", "core debug");
+            tracing::trace!(target: "temporalio_sdk::worker", "sdk trace");
+            tracing::debug!(target: "temporal_client", "client root debug");
+            tracing::debug!(target: "temporal_client::retry", "client submodule debug");
+            tracing::info!(target: "temporalio_sdk_core::worker", "core info");
+            tracing::info!(target: "temporal_client", "client info");
+            tracing::debug!(target: "temporal_client_app::handler", "unrelated prefix debug");
+            tracing::debug!(target: "infra_temporal::client", "adapter debug");
+        });
+        drain(guard);
+        buffer.records()
+    };
+
+    let capped = emit("trace");
+    assert!(!capped.contains("core debug"), "{capped}");
+    assert!(!capped.contains("sdk trace"), "{capped}");
+    assert!(!capped.contains("client root debug"), "{capped}");
+    assert!(!capped.contains("client submodule debug"), "{capped}");
+    assert!(capped.contains("core info"), "{capped}");
+    assert!(capped.contains("client info"), "{capped}");
+    assert!(capped.contains("unrelated prefix debug"), "{capped}");
+    assert!(capped.contains("adapter debug"), "{capped}");
+
+    let named_core = emit("debug,temporalio_sdk_core=debug");
+    assert!(named_core.contains("core debug"), "{named_core}");
+    assert!(!named_core.contains("client root debug"), "{named_core}");
+    assert!(
+        !named_core.contains("client submodule debug"),
+        "{named_core}"
+    );
+
+    let named_client = emit("debug,temporal_client=debug");
+    assert!(!named_client.contains("core debug"), "{named_client}");
+    assert!(named_client.contains("client root debug"), "{named_client}");
+    assert!(
+        named_client.contains("client submodule debug"),
+        "{named_client}"
+    );
+
+    let sibling = emit("debug,temporalio_client=warn");
+    assert!(!sibling.contains("core debug"), "{sibling}");
+    assert!(!sibling.contains("client root debug"), "{sibling}");
+
+    let stem_only = emit("debug,temporalio_=debug");
+    assert!(!stem_only.contains("core debug"), "{stem_only}");
+
+    let quiet = emit("warn");
+    assert!(!quiet.contains("core info"), "{quiet}");
+    assert!(!quiet.contains("client info"), "{quiet}");
+}

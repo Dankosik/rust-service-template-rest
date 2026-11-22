@@ -59,6 +59,8 @@ const RETAINED_SECTIONS: &[&str] = &[
     // template:begin webhooks:config-section
     "webhooks",
     // template:end webhooks:config-section
+    "temporal",
+    "temporal_worker",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -211,6 +213,33 @@ pub(crate) fn load_worker_with_tail_from(
     Ok(input.admit(build, shutdown_tail)?)
 }
 // template:end worker:load-worker
+
+pub fn load_temporal_worker(
+    options: &LoadOptions,
+    build: BuildInfo,
+    shutdown_tail: crate::ShutdownTail,
+) -> Result<crate::TemporalWorkerConfig, Error> {
+    load_temporal_worker_with_tail_from(options, build, shutdown_tail, std::env::vars_os())
+}
+
+#[cfg(test)]
+pub(crate) fn load_temporal_worker_from(
+    options: &LoadOptions,
+    build: BuildInfo,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<crate::TemporalWorkerConfig, Error> {
+    load_temporal_worker_with_tail_from(options, build, crate::http::NO_SHUTDOWN_TAIL, environment)
+}
+
+pub(crate) fn load_temporal_worker_with_tail_from(
+    options: &LoadOptions,
+    build: BuildInfo,
+    shutdown_tail: crate::ShutdownTail,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<crate::TemporalWorkerConfig, Error> {
+    let input: crate::temporal_worker::TemporalWorkerInput = merge(options, environment)?;
+    Ok(input.admit(build, shutdown_tail)?)
+}
 
 // template:begin postgres:load-migration
 #[derive(Debug, thiserror::Error)]
