@@ -84,6 +84,9 @@ lint:
     # template:begin outbound-auth:just-lint-outbound-auth
     features+=(--features infra-oauth2-client-credentials/integration)
     # template:end outbound-auth:just-lint-outbound-auth
+    # template:begin clickhouse:just-lint-clickhouse
+    features+=(--features infra-clickhouse/integration)
+    # template:end clickhouse:just-lint-clickhouse
     cargo clippy --workspace --all-targets --keep-going ${features[@]+"${features[@]}"} --locked -- -D warnings
     RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" \
         cargo doc --keep-going --workspace --no-deps --document-private-items ${features[@]+"${features[@]}"} --locked
@@ -383,6 +386,13 @@ test-object-storage-conformance provider:
 test-integration-oauth *args:
     python3 -m scripts.integration oauth -- "$@"
 # template:end outbound-auth:just-outbound-auth-profile
+
+# template:begin clickhouse:just-integration-clickhouse
+# Run ClickHouse integration suite against throwaway Compose
+[positional-arguments]
+test-integration-clickhouse *args:
+    python3 -m scripts.integration clickhouse -- "$@"
+# template:end clickhouse:just-integration-clickhouse
 
 # template:begin source-template:just-template-targets
 # Materialize selected agent harness files from .agents/

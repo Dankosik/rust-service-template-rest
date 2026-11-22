@@ -197,6 +197,17 @@ affected instances during the same period.
   `operation` and `outcome`. Look for `object_storage_operation_failed`
   and its `error.type` in the related logs.
 <!-- template:end object-storage:docs-alerting-http-object-storage -->
+<!-- template:begin clickhouse:docs-alerting-http-clickhouse -->
+- For ClickHouse, check `clickhouse_operation_duration_seconds_count` by
+  `operation` and `outcome`, `clickhouse_admission_refused_total` by
+  `operation`, `clickhouse_operations_in_flight`, and
+  `clickhouse_password_file_refreshes_total{outcome="read_failed"}` (paired
+  with `clickhouse_password_file_unreadable` logs). Inspect `clickhouse`
+  client spans' `error.type` attribute via `request_id` or trace context.
+  No error-rate alert rules ship for synchronous ClickHouse calls;
+  service-level SLO burn surfaces through `HTTPErrorBudgetBurn` and
+  `HTTPLatencyBudgetBurn` (`clickhouse_operation_duration_seconds_bucket`).
+<!-- template:end clickhouse:docs-alerting-http-clickhouse -->
 
 ### HTTPLatencyBudgetBurn
 

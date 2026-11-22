@@ -42,6 +42,7 @@ jobs:
       integration_cache: ${{ steps.detect.outputs.integration_cache }}
       integration_object_storage: ${{ steps.detect.outputs.integration_object_storage }}
       integration_messaging: ${{ steps.detect.outputs.integration_messaging }}
+      integration_clickhouse: ${{ steps.detect.outputs.integration_clickhouse }}
       oauth: ${{ steps.detect.outputs.oauth }}
       docker: ${{ steps.detect.outputs.docker }}
       runtime_progress: ${{ steps.detect.outputs.runtime_progress }}
@@ -359,6 +360,9 @@ jobs:
       - name: JetStream integration
         if: hashFiles('crates/infra-messaging/Cargo.toml') != '' && needs.changes.outputs.integration_messaging == 'true'
         run: REQUIRE_DOCKER=1 just test-integration-messaging
+      - name: ClickHouse integration
+        if: hashFiles('crates/infra-clickhouse/Cargo.toml') != '' && needs.changes.outputs.integration_clickhouse == 'true'
+        run: REQUIRE_DOCKER=1 just test-integration-clickhouse
   # template:end integration:ci-integration-job
 
   # template:begin outbound-auth:ci-oauth-job
@@ -512,7 +516,7 @@ jobs:
           - shard: core-auth
             profiles: minimal authn-jwt authn-introspection outbound-oauth
           - shard: adapters-grpc
-            profiles: postgres cache-s3 grpc-service-auth
+            profiles: postgres cache-s3 clickhouse grpc-service-auth
           - shard: durable-full
             profiles: postgres-full messaging-outbox full
     steps:

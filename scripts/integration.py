@@ -92,6 +92,14 @@ def cmd_compile(suite: str) -> None:
                 }
             ),
         )
+    if (lib.ROOT / "crates/infra-clickhouse").is_dir():
+        lib.run(
+            [
+                "cargo", "test", "--locked", "-p", "infra-clickhouse", "--features", "integration",
+                "--test", "clickhouse", "--no-run",
+            ],
+            env=lib.clean_pg_env({"CLICKHOUSE_URL": "compile-only"}),
+        )
     if suite == "retained" and (lib.ROOT / "crates/infra-oauth2-client-credentials").is_dir():
         lib.run(
             [
@@ -362,6 +370,40 @@ def cmd_oauth(extra: Sequence[str]) -> None:
         lib.run(cmd, env=env)
 
 
+def cmd_clickhouse(extra: Sequence[str]) -> None:
+    if not (lib.ROOT / "crates/infra-clickhouse").is_dir():
+        raise lib.ScriptError("clickhouse profile not present", exit_code=2)
+    cmd = [
+        "cargo", "test", "--locked", "-p", "infra-clickhouse",
+        "--features", "integration", "--test", "clickhouse", *extra,
+    ]
+    compose_creds = {
+        "CLICKHOUSE_DATABASE": "app",
+        "CLICKHOUSE_USER": "app",
+        "CLICKHOUSE_PASSWORD": "app",
+        "CLICKHOUSE_READONLY_USER": "app_ro",
+        "CLICKHOUSE_READONLY_PASSWORD": "app_ro",
+    }
+    override_creds = {k: os.environ.get(k) or v for k, v in compose_creds.items()}
+    if _is_no_run(extra):
+        lib.run(cmd, env=lib.clean_pg_env({**override_creds, "CLICKHOUSE_URL": os.environ.get("CLICKHOUSE_URL") or "compile-only"}))
+        return
+    if existing := os.environ.get("CLICKHOUSE_URL"):
+        lib.run(cmd, env=lib.clean_pg_env({**override_creds, "CLICKHOUSE_URL": existing}))
+        return
+    lib.require_docker(allow_refusal=True)
+    with lib.ComposeStack("service-clickhouse") as stack:
+        port = stack.start("clickhouse", 8123)
+        env = lib.clean_pg_env({**compose_creds, "CLICKHOUSE_URL": f"http://127.0.0.1:{port}"})
+        compile_cmd = [
+            "cargo", "test", "--locked", "-p", "infra-clickhouse",
+            "--features", "integration", "--test", "clickhouse", "--no-run",
+        ]
+        lib.run(compile_cmd, env=env)
+        stack.wait("clickhouse", port)
+        lib.run(cmd, env=env)
+
+
 def _verify_sqlx_cli() -> None:
     if shutil.which("cargo-sqlx") is None or shutil.which("sqlx") is None:
         raise lib.ScriptError("sqlx-cli is required; run `mise install cargo:sqlx-cli`", exit_code=2)
@@ -401,7 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     db_p = sub.add_parser("db")
     db_p.add_argument("--with-sqlx-check", action="store_true")
     db_p.add_argument("cargo_args", nargs=argparse.REMAINDER)
-    for name in ("cache", "object-storage", "messaging", "oauth"):
+    for name in ("cache", "object-storage", "messaging", "oauth", "clickhouse"):
         p = sub.add_parser(name)
         p.add_argument("cargo_args", nargs=argparse.REMAINDER)
     sqlx_p = sub.add_parser("sqlx-prepare")
@@ -426,6 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "object-storage": cmd_object_storage,
                     "messaging": cmd_messaging,
                     "oauth": cmd_oauth,
+                    "clickhouse": cmd_clickhouse,
                 }[args.command](extra)
 
     return lib.run_cli(_dispatch)
