@@ -373,7 +373,11 @@
       ]
     },
     "config-url": {
-      "when": {"messaging": "nats-jetstream"},
+      "when": {"any": [{"messaging": "nats-jetstream"}, {"clickhouse": "http"}]},
+      "remove_when_unselected": []
+    },
+    "config-unknown-env-test": {
+      "when": {"any": [{"cache": "redis"}, {"clickhouse": "http"}]},
       "remove_when_unselected": []
     },
     "outbound-auth": {
@@ -585,6 +589,8 @@
       "when": {"clickhouse": "http"},
       "remove_when_unselected": [
         "crates/infra-clickhouse/",
+        "crates/config/src/clickhouse.rs",
+        "crates/config/src/clickhouse/",
         "env/clickhouse/"
       ]
     },
