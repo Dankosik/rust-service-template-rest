@@ -88,9 +88,9 @@ impl ServerOutcome {
         }
     }
 
-    pub(crate) fn fixed(failure: FixedFailure) -> Self {
+    pub(crate) const fn fixed(failure: FixedFailure) -> Self {
         Self {
-            code: failure.template().code(),
+            code: failure.grpc_code(),
             failure: Some(failure.catalog_code()),
         }
     }
@@ -121,19 +121,13 @@ impl ServerOutcome {
 
 #[derive(Clone, Copy)]
 enum LocalStatus {
-    Failure {
-        status: &'static tonic::Status,
-        failure: service_failure::Code,
-    },
+    Failure(FixedFailure),
     Drained,
 }
 
 impl LocalStatus {
-    fn failure(failure: FixedFailure) -> Self {
-        Self::Failure {
-            status: failure.template(),
-            failure: failure.catalog_code(),
-        }
+    const fn failure(failure: FixedFailure) -> Self {
+        Self::Failure(failure)
     }
 
     const fn drained() -> Self {
@@ -142,12 +136,9 @@ impl LocalStatus {
 
     fn write_headers(self, headers: &mut HeaderMap) -> ServerOutcome {
         match self {
-            Self::Failure { status, failure } => {
-                let _ = status.add_header(headers);
-                ServerOutcome {
-                    code: status.code(),
-                    failure: Some(failure),
-                }
+            Self::Failure(failure) => {
+                failure.write_headers(headers);
+                ServerOutcome::fixed(failure)
             }
             Self::Drained => {
                 headers.insert(tonic::Status::GRPC_STATUS, HeaderValue::from_static("0"));
@@ -365,7 +356,7 @@ mod tests {
             let mut expected = HeaderMap::new();
             failure.status().add_header(&mut expected).unwrap();
             assert_eq!(local, expected);
-            assert_eq!(outcome.code, failure.template().code());
+            assert_eq!(outcome.code, failure.grpc_code());
             assert_eq!(outcome.failure, Some(failure.catalog_code()));
         }
 

@@ -3,10 +3,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use bytes::Bytes;
+use enum_map::EnumMap;
+use http::{HeaderMap, HeaderValue};
+use infra_grpc_core::protocol::STATUS_HEADERS;
 pub use service_failure::Code;
 use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER, SANITIZED_DETAIL};
 use tonic::Status;
-use tonic_types::{ErrorDetails, FieldViolation, StatusExt as _};
+use tonic_types::{BadRequest, ErrorDetail, ErrorInfo, FieldViolation, RetryInfo, StatusExt as _};
 
 pub const ERROR_DOMAIN: &str = "service";
 
@@ -44,19 +47,26 @@ impl Failure {
         self
     }
 
+    const fn is_plain(&self) -> bool {
+        self.retry_after.is_none() && self.field_violations.is_empty()
+    }
+
     pub(crate) fn into_status_as(self, grpc: tonic::Code, message: &'static str) -> Status {
-        let mut details = ErrorDetails::with_error_info(
-            self.code.as_str().to_ascii_uppercase(),
-            ERROR_DOMAIN,
-            HashMap::new(),
-        );
-        if let Some(after) = self.retry_after {
-            details.set_retry_info(Some(after));
-        }
-        if !self.field_violations.is_empty() {
-            details.set_bad_request(self.field_violations);
-        }
-        Status::with_error_details(grpc, message, details)
+        let details: [Option<ErrorDetail>; 3] = [
+            self.retry_after
+                .map(|after| RetryInfo::new(Some(after)).into()),
+            Some(
+                ErrorInfo::new(
+                    self.code.as_str().to_ascii_uppercase(),
+                    ERROR_DOMAIN,
+                    HashMap::new(),
+                )
+                .into(),
+            ),
+            (!self.field_violations.is_empty())
+                .then(|| BadRequest::new(self.field_violations).into()),
+        ];
+        Status::with_error_details_vec(grpc, message, details.into_iter().flatten())
     }
 
     pub(crate) fn into_classified_as(
@@ -66,7 +76,7 @@ impl Failure {
     ) -> ClassifiedStatus {
         let code = self.code;
         ClassifiedStatus {
-            status: self.into_status_as(grpc, message),
+            kind: ClassifiedKind::Dynamic(self.into_status_as(grpc, message)),
             failure: Some(code),
         }
     }
@@ -74,21 +84,87 @@ impl Failure {
 
 impl From<Failure> for Status {
     fn from(failure: Failure) -> Self {
+        if failure.is_plain() {
+            return catalog_template(failure.code).status();
+        }
         let (grpc, message) = projection(failure.code);
         failure.into_status_as(grpc, message)
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct ClassifiedStatus {
+struct StatusTemplate {
     status: Status,
+    header_values: [Option<HeaderValue>; 3],
+}
+
+impl StatusTemplate {
+    fn build(status: Status) -> Self {
+        let mut encoded = HeaderMap::with_capacity(STATUS_HEADERS.len());
+        let added = status.add_header(&mut encoded);
+        debug_assert!(added.is_ok(), "catalog status headers must encode");
+        let header_values = STATUS_HEADERS.map(|name| encoded.remove(&name));
+        debug_assert!(encoded.is_empty());
+        Self {
+            status,
+            header_values,
+        }
+    }
+
+    fn status(&'static self) -> Status {
+        Status::with_details(
+            self.status.code(),
+            self.status.message(),
+            Bytes::from_static(self.status.details()),
+        )
+    }
+
+    fn write_headers(&self, headers: &mut HeaderMap) {
+        for (name, value) in STATUS_HEADERS.into_iter().zip(&self.header_values) {
+            if let Some(value) = value {
+                headers.insert(name, value.clone());
+            }
+        }
+    }
+
+    fn http_response<B: Default>(&'static self) -> http::Response<B> {
+        let mut response = http::Response::new(B::default());
+        let headers = response.headers_mut();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            tonic::metadata::GRPC_CONTENT_TYPE,
+        );
+        self.write_headers(headers);
+        response.extensions_mut().insert(self.status());
+        response
+    }
+}
+
+fn catalog_template(code: Code) -> &'static StatusTemplate {
+    static TEMPLATES: EnumMap<Code, OnceLock<StatusTemplate>> =
+        EnumMap::from_array([const { OnceLock::new() }; enum_map::enum_len::<Code>()]);
+    TEMPLATES[code].get_or_init(|| {
+        let (grpc, message) = projection(code);
+        StatusTemplate::build(Failure::new(code).into_status_as(grpc, message))
+    })
+}
+
+#[derive(Debug)]
+enum ClassifiedKind {
+    Cached(&'static StatusTemplate),
+    Dynamic(Status),
+}
+
+#[derive(Debug)]
+pub(crate) struct ClassifiedStatus {
+    kind: ClassifiedKind,
     failure: Option<Code>,
 }
 
 impl ClassifiedStatus {
     pub(crate) fn fixed(failure: FixedFailure) -> Self {
         Self {
-            status: failure.status(),
+            kind: ClassifiedKind::Cached(failure.template()),
             failure: Some(failure.catalog_code()),
         }
     }
@@ -99,31 +175,46 @@ impl ClassifiedStatus {
             "plain statuses cannot carry rich catalog details"
         );
         Self {
-            status,
+            kind: ClassifiedKind::Dynamic(status),
             failure: None,
         }
     }
 
     pub(crate) fn code(&self) -> tonic::Code {
-        self.status.code()
+        match &self.kind {
+            ClassifiedKind::Cached(template) => template.status.code(),
+            ClassifiedKind::Dynamic(status) => status.code(),
+        }
     }
 
     pub(crate) const fn failure(&self) -> Option<Code> {
         self.failure
     }
 
-    pub(crate) fn into_status(self) -> Status {
-        self.status
+    pub(crate) fn into_http<B: Default>(self) -> http::Response<B> {
+        match self.kind {
+            ClassifiedKind::Cached(template) => template.http_response(),
+            ClassifiedKind::Dynamic(status) => status.into_http(),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn status(&self) -> &Status {
-        &self.status
+        match &self.kind {
+            ClassifiedKind::Cached(template) => &template.status,
+            ClassifiedKind::Dynamic(status) => status,
+        }
     }
 }
 
 impl From<Failure> for ClassifiedStatus {
     fn from(failure: Failure) -> Self {
+        if failure.is_plain() {
+            return Self {
+                kind: ClassifiedKind::Cached(catalog_template(failure.code)),
+                failure: Some(failure.code),
+            };
+        }
         let (grpc, message) = projection(failure.code);
         failure.into_classified_as(grpc, message)
     }
@@ -133,7 +224,7 @@ pub(crate) fn internal_status() -> Status {
     FixedFailure::Internal.status()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum FixedFailure {
     Deadline,
     Internal,
@@ -149,33 +240,37 @@ impl FixedFailure {
         }
     }
 
-    pub(crate) fn template(self) -> &'static Status {
-        static DEADLINE: OnceLock<Status> = OnceLock::new();
-        static INTERNAL: OnceLock<Status> = OnceLock::new();
-        static AT_CAPACITY: OnceLock<Status> = OnceLock::new();
-        let cache = match self {
-            Self::Deadline => &DEADLINE,
-            Self::Internal => &INTERNAL,
-            Self::AtCapacity => &AT_CAPACITY,
-        };
-        cache.get_or_init(|| {
-            let failure = Failure::new(self.catalog_code());
-            match self {
-                Self::AtCapacity => failure
-                    .retry_after(AT_CAPACITY_RETRY_AFTER)
-                    .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL),
-                Self::Deadline | Self::Internal => failure.into(),
-            }
-        })
+    pub(crate) const fn grpc_code(self) -> tonic::Code {
+        match self {
+            Self::AtCapacity => tonic::Code::ResourceExhausted,
+            Self::Deadline | Self::Internal => projection(self.catalog_code()).0,
+        }
+    }
+
+    fn template(self) -> &'static StatusTemplate {
+        static AT_CAPACITY: OnceLock<StatusTemplate> = OnceLock::new();
+        match self {
+            Self::Deadline | Self::Internal => catalog_template(self.catalog_code()),
+            Self::AtCapacity => AT_CAPACITY.get_or_init(|| {
+                StatusTemplate::build(
+                    Failure::new(self.catalog_code())
+                        .retry_after(AT_CAPACITY_RETRY_AFTER)
+                        .into_status_as(self.grpc_code(), AT_CAPACITY_DETAIL),
+                )
+            }),
+        }
     }
 
     pub(crate) fn status(self) -> Status {
-        let template = self.template();
-        Status::with_details(
-            template.code(),
-            template.message(),
-            Bytes::from_static(template.details()),
-        )
+        self.template().status()
+    }
+
+    pub(crate) fn write_headers(self, headers: &mut HeaderMap) {
+        self.template().write_headers(headers);
+    }
+
+    pub(crate) fn into_http<B: Default>(self) -> http::Response<B> {
+        self.template().http_response()
     }
 }
 
@@ -241,7 +336,26 @@ const fn projection(code: Code) -> (tonic::Code, &'static str) {
 
 #[cfg(test)]
 mod tests {
+    use tonic_types::ErrorDetails;
+
     use super::*;
+
+    fn assert_matches_tonic_http(actual: &http::Response<()>, expected_status: Status) {
+        let expected = expected_status.into_http::<()>();
+        assert_eq!(actual.status(), expected.status());
+        assert_eq!(actual.headers(), expected.headers());
+        let actual_ext = actual
+            .extensions()
+            .get::<Status>()
+            .expect("tonic status extension");
+        let expected_ext = expected
+            .extensions()
+            .get::<Status>()
+            .expect("expected tonic status extension");
+        assert_eq!(actual_ext.code(), expected_ext.code());
+        assert_eq!(actual_ext.message(), expected_ext.message());
+        assert_eq!(actual_ext.details(), expected_ext.details());
+    }
 
     #[test]
     fn every_code_is_a_status_with_a_valid_error_info_reason() {
@@ -271,6 +385,7 @@ mod tests {
             let classified = ClassifiedStatus::from(Failure::new(code));
             assert_eq!(classified.code(), status.code());
             assert_eq!(classified.failure(), Some(code));
+            assert_matches_tonic_http(&classified.into_http::<()>(), status);
         }
 
         let custom = Failure::new(Code::Forbidden)
@@ -279,6 +394,13 @@ mod tests {
         assert_eq!(custom.status().message(), "custom refusal");
         assert_eq!(custom.failure(), Some(Code::Forbidden));
         assert_eq!(catalog_code(custom.status()), Some(Code::Forbidden));
+        let custom_response = custom.into_http::<()>();
+        assert_eq!(
+            Status::from_header_map(custom_response.headers())
+                .expect("custom status headers")
+                .message(),
+            "custom refusal"
+        );
 
         for fixed in [
             FixedFailure::Deadline,
@@ -286,12 +408,27 @@ mod tests {
             FixedFailure::AtCapacity,
         ] {
             let classified = ClassifiedStatus::fixed(fixed);
-            assert_eq!(classified.code(), fixed.template().code());
+            assert_eq!(classified.code(), fixed.grpc_code());
+            assert_eq!(classified.code(), fixed.status().code());
             assert_eq!(classified.failure(), Some(fixed.catalog_code()));
             assert_eq!(
                 catalog_code(classified.status()),
                 Some(fixed.catalog_code())
             );
+            assert_matches_tonic_http(&fixed.into_http::<()>(), fixed.status());
+            assert_matches_tonic_http(&classified.into_http::<()>(), fixed.status());
+
+            let mut overwritten = HeaderMap::new();
+            overwritten.insert(Status::GRPC_STATUS, HeaderValue::from_static("0"));
+            overwritten.insert(Status::GRPC_MESSAGE, HeaderValue::from_static("stale"));
+            overwritten.insert(
+                Status::GRPC_STATUS_DETAILS,
+                HeaderValue::from_static("AAAA"),
+            );
+            fixed.write_headers(&mut overwritten);
+            let mut expected = HeaderMap::new();
+            fixed.status().add_header(&mut expected).unwrap();
+            assert_eq!(overwritten, expected);
         }
     }
 
@@ -410,6 +547,51 @@ mod tests {
                 ("message", "must be 1 to 1024 bytes"),
                 ("items[0].name", "must not be empty")
             ]
+        );
+
+        let mut expected_details =
+            ErrorDetails::with_error_info("BAD_REQUEST", ERROR_DOMAIN, HashMap::new());
+        expected_details.set_retry_info(Some(Duration::from_secs(2)));
+        expected_details.set_bad_request(vec![
+            FieldViolation::new("message", "must be 1 to 1024 bytes"),
+            FieldViolation::new("items[0].name", "must not be empty"),
+        ]);
+        let expected = Status::with_error_details(
+            tonic::Code::InvalidArgument,
+            "request is invalid",
+            expected_details,
+        );
+        assert_eq!(status.details(), expected.details());
+
+        let zero_retry =
+            Status::from(Failure::new(Code::ServiceUnavailable).retry_after(Duration::ZERO));
+        assert_eq!(
+            zero_retry
+                .get_error_details()
+                .retry_info()
+                .and_then(|info| info.retry_delay),
+            Some(Duration::ZERO)
+        );
+        let zero_retry_classified = ClassifiedStatus::from(
+            Failure::new(Code::ServiceUnavailable).retry_after(Duration::ZERO),
+        );
+        assert_eq!(
+            zero_retry_classified
+                .status()
+                .get_error_details()
+                .retry_info()
+                .and_then(|info| info.retry_delay),
+            Some(Duration::ZERO)
+        );
+
+        let clamped_retry =
+            Status::from(Failure::new(Code::ServiceUnavailable).retry_after(Duration::MAX));
+        assert_eq!(
+            clamped_retry
+                .get_error_details()
+                .retry_info()
+                .and_then(|info| info.retry_delay),
+            Some(RetryInfo::MAX_RETRY_DELAY)
         );
     }
 }

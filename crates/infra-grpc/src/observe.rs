@@ -7,6 +7,7 @@ use infra_grpc_core::observe::{
     Call as CoreCall, CallMetrics, HANDLING_SECONDS_BUCKETS, StatusCounters, open_rpc_span,
 };
 use infra_grpc_core::protocol::{RpcName, split_method_path};
+use infra_http_transport::TRACEPARENT;
 use opentelemetry::trace::SpanKind;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
@@ -149,7 +150,7 @@ pub(crate) fn attach_parent_or_fallback(
     span: &tracing::Span,
     headers: &http::HeaderMap,
 ) -> Option<opentelemetry::Context> {
-    let parent = if headers.contains_key("traceparent") {
+    let parent = if headers.contains_key(&TRACEPARENT) {
         otel_http::extract_context(headers)
     } else {
         opentelemetry::Context::new()

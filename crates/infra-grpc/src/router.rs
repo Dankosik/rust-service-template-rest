@@ -526,7 +526,7 @@ async fn health_call(
     let started = start_call(&mut request, &methods, request_timeout);
     let fixed = |failure: FixedFailure, response_deadline| {
         (
-            failure.status().into_http(),
+            failure.into_http(),
             Some(ServerOutcome::fixed(failure)),
             response_deadline,
         )
@@ -645,7 +645,7 @@ fn finish_rejected(
 ) -> Response {
     drop(cancel_on_drop);
     call.finish_with_failure(status.code(), status.failure());
-    status.into_status().into_http()
+    status.into_http()
 }
 
 const REJECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
