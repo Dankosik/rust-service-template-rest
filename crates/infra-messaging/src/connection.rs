@@ -27,7 +27,6 @@ impl NativeConnection {
         options: &MessagingOptions,
         context: &OperationContext,
     ) -> Result<Self, MessagingError> {
-        let (closed_event_tx, closed_event) = watch::channel(false);
         let servers: Vec<_> = options
             .servers
             .to_server_addrs()
@@ -38,8 +37,7 @@ impl NativeConnection {
             TransportSecurity::TlsFirst => (true, true),
             TransportSecurity::AllowPlaintext => (false, false),
         };
-        let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
-        if tls_first && !all_tls {
+        if tls_first && !servers.iter().all(async_nats::ServerAddr::tls_required) {
             return Err(MessagingError::Configuration(
                 "TLS-first requires every configured server to use TLS",
             ));
@@ -47,13 +45,14 @@ impl NativeConnection {
         let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
         let connect_budget = BrokerBudget::from_context(context);
         let connect_remaining = connect_budget.remaining();
-        let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
+        let secure_random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
+        let (closed_event_tx, closed_event) = watch::channel(false);
         let mut builder = connect_options(options.credentials.as_ref(), context)
             .await?
             .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
-            .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
+            .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, secure_random))
             .require_tls(require_tls)
             .event_callback(move |event| {
                 report_connection_event(&event);
@@ -77,7 +76,7 @@ impl NativeConnection {
             builder
                 .connect(servers)
                 .await
-                .map_err(|error| connect_failure(&error, connect_remaining))
+                .map_err(|error| report_connect_failure(&error, connect_remaining))
         })
         .await?;
         Ok(Self {
@@ -110,11 +109,10 @@ impl NativeConnection {
         let outcome = if budget.stopped().is_some() {
             CloseOutcome::WaitInterrupted
         } else {
-            tokio::select! {
-                biased;
-                _ = budget.wait_stopped() => CloseOutcome::WaitInterrupted,
-                result = drain => result,
-            }
+            budget
+                .run_until_stopped(drain)
+                .await
+                .unwrap_or(CloseOutcome::WaitInterrupted)
         };
         match outcome {
             CloseOutcome::Complete => {}
@@ -122,11 +120,7 @@ impl NativeConnection {
             CloseOutcome::UnobservedClose => {
                 client.force_close();
                 if budget.stopped().is_none() {
-                    tokio::select! {
-                        biased;
-                        _ = budget.wait_stopped() => {}
-                        _ = client.wait_closed() => {}
-                    }
+                    let _ = budget.run_until_stopped(client.wait_closed()).await;
                 }
             }
         }
@@ -142,12 +136,12 @@ async fn connect_options(
         None => Ok(async_nats::ConnectOptions::new()),
         Some(Credentials::Inline(credentials)) => async_nats::ConnectOptions::new()
             .credentials(credentials.expose_secret())
-            .map_err(|_| credentials_failure(CredentialsFileError::Malformed)),
+            .map_err(|_| report_credentials_failure(CredentialsFileError::Malformed)),
         Some(Credentials::File(path)) => {
             let file = bounded_operation(context, async {
                 CredentialsFile::admit(path)
                     .await
-                    .map_err(credentials_failure)
+                    .map_err(report_credentials_failure)
             })
             .await?;
             Ok(async_nats::ConnectOptions::with_auth_callback(
@@ -185,7 +179,7 @@ fn spread_reconnect_delay(base: Duration, sample: Result<u16, GetRandomFailed>) 
     base.saturating_sub(spread)
 }
 
-fn credentials_failure(error: CredentialsFileError) -> MessagingError {
+fn report_credentials_failure(error: CredentialsFileError) -> MessagingError {
     let failure = match error {
         CredentialsFileError::Unreadable(_) => {
             MessagingError::Configuration("credentials file is unreadable")
@@ -202,7 +196,7 @@ fn credentials_failure(error: CredentialsFileError) -> MessagingError {
     failure
 }
 
-fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
+fn report_connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
     let (failure, error_type) = match error.kind() {
         ConnectErrorKind::Authentication => (MessagingError::Authentication, "authentication"),
         ConnectErrorKind::AuthorizationViolation => {
@@ -339,7 +333,7 @@ mod tests {
         let events = logged(|| {
             for (kind, _) in stages {
                 let source = std::io::Error::other("nats://user:sentinel@broker.invalid");
-                let failure = connect_failure(
+                let failure = report_connect_failure(
                     &ConnectError::with_source(kind, source),
                     BROKER_OPERATION_BUDGET,
                 );

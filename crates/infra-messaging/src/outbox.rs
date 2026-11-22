@@ -65,10 +65,13 @@ impl From<job_outbox::OutboxEnqueueError> for OutboxEnqueueError {
     }
 }
 
+const ID_PREFIX_TAG: &str = "outbox-v1-";
+const ID_PREFIX_BYTES: usize = ID_PREFIX_TAG.len() + uuid::fmt::Simple::LENGTH + 1;
+
 #[derive_where::derive_where(Clone)]
 pub struct OutboxRoute<T> {
     publication: PublicationRoute<T>,
-    id_prefix: ArrayString<43>,
+    id_prefix: ArrayString<ID_PREFIX_BYTES>,
 }
 
 impl<T: EventPayload> fmt::Debug for OutboxRoute<T> {
@@ -85,7 +88,11 @@ impl<T: EventPayload> PublicationRoute<T> {
     #[must_use]
     pub fn for_outbox(self, publisher_id: NonNilUuid) -> OutboxRoute<T> {
         let mut id_prefix = ArrayString::new();
-        let _ = write!(&mut id_prefix, "outbox-v1-{}-", publisher_id.get().simple());
+        let _ = write!(
+            &mut id_prefix,
+            "{ID_PREFIX_TAG}{}-",
+            publisher_id.get().simple()
+        );
         OutboxRoute {
             publication: self,
             id_prefix,
@@ -96,7 +103,7 @@ impl<T: EventPayload> PublicationRoute<T> {
 impl<T: EventPayload + Serialize> OutboxRoute<T> {
     pub fn prepare(&self, event: &Event<T>) -> Result<OutboxEvent, PrepareError> {
         self.publication
-            .prepare_with_id(event, || {
+            .prepare_with_message_id(event, || {
                 crate::wire::prefixed_digest_hex(
                     &self.id_prefix,
                     &Sha256::digest(event.id.as_bytes()).into(),
@@ -290,23 +297,25 @@ impl PreparedEvent {
     }
 
     async fn prepare_outbox_intent(&self) -> Result<PreparedIntent<'_>, OutboxEnqueueError> {
-        if self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES && !self.payload().is_empty() {
+        let payload_len = self.payload().len();
+        let subject_alone_exceeds_job_limit = self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES;
+        if subject_alone_exceeds_job_limit && payload_len > 0 {
             return Err(OutboxEnqueueError::PayloadTooLarge {
-                bytes: self.payload().len(),
+                bytes: payload_len,
                 max_bytes: 0,
             });
         }
         let sizer = self.outbox_metadata_sizer().await?;
         let metadata_bytes = sizer.total_bytes();
         let max_bytes = raw_payload_capacity(metadata_bytes);
-        if self.payload().len() > max_bytes {
+        if payload_len > max_bytes {
             return Err(OutboxEnqueueError::PayloadTooLarge {
-                bytes: self.payload().len(),
+                bytes: payload_len,
                 max_bytes,
             });
         }
         sizer.check_limit()?;
-        let encoded_bytes = metadata_bytes + wire_payload::encoded_len(self.payload().len());
+        let encoded_bytes = metadata_bytes + wire_payload::encoded_len(payload_len);
         Ok(PreparedIntent {
             envelope: EnqueueIntent::from(self),
             encoded_bytes,
@@ -365,24 +374,16 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
 fn publication_job_error(error: PublishError) -> JobError {
     match error {
         PublishError::Ambiguous => JobError::retryable("publication_ack_unknown"),
-        PublishError::Rejected(PublishRejection::InvalidEnvelope(_)) => {
-            JobError::permanent("outbox_envelope_invalid")
-        }
-        PublishError::Rejected(
-            PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed,
-        ) => JobError::retryable("broker_refused"),
-        PublishError::Rejected(PublishRejection::BrokerSizeLimit) => {
-            JobError::retryable("broker_size_limit")
-        }
-        PublishError::Rejected(PublishRejection::WindowFull) => {
-            JobError::retryable("publish_window_full")
-        }
-        PublishError::Rejected(PublishRejection::Unavailable) => {
-            JobError::retryable("publisher_unavailable")
-        }
-        PublishError::Rejected(PublishRejection::ContextStopped) => {
-            JobError::retryable("publish_context_stopped")
-        }
+        PublishError::Rejected(rejection) => match rejection {
+            PublishRejection::InvalidEnvelope(_) => JobError::permanent("outbox_envelope_invalid"),
+            PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed => {
+                JobError::retryable("broker_refused")
+            }
+            PublishRejection::BrokerSizeLimit => JobError::retryable("broker_size_limit"),
+            PublishRejection::WindowFull => JobError::retryable("publish_window_full"),
+            PublishRejection::Unavailable => JobError::retryable("publisher_unavailable"),
+            PublishRejection::ContextStopped => JobError::retryable("publish_context_stopped"),
+        },
     }
 }
 
@@ -921,6 +922,6 @@ mod tests {
                 .publication_id()
                 .starts_with("outbox-v1-00000000000000000000000000000001-")
         );
-        assert_eq!(prepared.publication_id().len(), 43 + 64);
+        assert_eq!(prepared.publication_id().len(), super::ID_PREFIX_BYTES + 64);
     }
 }

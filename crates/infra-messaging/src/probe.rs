@@ -18,7 +18,7 @@ static PUBLISH_SLOTS: Mutex<BTreeMap<String, BTreeSet<usize>>> = Mutex::new(BTre
 
 #[derive(Debug)]
 pub(crate) struct PublishWorkMetrics {
-    connection: String,
+    connection_name: String,
     slot: usize,
     capacity: metrics::Gauge,
     in_flight: metrics::Gauge,
@@ -28,8 +28,8 @@ pub(crate) struct PublishWorkMetrics {
 impl PublishWorkMetrics {
     pub(crate) fn register(capacity: usize, connection_name: &str) -> Self {
         let slot = claim_slot(connection_name);
-        let connection = connection_name.to_owned();
-        let mut labels = vec![metrics::Label::new("connection", connection.clone())];
+        let connection_name = connection_name.to_owned();
+        let mut labels = vec![metrics::Label::new("connection", connection_name.clone())];
         if slot > 0 {
             labels.push(metrics::Label::new("connection_slot", slot.to_string()));
         }
@@ -44,7 +44,7 @@ impl PublishWorkMetrics {
         )]
         capacity_gauge.set(capacity as f64);
         Self {
-            connection,
+            connection_name,
             slot,
             capacity: capacity_gauge,
             in_flight,
@@ -85,7 +85,7 @@ impl Drop for PublishWorkMetrics {
         self.capacity.set(f64::NAN);
         let mut slots_by_connection = PUBLISH_SLOTS.lock();
         if let Entry::Occupied(mut entry) =
-            slots_by_connection.entry(std::mem::take(&mut self.connection))
+            slots_by_connection.entry(std::mem::take(&mut self.connection_name))
         {
             let slots = entry.get_mut();
             slots.remove(&self.slot);
