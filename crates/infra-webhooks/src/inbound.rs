@@ -111,6 +111,7 @@ impl From<ProtocolError> for Rejection {
     }
 }
 
+#[derive(Clone, Copy)]
 enum EndpointReceiveError {
     Rejected(Rejection),
     Unavailable,
@@ -178,7 +179,7 @@ impl Verifiers {
     pub fn into_receiver(self, pool: Pool) -> Receiver {
         Receiver {
             pool,
-            endpoints: Arc::new(self.bindings),
+            verifiers: Arc::new(self.bindings),
         }
     }
 }
@@ -195,7 +196,7 @@ impl fmt::Debug for Verifiers {
 #[derive(Clone)]
 pub struct Receiver {
     pool: Pool,
-    endpoints: Arc<HashMap<Arc<str>, Arc<dyn Verifier>>>,
+    verifiers: Arc<HashMap<Arc<str>, Arc<dyn Verifier>>>,
 }
 
 impl Receiver {
@@ -207,18 +208,14 @@ impl Receiver {
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        let verifier = self.verifier(endpoint_id)?;
-        receive_for_endpoint(
-            &self.pool,
+        self.receive_body(
             endpoint_id,
-            verifier,
             headers,
             ReceiveBody::Borrowed(body),
             now,
             deadline,
         )
         .await
-        .map_err(ReceiveError::from)
     }
 
     pub async fn receive_bytes(
@@ -229,13 +226,31 @@ impl Receiver {
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
+        self.receive_body(
+            endpoint_id,
+            headers,
+            ReceiveBody::Owned(body),
+            now,
+            deadline,
+        )
+        .await
+    }
+
+    async fn receive_body(
+        &self,
+        endpoint_id: &str,
+        headers: &HeaderMap,
+        body: ReceiveBody<'_>,
+        now: SystemTime,
+        deadline: Instant,
+    ) -> Result<ReceiptOutcome, ReceiveError> {
         let verifier = self.verifier(endpoint_id)?;
         receive_for_endpoint(
             &self.pool,
             endpoint_id,
             verifier,
             headers,
-            ReceiveBody::Owned(body),
+            body,
             now,
             deadline,
         )
@@ -244,7 +259,7 @@ impl Receiver {
     }
 
     fn verifier(&self, endpoint_id: &str) -> Result<&dyn Verifier, ReceiveError> {
-        self.endpoints
+        self.verifiers
             .get(endpoint_id)
             .map(AsRef::as_ref)
             .ok_or(ReceiveError::UnknownEndpoint)
@@ -262,7 +277,7 @@ async fn receive_for_endpoint(
     deadline: Instant,
 ) -> Result<ReceiptOutcome, EndpointReceiveError> {
     let admitted = admit(verifier, headers, body, now)
-        .map_err(|rejection| rejected(endpoint_id, rejection))?;
+        .map_err(|rejection| log_rejection(endpoint_id, rejection))?;
     let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
     Box::pin(pool.in_tx_with_deadline(
         deadline,
@@ -291,9 +306,9 @@ async fn receive_for_endpoint(
     .await
     .map_err(|error| match error {
         ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {
-            rejected(endpoint_id, PAYLOAD_TOO_LARGE)
+            log_rejection(endpoint_id, PAYLOAD_TOO_LARGE)
         }
-        error => receipt_unavailable(endpoint_id, &error),
+        error => log_receipt_unavailable(endpoint_id, &error),
     })
 }
 
@@ -301,7 +316,7 @@ impl fmt::Debug for Receiver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Receiver")
-            .field("endpoint_count", &self.endpoints.len())
+            .field("endpoint_count", &self.verifiers.len())
             .finish_non_exhaustive()
     }
 }
@@ -318,7 +333,7 @@ enum ReceiptFailure {
     Transaction(#[from] TxError),
 }
 
-fn rejected(endpoint_id: &str, rejection: Rejection) -> EndpointReceiveError {
+fn log_rejection(endpoint_id: &str, rejection: Rejection) -> EndpointReceiveError {
     tracing::info!(
         webhook.endpoint = endpoint_id,
         webhook.reason = rejection.reason(),
@@ -327,7 +342,7 @@ fn rejected(endpoint_id: &str, rejection: Rejection) -> EndpointReceiveError {
     EndpointReceiveError::Rejected(rejection)
 }
 
-fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> EndpointReceiveError {
+fn log_receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> EndpointReceiveError {
     let (stage, reason, driver) = match error {
         ReceiptFailure::Query(err) => ("insert_receipt", "unavailable", Some(err)),
         ReceiptFailure::Enqueue(EnqueueError::Database(err)) => {

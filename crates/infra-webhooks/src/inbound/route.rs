@@ -17,8 +17,8 @@ use tokio::time::Instant;
 use utoipa::{IntoResponses, OpenApi, ToResponse};
 
 use super::{
-    EndpointReceiveError, PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveBody, Receiver, Rejection,
-    RejectionKind, Verifier, receive_for_endpoint,
+    EndpointReceiveError, ReceiptOutcome, ReceiveBody, Receiver, Rejection, RejectionKind,
+    Verifier, receive_for_endpoint,
 };
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
@@ -64,7 +64,7 @@ impl WebhookState {
         let Some((context, deadline)) = parts
             .extensions
             .get::<RequestContext>()
-            .and_then(|context| Some((context, context.deadline()?)))
+            .and_then(|context| context.deadline().map(|deadline| (context, deadline)))
         else {
             tracing::error!(
                 endpoint = endpoint_id,
@@ -87,38 +87,46 @@ impl WebhookState {
         let Some(attempt_end) = deadline.attempt_end() else {
             return receipt_deadline_exceeded(metrics);
         };
-        let receipt = receive_for_endpoint(
-            pool,
-            endpoint_id,
-            verifier.as_ref(),
-            &parts.headers,
-            ReceiveBody::Owned(body),
-            SystemTime::now(),
+        let Ok(result) = tokio::time::timeout_at(
             attempt_end,
-        );
-        let Ok(result) = tokio::time::timeout_at(attempt_end, receipt).await else {
+            receive_for_endpoint(
+                pool,
+                endpoint_id,
+                verifier.as_ref(),
+                &parts.headers,
+                ReceiveBody::Owned(body),
+                SystemTime::now(),
+                attempt_end,
+            ),
+        )
+        .await
+        else {
             return receipt_deadline_exceeded(metrics);
         };
-        match result {
-            Ok(outcome) => {
-                let slot = match outcome {
-                    ReceiptOutcome::Accepted => OutcomeSlot::Accepted,
-                    ReceiptOutcome::Duplicate => OutcomeSlot::Duplicate,
-                };
-                metrics.record(slot);
-                StatusCode::NO_CONTENT.into_response()
-            }
-            Err(EndpointReceiveError::Rejected(rejection)) => {
-                metrics.record_rejection(rejection);
-                Problem::new(Code::WebhookRejected).into_response()
-            }
-            Err(EndpointReceiveError::Unavailable) if Instant::now() >= attempt_end => {
-                receipt_deadline_exceeded(metrics)
-            }
-            Err(EndpointReceiveError::Unavailable) => {
-                metrics.record(OutcomeSlot::Unavailable);
-                Problem::new(Code::ServiceUnavailable).into_response()
-            }
+        receipt_response(metrics, result, attempt_end)
+    }
+}
+
+fn receipt_response(
+    metrics: &EndpointMetrics,
+    result: Result<ReceiptOutcome, EndpointReceiveError>,
+    attempt_end: Instant,
+) -> Response {
+    match result {
+        Ok(outcome) => {
+            metrics.record(outcome.into());
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(EndpointReceiveError::Rejected(rejection)) => {
+            metrics.record_rejection(rejection);
+            Problem::new(Code::WebhookRejected).into_response()
+        }
+        Err(EndpointReceiveError::Unavailable) if Instant::now() >= attempt_end => {
+            receipt_deadline_exceeded(metrics)
+        }
+        Err(EndpointReceiveError::Unavailable) => {
+            metrics.record(IngressOutcome::Unavailable);
+            Problem::new(Code::ServiceUnavailable).into_response()
         }
     }
 }
@@ -147,8 +155,8 @@ impl ReceiverState {
     }
 
     fn active(receiver: Receiver) -> Self {
-        let Receiver { pool, endpoints } = receiver;
-        let endpoints = endpoints
+        let Receiver { pool, verifiers } = receiver;
+        let endpoints = verifiers
             .iter()
             .map(|(endpoint_id, verifier)| {
                 let id = Arc::clone(endpoint_id);
@@ -265,21 +273,30 @@ async fn receive(
 }
 
 fn receipt_deadline_exceeded(metrics: &EndpointMetrics) -> Response {
-    metrics.record(OutcomeSlot::DeadlineExceeded);
+    metrics.record(IngressOutcome::DeadlineExceeded);
     Problem::new(Code::GatewayTimeout)
         .detail("request budget for durable webhook receipt was exhausted")
         .into_response()
 }
 
 #[derive(Clone, Copy, Debug, Enum)]
-enum OutcomeSlot {
+enum IngressOutcome {
     Accepted,
     Duplicate,
     Unavailable,
     DeadlineExceeded,
 }
 
-impl OutcomeSlot {
+impl From<ReceiptOutcome> for IngressOutcome {
+    fn from(outcome: ReceiptOutcome) -> Self {
+        match outcome {
+            ReceiptOutcome::Accepted => Self::Accepted,
+            ReceiptOutcome::Duplicate => Self::Duplicate,
+        }
+    }
+}
+
+impl IngressOutcome {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
@@ -292,7 +309,7 @@ impl OutcomeSlot {
 
 struct EndpointMetrics {
     endpoint: SharedString,
-    outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
+    outcomes: EnumMap<IngressOutcome, OnceLock<Counter>>,
     protocol_rejections: EnumMap<ProtocolError, OnceLock<Counter>>,
     body_unreadable: OnceLock<Counter>,
     payload_too_large: OnceLock<Counter>,
@@ -311,13 +328,13 @@ impl EndpointMetrics {
         }
     }
 
-    fn record(&self, slot: OutcomeSlot) {
-        self.outcomes[slot]
+    fn record(&self, outcome: IngressOutcome) {
+        self.outcomes[outcome]
             .get_or_init(|| {
                 metrics::counter!(
                     WEBHOOK_INGRESS_OUTCOMES_METRIC,
                     "endpoint" => self.endpoint.clone(),
-                    "outcome" => slot.as_str()
+                    "outcome" => outcome.as_str()
                 )
             })
             .increment(1);
@@ -337,7 +354,7 @@ impl EndpointMetrics {
         match rejection.kind() {
             RejectionKind::Protocol(error) => self.record_protocol_rejection(error),
             RejectionKind::PayloadTooLarge => {
-                self.record_fixed_rejection(&self.payload_too_large, PAYLOAD_TOO_LARGE.reason());
+                self.record_fixed_rejection(&self.payload_too_large, rejection.reason());
             }
             RejectionKind::Custom(reason) => self.record_custom_rejection(reason),
         }
@@ -432,9 +449,9 @@ mod tests {
         let cloned = state.clone();
         metrics::with_local_recorder(&recorder, || {
             let (_, partner) = state.state.endpoint("partner").expect("partner endpoint");
-            partner.metrics.record(OutcomeSlot::Accepted);
+            partner.metrics.record(IngressOutcome::Accepted);
             let (_, cloned_partner) = cloned.state.endpoint("partner").expect("partner endpoint");
-            cloned_partner.metrics.record(OutcomeSlot::Accepted);
+            cloned_partner.metrics.record(IngressOutcome::Accepted);
             partner
                 .metrics
                 .record_rejection(Rejection::from(ProtocolError::InvalidSignature));

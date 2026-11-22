@@ -223,7 +223,7 @@ pub enum DispatchError<E> {
 pub struct Client {
     origin: policy::TargetOrigin,
     #[debug(skip)]
-    server: observe::Server,
+    server_attributes: observe::ServerAttributes,
     limits: Limits,
     propagate_trace_context: bool,
     #[debug(skip)]
@@ -247,10 +247,7 @@ impl Client {
 
     #[must_use]
     pub fn matches_origin(&self, origin: &Uri) -> bool {
-        origin
-            .path_and_query()
-            .is_none_or(|pq| pq.query().is_none() && matches!(pq.path(), "" | "/"))
-            && self.origin.admits(origin)
+        policy::is_origin_only(origin) && self.origin.admits(origin)
     }
 
     pub fn try_new(origin: Origin, limits: Limits) -> Result<Self, TlsError> {
@@ -277,7 +274,7 @@ impl Client {
     ) -> Self {
         observe::describe();
         Self {
-            server: observe::Server::new(&origin),
+            server_attributes: observe::ServerAttributes::new(&origin),
             transport: transport::build_transport(&limits, &origin, tls, resolver),
             origin,
             limits,
@@ -411,8 +408,12 @@ impl PreparedRequest<'_> {
             .map_err(Error::from)
             .map_err(ExchangeError::BeforeResponse)?;
         let template = request.extensions_mut().remove::<UrlTemplate>();
-        let mut attempt =
-            observe::Attempt::start(request.method(), template, &client.server, &context);
+        let mut attempt = observe::Attempt::start(
+            request.method(),
+            template,
+            &client.server_attributes,
+            &context,
+        );
         if client.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
@@ -434,19 +435,17 @@ impl PreparedRequest<'_> {
             attempt.record_status(response.status());
             on_status(response.status());
             context.check()?;
-            consume(response, client.limits.response_body_bytes(), &context)
+            let consumed = consume(response, client.limits.response_body_bytes(), &context)
                 .await
-                .map_err(SendError::from)
+                .map_err(SendError::from)?;
+            context.check()?;
+            Ok(consumed)
         };
         let result = tokio::select! {
             biased;
             reason = context.wait_stopped() => Err(SendError::from(reason)),
             result = exchange.instrument(span) => result,
-        }
-        .and_then(|response| {
-            context.check()?;
-            Ok(response)
-        });
+        };
         match result {
             Ok(value) => {
                 attempt.finish_response();

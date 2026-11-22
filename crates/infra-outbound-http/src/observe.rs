@@ -2,7 +2,7 @@ use std::{error::Error as StdError, fmt, mem::DropGuard, sync::Arc, time::Instan
 
 use http::{HeaderMap, Method, Request, StatusCode};
 use metrics::{Label, SharedString, Unit};
-use operation_context::{OperationContext, Stopped};
+use operation_context::OperationContext;
 use tracing::Span;
 
 use shared_rules::{
@@ -75,13 +75,13 @@ impl UrlTemplate {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Server {
+pub(crate) struct ServerAttributes {
     address: SharedString,
     port: u16,
     port_label: SharedString,
 }
 
-impl Server {
+impl ServerAttributes {
     pub(crate) fn new(origin: &TargetOrigin) -> Self {
         let port = origin.port();
         let mut buffer = fmt::NumBuffer::new();
@@ -126,7 +126,7 @@ struct AttemptInner<'a> {
     started: Instant,
     method: HttpMethod,
     template: Option<&'static str>,
-    server: &'a Server,
+    server_attributes: &'a ServerAttributes,
     context: &'a OperationContext,
     status: Option<StatusCode>,
     span: Span,
@@ -135,8 +135,8 @@ struct AttemptInner<'a> {
 impl AttemptInner<'_> {
     fn abandon(self) {
         let outcome = match self.context.check() {
-            Ok(()) | Err(Stopped::Cancelled) => Outcome::Cancelled,
-            Err(Stopped::Deadline) => Outcome::Failed("timeout"),
+            Ok(()) => Outcome::Cancelled,
+            Err(stopped) => Outcome::from_error(&Error::from(stopped)),
         };
         self.emit(outcome);
     }
@@ -168,27 +168,20 @@ impl AttemptInner<'_> {
         status_label: Option<&'static str>,
         error_type: Option<&'static str>,
     ) -> Vec<Label> {
-        let mut labels = Vec::with_capacity(
-            4 + usize::from(self.template.is_some())
-                + usize::from(status_label.is_some())
-                + usize::from(error_type.is_some()),
-        );
-        labels.extend([
+        [
             Label::new("http.request.method", self.method.as_str()),
-            Label::new("server.address", self.server.address.clone()),
-            Label::new("server.port", self.server.port_label.clone()),
+            Label::new("server.address", self.server_attributes.address.clone()),
+            Label::new("server.port", self.server_attributes.port_label.clone()),
             Label::new("outbound.outcome", outcome.as_str()),
-        ]);
-        if let Some(template) = self.template {
-            labels.push(Label::new("url.template", template));
-        }
-        if let Some(status_label) = status_label {
-            labels.push(Label::new("http.response.status_code", status_label));
-        }
-        if let Some(error_type) = error_type {
-            labels.push(Label::new("error.type", error_type));
-        }
-        labels
+        ]
+        .into_iter()
+        .chain(
+            self.template
+                .map(|template| Label::new("url.template", template)),
+        )
+        .chain(status_label.map(|label| Label::new("http.response.status_code", label)))
+        .chain(error_type.map(|error_type| Label::new("error.type", error_type)))
+        .collect()
     }
 }
 
@@ -198,7 +191,7 @@ impl<'a> Attempt<'a> {
     pub(crate) fn start(
         method: &Method,
         template: Option<UrlTemplate>,
-        server: &'a Server,
+        server_attributes: &'a ServerAttributes,
         context: &'a OperationContext,
     ) -> Self {
         let method = HttpMethod::parse(method.as_str());
@@ -209,8 +202,8 @@ impl<'a> Attempt<'a> {
             otel.kind = "client",
             http.request.method = method.as_str(),
             url.template = template,
-            server.address = &*server.address,
-            server.port = server.port,
+            server.address = &*server_attributes.address,
+            server.port = server_attributes.port,
             http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
             outbound.outcome = tracing::field::Empty,
@@ -221,7 +214,7 @@ impl<'a> Attempt<'a> {
                 started: Instant::now(),
                 method,
                 template,
-                server,
+                server_attributes,
                 context,
                 status: None,
                 span,
@@ -296,26 +289,24 @@ fn status_label(status: StatusCode) -> &'static str {
 }
 
 fn classify_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorKind {
-    let mut kind = TransportErrorKind::Other;
-    for cause in error_chain::causes(source) {
-        if cause.is::<rustls::Error>() {
-            return TransportErrorKind::Tls;
-        }
-        if kind != TransportErrorKind::Connect
-            && cause
-                .downcast_ref::<hyper_util::client::legacy::Error>()
-                .is_some_and(hyper_util::client::legacy::Error::is_connect)
-        {
-            kind = TransportErrorKind::Connect;
-        } else if kind == TransportErrorKind::Other
-            && cause
-                .downcast_ref::<hyper::Error>()
-                .is_some_and(hyper::Error::is_parse)
-        {
-            kind = TransportErrorKind::Protocol;
-        }
+    let causes = || error_chain::causes(source);
+    if causes().any(<dyn StdError>::is::<rustls::Error>) {
+        TransportErrorKind::Tls
+    } else if causes().any(|cause| {
+        cause
+            .downcast_ref::<hyper_util::client::legacy::Error>()
+            .is_some_and(hyper_util::client::legacy::Error::is_connect)
+    }) {
+        TransportErrorKind::Connect
+    } else if causes().any(|cause| {
+        cause
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_parse)
+    }) {
+        TransportErrorKind::Protocol
+    } else {
+        TransportErrorKind::Other
     }
-    kind
 }
 
 #[cfg(test)]

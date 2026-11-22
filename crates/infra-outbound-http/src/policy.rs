@@ -222,13 +222,16 @@ fn parse_origin_uri(raw: &str) -> Result<Uri, InvalidOrigin> {
         return Err(InvalidOrigin);
     }
     let uri = Uri::try_from(raw).map_err(|_| InvalidOrigin)?;
-    if uri
-        .path_and_query()
-        .is_some_and(|pq| pq.query().is_some() || !matches!(pq.path(), "" | "/"))
-    {
+    if !is_origin_only(&uri) {
         return Err(InvalidOrigin);
     }
     Ok(uri)
+}
+
+pub(crate) fn is_origin_only(uri: &Uri) -> bool {
+    uri.path_and_query().is_none_or(|path_and_query| {
+        path_and_query.query().is_none() && matches!(path_and_query.path(), "" | "/")
+    })
 }
 
 #[cfg(feature = "test-support")]
