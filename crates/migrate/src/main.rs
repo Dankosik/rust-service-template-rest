@@ -22,14 +22,14 @@ fn record_level(base: &str) -> String {
 #[derive(Clone, Copy, Debug)]
 struct RunContext {
     started: Instant,
-    target: Option<i64>,
+    target_version: Option<i64>,
 }
 
 impl RunContext {
     fn start() -> Self {
         Self {
             started: Instant::now(),
-            target: MIGRATOR.iter().map(|migration| migration.version).max(),
+            target_version: MIGRATOR.iter().map(|migration| migration.version).max(),
         }
     }
 
@@ -69,7 +69,7 @@ impl RunContext {
                     target: RECORD_TARGET,
                     tracing::Level::INFO,
                     migration.before = report.before,
-                    migration.target = self.target,
+                    migration.target = self.target_version,
                     migration.after = report.after(),
                     migration.applied_count = report.applied.len(),
                     migration.duration_ms = duration_ms,
@@ -88,7 +88,7 @@ impl RunContext {
                     target: RECORD_TARGET,
                     tracing::Level::ERROR,
                     migration.before = report.and_then(|report| report.before),
-                    migration.target = self.target,
+                    migration.target = self.target_version,
                     migration.after = report.and_then(Report::after),
                     migration.applied_count = report.map(|report| report.applied.len()),
                     migration.duration_ms = duration_ms,
@@ -141,8 +141,8 @@ impl Failure {
 fn main() -> ExitCode {
     let context = RunContext::start();
     let options = LoadOptions::try_parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit());
-    let config = service_config::load_migration(&options, BUILD_INFO);
-    let log_config = match &config {
+    let loaded = service_config::load_migration(&options, BUILD_INFO);
+    let log_config = match &loaded {
         Ok(config) => config.log(),
         Err(MigrationLoadError::PostgresDisabled { log }) => log,
         Err(err) => return context.finish_setup_failure(err.to_string()),
@@ -151,9 +151,11 @@ fn main() -> ExitCode {
         Ok(logger) => logger,
         Err(err) => return context.finish_setup_failure(format!("install logger: {err}")),
     };
-    let config = match config {
+    let config = match loaded {
         Ok(config) => config,
-        Err(err) => return context.finish_run(None, logger, Err(Failure::Setup(err.to_string()))),
+        Err(disabled) => {
+            return context.finish_run(None, logger, Err(Failure::Setup(disabled.to_string())));
+        }
     };
     install_panic_hook();
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -164,7 +166,7 @@ fn main() -> ExitCode {
         Err(err) => return context.finish_run(None, logger, Err(Failure::Runtime(err))),
     };
 
-    let outcome = runtime.block_on(apply(&config, context.target));
+    let outcome = runtime.block_on(apply(&config, context.target_version));
     context.finish_run(Some(runtime), logger, outcome)
 }
 
@@ -189,16 +191,17 @@ fn write_stderr_failure(message: &dyn std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
+async fn apply(config: &MigrationConfig, target_version: Option<i64>) -> Result<Report, Failure> {
     let postgres = config.postgres();
+    let ssl_policy = if config.app().is_local_development() {
+        SslPolicy::AllowLocalDevelopment
+    } else {
+        SslPolicy::VerifyFull
+    };
     let dsn = Dsn::admit_with(
         postgres.dsn.expose_secret(),
         postgres.password_file.as_deref(),
-        if config.app().is_local_development() {
-            SslPolicy::AllowLocalDevelopment
-        } else {
-            SslPolicy::VerifyFull
-        },
+        ssl_policy,
     )?;
     tracing::event!(
         target: RECORD_TARGET,
@@ -210,7 +213,7 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
-        migration.target = target,
+        migration.target = target_version,
         migration.deadline_ms =
             u64::try_from(postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
         "migration_starting"
@@ -223,7 +226,7 @@ async fn run_until_stop(options: &RunOptions<'_>) -> Result<Report, Failure> {
     let stop = stop_signal()?;
     tokio::select! {
         biased;
-        result = migrate::run(&MIGRATOR, options) => Ok(result?),
+        result = migrate::run(&MIGRATOR, options) => result.map_err(Failure::Run),
         signal = stop => Err(Failure::Interrupted(signal)),
     }
 }

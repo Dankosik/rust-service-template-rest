@@ -356,6 +356,18 @@ impl UnsuccessfulOutcome {
     }
 }
 
+fn sample_fits_window(sample: PopulationSample, requested_at: f64, received_at: f64) -> bool {
+    let PopulationSample {
+        observed_at_unix_seconds: observed_at,
+        oldest_at_unix_seconds: oldest,
+    } = sample;
+    observed_at.is_finite()
+        && observed_at > 0.0
+        && observed_at >= requested_at - CLOCK_TOLERANCE_SECONDS
+        && observed_at <= received_at + CLOCK_TOLERANCE_SECONDS
+        && oldest.is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at)
+}
+
 #[derive(Debug)]
 struct MaintenanceAttempt<'a> {
     observer: &'a mut MaintenanceObserver,
@@ -368,23 +380,17 @@ impl MaintenanceAttempt<'_> {
         self.record_sample_at(sample, MaintenanceClock::now());
     }
 
-    fn consistent_receipt_time(
+    fn receipt_time_if_consistent(
         &self,
+        sample: PopulationSample,
         received: MaintenanceClock,
-        observed_at: f64,
-        oldest: Option<f64>,
     ) -> Option<f64> {
         let received_at = received.wall?;
         let requested_at = self.requested.wall?;
-        let valid = self.requested.agrees_with(self.observer.previous_clock)
-            && received.agrees_with(self.requested)
-            && observed_at.is_finite()
-            && observed_at > 0.0
-            && observed_at >= requested_at - CLOCK_TOLERANCE_SECONDS
-            && observed_at <= received_at + CLOCK_TOLERANCE_SECONDS
-            && oldest
-                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
-        valid.then_some(received_at)
+        let clocks_agree = self.requested.agrees_with(self.observer.previous_clock)
+            && received.agrees_with(self.requested);
+        (clocks_agree && sample_fits_window(sample, requested_at, received_at))
+            .then_some(received_at)
     }
 
     fn record_sample_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
@@ -392,7 +398,7 @@ impl MaintenanceAttempt<'_> {
             observed_at_unix_seconds: observed_at,
             oldest_at_unix_seconds: oldest,
         } = sample;
-        let Some(received_at) = self.consistent_receipt_time(received, observed_at, oldest) else {
+        let Some(received_at) = self.receipt_time_if_consistent(sample, received) else {
             self.failed_at(FailureCause::ClockInvalid, received);
             return;
         };
