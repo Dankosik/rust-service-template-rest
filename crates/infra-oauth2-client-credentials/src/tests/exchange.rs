@@ -426,3 +426,32 @@ async fn a_failed_exchange_is_not_cached() {
     assert_eq!(fixture.token_request_count(), 2);
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn a_reusable_exchange_token_yields_when_the_task_budget_is_exhausted() {
+    let fixture = Fixture::new().await;
+    fixture.token_json(StatusCode::OK, &exchange_response("cached"));
+    let tokens = fixture.exchange_tokens(&[], None, EXCHANGE_CAPACITY);
+    let client = tokens.http(fixture.resource_client()).unwrap();
+    fixture.send_exchange(&client, "alice").await.unwrap();
+
+    let task = tokio::spawn(async move {
+        let context = token_context();
+        let subject_token = subject("alice");
+        let mut acquisition =
+            Box::pin(tokens.acquire_for_request(&subject_token, acquisition_deadline(&context)));
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        poll_pending(acquisition.as_mut()).await;
+        acquisition.await.unwrap()
+    });
+    let token = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(token.header, "Bearer cached");
+    assert_eq!(fixture.token_request_count(), 1);
+    fixture.finish().await;
+}

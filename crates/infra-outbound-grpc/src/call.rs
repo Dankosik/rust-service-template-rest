@@ -1,3 +1,4 @@
+use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,20 +11,23 @@ use infra_grpc_core::protocol::header_status_code;
 use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody, register_waker};
 use operation_context::{OperationContext, Stopped};
 use parking_lot::Mutex;
-use tokio_util::sync::DropGuard;
 
 use crate::observe::Call;
 
 pub(crate) type StatusHook = Box<dyn FnOnce(tonic::Code) + Send>;
+pub(crate) type LifetimeGuard = DropGuard<OperationContext, fn(OperationContext)>;
 
-#[expect(dead_code, reason = "guards release resources on drop")]
+pub(crate) fn cancel_on_drop(context: OperationContext) -> LifetimeGuard {
+    DropGuard::new(context, |context| context.cancel())
+}
+
 pub(crate) struct ClientGuards {
+    #[expect(dead_code, reason = "aborts in-flight upload on drop")]
     pub(crate) upload_guard: Option<UploadGuard>,
-    pub(crate) cancel_on_drop: DropGuard,
+    pub(crate) lifetime: LifetimeGuard,
 }
 
 pub(crate) struct ClientCustody {
-    pub(crate) lifetime: OperationContext,
     pub(crate) watch_stop: bool,
     pub(crate) guards: ClientGuards,
     pub(crate) on_status: Option<StatusHook>,
@@ -97,7 +101,6 @@ impl ClientOutcome {
 struct ClientHooks {
     observation: ClientObservation,
     guards: ClientGuards,
-    lifetime: OperationContext,
     on_status: Option<StatusHook>,
     missing_status: ClientOutcome,
 }
@@ -108,7 +111,7 @@ impl StreamHooks<tonic::Status> for ClientHooks {
     type Guards = ClientGuards;
 
     fn stopped(&self) -> Option<tonic::Status> {
-        self.lifetime.stopped().map(client_stopped_status)
+        self.guards.lifetime.stopped().map(client_stopped_status)
     }
 
     fn in_scope<R>(&self, poll: impl FnOnce() -> R) -> R {
@@ -184,7 +187,6 @@ pub(crate) fn attach_client_response(
     let hooks = ClientHooks {
         observation,
         guards: custody.guards,
-        lifetime: custody.lifetime,
         on_status: custody.on_status,
         missing_status,
     };
@@ -194,7 +196,7 @@ pub(crate) fn attach_client_response(
         |hooks, response| ClientOutcome::from_headers(&hooks.observation, response.headers()),
         move |hooks| {
             watch_stop.then(|| {
-                let lifetime = hooks.lifetime.clone();
+                let lifetime = OperationContext::clone(&hooks.guards.lifetime);
                 async move { client_stopped_status(lifetime.wait_stopped().await) }
             })
         },
@@ -333,13 +335,12 @@ mod tests {
         let hooks = ClientHooks {
             observation,
             guards: custody.guards,
-            lifetime: custody.lifetime,
             on_status: custody.on_status,
             missing_status,
         };
         WatchedBody::start(body, hooks, initial, move |hooks| {
             watch_stop.then(|| {
-                let lifetime = hooks.lifetime.clone();
+                let lifetime = OperationContext::clone(&hooks.guards.lifetime);
                 async move { client_stopped_status(lifetime.wait_stopped().await) }
             })
         })
@@ -362,7 +363,7 @@ mod tests {
         queued: VecDeque<Frame<Bytes>>,
         polls: Arc<AtomicUsize>,
         dropped: Arc<AtomicBool>,
-        on_drop: Option<oneshot::Sender<()>>,
+        on_drop: Option<Box<dyn FnOnce() + Send>>,
     }
 
     impl PendingFrames {
@@ -382,7 +383,9 @@ mod tests {
                     queued: VecDeque::new(),
                     polls: Arc::default(),
                     dropped: Arc::default(),
-                    on_drop: Some(tx),
+                    on_drop: Some(Box::new(move || {
+                        let _ = tx.send(());
+                    })),
                 },
                 rx,
             )
@@ -392,8 +395,8 @@ mod tests {
     impl Drop for PendingFrames {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);
-            if let Some(tx) = self.on_drop.take() {
-                let _ = tx.send(());
+            if let Some(on_drop) = self.on_drop.take() {
+                on_drop();
             }
         }
     }
@@ -489,10 +492,10 @@ mod tests {
         drop(guard);
     }
 
-    fn test_guards(upload_guard: Option<UploadGuard>) -> ClientGuards {
+    fn test_guards(upload_guard: Option<UploadGuard>, lifetime: OperationContext) -> ClientGuards {
         ClientGuards {
             upload_guard,
-            cancel_on_drop: CancellationToken::new().drop_guard(),
+            lifetime: cancel_on_drop(lifetime),
         }
     }
 
@@ -502,9 +505,8 @@ mod tests {
             PendingFrames::stalled(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::unbounded(),
                 watch_stop: false,
-                guards: test_guards(None),
+                guards: test_guards(None, OperationContext::unbounded()),
                 on_status: None,
             },
             None,
@@ -517,9 +519,8 @@ mod tests {
             PendingFrames::stalled(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::unbounded(),
                 watch_stop: true,
-                guards: test_guards(None),
+                guards: test_guards(None, OperationContext::unbounded()),
                 on_status: None,
             },
             None,
@@ -530,10 +531,16 @@ mod tests {
 
         let source = PendingFrames::stalled();
         let dropped = Arc::clone(&source.dropped);
-        let upload = PendingFrames::stalled();
-        let upload_dropped = Arc::clone(&upload.dropped);
-        let (_outgoing, upload_guard) = guard_upload(tonic::body::Body::new(upload));
         let cancellation = CancellationToken::new();
+        let mut upload = PendingFrames::stalled();
+        let upload_dropped = Arc::clone(&upload.dropped);
+        let upload_saw_uncancelled = Arc::new(AtomicBool::new(false));
+        upload.on_drop = Some(Box::new({
+            let cancellation = cancellation.clone();
+            let saw_uncancelled = Arc::clone(&upload_saw_uncancelled);
+            move || saw_uncancelled.store(!cancellation.is_cancelled(), Ordering::SeqCst)
+        }));
+        let (_outgoing, upload_guard) = guard_upload(tonic::body::Body::new(upload));
         let (report, mut wire_code) = oneshot::channel();
         let response = attach_client_response(
             http::Response::builder()
@@ -542,12 +549,11 @@ mod tests {
                 .unwrap(),
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::unbounded(),
                 watch_stop: true,
-                guards: ClientGuards {
+                guards: test_guards(
                     upload_guard,
-                    cancel_on_drop: cancellation.clone().drop_guard(),
-                },
+                    OperationContext::new(None, cancellation.clone()),
+                ),
                 on_status: Some(Box::new(move |code| report.send(code).unwrap())),
             },
         );
@@ -555,6 +561,7 @@ mod tests {
         assert!(cancellation.is_cancelled());
         assert!(dropped.load(Ordering::SeqCst));
         assert!(upload_dropped.load(Ordering::SeqCst));
+        assert!(upload_saw_uncancelled.load(Ordering::SeqCst));
         assert!(response.body().is_end_stream());
         assert_eq!(response.body().size_hint().exact(), Some(0));
     }
@@ -570,12 +577,8 @@ mod tests {
             source,
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::new(None, child.clone()),
                 watch_stop: true,
-                guards: ClientGuards {
-                    upload_guard: None,
-                    cancel_on_drop: child.drop_guard(),
-                },
+                guards: test_guards(None, OperationContext::new(None, child)),
                 on_status: None,
             },
             None,
@@ -609,22 +612,24 @@ mod tests {
         let cancellation = CancellationToken::new();
         let source = PendingFrames::stalled();
         let dropped = Arc::clone(&source.dropped);
-        let upload_source = PendingFrames::stalled();
+        let mut upload_source = PendingFrames::stalled();
         let upload_dropped = Arc::clone(&upload_source.dropped);
+        let upload_saw_uncancelled = Arc::new(AtomicBool::new(false));
+        upload_source.on_drop = Some(Box::new({
+            let cancellation = cancellation.clone();
+            let saw_uncancelled = Arc::clone(&upload_saw_uncancelled);
+            move || saw_uncancelled.store(!cancellation.is_cancelled(), Ordering::SeqCst)
+        }));
         let (mut outgoing, upload_guard) = guard_upload(tonic::body::Body::new(upload_source));
         let body = start_response_body(
             source,
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime: OperationContext::new(
-                    Some(Deadline::after(TEST_BUDGET)),
-                    cancellation.clone(),
-                ),
                 watch_stop: true,
-                guards: ClientGuards {
+                guards: test_guards(
                     upload_guard,
-                    cancel_on_drop: cancellation.clone().drop_guard(),
-                },
+                    OperationContext::new(Some(Deadline::after(TEST_BUDGET)), cancellation.clone()),
+                ),
                 on_status: None,
             },
             None,
@@ -640,6 +645,7 @@ mod tests {
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert!(upload_dropped.load(Ordering::SeqCst));
+        assert!(upload_saw_uncancelled.load(Ordering::SeqCst));
         let abort_frame = outgoing.frame().await.expect("upload error frame");
         assert_eq!(abort_frame.unwrap_err().code(), tonic::Code::Cancelled);
         assert!(outgoing.frame().await.is_none());
@@ -664,9 +670,8 @@ mod tests {
             response_source,
             ClientObservation::Transport(sample_call()),
             ClientCustody {
-                lifetime,
                 watch_stop: true,
-                guards: test_guards(upload_guard),
+                guards: test_guards(upload_guard, lifetime),
                 on_status: None,
             },
             None,
@@ -729,9 +734,8 @@ mod tests {
                 observer,
             },
             ClientCustody {
-                lifetime,
                 watch_stop: true,
-                guards: test_guards(None),
+                guards: test_guards(None, lifetime),
                 on_status: Some(on_status),
             },
             None,

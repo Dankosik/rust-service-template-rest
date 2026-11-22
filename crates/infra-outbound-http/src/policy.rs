@@ -281,12 +281,18 @@ fn frame_body(request: &mut Request<Bytes>) {
     let headers = request.headers_mut();
     headers.remove(header::TRANSFER_ENCODING);
     if length > 0 {
-        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+        headers.insert(header::CONTENT_LENGTH, exact_length_header(length));
     } else if expects_content {
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
     } else {
         headers.remove(header::CONTENT_LENGTH);
     }
+}
+
+fn exact_length_header(length: usize) -> HeaderValue {
+    let mut buffer = fmt::NumBuffer::new();
+    HeaderValue::from_str(length.format_into(&mut buffer))
+        .unwrap_or_else(|_| HeaderValue::from(length))
 }
 
 #[cfg(test)]

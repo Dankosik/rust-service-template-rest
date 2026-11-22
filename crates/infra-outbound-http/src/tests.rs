@@ -1004,8 +1004,20 @@ async fn transport_source_redacts_request_and_response_content() {
 
 struct FrameBody {
     frames: std::collections::VecDeque<hyper::body::Frame<Bytes>>,
+    exact_size: Option<u64>,
     on_poll: Option<Box<dyn FnMut(usize) + Send>>,
     polls: usize,
+}
+
+impl FrameBody {
+    fn new(frames: impl Into<std::collections::VecDeque<hyper::body::Frame<Bytes>>>) -> Self {
+        Self {
+            frames: frames.into(),
+            exact_size: None,
+            on_poll: None,
+            polls: 0,
+        }
+    }
 }
 
 impl hyper::body::Body for FrameBody {
@@ -1022,6 +1034,13 @@ impl hyper::body::Body for FrameBody {
             on_poll(poll_index);
         }
         std::task::Poll::Ready(self.frames.pop_front().map(Ok))
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.exact_size.map_or_else(
+            hyper::body::SizeHint::default,
+            hyper::body::SizeHint::with_exact,
+        )
     }
 }
 
@@ -1045,7 +1064,6 @@ impl Drop for TrackedBacking {
 
 #[tokio::test]
 async fn collect_bounded_body_releases_source_backing_and_checks_context_between_frames() {
-    use std::collections::VecDeque;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1066,16 +1084,12 @@ async fn collect_bounded_body_releases_source_backing_and_checks_context_between
     drop(backing);
     assert!(!released.load(Ordering::Acquire));
 
-    let single = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::new()),
-            Frame::data(payload),
-            Frame::data(Bytes::new()),
-            Frame::trailers(http::HeaderMap::new()),
-        ]),
-        on_poll: None,
-        polls: 0,
-    };
+    let single = FrameBody::new([
+        Frame::data(Bytes::new()),
+        Frame::data(payload),
+        Frame::data(Bytes::new()),
+        Frame::trailers(http::HeaderMap::new()),
+    ]);
     let buffered = crate::collect_bounded_body(single, 64, &context)
         .await
         .expect("single-frame body succeeds");
@@ -1085,41 +1099,54 @@ async fn collect_bounded_body_releases_source_backing_and_checks_context_between
     );
     assert_eq!(buffered.as_ref(), expected);
 
-    let empty = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::new()),
-            Frame::trailers(http::HeaderMap::new()),
-        ]),
-        on_poll: None,
-        polls: 0,
-    };
+    let empty = FrameBody::new([
+        Frame::data(Bytes::new()),
+        Frame::trailers(http::HeaderMap::new()),
+    ]);
     let empty_buffered = crate::collect_bounded_body(empty, 64, &context)
         .await
         .expect("empty body succeeds");
     assert!(empty_buffered.is_empty());
 
-    let multi = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::from_static(b"ab")),
-            Frame::data(Bytes::from_static(b"cd")),
-            Frame::data(Bytes::from_static(b"ef")),
-        ]),
-        on_poll: None,
-        polls: 0,
-    };
+    let multi = FrameBody::new([
+        Frame::data(Bytes::from_static(b"ab")),
+        Frame::data(Bytes::from_static(b"cd")),
+        Frame::data(Bytes::from_static(b"ef")),
+    ]);
     let concatenated = crate::collect_bounded_body(multi, 6, &context)
         .await
         .expect("multi-frame body at exact limit succeeds");
     assert_eq!(concatenated.as_ref(), b"abcdef");
 
-    let over_limit = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::from_static(b"abcd")),
-            Frame::data(Bytes::from_static(b"efg")),
-        ]),
-        on_poll: None,
-        polls: 0,
-    };
+    let mut exact_multi = FrameBody::new([
+        Frame::data(Bytes::from_static(b"abc")),
+        Frame::data(Bytes::from_static(b"de")),
+    ]);
+    exact_multi.exact_size = Some(5);
+    let exact_buffered = crate::collect_bounded_body(exact_multi, 64, &context)
+        .await
+        .expect("fixed-length multi-frame body succeeds");
+    assert_eq!(exact_buffered.as_ref(), b"abcde");
+    assert_eq!(
+        exact_buffered
+            .try_into_mut()
+            .expect("unique exact buffer")
+            .capacity(),
+        5
+    );
+
+    let mut advertised_over_limit = FrameBody::new([Frame::data(Bytes::from_static(b"a"))]);
+    advertised_over_limit.exact_size = Some(7);
+    advertised_over_limit.on_poll = Some(Box::new(|_| panic!("advertised overflow must not poll")));
+    std::assert_matches!(
+        crate::collect_bounded_body(advertised_over_limit, 6, &context).await,
+        Err(Error::ResponseBodyTooLarge)
+    );
+
+    let over_limit = FrameBody::new([
+        Frame::data(Bytes::from_static(b"abcd")),
+        Frame::data(Bytes::from_static(b"efg")),
+    ]);
     std::assert_matches!(
         crate::collect_bounded_body(over_limit, 6, &context).await,
         Err(Error::ResponseBodyTooLarge)
@@ -1127,18 +1154,15 @@ async fn collect_bounded_body_releases_source_backing_and_checks_context_between
 
     let op = OperationContext::unbounded();
     let cancel = op.clone();
-    let cancelled_between_frames = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::from_static(b"first")),
-            Frame::data(Bytes::from_static(b"second")),
-        ]),
-        on_poll: Some(Box::new(move |poll_index| {
-            if poll_index == 0 {
-                cancel.cancel();
-            }
-        })),
-        polls: 0,
-    };
+    let mut cancelled_between_frames = FrameBody::new([
+        Frame::data(Bytes::from_static(b"first")),
+        Frame::data(Bytes::from_static(b"second")),
+    ]);
+    cancelled_between_frames.on_poll = Some(Box::new(move |poll_index| {
+        if poll_index == 0 {
+            cancel.cancel();
+        }
+    }));
     std::assert_matches!(
         crate::collect_bounded_body(cancelled_between_frames, 64, &op).await,
         Err(Error::Cancelled)

@@ -482,13 +482,6 @@ async fn buffer_response(
     limit: usize,
     context: &OperationContext,
 ) -> Result<Response<Bytes>, Error> {
-    if hyper::body::Body::size_hint(response.body())
-        .exact()
-        .is_some_and(|length| length > limit as u64)
-    {
-        return Err(Error::ResponseBodyTooLarge);
-    }
-
     let (parts, body) = response.into_parts();
     let buffered = collect_bounded_body(body, limit, context).await?;
     Ok(Response::from_parts(parts, buffered))
@@ -503,6 +496,13 @@ where
     B: hyper::body::Body<Data = Bytes> + Unpin,
     B::Error: Into<BoxError>,
 {
+    let capacity_cap = match body.size_hint().exact() {
+        Some(length) => match usize::try_from(length) {
+            Ok(exact) if exact <= limit => exact,
+            _ => return Err(Error::ResponseBodyTooLarge),
+        },
+        None => limit,
+    };
     let mut body = Limited::new(body, limit);
     let mut collected = Vec::new();
     loop {
@@ -513,7 +513,7 @@ where
         if let Ok(data) = frame.map_err(map_body_error)?.into_data()
             && !data.is_empty()
         {
-            append_with_capacity_cap(&mut collected, &data, limit);
+            append_with_capacity_cap(&mut collected, &data, capacity_cap);
         }
     }
     Ok(Bytes::from(collected))

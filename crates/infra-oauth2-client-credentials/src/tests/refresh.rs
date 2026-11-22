@@ -720,3 +720,66 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         ]
     );
 }
+
+#[tokio::test]
+async fn deferred_refresh_still_stops_reusing_at_the_reuse_cutoff_and_respects_401() {
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
+    );
+    let service_tokens = fixture.service_tokens(&[]);
+    let client = service_tokens.http(fixture.resource_client()).unwrap();
+    fixture.send(&client).await.unwrap();
+    fixture.token_received().await;
+
+    fixture.token_raw(response(StatusCode::SERVICE_UNAVAILABLE, b"{}"));
+    advance(Duration::from_secs(39)).await;
+    fixture.send(&client).await.unwrap();
+    fixture.token_received().await;
+    let refresh = tokio::time::timeout(Duration::from_secs(2), service_tokens.fetch_lock().lock())
+        .await
+        .unwrap();
+    drop(refresh);
+
+    advance(Duration::from_secs(5)).await;
+    fixture.send(&client).await.unwrap();
+    assert_no_token_request(&fixture).await;
+    assert_eq!(fixture.token_request_count(), 2);
+
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
+    );
+    advance(Duration::from_secs(7)).await;
+    fixture.send(&client).await.unwrap();
+    assert_eq!(fixture.token_request_count(), 3);
+    assert_eq!(
+        fixture
+            .resource_requests()
+            .last()
+            .unwrap()
+            .header("authorization"),
+        Some("Bearer second")
+    );
+
+    advance(EVICTION_MIN_AGE).await;
+    fixture.resource_status(StatusCode::UNAUTHORIZED);
+    fixture.send(&client).await.unwrap();
+    fixture.resource_status(StatusCode::OK);
+    fixture.token_json(
+        StatusCode::OK,
+        &serde_json::json!({"access_token": "third", "token_type": "Bearer", "expires_in": 60}),
+    );
+    fixture.send(&client).await.unwrap();
+    assert_eq!(fixture.token_request_count(), 4);
+    assert_eq!(
+        fixture
+            .resource_requests()
+            .last()
+            .unwrap()
+            .header("authorization"),
+        Some("Bearer third")
+    );
+    fixture.finish().await;
+}
