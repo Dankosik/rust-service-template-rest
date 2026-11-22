@@ -51,21 +51,7 @@ impl Registry {
                 schema_version,
             })?;
             let (payload_schema_name, raw_definitions) = collect_schema();
-            let mut definitions = BTreeMap::new();
-            for (name, raw_schema) in raw_definitions {
-                let mut rendered_schema = serde_json::to_value(raw_schema)?;
-                match seen_schemas.get(&name) {
-                    Some(original) if original != &rendered_schema => {
-                        return Err(ContractError::SchemaName(name));
-                    }
-                    Some(_) => {}
-                    None => {
-                        seen_schemas.insert(name.clone(), rendered_schema.clone());
-                    }
-                }
-                relocate_schema_refs(&mut rendered_schema);
-                definitions.insert(name, rendered_schema);
-            }
+            let definitions = render_definitions(raw_definitions, &mut seen_schemas)?;
             channel_messages.entry(subject).or_default().insert(
                 format!("{event_type}.v{schema_version}"),
                 message(
@@ -89,6 +75,27 @@ impl Registry {
             "channels": channels,
         }))
     }
+}
+
+fn render_definitions(
+    raw_definitions: Definitions,
+    seen_schemas: &mut BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>, ContractError> {
+    let mut definitions = BTreeMap::new();
+    for (name, raw_schema) in raw_definitions {
+        let rendered = serde_json::to_value(raw_schema)?;
+        if let Some(original) = seen_schemas.get(&name) {
+            if *original != rendered {
+                return Err(ContractError::SchemaName(name));
+            }
+        } else {
+            seen_schemas.insert(name.clone(), rendered.clone());
+        }
+        let mut definition = rendered;
+        relocate_schema_refs(&mut definition);
+        definitions.insert(name, definition);
+    }
+    Ok(definitions)
 }
 
 const CREATED_AT_DESCRIPTION: &str =
@@ -154,10 +161,10 @@ fn payload_schema_reference(name: &str) -> String {
 }
 
 fn relocate_schema_refs(schema: &mut Value) {
-    let Some(schema) = schema.as_object_mut() else {
+    let Some(object) = schema.as_object_mut() else {
         return;
     };
-    if let Some(Value::String(reference)) = schema.get_mut("$ref")
+    if let Some(Value::String(reference)) = object.get_mut("$ref")
         && let Some(name) = reference.strip_prefix("#/components/schemas/")
     {
         *reference = format!("#/$defs/{name}");
@@ -169,14 +176,14 @@ fn relocate_schema_refs(schema: &mut Value) {
         "patternProperties",
         "dependentSchemas",
     ] {
-        if let Some(Value::Object(children)) = schema.get_mut(keyword) {
+        if let Some(Value::Object(children)) = object.get_mut(keyword) {
             for child in children.values_mut() {
                 relocate_schema_refs(child);
             }
         }
     }
     for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
-        if let Some(Value::Array(children)) = schema.get_mut(keyword) {
+        if let Some(Value::Array(children)) = object.get_mut(keyword) {
             for child in children {
                 relocate_schema_refs(child);
             }
@@ -195,7 +202,7 @@ fn relocate_schema_refs(schema: &mut Value) {
         "then",
         "else",
     ] {
-        if let Some(child) = schema.get_mut(keyword) {
+        if let Some(child) = object.get_mut(keyword) {
             relocate_schema_refs(child);
         }
     }

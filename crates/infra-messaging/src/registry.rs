@@ -61,10 +61,10 @@ where
         &self,
         id: &str,
         occurred_at: time::UtcDateTime,
-        payload: &[u8],
+        payload_json: &[u8],
         context: OperationContext,
     ) -> Result<HandlerFuture<'_>, serde_json::Error> {
-        let payload = serde_json::from_slice::<T>(payload)?;
+        let payload = serde_json::from_slice::<T>(payload_json)?;
         let event = Event {
             id: id.to_owned(),
             occurred_at,
@@ -241,10 +241,7 @@ impl<T: EventPayload + 'static> RouteEntry<'_, T> {
     where
         T: DeserializeOwned,
     {
-        self.entry.handler = Some(Arc::new(TypedEventHandler {
-            handler,
-            payload: PhantomData,
-        }));
+        self.entry.bind_handler(handler);
     }
 }
 
@@ -303,6 +300,20 @@ impl RegisteredRoute {
             && self.subject == route.subject
             && self.schema.is_some() == route.schema.is_some()
     }
+
+    fn bind_handler<T: EventPayload + DeserializeOwned + 'static>(
+        &mut self,
+        handler: impl EventHandler<T>,
+    ) {
+        self.handler = Some(Arc::new(TypedEventHandler {
+            handler,
+            payload: PhantomData,
+        }));
+    }
+
+    const fn is_handled(&self) -> bool {
+        self.handler.is_some()
+    }
 }
 
 impl std::fmt::Debug for Registry {
@@ -329,7 +340,7 @@ impl std::fmt::Debug for Registry {
                 &self
                     .routes
                     .values()
-                    .filter(|entry| entry.handler.is_some())
+                    .filter(|entry| entry.is_handled())
                     .count(),
             )
             .finish()
@@ -357,20 +368,20 @@ impl Registry {
                 schema_version,
             });
         }
-        let std::collections::hash_map::Entry::Vacant(entry) = self.routes.entry(key) else {
+        let std::collections::hash_map::Entry::Vacant(vacant) = self.routes.entry(key) else {
             return Err(RegistryError::DuplicateRoute {
                 event_type,
                 schema_version,
             });
         };
-        let entry = entry.insert(RegisteredRoute {
+        let registered = vacant.insert(RegisteredRoute {
             subject: route.subject.clone(),
             schema: route.schema,
             payload_type: TypeId::of::<T>(),
             handler: None,
         });
         Ok(RouteEntry {
-            entry,
+            entry: registered,
             max_publication_bytes: &mut self.max_publication_bytes,
             payload: PhantomData,
         })
@@ -384,32 +395,30 @@ impl Registry {
     where
         T: EventPayload + DeserializeOwned + 'static,
     {
+        let key = route_key::<T>();
         let Some(entry) = self
             .routes
-            .get_mut(&route_key::<T>())
+            .get_mut(&key)
             .filter(|entry| entry.matches(route))
         else {
             return Err(RegistryError::MissingRoute {
-                event_type: T::EVENT_TYPE,
-                schema_version: T::SCHEMA_VERSION,
+                event_type: key.event_type,
+                schema_version: key.schema_version,
             });
         };
-        if entry.handler.is_some() {
+        if entry.is_handled() {
             return Err(RegistryError::DuplicateHandler {
-                event_type: T::EVENT_TYPE,
-                schema_version: T::SCHEMA_VERSION,
+                event_type: key.event_type,
+                schema_version: key.schema_version,
             });
         }
-        entry.handler = Some(Arc::new(TypedEventHandler {
-            handler,
-            payload: PhantomData,
-        }));
+        entry.bind_handler(handler);
         Ok(())
     }
 
     #[must_use]
     pub fn has_handlers(&self) -> bool {
-        self.routes.values().any(|entry| entry.handler.is_some())
+        self.routes.values().any(RegisteredRoute::is_handled)
     }
 
     pub fn require_handlers(&self) -> Result<(), RegistryError> {
@@ -441,7 +450,7 @@ impl Registry {
     pub(crate) fn handled_routes(
         &self,
     ) -> impl Iterator<Item = (&RouteKey<'static>, &RegisteredRoute)> {
-        self.routes().filter(|(_, entry)| entry.handler.is_some())
+        self.routes().filter(|(_, entry)| entry.is_handled())
     }
 
     pub(crate) fn into_handled_routes(

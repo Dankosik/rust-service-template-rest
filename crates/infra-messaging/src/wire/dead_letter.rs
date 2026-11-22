@@ -33,6 +33,7 @@ pub enum RestoreError {
 }
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
+const REDRIVE_ID_PREFIX: &str = "redrive-";
 const ORIGINAL_ID_PRESENT: HeaderName = HeaderName::from_static("Original-Message-Id-Present");
 const ORIGINAL_ID_PRESENT_VALUE: &str = "1";
 const RETAINED_HEADERS: [HeaderName; 6] = [
@@ -67,38 +68,44 @@ pub(crate) struct DeadLetterBounds {
 }
 
 fn transfer_headers<T>(
-    publication_id: T,
-    subject: T,
+    transfer_id: T,
+    original_subject: T,
     reason: T,
-    stream: T,
+    dead_letter_stream: T,
 ) -> [(HeaderName, T); 4] {
     [
-        (header_name::NATS_MSG_ID, publication_id),
-        (header_name::ORIGINAL_SUBJECT, subject),
+        (header_name::NATS_MSG_ID, transfer_id),
+        (header_name::ORIGINAL_SUBJECT, original_subject),
         (header_name::DEAD_LETTER_REASON, reason),
-        (async_nats::header::NATS_EXPECTED_STREAM, stream),
+        (async_nats::header::NATS_EXPECTED_STREAM, dead_letter_stream),
     ]
 }
 
 pub(crate) fn dead_letter_bounds(
     source_bytes: usize,
-    subject_bytes: usize,
-    stream_bytes: usize,
+    original_subject_bytes: usize,
+    dead_letter_stream_bytes: usize,
 ) -> Option<DeadLetterBounds> {
     let reason_bytes = EnumMap::from_fn(|reason: DeadLetterReason| reason.label().len())
         .into_values()
         .max()?;
     let transfer_id_bytes = DEAD_LETTER_ID_PREFIX.len() + SHA256_HEX_LEN;
-    let identity_bytes =
-        checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?.max(checked_header_line_bytes(
-            ORIGINAL_ID_PRESENT.as_ref(),
-            ORIGINAL_ID_PRESENT_VALUE.len(),
-        )?);
-    let additions = transfer_headers(transfer_id_bytes, subject_bytes, reason_bytes, stream_bytes)
-        .into_iter()
-        .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
-            bytes.checked_add(checked_header_line_bytes(name.as_ref(), value_bytes)?)
-        })?;
+    let message_id_line = checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?;
+    let original_id_flag_line = checked_header_line_bytes(
+        ORIGINAL_ID_PRESENT.as_ref(),
+        ORIGINAL_ID_PRESENT_VALUE.len(),
+    )?;
+    let identity_bytes = message_id_line.max(original_id_flag_line);
+    let additions = transfer_headers(
+        transfer_id_bytes,
+        original_subject_bytes,
+        reason_bytes,
+        dead_letter_stream_bytes,
+    )
+    .into_iter()
+    .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
+        bytes.checked_add(checked_header_line_bytes(name.as_ref(), value_bytes)?)
+    })?;
     let framing_reserve = HEADER_PREAMBLE_BYTES.max(RETAINED_HEADERS.len() * 2 + 4);
     let framed_source = source_bytes.checked_add(framing_reserve)?;
     Some(DeadLetterBounds {
@@ -111,8 +118,8 @@ pub(crate) fn dead_letter_bounds(
 
 pub(crate) fn dead_letter_headers(
     original: &HeaderMap,
-    subject: &str,
-    stream: &str,
+    original_subject: &str,
+    dead_letter_stream: &str,
     transfer_id: &str,
     reason: DeadLetterReason,
 ) -> HeaderMap {
@@ -132,7 +139,12 @@ pub(crate) fn dead_letter_headers(
     } else if message_id == transfer_id {
         headers.insert(ORIGINAL_ID_PRESENT, ORIGINAL_ID_PRESENT_VALUE);
     }
-    for (name, value) in transfer_headers(transfer_id, subject, reason.label(), stream) {
+    for (name, value) in transfer_headers(
+        transfer_id,
+        original_subject,
+        reason.label(),
+        dead_letter_stream,
+    ) {
         headers.insert(name, value);
     }
     headers
@@ -181,8 +193,8 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Re
     if is_zero_time(occurred_at) {
         return Err(RestoreError::CreatedAtRequired);
     }
-    let publication_id = record_id(
-        "redrive-",
+    let redrive_publication_id = record_id(
+        REDRIVE_ID_PREFIX,
         &record.stream,
         record.stream_sequence,
         record.stored_at,
@@ -191,7 +203,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, Re
     PreparedEvent::from_parts(PreparedEventParts {
         subject: subject.to_owned(),
         message_id: message_id.to_owned(),
-        publication_id,
+        publication_id: redrive_publication_id,
         event_type: event_type.to_owned(),
         schema_version,
         occurred_at,
@@ -217,14 +229,14 @@ fn has_ambiguous_original_id(
 }
 
 pub fn dead_letter_id(
-    stream: &str,
+    source_stream: &str,
     stream_sequence: u64,
     stored_at: OffsetDateTime,
     original_publication_id: &str,
 ) -> Result<String, TimestampOutOfRange> {
     record_id(
         DEAD_LETTER_ID_PREFIX,
-        stream,
+        source_stream,
         stream_sequence,
         stored_at,
         original_publication_id,
@@ -233,23 +245,23 @@ pub fn dead_letter_id(
 
 fn record_id(
     prefix: &str,
-    stream: &str,
+    source_stream: &str,
     stream_sequence: u64,
     stored_at: OffsetDateTime,
-    publication_id: &str,
+    original_publication_id: &str,
 ) -> Result<String, TimestampOutOfRange> {
-    let stored_at = stored_at.checked_to_utc().ok_or(TimestampOutOfRange)?;
-    let stored_at = format_timestamp_bytes(stored_at)?;
+    let stored_at_bytes =
+        format_timestamp_bytes(stored_at.checked_to_utc().ok_or(TimestampOutOfRange)?)?;
     let mut sequence = std::fmt::NumBuffer::new();
-    let mut hash = Sha256::new();
-    hash.update(stream.as_bytes());
-    hash.update([0]);
-    hash.update(stream_sequence.format_into(&mut sequence).as_bytes());
-    hash.update([0]);
-    hash.update(&stored_at);
-    hash.update([0]);
-    hash.update(publication_id.as_bytes());
-    Ok(prefixed_digest_hex(prefix, &hash.finalize().into()))
+    let mut hasher = Sha256::new();
+    hasher.update(source_stream.as_bytes());
+    hasher.update([0]);
+    hasher.update(stream_sequence.format_into(&mut sequence).as_bytes());
+    hasher.update([0]);
+    hasher.update(&stored_at_bytes);
+    hasher.update([0]);
+    hasher.update(original_publication_id.as_bytes());
+    Ok(prefixed_digest_hex(prefix, &hasher.finalize().into()))
 }
 
 #[cfg(test)]

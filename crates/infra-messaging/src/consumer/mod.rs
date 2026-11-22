@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use async_nats::jetstream::consumer::pull;
+use async_nats::jetstream::consumer::{self, pull};
 use async_nats::jetstream::consumer::{
     AckPolicy, Config, DeliverPolicy, PullConsumer, ReplayPolicy,
 };
@@ -71,9 +71,9 @@ fn pull_delivery_bytes(
 #[derive(Debug)]
 pub struct Consumer {
     shared: Arc<Shared>,
-    pull: PullConsumer,
+    durable: PullConsumer,
     concurrency: NonZeroUsize,
-    pull_delivery_bytes: usize,
+    delivery_bytes: usize,
     retained_pull_bytes: usize,
     handler: Arc<DeliveryHandler>,
     durable_ready: Arc<AtomicBool>,
@@ -102,25 +102,25 @@ impl health::Probe for ConsumerProbe {
 
 #[derive(Clone, Copy)]
 struct PullLimits {
-    messages: usize,
-    bytes: usize,
+    max_messages: usize,
+    max_bytes: usize,
     expires: Duration,
 }
 
 impl PullLimits {
     fn for_durable(config: &Config, delivery_bytes: usize) -> Option<Self> {
-        fn positive_limit(value: i64) -> usize {
+        fn limit_or_unbounded(value: i64) -> usize {
             usize::try_from(value)
                 .ok()
                 .filter(|limit| *limit > 0)
                 .unwrap_or(usize::MAX)
         }
 
-        let bytes = positive_limit(config.max_bytes);
-        let messages = positive_limit(config.max_batch).min(bytes / delivery_bytes);
-        (messages > 0).then_some(Self {
-            messages,
-            bytes,
+        let max_bytes = limit_or_unbounded(config.max_bytes);
+        let max_messages = limit_or_unbounded(config.max_batch).min(max_bytes / delivery_bytes);
+        (max_messages > 0).then_some(Self {
+            max_messages,
+            max_bytes,
             expires: if config.max_expires.is_zero() {
                 PULL_EXPIRES
             } else {
@@ -197,27 +197,27 @@ impl Consumer {
             &options.filter_subject,
             server.max_payload,
         )?;
-        let delivery_bytes = pull_delivery_bytes(
-            shared.max_payload_bytes,
-            subject_bytes,
-            shared.source_stream.as_str(),
-            &options.durable_name,
-            server.domain.as_deref(),
-        )
-        .ok_or(MessagingError::Bounds)?;
-        let retained_pull_bytes = pull_delivery_bytes(
-            PUBLICATION_WINDOW_BYTES - wire::HEADER_LIMIT_BYTES,
-            subject_bytes,
-            shared.source_stream.as_str(),
-            &options.durable_name,
-            server.domain.as_deref(),
-        )
-        .filter(|bytes| i64::try_from(*bytes).is_ok())
-        .ok_or(MessagingError::Bounds)?;
-        delivery_bytes
+        let delivery_bytes_for = |payload_bytes| {
+            pull_delivery_bytes(
+                payload_bytes,
+                subject_bytes,
+                shared.source_stream.as_str(),
+                &options.durable_name,
+                server.domain.as_deref(),
+            )
+        };
+        let delivery_bytes =
+            delivery_bytes_for(shared.max_payload_bytes).ok_or(MessagingError::Bounds)?;
+        let retained_pull_bytes =
+            delivery_bytes_for(PUBLICATION_WINDOW_BYTES - wire::HEADER_LIMIT_BYTES)
+                .filter(|bytes| i64::try_from(*bytes).is_ok())
+                .ok_or(MessagingError::Bounds)?;
+        let in_flight_bytes_fit_i64 = delivery_bytes
             .checked_mul(options.concurrency.get())
-            .and_then(|bytes| i64::try_from(bytes).ok())
-            .ok_or(MessagingError::Bounds)?;
+            .is_some_and(|bytes| i64::try_from(bytes).is_ok());
+        if !in_flight_bytes_fit_i64 {
+            return Err(MessagingError::Bounds);
+        }
         let config = async_nats::jetstream::consumer::pull::Config {
             durable_name: Some(options.durable_name.clone()),
             filter_subject: options.filter_subject.clone(),
@@ -229,7 +229,7 @@ impl Consumer {
             replay_policy: ReplayPolicy::Instant,
             ..Default::default()
         };
-        let pull = bounded_operation(
+        let durable = bounded_operation(
             context,
             bind_durable(
                 &shared.jetstream,
@@ -239,7 +239,7 @@ impl Consumer {
             ),
         )
         .await?;
-        if PullLimits::for_durable(&pull.cached_info().config, delivery_bytes).is_none() {
+        if PullLimits::for_durable(&durable.cached_info().config, delivery_bytes).is_none() {
             tracing::warn!(operation = "bind_consumer", error.type = "durable_max_bytes", reason = %MessagingError::Topology, "messaging_admission_failed");
             return Err(MessagingError::Topology);
         }
@@ -251,8 +251,8 @@ impl Consumer {
                 admission,
             )),
             shared,
-            pull,
-            pull_delivery_bytes: delivery_bytes,
+            durable,
+            delivery_bytes,
             retained_pull_bytes,
             durable_ready: Arc::new(AtomicBool::new(true)),
         })
@@ -319,13 +319,11 @@ impl Consumer {
                 tokio::select! {
                     biased;
                     () = &mut drained => break 'pulls,
-                    Some(joined) = deliveries.join_next() => check_delivery_task_result(joined)?,
+                    Some(joined) = deliveries.join_next() => delivery_task_result(joined)?,
                 }
             }
-            let status = tokio::select! {
-                biased;
-                () = &mut drained => break 'pulls,
-                status = self.refresh_durable_status() => status,
+            let Some(status) = self.durable_status_unless_drained(drain).await else {
+                break 'pulls;
             };
             let limits = match status {
                 DurableStatus::Lost => return Err(ConsumerError::ConsumerLost),
@@ -334,28 +332,31 @@ impl Consumer {
                 }
                 DurableStatus::Ready(limits) => limits,
                 DurableStatus::Unavailable(error) => {
-                    pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
+                    pull_failed(
+                        PullPhase::ConsumerInfo,
+                        consumer_info_error_type(&error.kind()),
+                    );
                     if wait_for_backoff(drain).await.is_break() {
                         break 'pulls;
                     }
                     continue;
                 }
             };
-            let budget = self.pull_budget(mode, deliveries.len(), limits);
-            let opened = self.open_batch(&budget, deliveries, drain).await?;
+            let request_limits = self.request_limits(mode, deliveries.len(), limits);
+            let opened = self.open_batch(&request_limits, deliveries, drain).await?;
             let messages = match opened {
                 BatchOpen::Ready(messages) => messages,
                 BatchOpen::Retry => continue 'pulls,
                 BatchOpen::Stop => break 'pulls,
             };
             match self
-                .dispatch_batch(messages, deliveries, drain, &budget)
+                .dispatch_batch(messages, deliveries, drain, &request_limits)
                 .await?
             {
                 BatchEnd::Filled => {
                     if mode == PullMode::SingleRetainedMessage {
                         if let Some(joined) = deliveries.join_next().await {
-                            check_delivery_task_result(joined)?;
+                            delivery_task_result(joined)?;
                         }
                         mode = PullMode::Normal;
                     }
@@ -371,7 +372,7 @@ impl Consumer {
             }
         }
         while let Some(joined) = deliveries.join_next().await {
-            check_delivery_task_result(joined)?;
+            delivery_task_result(joined)?;
         }
         Ok(())
     }
@@ -387,14 +388,17 @@ impl Consumer {
         }
         match failure {
             BatchFailure::MaxBytesExceededBeforeFirstDelivery => {
-                pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
+                pull_failed(
+                    PullPhase::BatchReceive,
+                    BatchReceiveError::MaxBytesExceeded.label(),
+                );
                 if mode == PullMode::SingleRetainedMessage {
                     return Err(ConsumerError::RetainedMessageTooLarge);
                 }
                 Ok(ControlFlow::Continue(PullMode::SingleRetainedMessage))
             }
-            BatchFailure::Stream { phase, error_kind } => {
-                pull_failed(phase, error_kind);
+            BatchFailure::Stream { phase, error_type } => {
+                pull_failed(phase, error_type);
                 if wait_for_backoff(drain).await.is_break() {
                     return Ok(ControlFlow::Break(()));
                 }
@@ -405,17 +409,17 @@ impl Consumer {
 
     async fn open_batch(
         &self,
-        budget: &PullLimits,
+        request_limits: &PullLimits,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         drain: &CancellationToken,
     ) -> Result<BatchOpen, ConsumerError> {
         let request = tokio::time::timeout(
             BROKER_OPERATION_BUDGET,
-            self.pull
+            self.durable
                 .batch()
-                .max_messages(budget.messages)
-                .max_bytes(budget.bytes)
-                .expires(budget.expires)
+                .max_messages(request_limits.max_messages)
+                .max_bytes(request_limits.max_bytes)
+                .expires(request_limits.expires)
                 .messages(),
         );
         let drained = drain.cancelled();
@@ -425,20 +429,20 @@ impl Consumer {
                 biased;
                 () = &mut drained => return Ok(BatchOpen::Stop),
                 Some(joined) = deliveries.join_next(), if !deliveries.is_empty() => {
-                    check_delivery_task_result(joined)?;
+                    delivery_task_result(joined)?;
                 }
                 result = &mut request => break result,
             }
         };
-        let error_kind = match result {
+        let error_type = match result {
             Ok(Ok(messages)) => return Ok(BatchOpen::Ready(messages)),
-            Ok(Err(error)) => batch_create_error_kind(error.kind()),
-            Err(_) => "local_timeout",
+            Ok(Err(error)) => batch_create_error_type(error.kind()),
+            Err(_) => LOCAL_TIMEOUT,
         };
         if drain.is_cancelled() {
             return Ok(BatchOpen::Stop);
         }
-        pull_failed("batch_create", error_kind);
+        pull_failed(PullPhase::BatchCreate, error_type);
         if self.recheck_durable_consumer(drain).await?.is_break()
             || wait_for_backoff(drain).await.is_break()
         {
@@ -451,43 +455,36 @@ impl Consumer {
         &self,
         drain: &CancellationToken,
     ) -> Result<ControlFlow<()>, ConsumerError> {
+        let Some(status) = self.durable_status_unless_drained(drain).await else {
+            return Ok(ControlFlow::Break(()));
+        };
+        if matches!(status, DurableStatus::Lost) {
+            return Err(ConsumerError::ConsumerLost);
+        }
+        Ok(if drain.is_cancelled() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    }
+
+    async fn durable_status_unless_drained(
+        &self,
+        drain: &CancellationToken,
+    ) -> Option<DurableStatus> {
         tokio::select! {
             biased;
-            () = drain.cancelled() => Ok(ControlFlow::Break(())),
-            status = self.refresh_durable_status() => match status {
-                DurableStatus::Lost => Err(ConsumerError::ConsumerLost),
-                DurableStatus::Ready(_) | DurableStatus::Unavailable(_) => {
-                    if drain.is_cancelled() {
-                        Ok(ControlFlow::Break(()))
-                    } else {
-                        Ok(ControlFlow::Continue(()))
-                    }
-                }
-            },
+            () = drain.cancelled() => None,
+            status = self.refresh_durable_status() => Some(status),
         }
     }
 
     async fn refresh_durable_status(&self) -> DurableStatus {
-        let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, self.pull.get_info())
+        let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, self.durable.get_info())
             .await
             .unwrap_or_else(|_| Err(ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut)));
         let status = match result {
-            Ok(info) => {
-                let bound = self.pull.cached_info();
-                if let Some(error_type) = durable_contract_error_type(&bound.config, &info.config) {
-                    tracing::warn!(
-                        operation = "consumer_info",
-                        error.type = error_type,
-                        "messaging_durable_configuration_changed"
-                    );
-                    DurableStatus::Lost
-                } else if info.created == bound.created {
-                    PullLimits::for_durable(&info.config, self.pull_delivery_bytes)
-                        .map_or(DurableStatus::Lost, DurableStatus::Ready)
-                } else {
-                    DurableStatus::Lost
-                }
-            }
+            Ok(info) => self.status_of(&info),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -503,22 +500,40 @@ impl Consumer {
         status
     }
 
-    fn pull_budget(
+    fn status_of(&self, info: &consumer::Info) -> DurableStatus {
+        let bound = self.durable.cached_info();
+        if let Some(error_type) = durable_contract_error_type(&bound.config, &info.config) {
+            tracing::warn!(
+                operation = "consumer_info",
+                error.type = error_type,
+                "messaging_durable_configuration_changed"
+            );
+            return DurableStatus::Lost;
+        }
+        if info.created != bound.created {
+            return DurableStatus::Lost;
+        }
+        PullLimits::for_durable(&info.config, self.delivery_bytes)
+            .map_or(DurableStatus::Lost, DurableStatus::Ready)
+    }
+
+    fn request_limits(
         &self,
         mode: PullMode,
         active_deliveries: usize,
         limits: PullLimits,
     ) -> PullLimits {
-        let (messages, bytes) = match mode {
-            PullMode::SingleRetainedMessage => (1, self.retained_pull_bytes.min(limits.bytes)),
+        let (max_messages, max_bytes) = match mode {
+            PullMode::SingleRetainedMessage => (1, self.retained_pull_bytes.min(limits.max_bytes)),
             PullMode::Normal => {
-                let messages = (self.concurrency.get() - active_deliveries).min(limits.messages);
-                (messages, messages * self.pull_delivery_bytes)
+                let max_messages =
+                    (self.concurrency.get() - active_deliveries).min(limits.max_messages);
+                (max_messages, max_messages * self.delivery_bytes)
             }
         };
         PullLimits {
-            messages,
-            bytes,
+            max_messages,
+            max_bytes,
             ..limits
         }
     }
@@ -528,32 +543,21 @@ impl Consumer {
         mut messages: pull::Batch,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         drain: &CancellationToken,
-        budget: &PullLimits,
+        request_limits: &PullLimits,
     ) -> Result<BatchEnd, ConsumerError> {
         let result = self
-            .dispatch_batch_messages(&mut messages, deliveries, drain, budget)
+            .dispatch_batch_messages(&mut messages, deliveries, drain, request_limits)
             .await;
+        let release = release_prefetched_messages(
+            messages,
+            request_limits.max_messages,
+            drain,
+            &self.handler.filter_subject,
+        );
         match &result {
-            Ok(BatchEnd::Stopped | BatchEnd::Closed | BatchEnd::Failed(_)) => {
-                release_prefetched_messages(
-                    messages,
-                    budget.messages,
-                    drain,
-                    &self.handler.filter_subject,
-                )
-                .await;
-            }
+            Ok(BatchEnd::Stopped | BatchEnd::Closed | BatchEnd::Failed(_)) => release.await,
             Err(error) if error.requires_delivery_drain() => {
-                let _ = tokio::time::timeout(
-                    BROKER_OPERATION_BUDGET,
-                    release_prefetched_messages(
-                        messages,
-                        budget.messages,
-                        drain,
-                        &self.handler.filter_subject,
-                    ),
-                )
-                .await;
+                let _ = tokio::time::timeout(BROKER_OPERATION_BUDGET, release).await;
             }
             Ok(BatchEnd::Filled) | Err(_) => {}
         }
@@ -565,19 +569,20 @@ impl Consumer {
         messages: &mut pull::Batch,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         drain: &CancellationToken,
-        budget: &PullLimits,
+        request_limits: &PullLimits,
     ) -> Result<BatchEnd, ConsumerError> {
-        let mut remaining = budget.messages;
+        let mut dispatched = 0;
         let drained = drain.cancelled();
         let deadline =
-            tokio::time::sleep_until(Instant::now() + budget.expires + PULL_EXPIRY_GRACE);
+            tokio::time::sleep_until(Instant::now() + request_limits.expires + PULL_EXPIRY_GRACE);
         tokio::pin!(drained, deadline);
-        while remaining > 0 {
+        while dispatched < request_limits.max_messages {
+            let first_delivery = dispatched == 0;
             let message = tokio::select! {
                 biased;
                 () = &mut drained => return Ok(BatchEnd::Stopped),
                 Some(joined) = deliveries.join_next(), if !deliveries.is_empty() => {
-                    check_delivery_task_result(joined)?;
+                    delivery_task_result(joined)?;
                     continue;
                 },
                 next = messages.next() => match next {
@@ -585,32 +590,24 @@ impl Consumer {
                     None => return Ok(BatchEnd::Closed),
                     Some(Err(error)) => {
                         let failure = classify_batch_receive_error(&error);
-                        if remaining == budget.messages
+                        if first_delivery
                             && matches!(failure, BatchReceiveError::MaxBytesExceeded)
                         {
                             return Ok(BatchEnd::Failed(
                                 BatchFailure::MaxBytesExceededBeforeFirstDelivery,
                             ));
                         }
-                        return Ok(BatchEnd::Failed(BatchFailure::Stream {
-                            phase: "batch_receive",
-                            error_kind: failure.label(),
-                        }));
+                        return Ok(BatchEnd::Failed(BatchFailure::batch_receive(failure.label())));
                     }
                 },
-                () = &mut deadline => return Ok(BatchEnd::Failed(BatchFailure::Stream {
-                    phase: "batch_receive",
-                    error_kind: "local_timeout",
-                })),
+                () = &mut deadline => {
+                    return Ok(BatchEnd::Failed(BatchFailure::batch_receive(LOCAL_TIMEOUT)));
+                }
             };
-            if remaining == budget.messages {
-                let status = tokio::select! {
-                    biased;
-                    () = &mut drained => {
-                        release_message(&message, drain, &self.handler.filter_subject).await;
-                        return Ok(BatchEnd::Stopped);
-                    }
-                    status = self.refresh_durable_status() => status,
+            if first_delivery {
+                let Some(status) = self.durable_status_unless_drained(drain).await else {
+                    release_message(&message, drain, &self.handler.filter_subject).await;
+                    return Ok(BatchEnd::Stopped);
                 };
                 match status {
                     DurableStatus::Ready(_) => {}
@@ -618,8 +615,8 @@ impl Consumer {
                     DurableStatus::Unavailable(error) => {
                         release_message(&message, drain, &self.handler.filter_subject).await;
                         return Ok(BatchEnd::Failed(BatchFailure::Stream {
-                            phase: "consumer_info",
-                            error_kind: consumer_info_error_kind(&error.kind()),
+                            phase: PullPhase::ConsumerInfo,
+                            error_type: consumer_info_error_type(&error.kind()),
                         }));
                     }
                 }
@@ -628,7 +625,7 @@ impl Consumer {
                 release_message(&message, drain, &self.handler.filter_subject).await;
                 return Ok(BatchEnd::Stopped);
             }
-            remaining -= 1;
+            dispatched += 1;
             let handler = Arc::clone(&self.handler);
             deliveries.spawn(async move { handler.handle(message).await });
         }
@@ -670,18 +667,46 @@ enum BatchEnd {
 enum BatchFailure {
     MaxBytesExceededBeforeFirstDelivery,
     Stream {
-        phase: &'static str,
-        error_kind: &'static str,
+        phase: PullPhase,
+        error_type: &'static str,
     },
 }
 
-fn check_delivery_task_result(
+impl BatchFailure {
+    const fn batch_receive(error_type: &'static str) -> Self {
+        Self::Stream {
+            phase: PullPhase::BatchReceive,
+            error_type,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PullPhase {
+    BatchCreate,
+    BatchReceive,
+    ConsumerInfo,
+}
+
+impl PullPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BatchCreate => "batch_create",
+            Self::BatchReceive => "batch_receive",
+            Self::ConsumerInfo => "consumer_info",
+        }
+    }
+}
+
+const LOCAL_TIMEOUT: &str = "local_timeout";
+
+fn delivery_task_result(
     joined: Result<Result<(), ConsumerError>, JoinError>,
 ) -> Result<(), ConsumerError> {
     joined.map_err(|_| ConsumerError::TaskEnded).flatten()
 }
 
-fn consumer_info_error_kind(kind: &ConsumerInfoErrorKind) -> &'static str {
+fn consumer_info_error_type(kind: &ConsumerInfoErrorKind) -> &'static str {
     match kind {
         ConsumerInfoErrorKind::InvalidName => "invalid_name",
         ConsumerInfoErrorKind::Offline => "offline",
@@ -694,7 +719,7 @@ fn consumer_info_error_kind(kind: &ConsumerInfoErrorKind) -> &'static str {
     }
 }
 
-fn batch_create_error_kind(kind: pull::BatchErrorKind) -> &'static str {
+fn batch_create_error_type(kind: pull::BatchErrorKind) -> &'static str {
     match kind {
         pull::BatchErrorKind::Subscribe => "subscribe",
         pull::BatchErrorKind::Pull => "pull",
@@ -740,8 +765,8 @@ fn classify_batch_receive_error(error: &async_nats::Error) -> BatchReceiveError 
     BatchReceiveError::Other(label)
 }
 
-fn pull_failed(phase: &'static str, error_type: &'static str) {
-    tracing::warn!(phase, error.type = error_type, "messaging_pull_failed");
+fn pull_failed(phase: PullPhase, error_type: &'static str) {
+    tracing::warn!(phase = phase.label(), error.type = error_type, "messaging_pull_failed");
     metrics::counter!(STREAM_ERRORS_TOTAL).increment(1);
 }
 
@@ -755,12 +780,12 @@ async fn wait_for_backoff(drain: &CancellationToken) -> ControlFlow<()> {
 
 async fn release_prefetched_messages(
     mut messages: pull::Batch,
-    slots: usize,
+    max_messages: usize,
     drain: &CancellationToken,
     filter_subject: &str,
 ) {
     let mut prefetched = Vec::new();
-    for _ in 0..slots {
+    for _ in 0..max_messages {
         let Some(Some(item)) = messages.next().now_or_never() else {
             break;
         };

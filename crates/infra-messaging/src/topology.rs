@@ -87,14 +87,6 @@ impl DeadLetterTopology {
         filter: &str,
         server_max_payload_bytes: usize,
     ) -> Result<usize, MessagingError> {
-        let bounds_unavailable = || {
-            report_refusal_failure(
-                "dead_letter_stream",
-                Refusal::DeadLetterBoundsUnavailable,
-                0,
-                None,
-            )
-        };
         let subject_bytes = if filter.contains(['*', '>']) {
             registry
                 .routes()
@@ -109,19 +101,19 @@ impl DeadLetterTopology {
             subject_bytes,
             self.stream.len(),
         )
-        .ok_or_else(bounds_unavailable)?;
+        .ok_or_else(|| {
+            Refusal::DeadLetterBoundsUnavailable.report("dead_letter_stream", 0, None)
+        })?;
         if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
-            return Err(report_refusal_failure(
+            return Err(Refusal::DeadLetterHeaderSize.report(
                 "dead_letter_stream",
-                Refusal::DeadLetterHeaderSize,
                 bounds.headers,
                 i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
             ));
         }
         if bounds.total > server_max_payload_bytes {
-            return Err(report_refusal_failure(
+            return Err(Refusal::ServerMaxPayload.report(
                 "server",
-                Refusal::ServerMaxPayload,
                 bounds.total,
                 i64::try_from(server_max_payload_bytes).ok(),
             ));
@@ -130,9 +122,8 @@ impl DeadLetterTopology {
             .dead_letter_max_message_bytes
             .filter(|limit| limit.get() < bounds.total)
         {
-            return Err(report_refusal_failure(
+            return Err(Refusal::StreamMessageSize.report(
                 "dead_letter_stream",
-                Refusal::StreamMessageSize,
                 bounds.total,
                 i64::try_from(limit.get()).ok(),
             ));
@@ -149,18 +140,16 @@ pub(crate) async fn admit_topology(
     context: &OperationContext,
 ) -> Result<TopologyAdmission, MessagingError> {
     validate_server(client, envelope_limit_bytes).map_err(|refusal| {
-        report_refusal_failure(
+        refusal.report(
             "server",
-            refusal,
             envelope_limit_bytes,
             i64::try_from(client.server_info().max_payload).ok(),
         )
     })?;
     let source = get_stream(jetstream, &options.source_stream, "source", context).await?;
     let source_config = &source.cached_info().config;
-    validate_stream_publication(source_config).map_err(|refusal| {
-        report_refusal_failure("source_stream", refusal, envelope_limit_bytes, None)
-    })?;
+    validate_stream_publication(source_config)
+        .map_err(|refusal| refusal.report("source_stream", envelope_limit_bytes, None))?;
     let consumer = match &options.consumer {
         Some(consumer) => Some(
             admit_consumer_topology(
@@ -183,6 +172,14 @@ pub(crate) async fn admit_topology(
     })
 }
 
+fn dead_letter_subject_covered(config: &StreamConfig, subject: &str) -> bool {
+    wire::valid_subject(subject)
+        && config
+            .subjects
+            .iter()
+            .any(|filter| wire::matches_filter(filter, subject))
+}
+
 async fn admit_consumer_topology(
     consumer: &ConsumerOptions,
     source_stream: &str,
@@ -193,9 +190,8 @@ async fn admit_consumer_topology(
 ) -> Result<ConsumerAdmission, MessagingError> {
     let source_max_message_bytes = source_message_limit(raw_source_limit, envelope_limit_bytes)
         .map_err(|refusal| {
-            report_refusal_failure(
+            refusal.report(
                 "source_stream",
-                refusal,
                 envelope_limit_bytes,
                 Some(raw_source_limit.into()),
             )
@@ -205,27 +201,19 @@ async fn admit_consumer_topology(
         None => stream_name_for_subject(jetstream, &consumer.dlq_subject, context).await?,
     };
     if dead_letter_name == source_stream {
-        return Err(report_refusal_failure(
+        return Err(Refusal::DeadLetterIsSource.report(
             "dead_letter_stream",
-            Refusal::DeadLetterIsSource,
             envelope_limit_bytes,
             None,
         ));
     }
     let dead_letter = get_stream(jetstream, &dead_letter_name, "dead_letter", context).await?;
     let dead_letter_config = &dead_letter.cached_info().config;
-    validate_stream_publication(dead_letter_config).map_err(|refusal| {
-        report_refusal_failure("dead_letter_stream", refusal, envelope_limit_bytes, None)
-    })?;
-    if !wire::valid_subject(&consumer.dlq_subject)
-        || !dead_letter_config
-            .subjects
-            .iter()
-            .any(|filter| wire::matches_filter(filter, &consumer.dlq_subject))
-    {
-        return Err(report_refusal_failure(
+    validate_stream_publication(dead_letter_config)
+        .map_err(|refusal| refusal.report("dead_letter_stream", envelope_limit_bytes, None))?;
+    if !dead_letter_subject_covered(dead_letter_config, &consumer.dlq_subject) {
+        return Err(Refusal::DeadLetterSubjectMismatch.report(
             "dead_letter_stream",
-            Refusal::DeadLetterSubjectMismatch,
             envelope_limit_bytes,
             None,
         ));
@@ -350,20 +338,22 @@ fn preserves_subject(transform: &SubjectTransform) -> bool {
             if wildcard_index(output) != Some(capture) {
                 return false;
             }
-        } else if output != token
-            || output
-                .strip_prefix('$')
-                .is_some_and(|value| value.parse::<i64>().is_ok())
-            || (output.len() > 4 && output.starts_with("{{") && output.ends_with("}}"))
-        {
+        } else if output != token || is_transform_reference(output) {
             return false;
         }
     }
     destination.next().is_none()
 }
 
+fn is_transform_reference(output: &str) -> bool {
+    output
+        .strip_prefix('$')
+        .is_some_and(|value| value.parse::<i64>().is_ok())
+        || (output.len() > 4 && output.starts_with("{{") && output.ends_with("}}"))
+}
+
 fn wildcard_index(output: &str) -> Option<usize> {
-    let index = output.strip_prefix('$').or_else(|| {
+    let index_text = output.strip_prefix('$').or_else(|| {
         let function = output.strip_prefix("{{")?.strip_suffix("}}")?.trim_ascii();
         let argument = function
             .strip_prefix("wildcard")
@@ -373,7 +363,7 @@ fn wildcard_index(output: &str) -> Option<usize> {
             .strip_suffix(')')?;
         Some(argument.trim_matches(' '))
     });
-    index.and_then(|value| value.parse::<usize>().ok())
+    index_text.and_then(|digits| digits.parse::<usize>().ok())
 }
 
 pub(crate) async fn recheck_outbox_source(
@@ -403,7 +393,7 @@ pub(crate) async fn recheck_outbox_source(
     })?;
     let config = &info.config;
     if let Err(refusal) = validate_stream_publication(config) {
-        report_refusal("source_stream", refusal, shared.envelope_limit_bytes, None);
+        let _ = refusal.report("source_stream", shared.envelope_limit_bytes, None);
         return Err(PublishRejection::BrokerRefused.into());
     }
     if let Err(refusal) = validate_outbox_source(config) {
@@ -637,6 +627,23 @@ pub(crate) enum Refusal {
 }
 
 impl Refusal {
+    fn report(
+        self,
+        operation: &'static str,
+        required_bytes: usize,
+        limit_bytes: Option<i64>,
+    ) -> MessagingError {
+        let failure = self.failure();
+        log_admission_refusal(
+            operation,
+            failure,
+            self.error_type(),
+            required_bytes,
+            limit_bytes,
+        );
+        failure
+    }
+
     pub(crate) const fn error_type(self) -> &'static str {
         match self {
             Self::ServerVersion => "server_version",
@@ -676,31 +683,6 @@ impl Refusal {
             | Self::StreamSealed => MessagingError::Topology,
         }
     }
-}
-
-fn report_refusal_failure(
-    operation: &'static str,
-    refusal: Refusal,
-    required_bytes: usize,
-    limit_bytes: Option<i64>,
-) -> MessagingError {
-    report_refusal(operation, refusal, required_bytes, limit_bytes);
-    refusal.failure()
-}
-
-fn report_refusal(
-    operation: &'static str,
-    refusal: Refusal,
-    required_bytes: usize,
-    limit_bytes: Option<i64>,
-) {
-    log_admission_refusal(
-        operation,
-        refusal.failure(),
-        refusal.error_type(),
-        required_bytes,
-        limit_bytes,
-    );
 }
 
 fn log_admission_refusal(
@@ -751,28 +733,37 @@ pub(crate) fn classify_topology(error: &(dyn std::error::Error + 'static)) -> Me
         .unwrap_or(MessagingError::Topology)
 }
 
-fn classify_cause(error: &(dyn std::error::Error + 'static)) -> Option<MessagingError> {
-    if let Some(error) = error.downcast_ref::<async_nats::jetstream::context::RequestError>() {
-        match error.kind() {
-            async_nats::jetstream::context::RequestErrorKind::TimedOut => {
-                return Some(MessagingError::TimedOut {
-                    budget: BROKER_OPERATION_BUDGET,
-                });
-            }
-            async_nats::jetstream::context::RequestErrorKind::InvalidSubject => {
-                return Some(MessagingError::Configuration("broker subject is invalid"));
-            }
-            _ => {}
+fn request_failure(error: &async_nats::jetstream::context::RequestError) -> Option<MessagingError> {
+    use async_nats::jetstream::context::RequestErrorKind;
+
+    match error.kind() {
+        RequestErrorKind::TimedOut => Some(MessagingError::TimedOut {
+            budget: BROKER_OPERATION_BUDGET,
+        }),
+        RequestErrorKind::InvalidSubject => {
+            Some(MessagingError::Configuration("broker subject is invalid"))
         }
+        _ => None,
     }
-    let stream_error = error
+}
+
+fn classify_cause(error: &(dyn std::error::Error + 'static)) -> Option<MessagingError> {
+    if let Some(failure) = error
+        .downcast_ref::<async_nats::jetstream::context::RequestError>()
+        .and_then(request_failure)
+    {
+        return Some(failure);
+    }
+    let refused = match error
         .downcast_ref::<GetStreamError>()
-        .and_then(stream_broker_error);
-    stream_error
-        .as_ref()
-        .or_else(|| error.downcast_ref::<async_nats::jetstream::Error>())
-        .is_some_and(is_auth_refusal)
-        .then_some(MessagingError::Authentication)
+        .and_then(stream_broker_error)
+    {
+        Some(broker_error) => is_auth_refusal(&broker_error),
+        None => error
+            .downcast_ref::<async_nats::jetstream::Error>()
+            .is_some_and(is_auth_refusal),
+    };
+    refused.then_some(MessagingError::Authentication)
 }
 
 #[cfg(test)]

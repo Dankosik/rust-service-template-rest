@@ -57,19 +57,18 @@ impl CredentialsFileError {
 pub(crate) struct CredentialsFile {
     path: Arc<Path>,
     last_jwt_digest: Arc<Mutex<[u8; 32]>>,
-    reading: Arc<Semaphore>,
+    single_reader: Arc<Semaphore>,
 }
 
 impl CredentialsFile {
     pub(crate) async fn admit(path: &Path) -> Result<Self, CredentialsFileError> {
         let path: Arc<Path> = Arc::from(path);
-        let reading = Arc::new(Semaphore::new(1));
-        let (jwt, _) = read(&path, &reading).await?;
-        let digest = Sha256::digest(jwt.as_bytes()).into();
+        let single_reader = Arc::new(Semaphore::new(1));
+        let (jwt, _) = read_credentials(&path, &single_reader).await?;
         Ok(Self {
             path,
-            last_jwt_digest: Arc::new(Mutex::new(digest)),
-            reading,
+            last_jwt_digest: Arc::new(Mutex::new(jwt_digest(&jwt))),
+            single_reader,
         })
     }
 
@@ -77,28 +76,22 @@ impl CredentialsFile {
         &self,
         nonce: &[u8],
     ) -> Result<async_nats::Auth, CredentialsFileError> {
-        let credentials = read(&self.path, &self.reading).await;
-        let (mut jwt, key) = credentials.inspect_err(|error| {
-            error.observe_challenge_failure();
-            tracing::warn!(
-                error.type = error.error_type(),
-                io.error_kind = error.io_error_kind(),
-                "messaging_credentials_file_failed"
-            );
-        })?;
+        let (mut jwt, key) = read_credentials(&self.path, &self.single_reader)
+            .await
+            .inspect_err(|error| {
+                error.observe_challenge_failure();
+                tracing::warn!(
+                    error.type = error.error_type(),
+                    io.error_kind = error.io_error_kind(),
+                    "messaging_credentials_file_failed"
+                );
+            })?;
         let signature = key
             .sign(nonce)
             .map_err(|_| CredentialsFileError::Malformed)
             .inspect_err(|error| error.observe_challenge_failure())?;
-        let digest: [u8; 32] = Sha256::digest(jwt.as_bytes()).into();
-        let jwt_changed = {
-            let mut previous = self.last_jwt_digest.lock();
-            let changed = *previous != digest;
-            if changed {
-                *previous = digest;
-            }
-            changed
-        };
+        let digest = jwt_digest(&jwt);
+        let jwt_changed = std::mem::replace(&mut *self.last_jwt_digest.lock(), digest) != digest;
         if jwt_changed {
             tracing::info!("messaging_credentials_reloaded");
         }
@@ -111,26 +104,29 @@ impl CredentialsFile {
     }
 }
 
-async fn read(
+fn jwt_digest(jwt: &str) -> [u8; 32] {
+    Sha256::digest(jwt.as_bytes()).into()
+}
+
+async fn read_credentials(
     path: &Arc<Path>,
-    reading: &Arc<Semaphore>,
+    single_reader: &Arc<Semaphore>,
 ) -> Result<(Zeroizing<String>, nkeys::KeyPair), CredentialsFileError> {
-    let permit = reading
+    let permit = single_reader
         .clone()
         .try_acquire_owned()
         .map_err(|_| CredentialsFileError::Unreadable(std::io::ErrorKind::ResourceBusy))?;
     let path = Arc::clone(path);
-    let content = tokio::task::spawn_blocking(move || {
+    let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         read_file(&path)
     })
     .await
     .map_err(|_| CredentialsFileError::Unreadable(std::io::ErrorKind::Other))?
     .map_err(|error| CredentialsFileError::Unreadable(error.kind()))?;
-    let text = std::str::from_utf8(&content)
+    let text = std::str::from_utf8(&bytes)
         .map_err(|_| CredentialsFileError::Unreadable(io::ErrorKind::InvalidData))?;
-    let (jwt, key) = parse(text)?;
-    Ok((Zeroizing::new(jwt), key))
+    parse_credentials(text)
 }
 
 #[expect(
@@ -164,9 +160,11 @@ fn read_file(path: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 
-fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
+fn parse_credentials(
+    content: &str,
+) -> Result<(Zeroizing<String>, nkeys::KeyPair), CredentialsFileError> {
     async_nats::parse_jwt_and_key_from_creds(content)
-        .map(|(jwt, key)| (jwt.to_owned(), key))
+        .map(|(jwt, key)| (Zeroizing::new(jwt.to_owned()), key))
         .map_err(|_| CredentialsFileError::Malformed)
 }
 
@@ -191,8 +189,8 @@ mod tests {
         let user = nkeys::KeyPair::new_user();
         let content = creds("eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln", &user);
 
-        let (jwt, key) = parse(&content).unwrap();
-        assert_eq!(jwt, "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
+        let (jwt, key) = parse_credentials(&content).unwrap();
+        assert_eq!(jwt.as_str(), "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
         assert_eq!(key.public_key(), user.public_key());
         assert!(
             async_nats::ConnectOptions::new()
@@ -203,13 +201,13 @@ mod tests {
         let crlf = content.replace('\n', "\r\n");
         let at_eof = crlf.trim_end_matches(['\r', '\n', '*']);
         assert!(at_eof.ends_with("------END USER NKEY SEED------"));
-        let (jwt, key) = parse(at_eof).unwrap();
+        let (jwt, key) = parse_credentials(at_eof).unwrap();
         assert!(
             async_nats::ConnectOptions::new()
                 .credentials(at_eof)
                 .is_ok()
         );
-        assert_eq!(jwt, "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
+        assert_eq!(jwt.as_str(), "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
         assert_eq!(key.public_key(), user.public_key());
 
         let padded = creds(" user.jwt.value", &user);
@@ -222,7 +220,7 @@ mod tests {
              -----BEGIN USER NKEY SEED-----\nnot-a-seed\n------END USER NKEY SEED------\n",
         ] {
             assert_eq!(
-                parse(malformed).unwrap_err(),
+                parse_credentials(malformed).unwrap_err(),
                 CredentialsFileError::Malformed
             );
             assert!(

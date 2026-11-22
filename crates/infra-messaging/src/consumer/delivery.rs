@@ -93,7 +93,7 @@ struct RegisteredHandlers {
 
 impl RegisteredHandlers {
     fn from_registry(registry: Registry) -> Self {
-        let event = |event_type| EventMetrics {
+        let event_metrics = |event_type| EventMetrics {
             event_type,
             outcomes: Outcomes::register(
                 HANDLER_TOTAL,
@@ -108,7 +108,7 @@ impl RegisteredHandlers {
             registered
                 .entry(key.event_type)
                 .or_insert_with(|| EventDispatch {
-                    metrics: event(key.event_type),
+                    metrics: event_metrics(key.event_type),
                     routes: Vec::new(),
                 })
                 .routes
@@ -120,7 +120,7 @@ impl RegisteredHandlers {
         }
         Self {
             registered,
-            unregistered: event(UNREGISTERED),
+            unregistered: event_metrics(UNREGISTERED),
         }
     }
 
@@ -234,8 +234,9 @@ impl DeliveryHandler {
 
     pub(super) async fn handle(&self, message: Message) -> Result<(), ConsumerError> {
         let Some((info, delivery_attempt)) = message.info().ok().and_then(|info| {
-            let attempt = usize::try_from(info.delivered).ok()?;
-            Some((info, attempt))
+            usize::try_from(info.delivered)
+                .ok()
+                .map(|attempt| (info, attempt))
         }) else {
             tracing::warn!(
                 messaging.destination.template = self.filter_subject.as_str(),
@@ -305,7 +306,36 @@ impl DeliveryHandler {
             &self.abort,
         )
         .await;
-        target.metrics.outcomes.record(outcome, started.elapsed());
+        self.report_outcome(target, outcome, delivery_attempt, started.elapsed());
+        match settlement(outcome, delivery_attempt) {
+            Settlement::Acknowledge => {
+                acknowledge(
+                    &self.shared.connection.client,
+                    message,
+                    &self.filter_subject,
+                )
+                .await;
+                Ok(())
+            }
+            Settlement::DeadLetter(reason) => {
+                self.dead_letter(message, info, reason, target.metrics.event_type)
+                    .await
+            }
+            Settlement::Redeliver(delay) => {
+                redeliver_after(message, delay, &self.filter_subject).await;
+                Ok(())
+            }
+        }
+    }
+
+    fn report_outcome(
+        &self,
+        target: DispatchTarget<'_>,
+        outcome: Outcome,
+        delivery_attempt: usize,
+        elapsed: Duration,
+    ) {
+        target.metrics.outcomes.record(outcome, elapsed);
         let event_type = target.metrics.event_type;
         let label = outcome.label();
         record_span_outcome(
@@ -330,24 +360,6 @@ impl DeliveryHandler {
                 "messaging_delivery_failed"
             ),
         }
-
-        match settlement(outcome, delivery_attempt) {
-            Settlement::Acknowledge => {
-                acknowledge(
-                    &self.shared.connection.client,
-                    message,
-                    &self.filter_subject,
-                )
-                .await;
-            }
-            Settlement::DeadLetter(reason) => {
-                return self.dead_letter(message, info, reason, event_type).await;
-            }
-            Settlement::Redeliver(delay) => {
-                redeliver_after(message, delay, &self.filter_subject).await;
-            }
-        }
-        Ok(())
     }
 
     async fn dead_letter(
@@ -357,7 +369,7 @@ impl DeliveryHandler {
         reason: wire::DeadLetterReason,
         event_type: &'static str,
     ) -> Result<(), ConsumerError> {
-        let Some(message) =
+        let Some(publication) =
             build_dead_letter_message(source, info, &self.dead_letter_stream, reason)
         else {
             tracing::error!(
@@ -368,32 +380,16 @@ impl DeliveryHandler {
             redeliver_after(source, SETTLEMENT_RETRY_DELAY, &self.filter_subject).await;
             return Ok(());
         };
-        let reason = reason.label();
-
+        let reason_label = reason.label();
         let budget = BrokerBudget::new(Deadline::after(BROKER_OPERATION_BUDGET), &self.abort);
         let result =
-            send_publication(&self.shared, &self.dead_letter_subject, message, budget).await;
-        let outcome = match &result {
+            send_publication(&self.shared, &self.dead_letter_subject, publication, budget).await;
+        let transfer_outcome = match &result {
             Ok(_) => "accepted",
             Err(PublishError::Ambiguous) => "ambiguous",
             Err(PublishError::Rejected(_)) => "rejected",
         };
-        metrics::counter!(
-            DEAD_LETTER_TOTAL,
-            "event_type" => event_type,
-            "reason" => reason,
-            "outcome" => outcome
-        )
-        .increment(1);
-        if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            metrics::gauge!(
-                LAST_DEAD_LETTER_TIMESTAMP_SECONDS,
-                "event_type" => event_type,
-                "reason" => reason,
-                "outcome" => outcome
-            )
-            .set(timestamp.as_secs_f64());
-        }
+        record_dead_letter_transfer(event_type, reason_label, transfer_outcome);
         let Err(failure) = result else {
             acknowledge(&self.shared.connection.client, source, &self.filter_subject).await;
             return Ok(());
@@ -401,8 +397,8 @@ impl DeliveryHandler {
         tracing::error!(
             messaging.destination.template = self.filter_subject.as_str(),
             event_type,
-            reason,
-            outcome,
+            reason = reason_label,
+            outcome = transfer_outcome,
             "messaging_dead_letter_transfer_failed"
         );
         match failure {
@@ -431,6 +427,29 @@ impl DeliveryHandler {
     }
 }
 
+fn record_dead_letter_transfer(
+    event_type: &'static str,
+    reason_label: &'static str,
+    transfer_outcome: &'static str,
+) {
+    metrics::counter!(
+        DEAD_LETTER_TOTAL,
+        "event_type" => event_type,
+        "reason" => reason_label,
+        "outcome" => transfer_outcome
+    )
+    .increment(1);
+    if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        metrics::gauge!(
+            LAST_DEAD_LETTER_TIMESTAMP_SECONDS,
+            "event_type" => event_type,
+            "reason" => reason_label,
+            "outcome" => transfer_outcome
+        )
+        .set(timestamp.as_secs_f64());
+    }
+}
+
 async fn run_handler(
     handler: Option<&BoundHandler>,
     envelope: wire::InboundEnvelopeRef<'_>,
@@ -444,15 +463,12 @@ async fn run_handler(
     };
     let deadline = Deadline::after(HANDLER_TIMEOUT);
     let context = OperationContext::new(Some(deadline), cancel.child_token());
-    let _ended = context.cancellation().drop_guard_ref();
+    let _cancel_handler_on_exit = context.cancellation().drop_guard_ref();
     let dispatch = handler.dispatch(envelope, context.clone());
-    let stopped = |reason| match reason {
-        Stopped::Deadline => Outcome::TimedOut,
-        Stopped::Cancelled => Outcome::Retryable,
-    };
     let result = match context.run(AssertUnwindSafe(dispatch).catch_unwind()).await {
         Ok(result) => result,
-        Err(reason) => return stopped(reason),
+        Err(Stopped::Deadline) => return Outcome::TimedOut,
+        Err(Stopped::Cancelled) => return Outcome::Retryable,
     };
     match result {
         Ok(Ok(())) => Outcome::Success,
@@ -463,26 +479,36 @@ async fn run_handler(
     }
 }
 
-async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
-    let span = settlement_span(filter_subject, "ack");
-    let error_type = if let Some(reply) = source.reply.as_ref() {
-        let request = Request::new().timeout(None).payload(AckKind::Ack.into());
-        match tokio::time::timeout(
-            BROKER_OPERATION_BUDGET,
-            client.send_request(wire::BorrowedSubject(reply), request),
-        )
+async fn bounded_settlement<T, E>(
+    span: &tracing::Span,
+    request: impl Future<Output = Result<T, E>>,
+) -> Result<(), &'static str> {
+    match tokio::time::timeout(BROKER_OPERATION_BUDGET, request)
         .instrument(span.clone())
         .await
-        {
-            Ok(Ok(_)) => {
-                record_span_outcome(&span, "confirmed", None);
-                return;
-            }
-            Ok(Err(_)) => "client_error",
-            Err(_) => "timeout",
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err("client_error"),
+        Err(_) => Err("timeout"),
+    }
+}
+
+async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
+    let span = settlement_span(filter_subject, "ack");
+    let sent = match source.reply.as_ref() {
+        Some(reply) => {
+            let request = Request::new().timeout(None).payload(AckKind::Ack.into());
+            bounded_settlement(
+                &span,
+                client.send_request(wire::BorrowedSubject(reply), request),
+            )
+            .await
         }
-    } else {
-        "missing_reply"
+        None => Err("missing_reply"),
+    };
+    let Err(error_type) = sent else {
+        record_span_outcome(&span, "confirmed", None);
+        return;
     };
     record_span_outcome(&span, "unconfirmed", Some(error_type));
     span.in_scope(|| {
@@ -497,19 +523,11 @@ async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subje
 
 pub(super) async fn redeliver_after(source: &Message, delay: Duration, filter_subject: &str) {
     let span = settlement_span(filter_subject, "nak");
-    let error_type = match tokio::time::timeout(
-        BROKER_OPERATION_BUDGET,
-        source.ack_with(AckKind::Nak(Some(delay))),
-    )
-    .instrument(span.clone())
-    .await
-    {
-        Ok(Ok(())) => {
-            record_span_outcome(&span, "submitted", None);
-            return;
-        }
-        Ok(Err(_)) => "client_error",
-        Err(_) => "timeout",
+    let Err(error_type) =
+        bounded_settlement(&span, source.ack_with(AckKind::Nak(Some(delay)))).await
+    else {
+        record_span_outcome(&span, "submitted", None);
+        return;
     };
     record_span_outcome(&span, "failed", Some(error_type));
     span.in_scope(|| {

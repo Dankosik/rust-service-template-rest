@@ -89,7 +89,7 @@ impl PreparedEvent {
             return Err(PrepareError::Identity);
         }
         let key = route_key::<T>();
-        let occurred_at = CreatedAt::parse_outbound(event.occurred_at)?;
+        let occurred_at = CreatedAt::new_outbound(event.occurred_at)?;
         Ok(Self {
             subject,
             message_id: make_id(),
@@ -204,42 +204,38 @@ pub(crate) fn validate_reconstructed_envelope(
 }
 
 pub(crate) fn payload_depth_allowed(mut bytes: &[u8]) -> bool {
-    use bstr::ByteSlice as _;
-
     let mut depth = 0_usize;
     while let Some((&byte, rest)) = bytes.split_first() {
+        bytes = rest;
         match byte {
-            b'"' => {
-                bytes = rest;
-                loop {
-                    let Some(offset) = bytes.find_byteset(b"\"\\") else {
-                        return true;
-                    };
-                    let escaped = bytes[offset] == b'\\';
-                    let Some(after) = bytes.get(offset + 1 + usize::from(escaped)..) else {
-                        return true;
-                    };
-                    bytes = after;
-                    if !escaped {
-                        break;
-                    }
-                }
-            }
+            b'"' => match after_json_string(bytes) {
+                Some(after) => bytes = after,
+                None => return true,
+            },
             b'[' | b'{' => {
                 depth += 1;
                 if depth > MAX_PAYLOAD_JSON_DEPTH {
                     return false;
                 }
-                bytes = rest;
             }
-            b']' | b'}' => {
-                depth = depth.saturating_sub(1);
-                bytes = rest;
-            }
-            _ => bytes = rest,
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
     }
     true
+}
+
+fn after_json_string(mut bytes: &[u8]) -> Option<&[u8]> {
+    use bstr::ByteSlice as _;
+
+    loop {
+        let offset = bytes.find_byteset(b"\"\\")?;
+        let escaped = bytes[offset] == b'\\';
+        bytes = bytes.get(offset + 1 + usize::from(escaped)..)?;
+        if !escaped {
+            return Some(bytes);
+        }
+    }
 }
 
 #[cfg(test)]
