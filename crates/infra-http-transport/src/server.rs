@@ -19,6 +19,17 @@ use tower::ServiceExt as _;
 
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
+static CONNECTIONS_METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+static CONNECTIONS_REFUSED_KEY: metrics::Key =
+    metrics::Key::from_static_name(CONNECTIONS_REFUSED_METRIC);
+
+fn connections_refused_counter() -> metrics::Counter {
+    metrics::with_recorder(|recorder| {
+        recorder.register_counter(&CONNECTIONS_REFUSED_KEY, &CONNECTIONS_METRIC_METADATA)
+    })
+}
+
 const LISTEN_BACKLOG: u32 = 65_535;
 
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
@@ -610,7 +621,7 @@ where
         "Accepted connections closed without a response because the connection cap was reached."
     );
     if limits.max_connections.is_some() {
-        metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
+        connections_refused_counter().increment(0);
     }
     let (accept_failure_tx, accept_failure) = watch::channel(None);
     let accept_failure_guard = DropGuard::new(
@@ -696,7 +707,7 @@ async fn accept_loop<F, Fut, IO>(
             .map(|semaphore| Arc::clone(semaphore).try_acquire_owned())
             .transpose()
         else {
-            metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
+            connections_refused_counter().increment(1);
             tracing::debug!(%local_addr, %peer, "http_connection_refused");
             drop(stream);
             continue;

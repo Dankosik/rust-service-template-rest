@@ -8,13 +8,13 @@ use infra_object_storage::{
     PutBody, UnknownOutcome,
 };
 
-use crate::context::BodyReadTracker;
+use crate::context::{BodyReadTracker, RequestTracking};
 use crate::problem::{body_too_large, sanitized_problem};
 use crate::{Code, Problem, RequestContext, ResponseContext};
 
 struct TrackedBody {
     body: Body,
-    tracker: BodyReadTracker,
+    tracker: BodyReadTracker<std::sync::Arc<RequestTracking>>,
 }
 
 impl HttpBody for TrackedBody {
@@ -42,11 +42,11 @@ impl HttpBody for TrackedBody {
 impl RequestContext {
     #[must_use]
     pub fn upload_body(&self, length: u64, body: Body) -> PutBody {
-        let tracked = TrackedBody {
-            body,
-            tracker: BodyReadTracker::new(Some(self)),
+        let body = match self.body_read_tracker() {
+            Some(tracker) => PutBody::stream(length, TrackedBody { body, tracker }),
+            None => PutBody::stream(length, body),
         };
-        self.observe_put(PutBody::stream(length, tracked))
+        self.observe_put(body)
     }
 
     #[must_use]

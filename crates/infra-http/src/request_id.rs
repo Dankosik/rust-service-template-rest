@@ -1,5 +1,6 @@
 use axum::http::header::HeaderName;
 use axum::http::{HeaderValue, Request};
+use bytes::Bytes;
 use itertools::Itertools as _;
 use tower_http::request_id::RequestId;
 use uuid::Uuid;
@@ -17,9 +18,9 @@ fn is_valid(value: &[u8]) -> bool {
 }
 
 fn generate() -> Option<HeaderValue> {
-    let mut buffer = Uuid::encode_buffer();
-    let id = Uuid::new_v4().hyphenated().encode_lower(&mut buffer);
-    HeaderValue::from_str(id).ok()
+    let mut buffer = [0; uuid::fmt::Hyphenated::LENGTH];
+    let _ = Uuid::new_v4().hyphenated().encode_lower(&mut buffer);
+    HeaderValue::from_maybe_shared(Bytes::from_owner(buffer)).ok()
 }
 
 pub(crate) fn ensure<B>(request: &mut Request<B>) -> Option<RequestId> {

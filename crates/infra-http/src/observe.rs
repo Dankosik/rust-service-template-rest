@@ -5,7 +5,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::extract::{MatchedPath, Request};
 use axum::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, Version};
+use axum::http::{HeaderMap, StatusCode, Uri, Version};
 use axum::response::Response;
 use compact_str::{CompactString, format_compact};
 use foldhash::HashMap;
@@ -24,7 +24,7 @@ use tracing_opentelemetry_instrumentation_sdk::{
 use crate::body::{BodyEnd, on_body_end};
 use crate::harden::AdmissionShed;
 use crate::probes::ProbeRoutes;
-use crate::problem::{Code, Problem};
+use crate::problem::Code;
 use infra_http_transport::{ConnectionInfo, TRACEPARENT, TRACESTATE, TransportScheme};
 
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
@@ -104,10 +104,12 @@ impl Observer {
         let version = request.version();
         let scheme = url_scheme(request.uri(), connection.as_ref());
         let route = matched.as_ref().map(MatchedPath::as_str);
-        let is_probe = (check_probe
-            || (!self.log_health_probes && request.method() == Method::GET))
-            && route.is_some_and(|route| self.probes.contains(request.method(), route));
-        let log_access = !suppresses_access_log(self.log_health_probes, request.method(), is_probe);
+        let is_probe = match method {
+            HttpMethod::Get => check_probe || !self.log_health_probes,
+            HttpMethod::Head => check_probe,
+            _ => false,
+        } && route.is_some_and(|route| self.probes.contains(method, route));
+        let log_access = !suppresses_access_log(self.log_health_probes, method, is_probe);
         let span = make_span(
             version,
             method,
@@ -172,12 +174,13 @@ impl ActiveObservation {
         mut self,
         mut response: Response,
         cancel_guard: Option<G>,
+        problem_code: Option<Code>,
     ) -> Response {
         let status = response.status();
-        let extensions = response.extensions();
         // template:begin authn:http-observe-scope-refusal
         if status == StatusCode::FORBIDDEN
-            && extensions
+            && response
+                .extensions()
                 .get::<crate::authn::InsufficientScope>()
                 .is_some()
         {
@@ -188,8 +191,9 @@ impl ActiveObservation {
         // template:end authn:http-observe-scope-refusal
         self.observation.head = Some(ResponseHead {
             status,
-            problem_code: extensions.get::<Problem>().map(Problem::code),
-            load_shed: extensions.get::<AdmissionShed>().is_some(),
+            problem_code,
+            load_shed: status == StatusCode::SERVICE_UNAVAILABLE
+                && response.extensions().get::<AdmissionShed>().is_some(),
         });
         self.trace_context.inject_response(response.headers_mut());
         if ends_at_headers(self.observation.method, status) {
@@ -551,8 +555,8 @@ fn status_label(status: StatusCode) -> &'static str {
     response_status_code(status.as_u16()).unwrap_or_default()
 }
 
-fn suppresses_access_log(log_health_probes: bool, method: &Method, is_probe: bool) -> bool {
-    !log_health_probes && method == Method::GET && is_probe
+fn suppresses_access_log(log_health_probes: bool, method: HttpMethod, is_probe: bool) -> bool {
+    !log_health_probes && method == HttpMethod::Get && is_probe
 }
 
 #[cfg(test)]
@@ -844,21 +848,25 @@ mod tests {
                 implicit_head: true,
             },
         ]);
-        let suppresses = |log_health_probes, method: &Method, route: Option<&str>| {
+        let suppresses = |log_health_probes, method: HttpMethod, route: Option<&str>| {
             let is_probe = route.is_some_and(|route| probes.contains(method, route));
             suppresses_access_log(log_health_probes, method, is_probe)
         };
-        assert!(suppresses(false, &Method::GET, Some("/health/live")));
-        assert!(suppresses(false, &Method::GET, Some("/api/health/ready")));
+        assert!(suppresses(false, HttpMethod::Get, Some("/health/live")));
+        assert!(suppresses(
+            false,
+            HttpMethod::Get,
+            Some("/api/health/ready")
+        ));
         assert!(!suppresses(
             false,
-            &Method::GET,
+            HttpMethod::Get,
             Some("/business/health/live")
         ));
-        assert!(!suppresses(false, &Method::GET, None));
-        assert!(!suppresses(false, &Method::HEAD, Some("/health/live")));
-        assert!(!suppresses(false, &Method::POST, Some("/health/live")));
-        assert!(!suppresses(true, &Method::GET, Some("/health/live")));
+        assert!(!suppresses(false, HttpMethod::Get, None));
+        assert!(!suppresses(false, HttpMethod::Head, Some("/health/live")));
+        assert!(!suppresses(false, HttpMethod::Post, Some("/health/live")));
+        assert!(!suppresses(true, HttpMethod::Get, Some("/health/live")));
     }
 
     async fn exported_span(request: Request) -> opentelemetry_sdk::trace::SpanData {

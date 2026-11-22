@@ -1,7 +1,8 @@
 use crate::{FinalizeError, HttpContract};
 use axum::extract::{FromRef, State};
-use axum::http::{Method, StatusCode};
+use axum::http::StatusCode;
 use health::ReadinessReader;
+use shared_rules::otel_http::HttpMethod;
 use std::sync::Arc;
 
 const LIVE_PATH: &str = "/health/live";
@@ -27,15 +28,19 @@ impl ProbeRoutes {
         Self(routes.into())
     }
 
-    pub(crate) fn contains(&self, method: &Method, route: &str) -> bool {
-        self.contains_method(method.as_str(), route)
+    pub(crate) fn contains(&self, method: HttpMethod, route: &str) -> bool {
+        match method {
+            HttpMethod::Get => self.0.iter().any(|probe| probe.path.as_ref() == route),
+            HttpMethod::Head => self
+                .0
+                .iter()
+                .any(|probe| probe.implicit_head && probe.path.as_ref() == route),
+            _ => false,
+        }
     }
 
     pub(crate) fn contains_method(&self, method: &str, route: &str) -> bool {
-        self.0.iter().any(|probe| {
-            probe.path.as_ref() == route
-                && (method == "GET" || (probe.implicit_head && method == "HEAD"))
-        })
+        self.contains(HttpMethod::parse(method), route)
     }
 }
 
@@ -106,8 +111,8 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::Request;
     use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+    use axum::http::{Method, Request};
     use axum::response::Response;
     use health::{Readiness, RefreshPolicy};
     use tower::ServiceExt;
