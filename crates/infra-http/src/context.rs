@@ -4,8 +4,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::rejection::BytesRejection;
-use axum::extract::{FromRequest, FromRequestParts, Request};
+use axum::extract::{FromRequestParts, Request};
 use axum::http::header::CONNECTION;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Version};
@@ -102,9 +101,13 @@ impl RequestContext {
     }
 }
 
-pub(crate) async fn read_request_bytes(mut request: Request) -> Result<Bytes, BytesRejection> {
-    let context = request.extensions_mut().remove::<RequestContext>();
-    track_body_read(context.as_ref(), Bytes::from_request(request, &())).await
+pub(crate) async fn read_request_bytes(
+    context: Option<&RequestContext>,
+    body: Body,
+) -> Result<Bytes, axum::Error> {
+    track_body_read(context, body.collect())
+        .await
+        .map(http_body_util::Collected::to_bytes)
 }
 
 // template:begin http-idempotency:http-idempotency-collect-body

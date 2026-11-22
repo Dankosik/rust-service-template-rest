@@ -12,6 +12,7 @@ use infra_bearerauthn::{
 };
 use operation_context::OperationContext;
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
+use tower_http::request_id::RequestId;
 use utoipa::{IntoResponses, ToResponse};
 
 use crate::contract::{Access, Policy, layer_routes};
@@ -131,7 +132,12 @@ async fn authenticate_protected(
             .authenticate_presented(context.operation(), authorization, Transport::Http)
             .await
     };
-    let (principal, delegation) = match authorize(context.operation(), result, required) {
+    let (principal, delegation) = match authorize(
+        context.operation(),
+        result,
+        required,
+        request.extensions().get::<RequestId>(),
+    ) {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
@@ -151,17 +157,20 @@ fn authorize(
     operation: &OperationContext,
     result: Result<(Principal, PresentedToken<'_>), Failure>,
     required: &ProtectedAccess,
+    request_id: Option<&RequestId>,
 ) -> Result<(Principal, Option<DelegationCredential>), Response> {
     if let Some(stopped) = operation.stopped() {
-        return Err(Problem::from(stopped).into_response());
+        return Err(Problem::from(stopped)
+            .with_request_id(request_id)
+            .into_response());
     }
-    let (principal, token) = result.map_err(failure_response)?;
+    let (principal, token) = result.map_err(|failure| failure_response(failure, request_id))?;
     if !required
         .scope_alternatives
         .iter()
         .any(|scopes| principal.has_scopes(scopes.iter()))
     {
-        return Err(insufficient_scope_response());
+        return Err(insufficient_scope_response(request_id));
     }
     Ok((
         principal,
@@ -174,9 +183,10 @@ fn authorize(
 #[derive(Clone, Copy)]
 pub(super) struct InsufficientScope;
 
-fn insufficient_scope_response() -> Response {
+fn insufficient_scope_response(request_id: Option<&RequestId>) -> Response {
     let mut response = Problem::new(Code::Forbidden)
         .detail_static(INSUFFICIENT_SCOPE_DETAIL)
+        .with_request_id(request_id)
         .into_response();
     response.extensions_mut().insert(InsufficientScope);
     response.headers_mut().insert(
@@ -191,7 +201,7 @@ fn wiring_failure(failure: &'static str) -> Response {
     sanitized_internal_error()
 }
 
-fn failure_response(failure: Failure) -> Response {
+fn failure_response(failure: Failure, request_id: Option<&RequestId>) -> Response {
     let (code, challenge) = match failure {
         Failure::Missing => (Code::AuthenticationRequired, Some("Bearer realm=\"api\"")),
         Failure::Malformed => (
@@ -206,6 +216,7 @@ fn failure_response(failure: Failure) -> Response {
     };
     let mut response = Problem::new(code)
         .detail_static(failure.as_str())
+        .with_request_id(request_id)
         .into_response();
     if let Some(challenge) = challenge {
         response.headers_mut().insert(
@@ -268,7 +279,7 @@ mod tests {
             scope_alternatives: Box::new([]),
             delegate: false,
         };
-        let response = authorize(&context, Err(Failure::Unavailable), &required).unwrap_err();
+        let response = authorize(&context, Err(Failure::Unavailable), &required, None).unwrap_err();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response.headers().contains_key(WWW_AUTHENTICATE));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
@@ -284,7 +295,7 @@ mod tests {
             Failure::Invalid,
             Failure::Unavailable,
         ] {
-            let problem = body_json(failure_response(failure)).await;
+            let problem = body_json(failure_response(failure, None)).await;
             assert_eq!(problem["detail"], failure.to_string());
         }
     }

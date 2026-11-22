@@ -1,5 +1,7 @@
 use crate::rfc9110::is_tchar;
 
+const BEARER_SCHEME: &[u8] = b"Bearer";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoBearer {
     Missing,
@@ -13,26 +15,32 @@ pub fn token_bytes<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a
     if values.next().is_some() {
         return Err(NoBearer::Malformed);
     }
-    let separator = value
-        .iter()
-        .position(|byte| *byte == b' ')
-        .unwrap_or(value.len());
-    let (scheme, rest) = value.split_at(separator);
-    if !scheme.eq_ignore_ascii_case(b"Bearer") {
-        if scheme.is_empty() || !scheme.iter().all(|byte| is_tchar(*byte)) {
-            return Err(NoBearer::Malformed);
+    if let Some((prefix, rest)) = value.split_at_checked(BEARER_SCHEME.len())
+        && prefix.eq_ignore_ascii_case(BEARER_SCHEME)
+    {
+        match rest.split_first() {
+            Some((&b' ', after_space)) => {
+                let mut token = after_space;
+                while let Some(tail) = token.strip_prefix(b" ") {
+                    token = tail;
+                }
+                return is_b64token(token)
+                    .then_some(token)
+                    .ok_or(NoBearer::Malformed);
+            }
+            None => return Err(NoBearer::Malformed),
+            Some(_) => {}
         }
-        return Err(NoBearer::Missing);
     }
-    let start = rest
-        .iter()
-        .position(|byte| *byte != b' ')
-        .unwrap_or(rest.len());
-    let token = &rest[start..];
-    if !is_b64token(token) {
-        return Err(NoBearer::Malformed);
+    let other_scheme = match value.iter().enumerate().find(|&(_, &byte)| !is_tchar(byte)) {
+        None => !value.is_empty(),
+        Some((index, &byte)) => index > 0 && byte == b' ',
+    };
+    if other_scheme {
+        Err(NoBearer::Missing)
+    } else {
+        Err(NoBearer::Malformed)
     }
-    Ok(token)
 }
 
 /// RFC 6750 §2.1
@@ -95,6 +103,8 @@ mod tests {
             b"Negotiate",
             b"Digest realm=\"unterminated",
             b"Basic abc\n",
+            b"BearerX abc",
+            b"BearerX",
         ] {
             assert_eq!(token_bytes([value]), Err(NoBearer::Missing), "{value:?}");
         }
@@ -103,8 +113,12 @@ mod tests {
     #[test]
     fn several_values_or_text_outside_the_grammar_is_malformed() {
         for value in [
-            b"Bearer".as_slice(),
+            b"".as_slice(),
+            b" ",
+            b"Bearer",
+            b"bEaReR",
             b"Bearer ",
+            b"Bearer   ",
             b" Bearer abc",
             b"Bearer abc ",
             b"Bearer a b",
@@ -116,12 +130,17 @@ mod tests {
             b"Bearer ab=c",
             b"Bearer abc\x7f",
             b"Bearer \xff",
+            b"Bearer@ abc",
             b"B@d abc",
         ] {
             assert_eq!(token_bytes([value]), Err(NoBearer::Malformed), "{value:?}");
         }
         assert_eq!(
             token_bytes([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
+            Err(NoBearer::Malformed)
+        );
+        assert_eq!(
+            token_bytes([b"Basic one".as_slice(), b"Basic two".as_slice()]),
             Err(NoBearer::Malformed)
         );
     }

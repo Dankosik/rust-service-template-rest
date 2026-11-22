@@ -296,22 +296,26 @@ fn status_label(status: StatusCode) -> &'static str {
 }
 
 fn classify_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorKind {
-    let causes = || error_chain::causes(source);
-    if error_chain::contains::<rustls::Error>(source) {
-        TransportErrorKind::Tls
-    } else if causes()
-        .filter_map(<dyn StdError>::downcast_ref::<hyper_util::client::legacy::Error>)
-        .any(hyper_util::client::legacy::Error::is_connect)
-    {
-        TransportErrorKind::Connect
-    } else if causes()
-        .filter_map(<dyn StdError>::downcast_ref::<hyper::Error>)
-        .any(hyper::Error::is_parse)
-    {
-        TransportErrorKind::Protocol
-    } else {
-        TransportErrorKind::Other
+    let mut kind = TransportErrorKind::Other;
+    for cause in error_chain::causes(source) {
+        if cause.is::<rustls::Error>() {
+            return TransportErrorKind::Tls;
+        }
+        if kind != TransportErrorKind::Connect
+            && cause
+                .downcast_ref::<hyper_util::client::legacy::Error>()
+                .is_some_and(hyper_util::client::legacy::Error::is_connect)
+        {
+            kind = TransportErrorKind::Connect;
+        } else if kind == TransportErrorKind::Other
+            && cause
+                .downcast_ref::<hyper::Error>()
+                .is_some_and(hyper::Error::is_parse)
+        {
+            kind = TransportErrorKind::Protocol;
+        }
     }
+    kind
 }
 
 #[cfg(test)]

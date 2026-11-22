@@ -6,29 +6,26 @@ pub const MAX_TIMEOUT_DIGITS: usize = 8;
 const MAX_TIMEOUT_VALUE: u64 = 99_999_999;
 const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(MAX_TIMEOUT_VALUE);
 
-const TIMEOUT_UNITS: [(u8, u128); 6] = [
-    (b'n', Duration::from_nanos(1).as_nanos()),
-    (b'u', Duration::from_micros(1).as_nanos()),
-    (b'm', Duration::from_millis(1).as_nanos()),
-    (b'S', Duration::from_secs(1).as_nanos()),
-    (b'M', Duration::from_mins(1).as_nanos()),
-    (b'H', Duration::from_hours(1).as_nanos()),
-];
-
 #[must_use]
 pub fn parse_timeout(value: &[u8]) -> Option<Duration> {
-    if value.len() > MAX_TIMEOUT_DIGITS + 1 {
-        return None;
-    }
     let (&unit, digits) = value.split_last()?;
-    if !digits.first()?.is_ascii_digit() {
+    if digits.is_empty() || digits.len() > MAX_TIMEOUT_DIGITS {
         return None;
     }
-    let amount: u32 = std::str::from_utf8(digits).ok()?.parse().ok()?;
-    let (_, nanos_per_unit) = TIMEOUT_UNITS.into_iter().find(|&(code, _)| code == unit)?;
-    Some(Duration::from_nanos_u128(
-        u128::from(amount) * nanos_per_unit,
-    ))
+    let amount = digits.iter().try_fold(0_u32, |amount, &byte| {
+        let digit = byte.checked_sub(b'0').filter(|&digit| digit < 10)?;
+        Some(amount * 10 + u32::from(digit))
+    })?;
+    let amount = u64::from(amount);
+    match unit {
+        b'n' => Some(Duration::from_nanos(amount)),
+        b'u' => Some(Duration::from_micros(amount)),
+        b'm' => Some(Duration::from_millis(amount)),
+        b'S' => Some(Duration::from_secs(amount)),
+        b'M' => Some(Duration::from_mins(amount)),
+        b'H' => Some(Duration::from_hours(amount)),
+        _ => None,
+    }
 }
 
 #[must_use]
@@ -65,24 +62,35 @@ mod tests {
     #[test]
     fn grpc_timeout_follows_the_protocol_grammar() {
         let cases = [
-            ("1H", Some(Duration::from_hours(1))),
-            ("2M", Some(Duration::from_mins(2))),
-            ("5S", Some(Duration::from_secs(5))),
-            ("250m", Some(Duration::from_millis(250))),
-            ("7u", Some(Duration::from_micros(7))),
-            ("99999999n", Some(Duration::from_nanos(99_999_999))),
-            ("0n", Some(Duration::ZERO)),
-            ("123456789S", None),
-            ("+5S", None),
-            ("1+5S", None),
-            ("-5S", None),
-            (" 5S", None),
-            ("S", None),
-            ("1x", None),
-            ("", None),
+            (b"1H".as_slice(), Some(Duration::from_hours(1))),
+            (b"2M", Some(Duration::from_mins(2))),
+            (b"5S", Some(Duration::from_secs(5))),
+            (b"00005S", Some(Duration::from_secs(5))),
+            (b"00000000S", Some(Duration::ZERO)),
+            (b"250m", Some(Duration::from_millis(250))),
+            (b"7u", Some(Duration::from_micros(7))),
+            (b"99999999n", Some(Duration::from_nanos(99_999_999))),
+            (b"99999999H", Some(WIRE_TIMEOUT_MAX)),
+            (b"0n", Some(Duration::ZERO)),
+            (b"123456789S", None),
+            (b"/S", None),
+            (b":S", None),
+            (b"1:S", None),
+            (b"1aS", None),
+            (b"+5S", None),
+            (b"1+5S", None),
+            (b"-5S", None),
+            (b" 5S", None),
+            (b"5 S", None),
+            (b"5S ", None),
+            (b"\xffS", None),
+            (b"1\xffS", None),
+            (b"S", None),
+            (b"1x", None),
+            (b"", None),
         ];
         for (value, expected) in cases {
-            assert_eq!(parse_timeout(value.as_bytes()), expected, "{value:?}");
+            assert_eq!(parse_timeout(value), expected, "{value:?}");
         }
     }
 
