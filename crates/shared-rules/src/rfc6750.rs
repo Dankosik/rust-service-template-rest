@@ -15,32 +15,29 @@ pub fn token_bytes<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a
     if values.next().is_some() {
         return Err(NoBearer::Malformed);
     }
-    if let Some((prefix, rest)) = value.split_at_checked(BEARER_SCHEME.len())
-        && prefix.eq_ignore_ascii_case(BEARER_SCHEME)
-    {
-        match rest.split_first() {
-            Some((&b' ', after_space)) => {
-                let mut token = after_space;
-                while let Some(tail) = token.strip_prefix(b" ") {
-                    token = tail;
-                }
-                return is_b64token(token)
-                    .then_some(token)
-                    .ok_or(NoBearer::Malformed);
+    let after_bearer = value
+        .split_at_checked(BEARER_SCHEME.len())
+        .and_then(|(scheme, rest)| scheme.eq_ignore_ascii_case(BEARER_SCHEME).then_some(rest));
+    match after_bearer {
+        Some([b' ', spaces_and_token @ ..]) => {
+            let mut token = spaces_and_token;
+            while let Some(tail) = token.strip_prefix(b" ") {
+                token = tail;
             }
-            None => return Err(NoBearer::Malformed),
-            Some(_) => {}
+            is_b64token(token)
+                .then_some(token)
+                .ok_or(NoBearer::Malformed)
         }
+        Some([]) => Err(NoBearer::Malformed),
+        _ if starts_with_auth_scheme(value) => Err(NoBearer::Missing),
+        _ => Err(NoBearer::Malformed),
     }
-    let other_scheme = match value.iter().enumerate().find(|&(_, &byte)| !is_tchar(byte)) {
-        None => !value.is_empty(),
-        Some((index, &byte)) => index > 0 && byte == b' ',
-    };
-    if other_scheme {
-        Err(NoBearer::Missing)
-    } else {
-        Err(NoBearer::Malformed)
-    }
+}
+
+/// RFC 9110 §11.1
+fn starts_with_auth_scheme(value: &[u8]) -> bool {
+    let scheme_len = value.iter().take_while(|&&byte| is_tchar(byte)).count();
+    scheme_len > 0 && matches!(value.get(scheme_len), None | Some(b' '))
 }
 
 /// RFC 6750 §2.1

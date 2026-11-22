@@ -4,7 +4,7 @@ pub const TIMEOUT_HEADER: &str = "grpc-timeout";
 
 pub const MAX_TIMEOUT_DIGITS: usize = 8;
 const MAX_TIMEOUT_VALUE: u64 = 99_999_999;
-const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(MAX_TIMEOUT_VALUE);
+const MAX_TIMEOUT: Duration = Duration::from_hours(MAX_TIMEOUT_VALUE);
 
 #[must_use]
 pub fn parse_timeout(value: &[u8]) -> Option<Duration> {
@@ -44,7 +44,7 @@ pub fn encode_timeout(remaining: Duration, wire: &mut [u8; MAX_TIMEOUT_DIGITS + 
     } else {
         (
             b'H',
-            u128::from(remaining.min(WIRE_TIMEOUT_MAX).as_secs() / 3600),
+            u128::from(remaining.min(MAX_TIMEOUT).as_secs() / 3600),
         )
     };
     let mut buffer = std::fmt::NumBuffer::new();
@@ -70,7 +70,7 @@ mod tests {
             (b"250m", Some(Duration::from_millis(250))),
             (b"7u", Some(Duration::from_micros(7))),
             (b"99999999n", Some(Duration::from_nanos(99_999_999))),
-            (b"99999999H", Some(WIRE_TIMEOUT_MAX)),
+            (b"99999999H", Some(MAX_TIMEOUT)),
             (b"0n", Some(Duration::ZERO)),
             (b"123456789S", None),
             (b"/S", None),
@@ -109,7 +109,7 @@ mod tests {
             Duration::from_secs(99_999_999),
             Duration::from_mins(99_999_999),
             Duration::from_hours(2),
-            WIRE_TIMEOUT_MAX,
+            MAX_TIMEOUT,
         ] {
             let encoded = encode_timeout(duration, &mut wire);
             assert_eq!(parse_timeout(encoded), Some(duration), "{duration:?}");

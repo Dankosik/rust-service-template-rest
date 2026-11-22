@@ -13,12 +13,12 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
 };
-use tokio::net::TcpSocket;
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
-        self, ClientConfig, RootCertStore, ServerConfig,
+        self, ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion,
         pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
     },
 };
@@ -80,9 +80,9 @@ impl TlsMaterial {
         let issuer = new_issuer();
         let leaf_key = KeyPair::generate().expect("generate TLS fixture leaf key");
         let names = hosts.iter().copied().map(str::to_owned).collect::<Vec<_>>();
-        let mut leaf = CertificateParams::new(names).expect("create TLS fixture SANs");
-        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let certificate = leaf
+        let mut leaf_params = CertificateParams::new(names).expect("create TLS fixture SANs");
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let certificate = leaf_params
             .signed_by(&leaf_key, &issuer)
             .expect("sign TLS fixture leaf certificate");
 
@@ -99,22 +99,21 @@ impl TlsMaterial {
     #[must_use]
     #[track_caller]
     pub fn server_config(&self) -> ServerConfig {
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()));
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("fixture TLS protocol versions")
-            .with_no_client_auth()
-            .with_single_cert(vec![self.cert.clone().into()], key)
-            .expect("fixture server certificate")
+        self.server_config_for(rustls::DEFAULT_VERSIONS)
     }
 
     #[must_use]
     #[track_caller]
     pub fn server_config_tls13(&self) -> ServerConfig {
+        self.server_config_for(&[&rustls::version::TLS13])
+    }
+
+    #[track_caller]
+    fn server_config_for(&self, versions: &[&'static SupportedProtocolVersion]) -> ServerConfig {
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()));
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .expect("TLS 1.3 fixture server")
+            .with_protocol_versions(versions)
+            .expect("fixture TLS protocol versions")
             .with_no_client_auth()
             .with_single_cert(vec![self.cert.clone().into()], key)
             .expect("fixture server certificate")
@@ -138,48 +137,66 @@ impl TlsMaterial {
         let local_addr = listener.local_addr().expect("fixture listener address");
         let acceptor = TlsAcceptor::from(Arc::new(self.server_config_tls13()));
         let shutdown = CancellationToken::new();
-        let task_shutdown = shutdown.clone();
-        let task = tokio::spawn(async move {
-            let mut connections = JoinSet::new();
-            loop {
-                let accepted = tokio::select! {
-                    biased;
-                    () = task_shutdown.cancelled() => break,
-                    Some(_) = connections.join_next(), if !connections.is_empty() => continue,
-                    accepted = listener.accept() => accepted,
-                };
-                let Ok((stream, _)) = accepted else {
-                    continue;
-                };
-                let acceptor = acceptor.clone();
-                let router = router.clone();
-                let cancel = task_shutdown.clone();
-                connections.spawn(async move {
-                    let accepted = tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return,
-                        accepted = acceptor.accept(stream) => accepted,
-                    };
-                    let Ok(stream) = accepted else {
-                        return;
-                    };
-                    let connection = http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), TowerToHyperService::new(router));
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => {}
-                        _ = connection => {}
-                    }
-                });
-            }
-            connections.abort_all();
-            while connections.join_next().await.is_some() {}
-        });
+        let task = tokio::spawn(accept_connections(
+            listener,
+            acceptor,
+            router,
+            shutdown.clone(),
+        ));
         HttpsServer {
             local_addr,
             shutdown,
             task: Some(task),
         }
+    }
+}
+
+async fn accept_connections(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    router: Router,
+    shutdown: CancellationToken,
+) {
+    let mut connections = JoinSet::new();
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            accepted = listener.accept() => accepted,
+        };
+        let Ok((stream, _)) = accepted else {
+            continue;
+        };
+        connections.spawn(serve_tls_connection(
+            stream,
+            acceptor.clone(),
+            router.clone(),
+            shutdown.clone(),
+        ));
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+}
+
+async fn serve_tls_connection(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    router: Router,
+    shutdown: CancellationToken,
+) {
+    let serve = async {
+        let Ok(stream) = acceptor.accept(stream).await else {
+            return;
+        };
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), TowerToHyperService::new(router))
+            .await;
+    };
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {}
+        () = serve => {}
     }
 }
 
