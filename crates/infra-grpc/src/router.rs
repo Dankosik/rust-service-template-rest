@@ -132,15 +132,15 @@ pub(crate) fn build(
     let BuiltServices {
         routes,
         listener_layers,
-        names,
+        service_names,
         methods,
         authentication,
     } = services.into_built(authentication)?;
     let limits = options.limits;
+    observe::describe();
     if limits.max_in_flight.is_some() {
         observe::register_shed();
     }
-    observe::describe();
     let admission = limits.max_in_flight.map(|count| {
         let count = count.get() as usize;
         AdmissionPermits {
@@ -149,30 +149,32 @@ pub(crate) fn build(
             max_wait: limits.max_admission_wait,
         }
     });
+    // template:begin service-auth:grpc-app-tls-init
+    let requires_tls = matches!(authentication, Authentication::ServiceTokens(_));
+    // template:end service-auth:grpc-app-tls-init
+    let state = Arc::new(BusinessState {
+        authentication,
+        methods: Arc::clone(&methods),
+        request_timeout: limits.request_timeout,
+        admission,
+    });
+    let business = routes
+        .into_axum_router()
+        .layer(axum::middleware::from_fn_with_state(state, business_call));
+    let router = native_router(
+        business,
+        listener_layers,
+        readiness,
+        service_names,
+        methods,
+        limits.request_timeout,
+        options.trust_trace_context,
+    );
     Ok(Application {
-        // template:begin service-auth:grpc-app-tls-init
-        requires_tls: matches!(authentication, Authentication::ServiceTokens(_)),
-        // template:end service-auth:grpc-app-tls-init
-        routes: tonic::service::Routes::from({
-            let state = Arc::new(BusinessState {
-                authentication,
-                methods: Arc::clone(&methods),
-                request_timeout: limits.request_timeout,
-                admission,
-            });
-            let business = routes
-                .into_axum_router()
-                .layer(axum::middleware::from_fn_with_state(state, business_call));
-            native_router(
-                business,
-                listener_layers,
-                readiness,
-                names,
-                methods,
-                limits.request_timeout,
-                options.trust_trace_context,
-            )
-        }),
+        routes: tonic::service::Routes::from(router),
+        // template:begin service-auth:grpc-app-tls-field
+        requires_tls,
+        // template:end service-auth:grpc-app-tls-field
     })
 }
 
@@ -189,12 +191,12 @@ fn native_router(
     router: axum::Router,
     listener_layers: Vec<ListenerLayer>,
     readiness: ::health::ReadinessReader,
-    names: BTreeSet<&'static str>,
+    service_names: BTreeSet<&'static str>,
     methods: Arc<Methods>,
     request_timeout: Duration,
     trust_trace_context: bool,
 ) -> axum::Router {
-    let health = HealthServer::new(crate::health::Adapter::new(readiness, names));
+    let health = HealthServer::new(crate::health::Adapter::new(readiness, service_names));
     #[expect(
         clippy::disallowed_methods,
         reason = "gRPC health registration belongs to the separate tonic listener"
@@ -235,20 +237,28 @@ async fn native_grpc(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let response = if request.method() != http::Method::POST {
-        (
-            http::StatusCode::METHOD_NOT_ALLOWED,
-            [(http::header::ALLOW, "POST")],
-        )
-            .into_response()
-    } else if !crate::protocol::has_native_content_type(request.headers()) {
-        http::StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response()
-    } else {
-        infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
-        return next.run(request).await;
-    };
-    drain_rejected(request, REJECT_DRAIN_TIMEOUT).await;
-    response
+    if let Some(rejection) = non_grpc_rejection(&request) {
+        drain_rejected(request, REJECT_DRAIN_TIMEOUT).await;
+        return rejection;
+    }
+    infra_http_transport::admit_trace_context(request.headers_mut(), trust_trace_context);
+    next.run(request).await
+}
+
+fn non_grpc_rejection(request: &Request) -> Option<Response> {
+    if request.method() != http::Method::POST {
+        return Some(
+            (
+                http::StatusCode::METHOD_NOT_ALLOWED,
+                [(http::header::ALLOW, "POST")],
+            )
+                .into_response(),
+        );
+    }
+    if !crate::protocol::has_native_content_type(request.headers()) {
+        return Some(http::StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response());
+    }
+    None
 }
 
 struct Admitted {
@@ -259,7 +269,7 @@ struct Admitted {
 struct StartedCall<'a> {
     method: &'a Method,
     call: observe::Call,
-    fallback: Option<opentelemetry::Context>,
+    fallback_context: Option<opentelemetry::Context>,
     opening_deadline: Deadline,
     response_deadline: Option<Deadline>,
 }
@@ -273,12 +283,12 @@ fn start_call<'a>(
     let path = request.uri().path();
     let method = methods.resolve(path);
     let call = observe::Call::start(method, path);
-    let fallback = observe::attach_parent_or_fallback(call.span(), request.headers());
+    let fallback_context = observe::attach_parent_or_fallback(call.span(), request.headers());
     let (opening_deadline, response_deadline) = call_deadlines(request.headers(), request_timeout);
     StartedCall {
         method,
         call,
-        fallback,
+        fallback_context,
         opening_deadline,
         response_deadline,
     }
@@ -355,7 +365,7 @@ async fn business_call(
 
     let outcome = run_in_span(
         async {
-            lifecycle
+            match lifecycle
                 .opening_context
                 .run(open_business(
                     &state,
@@ -365,11 +375,13 @@ async fn business_call(
                     next,
                 ))
                 .await
-                .map_err(|reason| Rejection::from(stopped_status(reason)))
-                .and_then(std::convert::identity)
+            {
+                Ok(outcome) => outcome,
+                Err(reason) => Err(stopped_status(reason).into()),
+            }
         },
         started.call.span(),
-        started.fallback.as_ref(),
+        started.fallback_context.as_ref(),
         || {
             Err(Rejection::from(ClassifiedStatus::fixed(
                 FixedFailure::Internal,
@@ -381,7 +393,7 @@ async fn business_call(
     finish_call(
         outcome,
         started.call,
-        started.fallback,
+        started.fallback_context,
         lifecycle.cancel_on_drop,
         lifecycle.stop,
     )
@@ -408,7 +420,7 @@ async fn open_business(
         },
     )
     .await?;
-    let authenticated: Result<_, Rejection> = match &state.authentication {
+    let request = match &state.authentication {
         // template:begin authn:grpc-router-run-authn
         Authentication::Bearer(verifier) => {
             crate::authn::authenticate(
@@ -417,28 +429,28 @@ async fn open_business(
                 opening_context,
                 request,
             )
-            .await
+            .await?
         }
         // template:end authn:grpc-router-run-authn
         // template:begin service-auth:grpc-router-run-service-auth
-        Authentication::ServiceTokens(verifier) => crate::service_auth::admit_caller(
-            verifier,
-            method.allowed_callers(),
-            opening_context,
-            request,
-        )
-        .await
-        .map_err(Rejection::from),
+        Authentication::ServiceTokens(verifier) => {
+            crate::service_auth::admit_caller(
+                verifier,
+                method.allowed_callers(),
+                opening_context,
+                request,
+            )
+            .await?
+        }
         // template:end service-auth:grpc-router-run-service-auth
         Authentication::None => {
             // template:begin service-auth:grpc-router-strip-unverified-authorization
             let mut request = request;
             request.headers_mut().remove(http::header::AUTHORIZATION);
             // template:end service-auth:grpc-router-strip-unverified-authorization
-            Ok(request)
+            request
         }
     };
-    let request = authenticated?;
     if !method.kind.is_registered() {
         let status = ClassifiedStatus::plain(tonic::Status::unimplemented(""));
         return Err(reject_with_budget(opening_context, request, status)
@@ -546,7 +558,7 @@ async fn health_call(
             }
         },
         started.call.span(),
-        started.fallback.as_ref(),
+        started.fallback_context.as_ref(),
         || fixed(FixedFailure::Internal, started.response_deadline),
     )
     .await;
@@ -554,7 +566,7 @@ async fn health_call(
     wrap_response(
         response,
         started.call,
-        started.fallback,
+        started.fallback_context,
         ServerCustody::deadline(response_deadline),
         known_outcome,
     )
@@ -596,13 +608,13 @@ fn sanitize_extensions(extensions: &mut http::Extensions) {
 async fn run_in_span<T>(
     future: impl Future<Output = T>,
     span: &tracing::Span,
-    fallback: Option<&opentelemetry::Context>,
+    fallback_context: Option<&opentelemetry::Context>,
     on_panic: impl FnOnce() -> T,
 ) -> T {
     let instrumented = AssertUnwindSafe(future)
         .catch_unwind()
         .instrument(span.clone());
-    let settled = match fallback {
+    let settled = match fallback_context {
         None => instrumented.await,
         Some(context) => instrumented.with_context(context.clone()).await,
     };
@@ -612,7 +624,7 @@ async fn run_in_span<T>(
 fn finish_call(
     outcome: Result<Admitted, Rejection>,
     call: observe::Call,
-    fallback: Option<opentelemetry::Context>,
+    fallback_context: Option<opentelemetry::Context>,
     cancel_on_drop: DropGuard,
     stop: Option<ServerStop>,
 ) -> Response {
@@ -620,7 +632,7 @@ fn finish_call(
         Ok(Admitted { response, permit }) => wrap_response(
             response,
             call,
-            fallback,
+            fallback_context,
             ServerCustody {
                 permit,
                 cancel_on_drop: Some(cancel_on_drop),
@@ -644,7 +656,7 @@ fn finish_rejected(
     cancel_on_drop: DropGuard,
 ) -> Response {
     drop(cancel_on_drop);
-    call.finish_with_failure(status.code(), status.failure());
+    call.finish_with_failure(status.code(), status.catalog_code());
     status.into_http()
 }
 

@@ -17,7 +17,7 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_util::either::Either;
 use tonic::body::Body;
-use tonic::client::{ResponseStatusObserver as DecodedStatusObserver, TrackResponseStatus};
+use tonic::client::TrackResponseStatus;
 use tonic::transport::{Channel, Endpoint};
 use tower::{BoxError, Service, ServiceExt as _};
 use tracing::Instrument as _;
@@ -26,8 +26,8 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use crate::ClientError;
 use crate::call::{
     ClientCustody, ClientGuards, ClientObservation, LifetimeGuard, StatusHook,
-    attach_client_response, cancel_on_drop, client_deadline_status, client_stopped_status,
-    guard_upload,
+    attach_client_response, cancel_on_drop, check_open, client_deadline_status,
+    client_stopped_status, guard_upload,
 };
 use crate::tls::ClientTlsMaterial;
 
@@ -118,34 +118,43 @@ impl ClientBuilder<'_> {
             return Err(ClientError::InvalidOpeningLimit);
         }
         let (uri, origin, tls) = parse_destination(self.destination, self.security)?;
-        let endpoint = Endpoint::from(uri)
-            .http2_keep_alive_interval(Duration::from_mins(1))
-            .keep_alive_timeout(Duration::from_secs(20))
-            .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
-            .initial_stream_window_size(HTTP2_STREAM_WINDOW);
-        let destination = crate::observe::Destination::from_uri(endpoint.uri());
-        let mut http = HttpConnector::new();
-        http.enforce_http(false);
-        http.set_nodelay(true);
-        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
-        http.set_keepalive(Some(Duration::from_mins(1)));
-        http.set_keepalive_interval(Some(Duration::from_secs(15)));
-        http.set_keepalive_retries(Some(3));
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
+        let endpoint = grpc_endpoint(uri);
+        let server_address = crate::observe::ServerAddress::from_uri(endpoint.uri());
+        let http = tcp_connector();
         Ok(Client {
             inner: Arc::new(ClientInner {
                 origin,
                 channel: Channel::new(GrpcConnector { http, tls }, endpoint),
-                destination,
+                server_address,
                 timeout: self.timeout,
-                openings: self
+                opening_slots: self
                     .opening_limit
                     .map(|limit| Arc::new(Semaphore::new(limit.get()))),
                 series: crate::observe::Series::client(),
             }),
         })
     }
+}
+
+fn grpc_endpoint(uri: http::Uri) -> Endpoint {
+    Endpoint::from(uri)
+        .http2_keep_alive_interval(Duration::from_mins(1))
+        .keep_alive_timeout(Duration::from_secs(20))
+        .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+        .initial_stream_window_size(HTTP2_STREAM_WINDOW)
+}
+
+fn tcp_connector() -> HttpConnector {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    http.set_nodelay(true);
+    http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+    http.set_keepalive(Some(Duration::from_mins(1)));
+    http.set_keepalive_interval(Some(Duration::from_secs(15)));
+    http.set_keepalive_retries(Some(3));
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    http.set_tcp_user_timeout(Some(Duration::from_secs(30)));
+    http
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,9 +215,9 @@ struct ClientInner {
     #[debug(skip)]
     origin: ClientOrigin,
     #[debug(skip)]
-    destination: Option<crate::observe::Destination>,
+    server_address: Option<crate::observe::ServerAddress>,
     timeout: ClientTimeout,
-    openings: Option<Arc<Semaphore>>,
+    opening_slots: Option<Arc<Semaphore>>,
     series: &'static crate::observe::Series,
 }
 
@@ -289,7 +298,7 @@ impl Service<Request<Body>> for Client {
     type Error = tonic::Status;
     type Future = ResponseFuture;
 
-    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
@@ -322,8 +331,8 @@ where
     type Error = S::Error;
     type Future = S::Future;
 
-    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(context)
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
@@ -367,7 +376,8 @@ impl PreparedCall {
         if caller_timeout.is_none() {
             request.headers_mut().remove(GRPC_TIMEOUT);
         }
-        let call = crate::observe::start_call(inner.series, &request, inner.destination.as_ref());
+        let call =
+            crate::observe::start_call(inner.series, &request, inner.server_address.as_ref());
         if context_conflict {
             return Err(call.refuse(tonic::Status::internal(
                 "request operation context conflicts with client context",
@@ -383,7 +393,7 @@ impl PreparedCall {
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
         );
-        let permit = match acquire_opening_permit(inner.openings.as_ref(), &contexts.opening) {
+        let permit = match acquire_opening_permit(inner.opening_slots.as_ref(), &contexts.opening) {
             Ok(permit) => permit,
             Err(status) => return Err(call.refuse(status)),
         };
@@ -457,35 +467,34 @@ impl PreparedCall {
         let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
         let (body, upload_guard) = guard_upload(body);
         let mut request = Request::from_parts(parts, body);
-        let result = opening
+        let result = match opening
             .run(async {
                 let ready = channel
                     .ready()
                     .await
-                    .map_err(|err| transport_status(&err))?;
-                opening.check().map_err(client_stopped_status)?;
+                    .map_err(|err| report_transport_failure(&err))?;
+                check_open(&opening)?;
                 prepare_dispatch(request.headers_mut())?;
-                opening.check().map_err(client_stopped_status)?;
+                check_open(&opening)?;
                 apply_forwarded_timeout(request.headers_mut(), lifetime.deadline())?;
                 ready
                     .call(request)
                     .await
-                    .map_err(|err| transport_status(&err))
+                    .map_err(|err| report_transport_failure(&err))
             })
             .instrument(call.span().clone())
             .await
-            .map_err(client_stopped_status)
-            .and_then(std::convert::identity);
+        {
+            Ok(sent) => sent,
+            Err(reason) => Err(client_stopped_status(reason)),
+        };
         drop(permit);
         let mut response = match result {
             Ok(response) => response,
             Err(status) => return Err(call.refuse(status)),
         };
         let observation = if track_decoded_status {
-            let span = call.span().clone();
-            let observer = DecodedStatusObserver::new(move |code| call.finish(code));
-            response.extensions_mut().insert(observer.clone());
-            ClientObservation::Decoded { span, observer }
+            ClientObservation::decoded(call, &mut response)
         } else {
             ClientObservation::Transport(call)
         };
@@ -515,8 +524,8 @@ impl Service<http::Uri> for GrpcConnector {
     type Error = BoxError;
     type Future = BoxFuture<Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.http.poll_ready(context).map_err(BoxError::from)
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.http.poll_ready(cx).map_err(BoxError::from)
     }
 
     fn call(&mut self, uri: http::Uri) -> Self::Future {
@@ -529,7 +538,7 @@ impl Service<http::Uri> for GrpcConnector {
                     None => Ok::<_, BoxError>(TokioIo::new(Either::Left(tcp))),
                     Some((connector, server_name)) => {
                         let tls_stream = connector.connect(server_name, tcp).await?;
-                        if tls_stream.get_ref().1.alpn_protocol() != Some(b"h2") {
+                        if tls_stream.get_ref().1.alpn_protocol() != Some(crate::tls::ALPN_H2) {
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 "TLS peer did not negotiate h2 ALPN",
@@ -563,8 +572,8 @@ fn parse_destination(
     match (security, parts.scheme) {
         (ClientSecurity::Plaintext, OriginScheme::Http) => Ok((uri, origin, None)),
         (ClientSecurity::Tls(material), OriginScheme::Https) => {
-            let trimmed_host = unbracket_host(parts.host);
-            let server_name = rustls::pki_types::ServerName::try_from(trimmed_host)
+            let unbracketed_host = unbracket_host(parts.host);
+            let server_name = rustls::pki_types::ServerName::try_from(unbracketed_host)
                 .map_err(|_| ClientError::InvalidDestination)?
                 .to_owned();
             let config = crate::tls::client_tls_config(&material)?;
@@ -591,10 +600,10 @@ fn derive_call_contexts(
 ) -> CallContexts {
     let (opening_before_parent, lifetime_before_parent) =
         timeout.deadlines(started_at, caller_timeout);
-    let (has_parent, parent_deadline, cancellation) = match parent {
-        Some(parent) => (true, parent.deadline(), parent.cancellation().child_token()),
-        None => (false, None, tokio_util::sync::CancellationToken::new()),
-    };
+    let parent_deadline = parent.and_then(OperationContext::deadline);
+    let cancellation = parent.map_or_else(tokio_util::sync::CancellationToken::new, |parent| {
+        parent.cancellation().child_token()
+    });
     let opening = OperationContext::new(
         earliest(Some(opening_before_parent), parent_deadline),
         cancellation.clone(),
@@ -603,7 +612,7 @@ fn derive_call_contexts(
         earliest(lifetime_before_parent, parent_deadline),
         cancellation,
     );
-    let watch_stop = has_parent || lifetime.deadline().is_some();
+    let watch_stop = parent.is_some() || lifetime.deadline().is_some();
     CallContexts {
         opening,
         lifetime: cancel_on_drop(lifetime),
@@ -612,14 +621,14 @@ fn derive_call_contexts(
 }
 
 fn acquire_opening_permit(
-    openings: Option<&Arc<Semaphore>>,
+    opening_slots: Option<&Arc<Semaphore>>,
     opening: &OperationContext,
 ) -> Result<Option<OwnedSemaphorePermit>, tonic::Status> {
-    opening.check().map_err(client_stopped_status)?;
-    let Some(openings) = openings else {
+    check_open(opening)?;
+    let Some(opening_slots) = opening_slots else {
         return Ok(None);
     };
-    Arc::clone(openings)
+    Arc::clone(opening_slots)
         .try_acquire_owned()
         .map(Some)
         .map_err(|_| {
@@ -650,7 +659,7 @@ fn apply_forwarded_timeout(
     Ok(())
 }
 
-fn transport_status(error: &tonic::transport::Error) -> tonic::Status {
+fn report_transport_failure(error: &tonic::transport::Error) -> tonic::Status {
     if error_chain::contains::<tonic::TimeoutExpired>(error) {
         return client_deadline_status();
     }

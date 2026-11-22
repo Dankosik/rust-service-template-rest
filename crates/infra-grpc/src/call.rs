@@ -1,5 +1,5 @@
 use http::{HeaderMap, HeaderValue};
-use infra_grpc_core::protocol::STATUS_HEADERS;
+use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
 use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody};
 use operation_context::{Deadline, OperationContext, Stopped};
 use tokio::sync::OwnedSemaphorePermit;
@@ -26,7 +26,7 @@ impl ServerCustody {
     fn into_hooks(
         self,
         call: Call,
-        fallback: Option<opentelemetry::Context>,
+        fallback_context: Option<opentelemetry::Context>,
     ) -> (ServerHooks, Option<ServerStop>) {
         let deadline = self.stop.as_ref().and_then(ServerStop::deadline);
         let hooks = ServerHooks {
@@ -34,7 +34,7 @@ impl ServerCustody {
             permit: self.permit,
             cancel_on_drop: self.cancel_on_drop,
             deadline,
-            fallback,
+            fallback_context,
         };
         (hooks, self.stop)
     }
@@ -55,58 +55,63 @@ pub(crate) fn check_open(context: &OperationContext) -> Result<(), ClassifiedSta
 
 const MIN_HEADERS_FOR_STATUS_PROJECTION: usize = 32;
 
-fn header_catalog_code(
-    headers: &HeaderMap,
-    status_header: &HeaderValue,
-) -> Option<service_failure::Code> {
-    let details = headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
-    let status = if headers.len() < MIN_HEADERS_FOR_STATUS_PROJECTION {
-        tonic::Status::from_header_map(headers)
-    } else {
-        let mut fields = HeaderMap::with_capacity(STATUS_HEADERS.len());
-        fields.insert(tonic::Status::GRPC_STATUS, status_header.clone());
-        if let Some(message) = headers.get(tonic::Status::GRPC_MESSAGE) {
-            fields.insert(tonic::Status::GRPC_MESSAGE, message.clone());
+fn status_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut projected = HeaderMap::with_capacity(STATUS_HEADERS.len());
+    for name in STATUS_HEADERS {
+        if let Some(value) = headers.get(&name) {
+            projected.insert(name, value.clone());
         }
-        fields.insert(tonic::Status::GRPC_STATUS_DETAILS, details.clone());
-        tonic::Status::from_header_map(&fields)
-    }?;
-    crate::status::catalog_code(&status)
+    }
+    projected
+}
+
+fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
+    if !headers.contains_key(tonic::Status::GRPC_STATUS_DETAILS) {
+        return None;
+    }
+    let projected;
+    let source = if headers.len() < MIN_HEADERS_FOR_STATUS_PROJECTION {
+        headers
+    } else {
+        projected = status_headers(headers);
+        &projected
+    };
+    crate::status::catalog_code(&tonic::Status::from_header_map(source)?)
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerOutcome {
     code: tonic::Code,
-    failure: Option<service_failure::Code>,
+    catalog_code: Option<service_failure::Code>,
 }
 
 impl ServerOutcome {
     const fn unknown() -> Self {
         Self {
             code: tonic::Code::Unknown,
-            failure: None,
+            catalog_code: None,
         }
     }
 
     pub(crate) const fn fixed(failure: FixedFailure) -> Self {
         Self {
             code: failure.grpc_code(),
-            failure: Some(failure.catalog_code()),
+            catalog_code: Some(failure.catalog_code()),
         }
     }
 
     fn from_status(status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
-            failure: crate::status::catalog_code(status),
+            catalog_code: crate::status::catalog_code(status),
         }
     }
 
     fn from_headers(headers: &HeaderMap) -> Option<Self> {
-        let status_header = headers.get(tonic::Status::GRPC_STATUS)?;
+        let code = header_status_code(headers)?;
         Some(Self {
-            code: tonic::Code::from_bytes(status_header.as_bytes()),
-            failure: header_catalog_code(headers, status_header),
+            code,
+            catalog_code: header_catalog_code(headers),
         })
     }
 
@@ -126,14 +131,6 @@ enum LocalStatus {
 }
 
 impl LocalStatus {
-    const fn failure(failure: FixedFailure) -> Self {
-        Self::Failure(failure)
-    }
-
-    const fn drained() -> Self {
-        Self::Drained
-    }
-
     fn write_headers(self, headers: &mut HeaderMap) -> ServerOutcome {
         match self {
             Self::Failure(failure) => {
@@ -144,7 +141,7 @@ impl LocalStatus {
                 headers.insert(tonic::Status::GRPC_STATUS, HeaderValue::from_static("0"));
                 ServerOutcome {
                     code: tonic::Code::Ok,
-                    failure: None,
+                    catalog_code: None,
                 }
             }
         }
@@ -161,7 +158,7 @@ struct ServerHooks {
     permit: Option<OwnedSemaphorePermit>,
     cancel_on_drop: Option<DropGuard>,
     deadline: Option<Deadline>,
-    fallback: Option<opentelemetry::Context>,
+    fallback_context: Option<opentelemetry::Context>,
 }
 
 impl<E> StreamHooks<E> for ServerHooks {
@@ -172,17 +169,20 @@ impl<E> StreamHooks<E> for ServerHooks {
     fn stopped(&self) -> Option<LocalStatus> {
         self.deadline
             .is_some_and(Deadline::expired)
-            .then(|| LocalStatus::failure(FixedFailure::Deadline))
+            .then_some(LocalStatus::Failure(FixedFailure::Deadline))
     }
 
     fn in_scope<R>(&self, poll: impl FnOnce() -> R) -> R {
         let _entered = self.call.span().enter();
-        let _attached = self.fallback.clone().map(opentelemetry::Context::attach);
+        let _attached = self
+            .fallback_context
+            .clone()
+            .map(opentelemetry::Context::attach);
         poll()
     }
 
     fn on_panic(&self) -> PanicOutcome<LocalStatus, ServerOutcome> {
-        PanicOutcome::Stop(LocalStatus::failure(FixedFailure::Internal))
+        PanicOutcome::Stop(LocalStatus::Failure(FixedFailure::Internal))
     }
 
     fn write_stop(&self, stop: LocalStatus, trailers: &mut HeaderMap) -> ServerOutcome {
@@ -199,11 +199,12 @@ impl<E> StreamHooks<E> for ServerHooks {
     }
 
     fn watcher_lost() -> LocalStatus {
-        LocalStatus::failure(FixedFailure::Internal)
+        LocalStatus::Failure(FixedFailure::Internal)
     }
 
     fn emit(self, outcome: ServerOutcome) -> ServerGuards {
-        self.call.finish_with_failure(outcome.code, outcome.failure);
+        self.call
+            .finish_with_failure(outcome.code, outcome.catalog_code);
         ServerGuards {
             _permit: self.permit,
             _cancel_on_drop: self.cancel_on_drop,
@@ -233,13 +234,13 @@ async fn wait_server_stop(stop: ServerStop) -> LocalStatus {
         ServerStop::Drain { deadline, drain } => {
             let context = OperationContext::new(deadline, drain);
             match context.wait_stopped().await {
-                Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
-                Stopped::Cancelled => LocalStatus::drained(),
+                Stopped::Deadline => LocalStatus::Failure(FixedFailure::Deadline),
+                Stopped::Cancelled => LocalStatus::Drained,
             }
         }
         ServerStop::Deadline(deadline) => {
             deadline.wait().await;
-            LocalStatus::failure(FixedFailure::Deadline)
+            LocalStatus::Failure(FixedFailure::Deadline)
         }
     }
 }
@@ -247,11 +248,11 @@ async fn wait_server_stop(stop: ServerStop) -> LocalStatus {
 pub(crate) fn wrap_response(
     response: axum::response::Response,
     call: Call,
-    fallback: Option<opentelemetry::Context>,
+    fallback_context: Option<opentelemetry::Context>,
     custody: ServerCustody,
     known_outcome: Option<ServerOutcome>,
 ) -> axum::response::Response {
-    let (hooks, stop) = custody.into_hooks(call, fallback);
+    let (hooks, stop) = custody.into_hooks(call, fallback_context);
     WatchedBody::attach_response(
         response,
         hooks,
@@ -273,7 +274,6 @@ mod tests {
     use bytes::Bytes;
     use http_body::{Body, Frame};
     use http_body_util::BodyExt as _;
-    use infra_grpc_core::protocol::header_status_code;
     use opentelemetry::trace::{
         SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     };
@@ -321,7 +321,10 @@ mod tests {
 
         let outcome = ServerOutcome::from_headers(&trailers).unwrap();
         assert_eq!(outcome.code, tonic::Code::DeadlineExceeded);
-        assert_eq!(outcome.failure, Some(service_failure::Code::GatewayTimeout));
+        assert_eq!(
+            outcome.catalog_code,
+            Some(service_failure::Code::GatewayTimeout)
+        );
 
         let mut malformed = HeaderMap::new();
         malformed.insert(
@@ -337,27 +340,27 @@ mod tests {
         }
         let malformed_outcome = ServerOutcome::from_headers(&malformed).unwrap();
         assert_eq!(malformed_outcome.code, tonic::Code::ResourceExhausted);
-        assert_eq!(malformed_outcome.failure, None);
+        assert_eq!(malformed_outcome.catalog_code, None);
     }
 
     #[tokio::test(start_paused = true)]
     async fn local_status_matches_tonic_headers_and_expired_deadline_overrides_known_outcome() {
         let mut drained = HeaderMap::new();
-        let drained_outcome = LocalStatus::drained().write_headers(&mut drained);
+        let drained_outcome = LocalStatus::Drained.write_headers(&mut drained);
         let mut tonic_ok = HeaderMap::new();
         tonic::Status::ok("").add_header(&mut tonic_ok).unwrap();
         assert_eq!(drained, tonic_ok);
         assert_eq!(drained_outcome.code, tonic::Code::Ok);
-        assert_eq!(drained_outcome.failure, None);
+        assert_eq!(drained_outcome.catalog_code, None);
 
         for failure in [FixedFailure::Deadline, FixedFailure::Internal] {
             let mut local = HeaderMap::new();
-            let outcome = LocalStatus::failure(failure).write_headers(&mut local);
+            let outcome = LocalStatus::Failure(failure).write_headers(&mut local);
             let mut expected = HeaderMap::new();
             failure.status().add_header(&mut expected).unwrap();
             assert_eq!(local, expected);
             assert_eq!(outcome.code, failure.grpc_code());
-            assert_eq!(outcome.failure, Some(failure.catalog_code()));
+            assert_eq!(outcome.catalog_code, Some(failure.catalog_code()));
         }
 
         for (failure, grpc_code, failure_code) in [
@@ -471,8 +474,10 @@ mod tests {
         let path = "/test.Service/Stream";
         let methods = crate::services::Methods::new([(
             path.into(),
-            crate::services::CallType::BidiStream,
-            false,
+            crate::services::MethodKind::Registered {
+                call_type: crate::services::CallType::BidiStream,
+                end_on_drain: false,
+            },
             crate::services::MethodPolicy::None,
         )]);
         Call::start(methods.resolve(path), path)
@@ -786,7 +791,7 @@ mod tests {
         let deadline = stopped_status(Stopped::Deadline);
         assert_eq!(deadline.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
-            deadline.failure(),
+            deadline.catalog_code(),
             Some(service_failure::Code::GatewayTimeout)
         );
         assert_eq!(
@@ -795,7 +800,7 @@ mod tests {
         );
         let cancelled = stopped_status(Stopped::Cancelled);
         assert_eq!(cancelled.code(), tonic::Code::Cancelled);
-        assert_eq!(cancelled.failure(), None);
+        assert_eq!(cancelled.catalog_code(), None);
         assert_eq!(crate::status::catalog_code(cancelled.status()), None);
     }
 

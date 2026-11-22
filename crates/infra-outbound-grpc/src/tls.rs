@@ -38,14 +38,14 @@ pub(crate) fn client_tls_config(
 
 struct FallibleOnce<T> {
     value: OnceLock<T>,
-    init: Mutex<()>,
+    init_lock: Mutex<()>,
 }
 
 impl<T> FallibleOnce<T> {
     const fn new() -> Self {
         Self {
             value: OnceLock::new(),
-            init: Mutex::new(()),
+            init_lock: Mutex::new(()),
         }
     }
 
@@ -53,7 +53,7 @@ impl<T> FallibleOnce<T> {
         if let Some(value) = self.value.get() {
             return Ok(value);
         }
-        let _guard = self.init.lock();
+        let _guard = self.init_lock.lock();
         if let Some(value) = self.value.get() {
             return Ok(value);
         }
@@ -61,6 +61,8 @@ impl<T> FallibleOnce<T> {
         Ok(self.value.get_or_init(|| value))
     }
 }
+
+pub(crate) const ALPN_H2: &[u8] = b"h2";
 
 fn default_tls_config() -> Result<Arc<ClientConfig>, ClientTlsError> {
     static DEFAULT_CONFIG: FallibleOnce<Arc<ClientConfig>> = FallibleOnce::new();
@@ -93,7 +95,7 @@ fn build_client_tls_config(
             .map_err(identity_setup_error)?,
         None => builder.with_no_client_auth(),
     };
-    config.alpn_protocols = vec![b"h2".to_vec()];
+    config.alpn_protocols = vec![ALPN_H2.to_vec()];
     Ok(config)
 }
 
@@ -118,19 +120,21 @@ fn identity_setup_error(error: rustls::Error) -> ClientTlsError {
 }
 
 fn client_ca_roots(ca_pem: &str) -> Result<RootCertStore, ClientTlsError> {
-    parse_ca_roots(ca_pem).map_err(|error| match error {
-        CertParseError::MalformedPem => ClientTlsError::InvalidCaCertificate(None),
-        CertParseError::InvalidDer(source) => ClientTlsError::InvalidCaCertificate(Some(source)),
-    })
+    parse_ca_roots(ca_pem).map_err(|error| ClientTlsError::InvalidCaCertificate(der_source(error)))
+}
+
+fn der_source(error: CertParseError) -> Option<rustls::Error> {
+    match error {
+        CertParseError::MalformedPem => None,
+        CertParseError::InvalidDer(source) => Some(source),
+    }
 }
 
 fn parse_client_identity(
     identity: &ClientIdentity<'_>,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), ClientTlsError> {
-    let chain = parse_cert_chain(identity.certificate_pem).map_err(|error| match error {
-        CertParseError::MalformedPem => ClientTlsError::InvalidCertificate(None),
-        CertParseError::InvalidDer(source) => ClientTlsError::InvalidCertificate(Some(source)),
-    })?;
+    let chain = parse_cert_chain(identity.certificate_pem)
+        .map_err(|error| ClientTlsError::InvalidCertificate(der_source(error)))?;
     let key = parse_private_key(identity.private_key_pem)
         .map_err(|_| ClientTlsError::InvalidPrivateKey)?;
     Ok((chain, key))

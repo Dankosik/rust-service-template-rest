@@ -155,23 +155,12 @@ pub(crate) struct Methods {
 
 impl Methods {
     pub(crate) fn new(
-        paths: impl IntoIterator<Item = (Box<str>, CallType, bool, MethodPolicy)>,
+        paths: impl IntoIterator<Item = (Box<str>, MethodKind, MethodPolicy)>,
     ) -> Self {
         Self {
             registered: paths
                 .into_iter()
-                .map(|(path, call_type, end_on_drain, policy)| {
-                    (
-                        path,
-                        Method::new(
-                            MethodKind::Registered {
-                                call_type,
-                                end_on_drain,
-                            },
-                            policy,
-                        ),
-                    )
-                })
+                .map(|(path, kind, policy)| (path, Method::new(kind, policy)))
                 .collect(),
             unknown: Method::default(),
         }
@@ -198,7 +187,7 @@ pub(crate) type ListenerLayer = BoxCloneSyncServiceLayer<
 pub(crate) struct BuiltServices {
     pub(crate) routes: tonic::service::Routes,
     pub(crate) listener_layers: Vec<ListenerLayer>,
-    pub(crate) names: BTreeSet<&'static str>,
+    pub(crate) service_names: BTreeSet<&'static str>,
     pub(crate) methods: Arc<Methods>,
     pub(crate) authentication: Authentication,
 }
@@ -207,12 +196,12 @@ pub(crate) struct BuiltServices {
 pub struct Services {
     listener_layers: Vec<ListenerLayer>,
     routes: tonic::service::RoutesBuilder,
-    names: BTreeSet<&'static str>,
+    service_names: BTreeSet<&'static str>,
     described: HashMap<String, BTreeMap<String, CallType>>,
     descriptor_sets: Vec<&'static [u8]>,
     reflection: bool,
     // template:begin authn:grpc-services-scopes-field
-    scopes: HashMap<String, crate::authn::ScopeRequirement>,
+    scope_requirements: HashMap<String, crate::authn::ScopeRequirement>,
     // template:end authn:grpc-services-scopes-field
     // template:begin service-auth:grpc-services-callers-field
     caller_rules: HashMap<String, foldhash::HashSet<infra_serviceauth::ServiceName>>,
@@ -232,14 +221,7 @@ pub struct ServiceRegistration<'a> {
 impl ServiceRegistration<'_> {
     // template:begin authn:grpc-services-require-scopes
     pub fn require_scopes(&mut self, method: &str, scopes: &[&str]) -> Result<&mut Self, Error> {
-        let path = self.services.resolve_service_method(
-            self.service_name,
-            method,
-            crate::error::PolicyKind::ScopeRequirement,
-        )?;
-        self.services
-            .register_scopes_for_paths(&[path.as_str()], scopes, false)?;
-        Ok(self)
+        self.require_method_scopes(method, scopes, false)
     }
 
     pub fn require_scopes_for_delegation(
@@ -247,13 +229,22 @@ impl ServiceRegistration<'_> {
         method: &str,
         scopes: &[&str],
     ) -> Result<&mut Self, Error> {
+        self.require_method_scopes(method, scopes, true)
+    }
+
+    fn require_method_scopes(
+        &mut self,
+        method: &str,
+        scopes: &[&str],
+        delegate: bool,
+    ) -> Result<&mut Self, Error> {
         let path = self.services.resolve_service_method(
             self.service_name,
             method,
             crate::error::PolicyKind::ScopeRequirement,
         )?;
         self.services
-            .register_scopes_for_paths(&[path.as_str()], scopes, true)?;
+            .register_scopes_for_paths(&[path.as_str()], scopes, delegate)?;
         Ok(self)
     }
     // template:end authn:grpc-services-require-scopes
@@ -342,35 +333,17 @@ impl Services {
             .map_err(|source| Error::new(ErrorKind::DecodeDescriptorSet(source)))?;
         let mut pending_descriptions: HashMap<String, BTreeMap<String, CallType>> =
             HashMap::default();
-        for file in set.file {
-            let package = file.package.as_deref().unwrap_or_default();
-            for service in file.service {
-                let name = service.name.unwrap_or_default();
-                let name = if package.is_empty() {
-                    name
-                } else {
-                    format!("{package}.{name}")
-                };
-                let methods: BTreeMap<_, _> = service
-                    .method
-                    .into_iter()
-                    .map(|method| {
-                        let call_type =
-                            CallType::new(method.client_streaming(), method.server_streaming());
-                        (method.name.unwrap_or_default(), call_type)
-                    })
-                    .collect();
-                match pending_descriptions
-                    .get(&name)
-                    .or_else(|| self.described.get(&name))
-                {
-                    Some(previous) if previous != &methods => {
-                        return Err(Error::new(ErrorKind::ConflictingServiceDescription(name)));
-                    }
-                    Some(_) => {}
-                    None => {
-                        pending_descriptions.insert(name, methods);
-                    }
+        for (name, methods) in described_services(set) {
+            match pending_descriptions
+                .get(&name)
+                .or_else(|| self.described.get(&name))
+            {
+                Some(previous) if previous != &methods => {
+                    return Err(Error::new(ErrorKind::ConflictingServiceDescription(name)));
+                }
+                Some(_) => {}
+                None => {
+                    pending_descriptions.insert(name, methods);
                 }
             }
         }
@@ -395,7 +368,7 @@ impl Services {
         if !self.described.contains_key(S::NAME) {
             return Err(Error::new(ErrorKind::UndescribedService(S::NAME)));
         }
-        if !self.names.insert(S::NAME) {
+        if !self.service_names.insert(S::NAME) {
             return Err(Error::new(ErrorKind::DuplicateService(S::NAME)));
         }
         self.routes.add_service(service);
@@ -443,7 +416,7 @@ impl Services {
         if matches!(authentication, Authentication::Bearer(_)) {
             self.prepare_scope_requirements()?;
         } else if self
-            .scopes
+            .scope_requirements
             .values()
             .any(|rule| rule.delegate || !rule.scopes.is_empty())
         {
@@ -453,24 +426,27 @@ impl Services {
         let Self {
             listener_layers,
             routes,
-            names,
+            service_names,
             described,
             reflection,
             // template:begin authn:grpc-router-bearer-destructure
-            mut scopes,
+            mut scope_requirements,
             // template:end authn:grpc-router-bearer-destructure
             // template:begin service-auth:grpc-router-caller-destructure
             mut caller_rules,
             // template:end service-auth:grpc-router-caller-destructure
             ..
         } = self;
-        let business =
-            described_method_paths(&described, names.iter().copied()).map(|(path, kind)| {
-                let end_on_drain = reflection && REFLECTION_PATHS.contains(&path.as_str());
+        let business = described_method_paths(&described, service_names.iter().copied()).map(
+            |(path, call_type)| {
+                let kind = MethodKind::Registered {
+                    call_type,
+                    end_on_drain: reflection && REFLECTION_PATHS.contains(&path.as_str()),
+                };
                 let policy = match &authentication {
                     Authentication::None => MethodPolicy::None,
                     // template:begin authn:grpc-method-policy-bearer
-                    Authentication::Bearer(_) => scopes
+                    Authentication::Bearer(_) => scope_requirements
                         .remove(&path)
                         .map_or(MethodPolicy::None, MethodPolicy::Scopes),
                     // template:end authn:grpc-method-policy-bearer
@@ -480,15 +456,23 @@ impl Services {
                         .map_or(MethodPolicy::None, MethodPolicy::Callers),
                     // template:end service-auth:grpc-method-policy-service-tokens
                 };
-                (path.into_boxed_str(), kind, end_on_drain, policy)
-            });
-        let health = described_method_paths(&described, std::iter::once(HealthServer::NAME))
-            .map(|(path, kind)| (path.into_boxed_str(), kind, false, MethodPolicy::None));
+                (path.into_boxed_str(), kind, policy)
+            },
+        );
+        let health = described_method_paths(&described, std::iter::once(HealthServer::NAME)).map(
+            |(path, call_type)| {
+                let kind = MethodKind::Registered {
+                    call_type,
+                    end_on_drain: false,
+                };
+                (path.into_boxed_str(), kind, MethodPolicy::None)
+            },
+        );
         let methods = Arc::new(Methods::new(business.chain(health)));
         Ok(BuiltServices {
             routes: routes.routes(),
             listener_layers,
-            names,
+            service_names,
             methods,
             authentication,
         })
@@ -501,14 +485,14 @@ impl Services {
             .into_iter()
             .chain(self.descriptor_sets.iter().copied());
         reflection::check_files(sets.clone())?;
-        let builder = || {
+        let reflection_builder = || {
             let builder =
                 tonic_reflection::server::Builder::configure().include_reflection_service(false);
             let builder = sets.clone().fold(
                 builder,
                 tonic_reflection::server::Builder::register_encoded_file_descriptor_set,
             );
-            self.names
+            self.service_names
                 .iter()
                 .copied()
                 .chain([
@@ -521,15 +505,15 @@ impl Services {
                     tonic_reflection::server::Builder::with_service_name,
                 )
         };
-        let v1 = builder()
+        let v1_service = reflection_builder()
             .build_v1()
             .map_err(|source| Error::new(ErrorKind::BuildReflectionV1(source)))?;
-        let v1alpha = builder()
+        let v1alpha_service = reflection_builder()
             .build_v1alpha()
             .map_err(|source| Error::new(ErrorKind::BuildReflectionV1Alpha(source)))?;
         let layer = MapRequestLayer::new(reflection::stop_request_body_on_cancellation);
-        self.add(layer.named_layer(v1))?;
-        self.add(layer.named_layer(v1alpha))?;
+        self.add(layer.named_layer(v1_service))?;
+        self.add(layer.named_layer(v1alpha_service))?;
         Ok(())
     }
 
@@ -545,22 +529,24 @@ impl Services {
         self.attach_reflection().unwrap();
         self.index_descriptor_services(tonic_health::pb::FILE_DESCRIPTOR_SET)
             .unwrap();
-        let services = self.names.iter().copied().chain([HealthServer::NAME]);
+        let services = self
+            .service_names
+            .iter()
+            .copied()
+            .chain([HealthServer::NAME]);
         let methods = Arc::new(Methods::new(
-            described_method_paths(&self.described, services).map(|(path, kind)| {
-                let end_on_drain = self.reflection && REFLECTION_PATHS.contains(&path.as_str());
-                (
-                    path.into_boxed_str(),
-                    kind,
-                    end_on_drain,
-                    MethodPolicy::None,
-                )
+            described_method_paths(&self.described, services).map(|(path, call_type)| {
+                let kind = MethodKind::Registered {
+                    call_type,
+                    end_on_drain: self.reflection && REFLECTION_PATHS.contains(&path.as_str()),
+                };
+                (path.into_boxed_str(), kind, MethodPolicy::None)
             }),
         ));
         (
             self.routes.routes().into_axum_router(),
             self.listener_layers,
-            self.names,
+            self.service_names,
             methods,
         )
     }
@@ -593,7 +579,7 @@ impl Services {
         reason = "the initializer removes both policy checks without bearer or service authentication"
     )]
     fn first_method_without(&self, has_rule: impl Fn(&str) -> bool) -> Option<String> {
-        described_method_paths(&self.described, self.names.iter().copied())
+        described_method_paths(&self.described, self.service_names.iter().copied())
             .map(|(path, _)| path)
             .find(|path| !has_rule(path))
     }
@@ -608,7 +594,10 @@ impl Services {
         let Some(&first) = paths.first() else {
             return Ok(());
         };
-        if let Some(&duplicate) = paths.iter().find(|&&path| self.scopes.contains_key(path)) {
+        if let Some(&duplicate) = paths
+            .iter()
+            .find(|&&path| self.scope_requirements.contains_key(path))
+        {
             return Err(Error::new(ErrorKind::DuplicatePolicy {
                 policy: crate::error::PolicyKind::ScopeRequirement,
                 path: duplicate.to_owned(),
@@ -617,7 +606,7 @@ impl Services {
         validate_scope_tokens(first, scopes)?;
         let scopes: Box<[String]> = scopes.iter().map(|&scope| scope.to_owned()).collect();
         for &path in paths {
-            self.scopes.insert(
+            self.scope_requirements.insert(
                 path.to_owned(),
                 crate::authn::ScopeRequirement {
                     scopes: scopes.clone(),
@@ -631,10 +620,12 @@ impl Services {
     fn prepare_scope_requirements(&mut self) -> Result<(), Error> {
         if self.reflection {
             for path in REFLECTION_PATHS {
-                self.scopes.entry(path.to_owned()).or_default();
+                self.scope_requirements.entry(path.to_owned()).or_default();
             }
         }
-        if let Some(path) = self.first_method_without(|path| self.scopes.contains_key(path)) {
+        if let Some(path) =
+            self.first_method_without(|path| self.scope_requirements.contains_key(path))
+        {
             return Err(Error::new(ErrorKind::MissingPolicy {
                 policy: crate::error::PolicyKind::ScopeRequirement,
                 path,
@@ -679,6 +670,32 @@ impl Services {
         Ok(())
     }
     // template:end service-auth:grpc-services-caller-helpers
+}
+
+fn described_services(
+    set: prost_types::FileDescriptorSet,
+) -> impl Iterator<Item = (String, BTreeMap<String, CallType>)> {
+    set.file.into_iter().flat_map(|file| {
+        let package = file.package.unwrap_or_default();
+        file.service.into_iter().map(move |service| {
+            let name = service.name.unwrap_or_default();
+            let name = if package.is_empty() {
+                name
+            } else {
+                format!("{package}.{name}")
+            };
+            let methods = service
+                .method
+                .into_iter()
+                .map(|method| {
+                    let call_type =
+                        CallType::new(method.client_streaming(), method.server_streaming());
+                    (method.name.unwrap_or_default(), call_type)
+                })
+                .collect();
+            (name, methods)
+        })
+    })
 }
 
 fn described_method_paths(

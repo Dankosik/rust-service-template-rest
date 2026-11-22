@@ -42,6 +42,13 @@ pub(crate) enum ClientObservation {
 }
 
 impl ClientObservation {
+    pub(crate) fn decoded(call: Call, response: &mut http::Response<tonic::body::Body>) -> Self {
+        let span = call.span().clone();
+        let observer = tonic::client::ResponseStatusObserver::new(move |code| call.finish(code));
+        response.extensions_mut().insert(observer.clone());
+        Self::Decoded { span, observer }
+    }
+
     fn span(&self) -> &tracing::Span {
         match self {
             Self::Transport(call) => call.span(),
@@ -67,6 +74,10 @@ pub(crate) fn client_stopped_status(reason: Stopped) -> tonic::Status {
     }
 }
 
+pub(crate) fn check_open(context: &OperationContext) -> Result<(), tonic::Status> {
+    context.check().map_err(client_stopped_status)
+}
+
 #[derive(Clone, Copy)]
 struct ClientOutcome {
     metric_code: tonic::Code,
@@ -79,6 +90,13 @@ impl ClientOutcome {
             metric_code: code,
             status_hook_code: None,
         }
+    }
+
+    fn from_http_status(status: StatusCode) -> Self {
+        grpc_code_from_http_status(status).map_or(Self::local(tonic::Code::Unknown), |code| Self {
+            metric_code: code,
+            status_hook_code: Some(code),
+        })
     }
 
     fn from_headers(observation: &ClientObservation, headers: &HeaderMap) -> Option<Self> {
@@ -176,13 +194,7 @@ pub(crate) fn attach_client_response(
     observation: ClientObservation,
     custody: ClientCustody,
 ) -> http::Response<tonic::body::Body> {
-    let missing_status = grpc_code_from_http_status(response.status()).map_or(
-        ClientOutcome::local(tonic::Code::Unknown),
-        |code| ClientOutcome {
-            metric_code: code,
-            status_hook_code: Some(code),
-        },
-    );
+    let missing_status = ClientOutcome::from_http_status(response.status());
     let watch_stop = custody.watch_stop;
     let hooks = ClientHooks {
         observation,
@@ -256,14 +268,14 @@ impl Body for Upload {
 
     fn poll_frame(
         self: Pin<&mut Self>,
-        context: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let mut phase = self.0.lock();
         let (polled, finished) = match &mut *phase {
             UploadPhase::Open { body, waker } => {
-                register_waker(waker, context.waker());
+                register_waker(waker, cx.waker());
                 let polled = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Pin::new(&mut *body).poll_frame(context)
+                    Pin::new(&mut *body).poll_frame(cx)
                 }));
                 let finished = matches!(polled, Ok(Poll::Ready(None | Some(Err(_)))) | Err(_))
                     || body.is_end_stream();
@@ -438,12 +450,12 @@ mod tests {
         request
             .extensions_mut()
             .insert(tonic::GrpcMethod::new("test.v1.StreamService", "Watch"));
-        let destination =
-            crate::observe::Destination::from_uri(&"http://127.0.0.1:50051".parse().unwrap());
+        let server_address =
+            crate::observe::ServerAddress::from_uri(&"http://127.0.0.1:50051".parse().unwrap());
         crate::observe::start_call(
             crate::observe::Series::client(),
             &request,
-            destination.as_ref(),
+            server_address.as_ref(),
         )
     }
 

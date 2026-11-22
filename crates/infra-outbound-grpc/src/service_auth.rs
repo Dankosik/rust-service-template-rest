@@ -58,26 +58,31 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Error = tonic::Status;
     type Future = ResponseFuture;
 
-    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
         ResponseFuture::from_prepared(self.prepare(request), |prepared| {
             let tokens = self.tokens.clone();
-            prepared.send_with_dispatch(move |headers| {
-                let authorization = tokens.authorization().map_err(|error| {
-                    let mut status = tonic::Status::unavailable("service token unavailable");
-                    status.set_source(Arc::new(error));
-                    status
-                })?;
-                if let Some(value) = authorization {
-                    headers.insert(AUTHORIZATION, value);
-                }
-                Ok(())
-            })
+            prepared.send_with_dispatch(move |headers| insert_service_token(&tokens, headers))
         })
     }
+}
+
+fn insert_service_token(
+    tokens: &ReceiverTokens,
+    headers: &mut http::HeaderMap,
+) -> Result<(), tonic::Status> {
+    let authorization = tokens.authorization().map_err(|error| {
+        let mut status = tonic::Status::unavailable("service token unavailable");
+        status.set_source(Arc::new(error));
+        status
+    })?;
+    if let Some(value) = authorization {
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

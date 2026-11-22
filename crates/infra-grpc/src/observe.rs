@@ -130,19 +130,15 @@ impl Call {
         self.0.metrics().record_failure(failure);
     }
 
-    fn finish(self, code: tonic::Code) {
-        self.0.finish(code);
-    }
-
     pub(crate) fn finish_with_failure(
         self,
         code: tonic::Code,
-        failure: Option<service_failure::Code>,
+        catalog_code: Option<service_failure::Code>,
     ) {
-        if let Some(failure) = failure {
-            self.record_failure(failure);
+        if let Some(catalog_code) = catalog_code {
+            self.record_failure(catalog_code);
         }
-        self.finish(code);
+        self.0.finish(code);
     }
 }
 
@@ -159,18 +155,15 @@ pub(crate) fn attach_parent_or_fallback(
 }
 
 pub(crate) fn record_shed() {
-    describe();
     metrics::counter!(SERVER_SHED_METRIC).increment(1);
 }
 
 pub(crate) fn register_shed() {
-    describe();
     metrics::counter!(SERVER_SHED_METRIC).increment(0);
 }
 
 #[must_use]
 pub(crate) fn admission_waiting() -> impl Drop {
-    describe();
     let waiting = metrics::gauge!(SERVER_ADMISSION_WAITING_METRIC);
     waiting.increment(1.0);
     DropGuard::new(tokio::time::Instant::now(), move |started| {
@@ -268,16 +261,18 @@ mod tests {
         let path = "/example.v1.EchoService/Unary";
         let methods = crate::services::Methods::new([(
             path.into(),
-            CallType::Unary,
-            false,
+            crate::services::MethodKind::Registered {
+                call_type: CallType::Unary,
+                end_on_drain: false,
+            },
             crate::services::MethodPolicy::None,
         )]);
         let known = Call::start(methods.resolve(path), path);
-        known.finish(tonic::Code::Unauthenticated);
+        known.finish_with_failure(tonic::Code::Unauthenticated, None);
 
         let path = "/example.v1.EchoService/Invented";
         let unknown = Call::start(methods.resolve(path), path);
-        unknown.finish(tonic::Code::Unimplemented);
+        unknown.finish_with_failure(tonic::Code::Unimplemented, None);
         drop(guard);
 
         let spans = exporter.get_finished_spans().unwrap();

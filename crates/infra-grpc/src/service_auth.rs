@@ -41,11 +41,7 @@ pub(crate) async fn admit_caller(
         }
     };
     if !allowed_callers.is_some_and(|callers| callers.contains(caller.name())) {
-        let method = if allowed_callers.is_some() {
-            request.uri().path()
-        } else {
-            "unknown"
-        };
+        let method = allowed_callers.map_or("unknown", |_| request.uri().path());
         tracing::warn!(
             caller = %caller.name(),
             method,
@@ -178,13 +174,19 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
-        assert_eq!(denied.failure(), Some(service_failure::Code::Forbidden));
+        assert_eq!(
+            denied.catalog_code(),
+            Some(service_failure::Code::Forbidden)
+        );
 
         let unknown = admit_caller(&verifier, None, &live, make_request(Some(&orders_bearer)))
             .await
             .unwrap_err();
         assert_eq!(unknown.code(), tonic::Code::PermissionDenied);
-        assert_eq!(unknown.failure(), Some(service_failure::Code::Forbidden));
+        assert_eq!(
+            unknown.catalog_code(),
+            Some(service_failure::Code::Forbidden)
+        );
 
         let admitted = admit_caller(
             &verifier,

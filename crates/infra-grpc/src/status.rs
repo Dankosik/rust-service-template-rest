@@ -77,7 +77,7 @@ impl Failure {
         let code = self.code;
         ClassifiedStatus {
             kind: ClassifiedKind::Dynamic(self.into_status_as(grpc, message)),
-            failure: Some(code),
+            catalog_code: Some(code),
         }
     }
 }
@@ -158,14 +158,14 @@ enum ClassifiedKind {
 #[derive(Debug)]
 pub(crate) struct ClassifiedStatus {
     kind: ClassifiedKind,
-    failure: Option<Code>,
+    catalog_code: Option<Code>,
 }
 
 impl ClassifiedStatus {
     pub(crate) fn fixed(failure: FixedFailure) -> Self {
         Self {
             kind: ClassifiedKind::Cached(failure.template()),
-            failure: Some(failure.catalog_code()),
+            catalog_code: Some(failure.catalog_code()),
         }
     }
 
@@ -176,7 +176,7 @@ impl ClassifiedStatus {
         );
         Self {
             kind: ClassifiedKind::Dynamic(status),
-            failure: None,
+            catalog_code: None,
         }
     }
 
@@ -187,8 +187,8 @@ impl ClassifiedStatus {
         }
     }
 
-    pub(crate) const fn failure(&self) -> Option<Code> {
-        self.failure
+    pub(crate) const fn catalog_code(&self) -> Option<Code> {
+        self.catalog_code
     }
 
     pub(crate) fn into_http<B: Default>(self) -> http::Response<B> {
@@ -212,7 +212,7 @@ impl From<Failure> for ClassifiedStatus {
         if failure.is_plain() {
             return Self {
                 kind: ClassifiedKind::Cached(catalog_template(failure.code)),
-                failure: Some(failure.code),
+                catalog_code: Some(failure.code),
             };
         }
         let (grpc, message) = projection(failure.code);
@@ -384,7 +384,7 @@ mod tests {
             assert_eq!(catalog_code(&status), Some(code));
             let classified = ClassifiedStatus::from(Failure::new(code));
             assert_eq!(classified.code(), status.code());
-            assert_eq!(classified.failure(), Some(code));
+            assert_eq!(classified.catalog_code(), Some(code));
             assert_matches_tonic_http(&classified.into_http::<()>(), status);
         }
 
@@ -392,7 +392,7 @@ mod tests {
             .into_classified_as(tonic::Code::PermissionDenied, "custom refusal");
         assert_eq!(custom.code(), tonic::Code::PermissionDenied);
         assert_eq!(custom.status().message(), "custom refusal");
-        assert_eq!(custom.failure(), Some(Code::Forbidden));
+        assert_eq!(custom.catalog_code(), Some(Code::Forbidden));
         assert_eq!(catalog_code(custom.status()), Some(Code::Forbidden));
         let custom_response = custom.into_http::<()>();
         assert_eq!(
@@ -410,7 +410,7 @@ mod tests {
             let classified = ClassifiedStatus::fixed(fixed);
             assert_eq!(classified.code(), fixed.grpc_code());
             assert_eq!(classified.code(), fixed.status().code());
-            assert_eq!(classified.failure(), Some(fixed.catalog_code()));
+            assert_eq!(classified.catalog_code(), Some(fixed.catalog_code()));
             assert_eq!(
                 catalog_code(classified.status()),
                 Some(fixed.catalog_code())

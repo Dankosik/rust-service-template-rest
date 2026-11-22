@@ -30,12 +30,12 @@ static CLIENT_SERIES: LazyLock<Series> = LazyLock::new(Series::new);
 pub(crate) type Call = infra_grpc_core::observe::Call<MethodMetrics>;
 
 #[derive(Debug)]
-pub(crate) struct Destination {
+pub(crate) struct ServerAddress {
     address: Arc<str>,
     port: Option<u16>,
 }
 
-impl Destination {
+impl ServerAddress {
     pub(crate) fn from_uri(uri: &http::Uri) -> Option<Self> {
         let host = uri
             .host()
@@ -51,11 +51,11 @@ impl Destination {
 pub(crate) fn start_call<B>(
     series: &Series,
     request: &http::Request<B>,
-    destination: Option<&Destination>,
+    server_address: Option<&ServerAddress>,
 ) -> Call {
     let started = Instant::now();
     let metrics = series.resolve(request);
-    let span = make_client_span(request, &metrics, destination);
+    let span = make_client_span(request, &metrics, server_address);
     metrics.started.increment(1);
     Call::start(metrics, span, started)
 }
@@ -63,7 +63,7 @@ pub(crate) fn start_call<B>(
 fn make_client_span<B>(
     request: &http::Request<B>,
     metrics: &MethodMetrics,
-    destination: Option<&Destination>,
+    server_address: Option<&ServerAddress>,
 ) -> tracing::Span {
     let span = open_rpc_span(
         &SpanKind::Client,
@@ -73,9 +73,9 @@ fn make_client_span<B>(
     if span.is_disabled() {
         return span;
     }
-    if let Some(destination) = destination {
-        span.set_attribute("server.address", Arc::clone(&destination.address));
-        if let Some(port) = destination.port {
+    if let Some(server_address) = server_address {
+        span.set_attribute("server.address", Arc::clone(&server_address.address));
+        if let Some(port) = server_address.port {
             span.set_attribute("server.port", i64::from(port));
         }
     }
@@ -293,8 +293,8 @@ mod tests {
             "/example.v1.EchoService/Unary",
             Some(("example.v1.EchoService", "Unary")),
         );
-        let destination = Destination::from_uri(&"http://[::1]:50051".parse().unwrap());
-        start_call(&series, &known, destination.as_ref()).finish(tonic::Code::Unauthenticated);
+        let server_address = ServerAddress::from_uri(&"http://[::1]:50051".parse().unwrap());
+        start_call(&series, &known, server_address.as_ref()).finish(tonic::Code::Unauthenticated);
         let mut raw = test_request("/example.v1.Raw/Unary", None);
         raw.headers_mut().insert(
             http::header::USER_AGENT,
@@ -374,11 +374,11 @@ mod tests {
 
     #[test]
     fn destination_strips_ipv6_brackets_and_caps_overlong_hosts() {
-        let ipv6 = Destination::from_uri(&"https://[::1]:50051".parse().unwrap()).unwrap();
+        let ipv6 = ServerAddress::from_uri(&"https://[::1]:50051".parse().unwrap()).unwrap();
         assert_eq!(ipv6.address.as_ref(), "::1");
         assert_eq!(ipv6.port, Some(50051));
 
-        let named = Destination::from_uri(&"https://grpc.example.test".parse().unwrap()).unwrap();
+        let named = ServerAddress::from_uri(&"https://grpc.example.test".parse().unwrap()).unwrap();
         assert_eq!(named.address.as_ref(), "grpc.example.test");
         assert_eq!(named.port, None);
 
@@ -386,7 +386,7 @@ mod tests {
             format!("https://{}.test:50051", "a".repeat(DIAGNOSTIC_BYTES))
                 .parse()
                 .unwrap();
-        assert!(Destination::from_uri(&overlong_uri).is_none());
+        assert!(ServerAddress::from_uri(&overlong_uri).is_none());
     }
 
     #[test]
