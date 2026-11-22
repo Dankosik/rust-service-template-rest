@@ -221,7 +221,12 @@ impl ReplayableResponse {
 
 pub(super) fn response_from_record(record: Record) -> Response {
     let (status, headers, body) = record.into_parts();
-    let mut response = Response::new(Body::from(body));
+    let body = if body.is_empty() {
+        Body::empty()
+    } else {
+        Body::from(body)
+    };
+    let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
@@ -265,6 +270,7 @@ fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, ReplayError> {
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderName;
+    use http_body::Body as _;
     use http_body_util::BodyExt as _;
     use utoipa::ToSchema;
 
@@ -413,6 +419,8 @@ mod tests {
         let response = response_from_record(Record::from(empty.into_success()));
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(response.headers().is_empty());
+        assert!(response.body().is_end_stream());
+        assert_eq!(response.body().size_hint().exact(), Some(0));
     }
 
     fn header_map(headers: &[(&str, &str)]) -> HeaderMap {
@@ -532,6 +540,11 @@ mod tests {
                     response.headers().get_all(name).iter().map(HeaderValue::as_bytes).collect();
                 proptest::prop_assert_eq!(returned, sent, "{}", name);
             }
+            proptest::prop_assert_eq!(response.body().is_end_stream(), body.is_empty());
+            proptest::prop_assert_eq!(
+                response.body().size_hint().exact(),
+                Some(body.len() as u64)
+            );
             let returned_body = runtime
                 .block_on(response.into_body().collect())
                 .unwrap()

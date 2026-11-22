@@ -412,24 +412,24 @@ async fn write(
                  SELECT expires_at FROM http_idempotency_records \
                  WHERE scope_key = $1 FOR UPDATE) \
              INSERT INTO http_idempotency_records AS r \
-             (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, \
-              expires_at) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp() + $9 \
+             (scope_key, fingerprint, status, headers, issuer, caller_kind, caller_value, \
+              expires_at, body) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, clock_timestamp() + $8, $9 \
              WHERE NOT EXISTS (SELECT 1 FROM locked WHERE expires_at > statement_timestamp()) \
              ON CONFLICT (scope_key) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, \
              status = EXCLUDED.status, headers = EXCLUDED.headers, body = EXCLUDED.body, \
              issuer = EXCLUDED.issuer, caller_kind = EXCLUDED.caller_kind, \
-             caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $9 \
+             caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $8 \
              WHERE r.expires_at <= statement_timestamp()",
             scope.digest.as_slice(),
             fingerprint.as_bytes().as_slice(),
             record.encode_status(),
             record.encode_headers().bind_iter() as _,
-            record.body(),
             scope.caller.issuer,
             scope.caller.kind.as_str(),
             scope.caller.value,
             retention as _,
+            record.body(),
         )
         .execute(tx),
     )

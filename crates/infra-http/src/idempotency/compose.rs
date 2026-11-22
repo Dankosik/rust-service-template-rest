@@ -361,7 +361,6 @@ async fn capture_attempt(
         .extensions
         .remove::<Principal>()
         .ok_or_else(|| wiring_failure(&route.operation_id, "principal_missing"))?;
-    let caller = identity::caller_identity(principal.issuer(), principal.identity());
     let Some(scope) = identity::decode_key(
         parts
             .headers
@@ -369,7 +368,10 @@ async fn capture_attempt(
             .iter()
             .map(HeaderValue::as_bytes),
     )
-    .map(|key| ScopeKey::new(caller, &key)) else {
+    .map(|key| {
+        let caller = identity::caller_identity(principal.issuer(), principal.identity());
+        ScopeKey::new(caller, &key)
+    }) else {
         route.record(Outcome::InvalidKey);
         return Err(invalid_key(route.rules_link.clone(), &parts.extensions));
     };
