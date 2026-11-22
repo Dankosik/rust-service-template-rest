@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -10,7 +11,6 @@ use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout};
-use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::admission::Admitted;
@@ -35,6 +35,65 @@ const PING_INTERVAL: Duration = Duration::from_secs(2);
 #[path = "tests/full_pipeline.rs"]
 mod full_pipeline_tests;
 
+#[derive(Clone)]
+pub(crate) struct Retirement(Arc<RetirementInner>);
+
+struct RetirementInner {
+    retired: AtomicBool,
+    waiters: Notify,
+}
+
+impl Retirement {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(RetirementInner {
+            retired: AtomicBool::new(false),
+            waiters: Notify::new(),
+        }))
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.0.retired.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn retire(&self) {
+        if !self.0.retired.swap(true, Ordering::AcqRel) {
+            self.0.waiters.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn wait(&self) {
+        if self.is_retired() {
+            return;
+        }
+        let notified = self.0.waiters.notified();
+        if self.is_retired() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+struct ApplicationSlots(AtomicUsize);
+
+impl ApplicationSlots {
+    fn new(limit: usize) -> Self {
+        Self(AtomicUsize::new(limit))
+    }
+
+    fn try_acquire(&self) -> Option<impl Drop + '_> {
+        self.0
+            .try_update(Ordering::Acquire, Ordering::Relaxed, |available| {
+                available.checked_sub(1)
+            })
+            .ok()
+            .map(|_| {
+                std::mem::DropGuard::new(&self.0, |slots| {
+                    slots.fetch_add(1, Ordering::Release);
+                })
+            })
+    }
+}
+
 #[derive(derive_more::Debug)]
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
@@ -42,7 +101,7 @@ pub(crate) struct Link {
     #[debug(skip)]
     shared: Arc<Shared>,
     #[debug(skip)]
-    application_slots: Semaphore,
+    application_slots: ApplicationSlots,
     #[debug(skip)]
     admission_refused: Counter,
     #[debug(skip)]
@@ -77,7 +136,7 @@ struct Generation {
     connection: MultiplexedConnection,
     caller_capacity: Arc<Semaphore>,
     abandoned: mpsc::UnboundedSender<AbandonedReply>,
-    retired: CancellationToken,
+    retired: Retirement,
     cooldown_until: Instant,
 }
 
@@ -97,12 +156,12 @@ impl Generation {
         Ok(reservation)
     }
 
-    fn exchange<T: Send + 'static>(
+    fn exchange<T: Send + 'static, F: Future<Output = redis::RedisResult<T>> + Send + 'static>(
         &self,
         reservation: OwnedSemaphorePermit,
-        reply: impl Future<Output = redis::RedisResult<T>> + Send + 'static,
+        reply: F,
         wire_deadline: Deadline,
-    ) -> Exchange<'_, T> {
+    ) -> Exchange<'_, F> {
         Exchange::new(
             &self.retired,
             &self.abandoned,
@@ -118,7 +177,7 @@ impl Shared {
         let state_guard = self.state_lock.lock();
         let previous = self.state.swap(Arc::new(State::Closed));
         if let State::Connected(current) = &*previous {
-            current.retired.cancel();
+            current.retired.retire();
             self.retirements.increment(1);
         }
         drop(state_guard);
@@ -131,7 +190,7 @@ impl Shared {
 
     fn retire(&self, generation: &Arc<Generation>) {
         let state_guard = self.state_lock.lock();
-        generation.retired.cancel();
+        generation.retired.retire();
         let notify = if matches!(
             &**self.state.load(),
             State::Connected(current) if Arc::ptr_eq(current, generation)
@@ -190,7 +249,7 @@ impl Shared {
         match &**self.state.load() {
             State::Closed => Some(Err(ErrorType::Io)),
             State::Connected(current) => {
-                if current.retired.is_cancelled() {
+                if current.retired.is_retired() {
                     current.cooldown_error().map(Err)
                 } else {
                     Some(Ok(current.clone()))
@@ -289,7 +348,7 @@ impl Link {
             server,
             command_timeout,
             shared,
-            application_slots: Semaphore::new(max_concurrency),
+            application_slots: ApplicationSlots::new(max_concurrency),
             admission_refused,
             commands_in_flight,
             supervisor,
@@ -338,7 +397,7 @@ impl Link {
             stop = budget.wait_stopped() => {
                 return Err(DispatchError::OutcomeUnknown(stop.into()));
             }
-            () = generation.retired.cancelled() => {
+            () = generation.retired.wait() => {
                 return Err(DispatchError::OutcomeUnknown(UnknownCause::Failed(ErrorType::Io)));
             }
         };
@@ -361,30 +420,35 @@ impl Link {
         &self,
         budget: &BoundedContext,
     ) -> Result<(Arc<Generation>, OwnedSemaphorePermit), UnknownCause> {
-        let generation = tokio::select! {
-            biased;
-            result = self.shared.acquire() => result,
-            stop = budget.wait_stopped() => return Err(stop.into()),
-        };
-        budget.check()?;
-        let generation = generation.map_err(UnknownCause::Failed)?;
+        let generation = if let Some(result) = self.shared.settled() {
+            result
+        } else {
+            let result = tokio::select! {
+                biased;
+                result = self.shared.acquire() => result,
+                stop = budget.wait_stopped() => return Err(stop.into()),
+            };
+            budget.check()?;
+            result
+        }
+        .map_err(UnknownCause::Failed)?;
         let reservation = tokio::select! {
             biased;
             result = generation.reserve() => result.map_err(UnknownCause::Failed)?,
             stop = budget.wait_stopped() => return Err(stop.into()),
-            () = generation.retired.cancelled() => return Err(UnknownCause::Failed(ErrorType::Io)),
+            () = generation.retired.wait() => return Err(UnknownCause::Failed(ErrorType::Io)),
         };
         check_before_dispatch(budget, &generation)?;
         Ok((generation, reservation))
     }
 
     fn claim_slot(&self) -> Result<impl Drop + '_, ErrorType> {
-        let permit = self.application_slots.try_acquire().map_err(|_| {
+        let slot = self.application_slots.try_acquire().ok_or_else(|| {
             self.admission_refused.increment(1);
             ErrorType::Other
         })?;
         self.commands_in_flight.increment(1.0);
-        Ok(std::mem::DropGuard::new(permit, |_permit| {
+        Ok(std::mem::DropGuard::new(slot, |_slot| {
             self.commands_in_flight.decrement(1.0);
         }))
     }
@@ -395,7 +459,7 @@ fn check_before_dispatch(
     generation: &Generation,
 ) -> Result<(), UnknownCause> {
     budget.check()?;
-    if generation.retired.is_cancelled() {
+    if generation.retired.is_retired() {
         return Err(UnknownCause::Failed(ErrorType::Io));
     }
     Ok(())
@@ -445,7 +509,7 @@ async fn maintenance_query(
     let deadline = Deadline::after(command_timeout);
     let result = tokio::select! {
         biased;
-        () = generation.retired.cancelled() => return Err(MaintenanceError::Aborted(ErrorType::Io)),
+        () = generation.retired.wait() => return Err(MaintenanceError::Aborted(ErrorType::Io)),
         result = reply => result,
         () = deadline.wait() => {
             return Err(MaintenanceError::Aborted(ErrorType::Timeout));
@@ -514,7 +578,7 @@ async fn supervise(exit: SupervisorGuard, command_timeout: Duration) {
         if shared.is_closed() {
             return;
         }
-        let retired = CancellationToken::new();
+        let retired = Retirement::new();
         let (dialed, rotation) = match setup_attempt(admitted, &retired, shared).await {
             Ok(connected) => connected,
             Err(error) => {
@@ -550,7 +614,7 @@ async fn run_generation(
     admitted: &Admitted,
     dialed: Dialed,
     rotation: Option<Rotation<'_>>,
-    retired: CancellationToken,
+    retired: Retirement,
     command_timeout: Duration,
 ) -> Option<Instant> {
     let server = &admitted.server;
@@ -594,7 +658,7 @@ pub(crate) fn setup_backoff() -> backon::ExponentialBackoff {
 
 async fn setup_attempt<'a>(
     admitted: &'a Admitted,
-    retired: &CancellationToken,
+    retired: &Retirement,
     shared: &'a Shared,
 ) -> Result<(Dialed, Option<Rotation<'a>>), ErrorType> {
     let setup = async {
@@ -612,7 +676,7 @@ async fn setup_attempt<'a>(
     };
     match timeout(SETUP_TIMEOUT, setup).await {
         Err(_elapsed) => Err(ErrorType::Timeout),
-        Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
+        Ok(Ok(_)) if retired.is_retired() => Err(ErrorType::Io),
         Ok(connected) => connected,
     }
 }
@@ -629,7 +693,7 @@ fn warn_ping_failed(server: &ServerEndpoint, error: ErrorType) {
 async fn connect(
     admitted: &Admitted,
     settings: &redis::RedisConnectionInfo,
-    retired: CancellationToken,
+    retired: Retirement,
     shared: &Shared,
 ) -> Result<Dialed, ErrorType> {
     let config = redis::AsyncConnectionConfig::new()
@@ -638,7 +702,7 @@ async fn connect(
         .set_pipeline_buffer_size(shared.max_concurrency + 1)
         .set_push_sender(move |push: redis::PushInfo| {
             if push.kind == redis::PushKind::Disconnection {
-                retired.cancel();
+                retired.retire();
             }
             Ok::<(), redis::aio::SendError>(())
         });
@@ -660,7 +724,7 @@ async fn maintain(
     loop {
         tokio::select! {
             biased;
-            () = generation.retired.cancelled() => return,
+            () = generation.retired.wait() => return,
             () = sleep_until(next_refresh), if rotation.is_some() && next_refresh <= next_ping => {
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()

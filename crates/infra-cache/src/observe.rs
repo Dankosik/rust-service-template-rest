@@ -6,6 +6,7 @@ use enum_map::EnumMap;
 use metrics::{Counter, Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
+use tracing::field::Field;
 
 use crate::error::{ErrorType, MutationCommandError, MutationRefusal, ReadFailure, UnknownCause};
 use crate::{Namespace, ServerEndpoint};
@@ -191,6 +192,33 @@ impl NamespaceMetrics {
     }
 }
 
+struct SpanFields {
+    outcome: Field,
+    mutation_outcome: Field,
+    error_reason: Field,
+    error_type: Field,
+    status_code: Field,
+}
+
+impl SpanFields {
+    fn for_span(span: &Span) -> Option<&'static Self> {
+        static FIELDS: OnceLock<Option<SpanFields>> = OnceLock::new();
+        let metadata = span.metadata()?;
+        FIELDS
+            .get_or_init(|| {
+                let fields = metadata.fields();
+                Some(Self {
+                    outcome: fields.field("cache.outcome")?,
+                    mutation_outcome: fields.field("cache.mutation.outcome")?,
+                    error_reason: fields.field("cache.error.reason")?,
+                    error_type: fields.field("error.type")?,
+                    status_code: fields.field("otel.status_code")?,
+                })
+            })
+            .as_ref()
+    }
+}
+
 struct OperationInner<'a> {
     started: Instant,
     metrics: &'a NamespaceMetrics,
@@ -204,7 +232,9 @@ impl OperationInner<'_> {
     }
 
     fn finish(&self, outcome: Outcome) {
-        self.span.record("cache.outcome", outcome.label());
+        if let Some(fields) = SpanFields::for_span(&self.span) {
+            self.span.record(&fields.outcome, outcome.label());
+        }
         self.metrics
             .histogram(self.operation, outcome)
             .record(self.started.elapsed());
@@ -268,7 +298,9 @@ impl<'a> OperationGuard<'a> {
             MutationCommandError::NotApplied(_) => "not_applied",
             MutationCommandError::OutcomeUnknown(_) => "outcome_unknown",
         };
-        self.0.span.record("cache.mutation.outcome", effect);
+        if let Some(fields) = SpanFields::for_span(&self.0.span) {
+            self.0.span.record(&fields.mutation_outcome, effect);
+        }
         match error {
             MutationCommandError::OutcomeUnknown(cause)
             | MutationCommandError::NotApplied(MutationRefusal::Cause(cause)) => {
@@ -302,11 +334,13 @@ impl<'a> OperationGuard<'a> {
     fn record_failure(self, failure: FailureOutcome, reason: Option<&'static str>) {
         let label = failure.error_label();
         let inner = DropGuard::dismiss(self.0);
-        inner.span.record("error.type", label);
-        if let Some(reason) = reason {
-            inner.span.record("cache.error.reason", reason);
+        if let Some(fields) = SpanFields::for_span(&inner.span) {
+            inner.span.record(&fields.error_type, label);
+            if let Some(reason) = reason {
+                inner.span.record(&fields.error_reason, reason);
+            }
+            inner.span.record(&fields.status_code, "ERROR");
         }
-        inner.span.record("otel.status_code", "ERROR");
         inner.finish(Outcome::Failed(failure));
         inner.span.in_scope(|| {
             tracing::debug!(

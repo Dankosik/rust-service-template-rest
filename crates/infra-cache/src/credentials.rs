@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::ServerEndpoint;
+use crate::connection::Retirement;
 use crate::error::{ErrorType, StartErrorKind};
 use crate::observe::PASSWORD_REFRESHES_METRIC;
 
@@ -163,12 +163,12 @@ impl<'a> Rotation<'a> {
     pub(crate) async fn refresh_and_record(
         &mut self,
         server: &ServerEndpoint,
-        retired: &CancellationToken,
+        retired: &Retirement,
         authenticate: impl AsyncFnOnce(&redis::Cmd) -> Result<(), ErrorType>,
     ) -> Disposition {
         let outcome = tokio::select! {
             biased;
-            () = retired.cancelled() => return Disposition::Retire,
+            () = retired.wait() => return Disposition::Retire,
             outcome = self.refresh(retired, authenticate) => outcome,
         };
         self.record(server, &outcome);
@@ -177,7 +177,7 @@ impl<'a> Rotation<'a> {
 
     async fn refresh(
         &mut self,
-        retired: &CancellationToken,
+        retired: &Retirement,
         authenticate: impl AsyncFnOnce(&redis::Cmd) -> Result<(), ErrorType>,
     ) -> RefreshOutcome {
         let password = match timeout(PASSWORD_READ_TIMEOUT, self.file.read(self.tasks)).await {
@@ -196,7 +196,7 @@ impl<'a> Rotation<'a> {
                 error => RefreshOutcome::Failed(error),
             };
         }
-        if retired.is_cancelled() {
+        if retired.is_retired() {
             return RefreshOutcome::Failed(ErrorType::Io);
         }
         self.authenticated_password = password;

@@ -1,5 +1,4 @@
 use std::pin::{Pin, pin};
-use std::sync::atomic::Ordering;
 use std::task::{Context, Wake, Waker};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -38,7 +37,7 @@ impl FullPipeline {
             connection,
             caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
             abandoned,
-            retired: CancellationToken::new(),
+            retired: Retirement::new(),
             cooldown_until: Instant::now(),
         });
         let shared = Arc::new(Shared {
@@ -63,7 +62,7 @@ impl FullPipeline {
                 },
                 command_timeout: BUDGET,
                 shared,
-                application_slots: Semaphore::new(APPLICATION_SLOTS),
+                application_slots: ApplicationSlots::new(APPLICATION_SLOTS),
                 admission_refused: Counter::noop(),
                 commands_in_flight: Gauge::noop(),
                 supervisor,
@@ -199,7 +198,7 @@ async fn duplex_generation(cooldown_until: Instant) -> (Arc<Generation>, DuplexS
         connection,
         caller_capacity: Arc::new(Semaphore::new(APPLICATION_SLOTS)),
         abandoned,
-        retired: CancellationToken::new(),
+        retired: Retirement::new(),
         cooldown_until,
     });
     (generation, server)
@@ -217,7 +216,7 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
         retirements: Counter::noop(),
         tasks: TaskTracker::new(),
     };
-    first.retired.cancel();
+    first.retired.retire();
 
     let mut waiting = pin!(shared.acquire());
     let wake = Arc::new(DriverWake::default());
@@ -251,7 +250,7 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
         .expect("published generation must settle waiting acquire");
     assert!(Arc::ptr_eq(&acquired, &second));
 
-    second.retired.cancel();
+    second.retired.retire();
     let mut waiting_failure = pin!(shared.acquire());
     let failure_wake = Arc::new(DriverWake::default());
     let failure_waker = Waker::from(failure_wake.clone());
@@ -269,7 +268,7 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
 
     let (third, _server3) = duplex_generation(Instant::now()).await;
     assert!(shared.publish(third.clone()));
-    third.retired.cancel();
+    third.retired.retire();
     let mut waiting_close = pin!(shared.acquire());
     let close_wake = Arc::new(DriverWake::default());
     let close_waker = Waker::from(close_wake.clone());
@@ -284,4 +283,90 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
     shared.close();
     assert!(close_wake.0.load(Ordering::Relaxed));
     assert_eq!(waiting_close.await.err(), Some(ErrorType::Io));
+}
+
+#[tokio::test]
+async fn retirement_wakes_pending_and_pre_created_waiters_idempotently() {
+    let signal = Retirement::new();
+    assert!(!signal.is_retired());
+
+    let mut pre_created = pin!(signal.wait());
+    let mut pending_a = pin!(signal.wait());
+    let mut pending_b = pin!(signal.wait());
+    let wake_a = Arc::new(DriverWake::default());
+    let wake_b = Arc::new(DriverWake::default());
+    assert!(
+        pending_a
+            .as_mut()
+            .poll(&mut Context::from_waker(&Waker::from(wake_a.clone())))
+            .is_pending()
+    );
+    assert!(
+        pending_b
+            .as_mut()
+            .poll(&mut Context::from_waker(&Waker::from(wake_b.clone())))
+            .is_pending()
+    );
+
+    signal.retire();
+    assert!(signal.is_retired());
+    assert!(wake_a.0.load(Ordering::Relaxed));
+    assert!(wake_b.0.load(Ordering::Relaxed));
+    signal.retire();
+    assert!(signal.is_retired());
+    assert!(futures_util::poll!(pending_a.as_mut()).is_ready());
+    assert!(futures_util::poll!(pending_b.as_mut()).is_ready());
+    assert!(futures_util::poll!(pre_created.as_mut()).is_ready());
+    assert!(futures_util::poll!(pin!(signal.wait())).is_ready());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retirement_wait_does_not_miss_concurrent_retire() {
+    for _ in 0..200 {
+        let signal = Retirement::new();
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let signal = signal.clone();
+                let barrier = barrier.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    signal.wait().await;
+                })
+            })
+            .collect();
+        barrier.wait().await;
+        signal.retire();
+        timeout(BUDGET, async {
+            for waiter in waiters {
+                waiter.await.expect("waiter task completed");
+            }
+        })
+        .await
+        .expect("all concurrent waiters must observe retirement");
+    }
+}
+
+#[test]
+fn application_slots_bounds_capacity_and_releases_on_drop_and_unwind() {
+    let slots = ApplicationSlots::new(2);
+    let first = slots.try_acquire().expect("first slot");
+    let second = slots.try_acquire().expect("second slot");
+    assert!(slots.try_acquire().is_none());
+
+    drop(first);
+    let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = slots.try_acquire().expect("reacquired slot");
+        assert!(slots.try_acquire().is_none());
+        panic!("simulated unwind while holding slot");
+    }));
+    assert!(recovered.is_err());
+
+    let third = slots.try_acquire().expect("slot released on unwind");
+    assert!(slots.try_acquire().is_none());
+    drop(second);
+    drop(third);
+    let _a = slots.try_acquire().expect("first slot after full release");
+    let _b = slots.try_acquire().expect("second slot after full release");
+    assert!(slots.try_acquire().is_none());
 }

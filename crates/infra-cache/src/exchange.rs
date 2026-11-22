@@ -1,46 +1,71 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures_util::future::BoxFuture;
 use futures_util::stream::StreamExt;
 use operation_context::Deadline;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
-use tokio_util::sync::CancellationToken;
 
+use crate::connection::Retirement;
 use crate::error::{ErrorType, error_type};
 
-pub(crate) struct AbandonedReply {
-    reservation: OwnedSemaphorePermit,
-    reply: BoxFuture<'static, ()>,
+pub(crate) trait AbandonedFuture: Send {
+    fn poll_requires_retirement(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool>;
 }
 
-impl AbandonedReply {
-    async fn wait(self) {
-        let _reservation = self.reservation;
-        self.reply.await;
+impl<T, F> AbandonedFuture for F
+where
+    F: Future<Output = redis::RedisResult<T>> + Send,
+{
+    fn poll_requires_retirement(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
+        self.poll(cx)
+            .map(|result| reply_requires_retirement(&result))
     }
 }
 
-type QueryFuture<T> = BoxFuture<'static, redis::RedisResult<T>>;
-
-struct InFlight<T> {
-    reply: QueryFuture<T>,
+pub(crate) struct AbandonedReply {
     reservation: OwnedSemaphorePermit,
-}
-
-pub(crate) struct Exchange<'a, T: Send + 'static> {
-    retired: &'a CancellationToken,
-    abandoned: &'a mpsc::UnboundedSender<AbandonedReply>,
-    in_flight: Option<InFlight<T>>,
+    reply: Pin<Box<dyn AbandonedFuture>>,
+    retired: Retirement,
     wire_deadline: Deadline,
 }
 
-impl<'a, T: Send + 'static> Exchange<'a, T> {
+impl AbandonedReply {
+    async fn wait(mut self) {
+        let _reservation = self.reservation;
+        let should_retire = tokio::select! {
+            biased;
+            retire = std::future::poll_fn(|cx| self.reply.as_mut().poll_requires_retirement(cx)) => {
+                retire
+            }
+            () = self.wire_deadline.wait() => true,
+        };
+        if should_retire {
+            self.retired.retire();
+        }
+    }
+}
+
+struct InFlight<F> {
+    reply: Pin<Box<F>>,
+    reservation: OwnedSemaphorePermit,
+}
+
+pub(crate) struct Exchange<'a, F: AbandonedFuture + 'static> {
+    retired: &'a Retirement,
+    abandoned: &'a mpsc::UnboundedSender<AbandonedReply>,
+    in_flight: Option<InFlight<F>>,
+    wire_deadline: Deadline,
+}
+
+impl<'a, F, T> Exchange<'a, F>
+where
+    F: Future<Output = redis::RedisResult<T>> + Send + 'static,
+{
     pub(crate) fn new(
-        retired: &'a CancellationToken,
+        retired: &'a Retirement,
         abandoned: &'a mpsc::UnboundedSender<AbandonedReply>,
         reservation: OwnedSemaphorePermit,
-        reply: impl Future<Output = redis::RedisResult<T>> + Send + 'static,
+        reply: F,
         wire_deadline: Deadline,
     ) -> Self {
         Self {
@@ -55,7 +80,10 @@ impl<'a, T: Send + 'static> Exchange<'a, T> {
     }
 }
 
-impl<T: Send + 'static> Future for Exchange<'_, T> {
+impl<F, T> Future for Exchange<'_, F>
+where
+    F: Future<Output = redis::RedisResult<T>> + Send + 'static,
+{
     type Output = redis::RedisResult<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -65,7 +93,7 @@ impl<T: Send + 'static> Future for Exchange<'_, T> {
         match in_flight.reply.as_mut().poll(cx) {
             Poll::Ready(result) => {
                 if reply_requires_retirement(&result) {
-                    self.retired.cancel();
+                    self.retired.retire();
                 }
                 Poll::Ready(result)
             }
@@ -77,28 +105,16 @@ impl<T: Send + 'static> Future for Exchange<'_, T> {
     }
 }
 
-impl<T: Send + 'static> Drop for Exchange<'_, T> {
+impl<F: AbandonedFuture + 'static> Drop for Exchange<'_, F> {
     fn drop(&mut self) {
         let Some(InFlight { reply, reservation }) = self.in_flight.take() else {
             return;
         };
-        let wire_deadline = self.wire_deadline;
-        let retired = self.retired.clone();
         let _ = self.abandoned.send(AbandonedReply {
             reservation,
-            reply: Box::pin(async move {
-                tokio::select! {
-                    biased;
-                    result = reply => {
-                        if reply_requires_retirement(&result) {
-                            retired.cancel();
-                        }
-                    }
-                    () = wire_deadline.wait() => {
-                        retired.cancel();
-                    }
-                }
-            }),
+            reply,
+            retired: self.retired.clone(),
+            wire_deadline: self.wire_deadline,
         });
     }
 }
