@@ -25,7 +25,7 @@ where
         finish(stream_end(remaining));
         return body;
     }
-    let finish = if let Some(end) = body_end(false, remaining) {
+    let finish = if let Some(end) = length_exhausted(remaining) {
         finish(end);
         None
     } else {
@@ -49,12 +49,8 @@ fn stream_end(remaining: Option<u64>) -> BodyEnd {
     }
 }
 
-fn body_end(end_stream: bool, remaining: Option<u64>) -> Option<BodyEnd> {
-    match (end_stream, remaining) {
-        (true, _) => Some(stream_end(remaining)),
-        (false, Some(0)) => Some(BodyEnd::Complete),
-        (false, _) => None,
-    }
+fn length_exhausted(remaining: Option<u64>) -> Option<BodyEnd> {
+    (remaining == Some(0)).then_some(BodyEnd::Complete)
 }
 
 struct GuardedBody<G, F> {
@@ -75,13 +71,12 @@ impl<G: Unpin, F: FnOnce(BodyEnd) + Unpin> HttpBody for GuardedBody<G, F> {
         let this = &mut *self;
         let frame = Pin::new(&mut this.body).poll_frame(cx);
         if let Poll::Ready(ref frame) = frame {
-            let (stream_end, overflowed) =
+            let (ended, overflowed) =
                 advance_stream(&mut this.remaining, &this.body, frame.as_ref());
-            if stream_end.is_some() {
+            if ended.is_some() {
                 this.guard = None;
             }
-            if this.finish.is_some()
-                && let Some(end) = observed_end(stream_end, overflowed, this.remaining)
+            if let Some(end) = observed_end(ended, overflowed, this.remaining)
                 && let Some(finish) = this.finish.take()
             {
                 finish(end);
@@ -108,32 +103,34 @@ fn advance_stream(
         None => (Some(BodyEnd::Complete), false),
         Some(Err(_)) => (Some(BodyEnd::Error), false),
         Some(Ok(frame)) => {
-            let mut overflowed = false;
-            if let (Some(remaining), Some(data)) = (remaining.as_mut(), frame.data_ref()) {
-                match remaining.checked_sub(data.len() as u64) {
-                    Some(next) => *remaining = next,
-                    None => overflowed = true,
-                }
-            }
-            let stream_end =
-                (frame.is_trailers() || body.is_end_stream()).then_some(BodyEnd::Complete);
-            (stream_end, overflowed)
+            let overflowed = match (remaining.as_mut(), frame.data_ref()) {
+                (Some(remaining), Some(data)) => match remaining.checked_sub(data.len() as u64) {
+                    Some(next) => {
+                        *remaining = next;
+                        false
+                    }
+                    None => true,
+                },
+                _ => false,
+            };
+            let ended = (frame.is_trailers() || body.is_end_stream()).then_some(BodyEnd::Complete);
+            (ended, overflowed)
         }
     }
 }
 
 fn observed_end(
-    stream_end: Option<BodyEnd>,
+    ended: Option<BodyEnd>,
     overflowed: bool,
     remaining: Option<u64>,
 ) -> Option<BodyEnd> {
     if overflowed {
         return Some(BodyEnd::Error);
     }
-    match stream_end {
+    match ended {
         Some(BodyEnd::Error) => Some(BodyEnd::Error),
-        Some(BodyEnd::Complete) => body_end(true, remaining),
-        None => body_end(false, remaining),
+        Some(BodyEnd::Complete) => Some(stream_end(remaining)),
+        None => length_exhausted(remaining),
     }
 }
 

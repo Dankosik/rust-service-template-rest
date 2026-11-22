@@ -14,7 +14,7 @@ use super::openapi::{
     can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
 };
 use super::stored;
-use super::{KEY_HEADER, REPLAYED_HEADER};
+use super::{REPLAYED_HEADER, is_key_parameter, is_replayed_header};
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("idempotent route composition is invalid: {subject}: {rule}")]
@@ -24,7 +24,7 @@ pub(crate) struct CompositionError {
 }
 
 impl CompositionError {
-    fn finalize(subject: &str, rule: Rule) -> crate::FinalizeError {
+    fn finalize_error(subject: &str, rule: Rule) -> crate::FinalizeError {
         crate::FinalizeError::new(crate::contract::FinalizeKind::Idempotency(Self {
             subject: subject.to_owned(),
             rule,
@@ -84,19 +84,16 @@ pub(super) fn prepare(
     let paths = &mut document.paths;
     let route_docs = document.external_docs.take();
     let subject = route_subject(paths);
-    let shape = || CompositionError::finalize(&subject, Rule::Shape);
+    let shape = || CompositionError::finalize_error(&subject, Rule::Shape);
     let Ok(item) = paths.paths.values_mut().exactly_one() else {
         return Err(shape());
     };
     if item.ref_path.is_some() {
         return Err(shape());
     }
-    let mut fingerprint_headers = Vec::new();
-    collect_fingerprint_headers(
-        item.parameters.as_deref().unwrap_or_default(),
-        &mut fingerprint_headers,
-    )
-    .map_err(|rule| CompositionError::finalize(&subject, rule))?;
+    let mut fingerprint_headers =
+        collect_fingerprint_headers(item.parameters.as_deref().unwrap_or_default())
+            .map_err(|rule| CompositionError::finalize_error(&subject, rule))?;
     let has_additional = !item.additional_operations.is_empty();
     let (method, operation) = path_operations_mut(item)
         .exactly_one()
@@ -106,9 +103,11 @@ pub(super) fn prepare(
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
-    let at_operation = |rule| CompositionError::finalize(&operation_id, rule);
+    let at_operation = |rule| CompositionError::finalize_error(&operation_id, rule);
+    if has_additional {
+        return Err(at_operation(Rule::Method));
+    }
     let method_filter = match method {
-        _ if has_additional => return Err(at_operation(Rule::Method)),
         "POST" => MethodFilter::POST,
         "PUT" => MethodFilter::PUT,
         "PATCH" => MethodFilter::PATCH,
@@ -117,11 +116,10 @@ pub(super) fn prepare(
     };
 
     prepare_key_parameter(operation).map_err(at_operation)?;
-    collect_fingerprint_headers(
-        operation.parameters.as_deref().unwrap_or_default(),
-        &mut fingerprint_headers,
-    )
-    .map_err(at_operation)?;
+    fingerprint_headers.extend(
+        collect_fingerprint_headers(operation.parameters.as_deref().unwrap_or_default())
+            .map_err(at_operation)?,
+    );
     fingerprint_headers.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
     fingerprint_headers.dedup();
     prepare_problem_responses(operation).map_err(at_operation)?;
@@ -144,10 +142,8 @@ pub(super) fn prepare(
     })
 }
 
-fn collect_fingerprint_headers(
-    parameters: &[RefOr<Parameter>],
-    headers: &mut Vec<HeaderName>,
-) -> Result<(), Rule> {
+fn collect_fingerprint_headers(parameters: &[RefOr<Parameter>]) -> Result<Vec<HeaderName>, Rule> {
+    let mut headers = Vec::new();
     for parameter in parameters {
         let RefOr::T(parameter) = parameter else {
             return Err(Rule::FingerprintParameter);
@@ -155,9 +151,7 @@ fn collect_fingerprint_headers(
         if parameter.parameter_in == ParameterIn::Cookie {
             return Err(Rule::CookieParameter(parameter.name.clone()));
         }
-        if parameter.parameter_in == ParameterIn::Header
-            && !parameter.name.eq_ignore_ascii_case(KEY_HEADER)
-        {
+        if parameter.parameter_in == ParameterIn::Header && !is_key_parameter(parameter) {
             let name = HeaderName::from_bytes(parameter.name.as_bytes())
                 .map_err(|_| Rule::FingerprintParameter)?;
             if name != CONTENT_TYPE {
@@ -165,7 +159,7 @@ fn collect_fingerprint_headers(
             }
         }
     }
-    Ok(())
+    Ok(headers)
 }
 
 fn prepare_key_parameter(operation: &mut Operation) -> Result<(), Rule> {
@@ -179,10 +173,7 @@ fn prepare_key_parameter(operation: &mut Operation) -> Result<(), Rule> {
             RefOr::T(parameter) => Some(parameter),
             RefOr::Ref(_) => None,
         })
-        .filter(|parameter| {
-            parameter.parameter_in == ParameterIn::Header
-                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
-        });
+        .filter(|parameter| is_key_parameter(parameter));
     match existing_keys.at_most_one() {
         Ok(None) => operation
             .parameters
@@ -258,15 +249,15 @@ fn prepare_success_responses(
 }
 
 fn supplement_success(
-    response: &mut Response,
+    command: &mut Response,
     annotation: Response,
     schemas: &BTreeMap<String, RefOr<Schema>>,
 ) -> Option<()> {
     for (media_type, content) in annotation.content {
-        supplement_content(response.content.get_mut(&media_type)?, content, schemas)?;
+        supplement_content(command.content.get_mut(&media_type)?, content, schemas)?;
     }
     for (name, header) in annotation.headers {
-        if let Some((_, existing)) = response
+        if let Some((_, existing)) = command
             .headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(&name))
@@ -275,21 +266,18 @@ fn supplement_success(
                 return None;
             }
         } else {
-            response.headers.insert(name, header);
+            command.headers.insert(name, header);
         }
     }
     if !annotation.description.is_empty() {
-        response.description = annotation.description;
+        command.description = annotation.description;
     }
     if annotation.summary.is_some() {
-        response.summary = annotation.summary;
+        command.summary = annotation.summary;
     }
-    response.links.extend(annotation.links);
+    command.links.extend(annotation.links);
     if let Some(extensions) = annotation.extensions {
-        response
-            .extensions
-            .get_or_insert_default()
-            .merge(extensions);
+        command.extensions.get_or_insert_default().merge(extensions);
     }
     Some(())
 }
@@ -317,10 +305,6 @@ fn supplement_content(
         command_content
             .schema
             .clone_from(&annotation_content.schema);
-    } else {
-        annotation_content
-            .schema
-            .clone_from(&command_content.schema);
     }
     if annotation_content.example.is_some() || !annotation_content.examples.is_empty() {
         command_content
@@ -329,31 +313,28 @@ fn supplement_content(
         command_content
             .examples
             .clone_from(&annotation_content.examples);
-    } else {
-        annotation_content
-            .example
-            .clone_from(&command_content.example);
-        annotation_content
-            .examples
-            .clone_from(&command_content.examples);
     }
     if annotation_content.description.is_some() {
         command_content
             .description
             .clone_from(&annotation_content.description);
-    } else {
-        annotation_content
-            .description
-            .clone_from(&command_content.description);
     }
+    copy_overridable(command_content, &mut annotation_content);
     same_definition(command_content, &annotation_content).then_some(())
+}
+
+fn copy_overridable(from: &Content, to: &mut Content) {
+    to.schema.clone_from(&from.schema);
+    to.example.clone_from(&from.example);
+    to.examples.clone_from(&from.examples);
+    to.description.clone_from(&from.description);
 }
 
 fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), Rule> {
     let replay_headers = response
         .headers
         .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case(REPLAYED_HEADER));
+        .filter(|(name, _)| is_replayed_header(name));
     match replay_headers.at_most_one() {
         Ok(None) => {
             response
@@ -367,9 +348,11 @@ fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), 
             });
         }
     }
-    if let Some(name) = response.headers.keys().find(|name| {
-        !name.eq_ignore_ascii_case(REPLAYED_HEADER) && !stored::is_replayable_header_name(name)
-    }) {
+    if let Some(name) = response
+        .headers
+        .keys()
+        .find(|name| !is_replayed_header(name) && !stored::is_replayable_header_name(name))
+    {
         return Err(Rule::UnreplayableHeader {
             status: status.to_owned(),
             name: name.clone(),

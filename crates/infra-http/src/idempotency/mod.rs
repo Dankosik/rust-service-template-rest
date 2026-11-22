@@ -132,3 +132,12 @@ pub(super) const KEY_HEADER_NAME: axum::http::HeaderName =
 pub(super) const REPLAYED_HEADER_NAME: axum::http::HeaderName =
     axum::http::HeaderName::from_static("idempotent-replayed");
 const REPLAYED_VALUE: &str = "true";
+
+pub(crate) fn is_key_parameter(parameter: &utoipa::openapi::path::Parameter) -> bool {
+    parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
+        && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
+}
+
+pub(crate) fn is_replayed_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case(REPLAYED_HEADER)
+}

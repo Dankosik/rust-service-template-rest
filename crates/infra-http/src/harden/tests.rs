@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 
-use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
-use axum::http::{Method, Request as HttpRequest};
+use axum::http::header::{ALLOW, CONNECTION, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::{Method, Request as HttpRequest, Version};
 use axum::response::IntoResponse as _;
 use axum::routing::{get, post};
 use axum_test::TestServer;

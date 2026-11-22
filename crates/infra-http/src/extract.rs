@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
 use crate::context::{RequestContext, read_request_bytes, wiring_failure};
-use crate::problem::{Code, Problem, body_read_problem, sanitized_problem};
+use crate::problem::{Code, Problem, body_read_problem, sanitized_internal_error};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
@@ -36,14 +36,13 @@ where
     type Rejection = Problem;
 
     async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
-        require_json_content_type(request.headers().get(CONTENT_TYPE))
-            .map_err(|problem| problem.with_request_id_from(request.extensions()))?;
         let (parts, body) = request.with_limited_body().into_parts();
-        let attach = |problem: Problem| problem.with_request_id_from(&parts.extensions);
+        let with_request_id = |problem: Problem| problem.with_request_id_from(&parts.extensions);
+        require_json_content_type(parts.headers.get(CONTENT_TYPE)).map_err(with_request_id)?;
         let bytes = read_request_bytes(parts.extensions.get::<RequestContext>(), body)
             .await
-            .map_err(|error| attach(body_read_problem(&error)))?;
-        decode_json(&bytes).map(Self).map_err(attach)
+            .map_err(|error| with_request_id(body_read_problem(&error)))?;
+        decode_json(&bytes).map(Self).map_err(with_request_id)
     }
 }
 
@@ -73,9 +72,7 @@ pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Proble
     let mut input = serde_json::Deserializer::from_slice(bytes);
     let value = serde_path_to_error::deserialize(&mut input)
         .map_err(|error| json_problem(&error, bytes))?;
-    input
-        .end()
-        .map_err(|_| Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL))?;
+    input.end().map_err(|_| body_syntax_problem())?;
     Ok(value)
 }
 
@@ -96,7 +93,7 @@ impl<T: Serialize> Json<T> {
                 response_type = std::any::type_name::<T>(),
                 "http_response_serialization_failed"
             );
-            return sanitized_problem().into_response();
+            return sanitized_internal_error();
         };
         (
             status,
@@ -149,16 +146,14 @@ where
         reason = "this wrapper delegates to the native extractor and maps its rejection"
     )]
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state).await {
-            Ok(axum::extract::Path(TrackedPath(Ok(value)))) => Ok(Self(value)),
-            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => Err(issue
-                .problem(parts, state)
-                .await
-                .with_request_id_from(&parts.extensions)),
-            Err(rejection) => Err(path_problem(&rejection, parts, state)
-                .await
-                .with_request_id_from(&parts.extensions)),
-        }
+        let problem = match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state)
+            .await
+        {
+            Ok(axum::extract::Path(TrackedPath(Ok(value)))) => return Ok(Self(value)),
+            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => issue.problem(parts, state).await,
+            Err(rejection) => path_problem(&rejection, parts, state).await,
+        };
+        Err(problem.with_request_id_from(&parts.extensions))
     }
 }
 
@@ -172,8 +167,12 @@ fn json_problem(error: &serde_path_to_error::Error<serde_json::Error>, bytes: &[
             body_pointer(error.path()),
         )
     } else {
-        Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
+        body_syntax_problem()
     }
+}
+
+fn body_syntax_problem() -> Problem {
+    Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
 }
 
 fn query_problem(path: &serde_path_to_error::Path) -> Problem {
@@ -199,7 +198,7 @@ async fn path_problem<S: Send + Sync>(
     let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
         return invalid_path(None);
     };
-    let index = match failed.kind() {
+    let failed_index = match failed.kind() {
         ErrorKind::ParseErrorAtKey { key, .. }
         | ErrorKind::InvalidUtf8InPathParam { key }
         | ErrorKind::DeserializeError { key, .. } => return invalid_path(Some(key)),
@@ -210,11 +209,15 @@ async fn path_problem<S: Send + Sync>(
     let Ok(params) = RawPathParams::from_request_parts(parts, state).await else {
         return invalid_path(None);
     };
+    invalid_path(param_at(&params, failed_index))
+}
+
+fn param_at(params: &RawPathParams, index: Option<usize>) -> Option<&str> {
     let param = match index {
         Some(index) => params.iter().nth(index),
         None => params.iter().exactly_one().ok(),
     };
-    invalid_path(param.map(|(name, _)| name))
+    param.map(|(name, _)| name)
 }
 
 struct TrackedPath<T>(Result<T, PathIssue>);
@@ -288,12 +291,12 @@ impl PathIssue {
                         .iter()
                         .find(|(name, _)| *name == key.as_str())
                         .map(|(name, _)| name),
-                    Some(Segment::Seq { index }) => params.iter().nth(*index).map(|(name, _)| name),
-                    _ => params.iter().exactly_one().ok().map(|(name, _)| name),
+                    Some(Segment::Seq { index }) => param_at(&params, Some(*index)),
+                    _ => param_at(&params, None),
                 };
                 invalid_path(name)
             }
-            _ => invalid_path(None),
+            Self::UnknownField | Self::MissingField(_) | Self::DuplicateField => invalid_path(None),
         }
     }
 }

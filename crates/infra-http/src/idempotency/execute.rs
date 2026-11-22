@@ -138,16 +138,20 @@ impl Attempt {
         let command_end = command
             .attempt_timeout()
             .and_then(|budget| Instant::now().checked_add(budget));
-        let execution = self.execute(command, command_end);
+        let execution = self.run_in_store(command, command_end);
         match command_end {
             Some(end) => tokio::time::timeout_at(end, execution)
                 .await
-                .unwrap_or_else(|_| command_timeout()),
+                .unwrap_or_else(|_| command_timeout_response()),
             None => execution.await,
         }
     }
 
-    async fn execute<C: FreshCommand>(self, command: C, command_end: Option<Instant>) -> Response {
+    async fn run_in_store<C: FreshCommand>(
+        self,
+        command: C,
+        command_end: Option<Instant>,
+    ) -> Response {
         let Attempt {
             store,
             scope,
@@ -164,31 +168,41 @@ impl Attempt {
                     &scope,
                     &fingerprint,
                     command_cutoff.unwrap_or(attempt_end),
-                    async |tx: &mut Tx<'_>| match command.execute(tx).await {
-                        Ok(success) => Ok(WriteOutcome::Success(success.capture()?.into_success())),
-                        Err(Rollback::Terminal(problem)) => {
-                            Ok(WriteOutcome::TerminalRefusal(problem.capture_terminal()?))
-                        }
-                        Err(Rollback::Refused(problem)) => Err(AttemptRollback::Refused(problem)),
-                        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
-                    },
+                    async |tx: &mut Tx<'_>| write_outcome(command, tx).await,
                 );
                 let result = tokio::time::timeout_at(attempt_end, attempt)
                     .await
                     .unwrap_or(Err(AttemptError::Unavailable));
                 if command_cutoff.is_some() && matches!(result, Err(AttemptError::Deadline)) {
-                    return command_timeout();
+                    return command_timeout_response();
                 }
                 result
             }
         };
-        map_attempted(attempted, &scope, &route)
-            .settle(deadline.at(), guard)
-            .await
+        let answer = map_attempted(attempted, &scope, &route);
+        if answer.outcome.yields_to_request_timeout() && Instant::now() >= deadline.at() {
+            return std::future::pending().await;
+        }
+        DropGuard::dismiss(guard).record(answer.outcome);
+        answer.response
     }
 }
 
-fn command_timeout() -> Response {
+async fn write_outcome<C: FreshCommand>(
+    command: C,
+    tx: &mut Tx<'_>,
+) -> Result<WriteOutcome<<C::Terminal as TerminalMode>::StoreMode>, AttemptRollback> {
+    match command.execute(tx).await {
+        Ok(success) => Ok(WriteOutcome::Success(success.capture()?.into_success())),
+        Err(Rollback::Terminal(problem)) => {
+            Ok(WriteOutcome::TerminalRefusal(problem.capture_terminal()?))
+        }
+        Err(Rollback::Refused(problem)) => Err(AttemptRollback::Refused(problem)),
+        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
+    }
+}
+
+fn command_timeout_response() -> Response {
     Problem::new(Code::GatewayTimeout)
         .detail_static(ATTEMPT_TIMEOUT_DETAIL)
         .into_response()
@@ -252,18 +266,6 @@ struct Answer {
 impl Answer {
     const fn new(response: Response, outcome: Outcome) -> Self {
         Self { response, outcome }
-    }
-
-    async fn settle<'a>(
-        self,
-        deadline: Instant,
-        guard: DropGuard<&'a Arc<RouteState>, impl FnOnce(&'a Arc<RouteState>)>,
-    ) -> Response {
-        if self.outcome.yields_to_request_timeout() && Instant::now() >= deadline {
-            return std::future::pending().await;
-        }
-        DropGuard::dismiss(guard).record(self.outcome);
-        self.response
     }
 }
 

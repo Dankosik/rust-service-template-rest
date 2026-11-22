@@ -101,12 +101,12 @@ pub fn mutation_problem(
                 UnknownOutcome::Stopped(stopped) => Problem::from(stopped),
                 UnknownOutcome::Unavailable => Problem::new(Code::ServiceUnavailable),
             };
-            unconfirmed_write(problem)
+            with_unconfirmed_write_detail(problem)
         }
     }
 }
 
-pub(super) fn unconfirmed_write(problem: Problem) -> Problem {
+pub(super) fn with_unconfirmed_write_detail(problem: Problem) -> Problem {
     problem.detail_static("the storage provider could not confirm whether the write took effect")
 }
 

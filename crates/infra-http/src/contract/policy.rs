@@ -9,7 +9,7 @@ use enum_map::EnumMap;
 use foldhash::{HashMap, HashMapExt as _};
 use itertools::Itertools as _;
 use utoipa::openapi::path::{Operation, PathItem};
-use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
+use utoipa::openapi::security::{HttpAuthScheme, SecurityRequirement, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr};
 
 use super::document::{StandardMethod, documented_methods, has_extension_operations};
@@ -41,6 +41,56 @@ struct RoutePolicy {
 }
 
 impl RoutePolicy {
+    fn compile(
+        document: &OpenApi,
+        path: &str,
+        item: &PathItem,
+        // template:begin http-idempotency:http-route-policy-mounts-parameter
+        idempotent: &IdempotentOperations,
+        // template:end http-idempotency:http-route-policy-mounts-parameter
+    ) -> Result<Self, FinalizeError> {
+        let extension_allow = extension_allow(item)?;
+        let mut standard = EnumMap::<StandardMethod, Option<Access>>::default();
+        for method in StandardMethod::ALL {
+            let Some(operation) = method.operation(item) else {
+                continue;
+            };
+            standard[method] = Some(compile_operation(
+                document,
+                path,
+                method.as_str(),
+                operation,
+                // template:begin http-idempotency:http-fixed-operation-mounts
+                idempotent,
+                // template:end http-idempotency:http-fixed-operation-mounts
+            )?);
+        }
+        let mut additional = Vec::with_capacity(item.additional_operations.len());
+        for (method, operation) in &item.additional_operations {
+            if StandardMethod::parse(method).is_some() {
+                return Err(FinalizeError::new(FinalizeKind::InvalidPolicy {
+                    path: path.to_owned(),
+                    method: method.clone(),
+                    fault: PolicyFault::FixedMethodInAdditionalOperations,
+                }));
+            }
+            additional.push((
+                method.as_str().into(),
+                compile_operation(
+                    document, path, method, operation,
+                    // template:begin http-idempotency:http-additional-operation-mounts
+                    idempotent,
+                    // template:end http-idempotency:http-additional-operation-mounts
+                )?,
+            ));
+        }
+        Ok(Self {
+            standard,
+            additional: additional.into_boxed_slice(),
+            extension_allow,
+        })
+    }
+
     fn get(&self, method: &str) -> Option<&Access> {
         match StandardMethod::parse(method) {
             Some(standard) => self.standard[standard].as_ref(),
@@ -77,49 +127,14 @@ impl Policy {
     ) -> Result<Self, FinalizeError> {
         let mut routes = HashMap::with_capacity(document.paths.paths.len());
         for (path, item) in &document.paths.paths {
-            let path = path.as_str();
-            let extension_allow = extension_allow(item)?;
-            let mut standard = EnumMap::<StandardMethod, Option<Access>>::default();
-            for method in StandardMethod::ALL {
-                let Some(operation) = method.operation(item) else {
-                    continue;
-                };
-                standard[method] = Some(compile_operation(
-                    document,
-                    path,
-                    method.as_str(),
-                    operation,
-                    // template:begin http-idempotency:http-fixed-operation-mounts
-                    idempotent,
-                    // template:end http-idempotency:http-fixed-operation-mounts
-                )?);
-            }
-            let mut additional = Vec::with_capacity(item.additional_operations.len());
-            for (method, operation) in &item.additional_operations {
-                if StandardMethod::parse(method).is_some() {
-                    return Err(FinalizeError::new(FinalizeKind::InvalidPolicy {
-                        path: path.to_owned(),
-                        method: method.clone(),
-                        fault: PolicyFault::FixedMethodInAdditionalOperations,
-                    }));
-                }
-                additional.push((
-                    method.as_str().into(),
-                    compile_operation(
-                        document, path, method, operation,
-                        // template:begin http-idempotency:http-additional-operation-mounts
-                        idempotent,
-                        // template:end http-idempotency:http-additional-operation-mounts
-                    )?,
-                ));
-            }
             routes.insert(
-                path.into(),
-                RoutePolicy {
-                    standard,
-                    additional: additional.into_boxed_slice(),
-                    extension_allow,
-                },
+                path.as_str().into(),
+                RoutePolicy::compile(
+                    document, path, item,
+                    // template:begin http-idempotency:http-route-policy-mounts
+                    idempotent,
+                    // template:end http-idempotency:http-route-policy-mounts
+                )?,
             );
         }
         Ok(Self(Arc::new(CompiledPolicy { routes })))
@@ -237,8 +252,7 @@ fn compile_operation(
 
 // template:begin http-idempotency:http-unmounted-reserved-declarations
 fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -> bool {
-    use crate::idempotency::{KEY_HEADER, REPLAYED_HEADER};
-    use utoipa::openapi::path::ParameterIn;
+    use crate::idempotency::{is_key_parameter, is_replayed_header};
     let components = document.components.as_ref();
     let empty_parameters = BTreeMap::new();
     let parameters = components.map_or(&empty_parameters, |components| &components.parameters);
@@ -251,17 +265,11 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
         .flatten()
         .chain(operation.parameters.iter().flatten())
         .filter_map(|value| resolve(value, parameters, ComponentKind::Parameters))
-        .any(|parameter| {
-            parameter.parameter_in == ParameterIn::Header
-                && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
-        });
+        .any(is_key_parameter);
     key || operation.responses.responses.iter().any(|(status, value)| {
         status.starts_with('2')
             && resolve(value, responses, ComponentKind::Responses).is_some_and(|response| {
-                response
-                    .headers
-                    .keys()
-                    .any(|name| name.eq_ignore_ascii_case(REPLAYED_HEADER))
+                response.headers.keys().any(|name| is_replayed_header(name))
             })
     })
 }
@@ -313,23 +321,7 @@ impl Access {
         if !declares_bearer_scheme(document) {
             return Err(PolicyFault::MissingBearerScheme);
         }
-        let requirements: Vec<BTreeMap<String, Vec<String>>> = serde_json::to_value(requirements)
-            .and_then(serde_json::from_value)
-            .map_err(|_| PolicyFault::UnreadableRequirement)?;
-        if requirements
-            .iter()
-            .any(|requirement| requirement.len() != 1 || !requirement.contains_key(BEARER_SCHEME))
-        {
-            return Err(PolicyFault::UnsupportedRequirement);
-        }
-        if requirements
-            .iter()
-            .flat_map(BTreeMap::values)
-            .flatten()
-            .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
-        {
-            return Err(PolicyFault::InvalidScopeToken);
-        }
+        let requirements = bearer_requirements(requirements)?;
         Ok(Self::Protected(
             // template:begin authn:http-contract-protected-value
             crate::authn::ProtectedAccess {
@@ -343,6 +335,29 @@ impl Access {
             // template:end authn:http-contract-protected-value
         ))
     }
+}
+
+fn bearer_requirements(
+    requirements: &[SecurityRequirement],
+) -> Result<Vec<BTreeMap<String, Vec<String>>>, PolicyFault> {
+    let requirements: Vec<BTreeMap<String, Vec<String>>> = serde_json::to_value(requirements)
+        .and_then(serde_json::from_value)
+        .map_err(|_| PolicyFault::UnreadableRequirement)?;
+    if requirements
+        .iter()
+        .any(|requirement| requirement.len() != 1 || !requirement.contains_key(BEARER_SCHEME))
+    {
+        return Err(PolicyFault::UnsupportedRequirement);
+    }
+    if requirements
+        .iter()
+        .flat_map(BTreeMap::values)
+        .flatten()
+        .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+    {
+        return Err(PolicyFault::InvalidScopeToken);
+    }
+    Ok(requirements)
 }
 
 fn declares_bearer_scheme(document: &OpenApi) -> bool {

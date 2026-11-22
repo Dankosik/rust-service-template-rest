@@ -129,28 +129,40 @@ pub enum Authentication {
 #[derive_where::derive_where(Default; S: Clone + Send + Sync + 'static)]
 pub struct HttpContract<S> {
     routes: OpenApiRouter<S>,
-    application: bool,
+    is_application_root: bool,
     extension_routers: HashMap<Method, Router<S>>,
-    probes: Vec<Box<str>>,
+    probe_paths: Vec<Box<str>>,
     // template:begin http-idempotency:http-mounted-operations-field
     idempotency: IdempotentOperations,
     // template:end http-idempotency:http-mounted-operations-field
 }
 
 #[derive(Clone)]
-struct DispatchedExtensions(axum::http::Extensions);
+struct OuterExtensions(axum::http::Extensions);
 
-async fn dispatch_extension(service: Option<Router>, mut request: Request) -> Response {
-    let Some(service) = service else {
-        return sanitized_internal_error();
-    };
-    let extensions = std::mem::take(request.extensions_mut());
-    if let Some(nested) = extensions.get::<NestedPath>() {
-        request.extensions_mut().insert(nested.clone());
+impl OuterExtensions {
+    fn stash(request: &mut Request) {
+        let extensions = std::mem::take(request.extensions_mut());
+        if let Some(nested) = extensions.get::<NestedPath>() {
+            request.extensions_mut().insert(nested.clone());
+        }
+        request.extensions_mut().insert(Self(extensions));
     }
-    request
-        .extensions_mut()
-        .insert(DispatchedExtensions(extensions));
+
+    fn restore(request: &mut Request) -> bool {
+        let Some(Self(mut extensions)) = request.extensions_mut().remove() else {
+            return false;
+        };
+        if let Some(nested) = request.extensions_mut().remove::<NestedPath>() {
+            extensions.insert(nested);
+        }
+        *request.extensions_mut() = extensions;
+        true
+    }
+}
+
+async fn dispatch_extension(service: Router, mut request: Request) -> Response {
+    OuterExtensions::stash(&mut request);
     let Ok(response) = service.oneshot(request).await;
     response
 }
@@ -164,14 +176,9 @@ where
     let dispatch = move |State(state): State<S>, mut request: Request| {
         let handler = handler.clone();
         async move {
-            let Some(DispatchedExtensions(mut extensions)) = request.extensions_mut().remove()
-            else {
+            if !OuterExtensions::restore(&mut request) {
                 return sanitized_internal_error();
-            };
-            if let Some(nested) = request.extensions_mut().remove::<NestedPath>() {
-                extensions.insert(nested);
             }
-            *request.extensions_mut() = extensions;
             handler.call(request, state).await
         }
     };
@@ -201,7 +208,13 @@ where
             .collect::<HashMap<_, _>>(),
     );
     let dispatch = move |request: Request| {
-        dispatch_extension(extension_routers.get(request.method()).cloned(), request)
+        let selected = extension_routers.get(request.method()).cloned();
+        async move {
+            match selected {
+                Some(service) => dispatch_extension(service, request).await,
+                None => sanitized_internal_error(),
+            }
+        }
     };
     #[expect(
         clippy::disallowed_methods,
@@ -209,12 +222,7 @@ where
     )]
     {
         for (path, item) in &paths.paths {
-            if item.query.is_some()
-                || item
-                    .additional_operations
-                    .keys()
-                    .any(|method| method != "CONNECT")
-            {
+            if document::needs_extension_dispatch(item) {
                 routes = routes.route(path, axum::routing::any(dispatch.clone()));
             }
         }
@@ -233,19 +241,53 @@ pub(crate) fn resolve_schema<'a>(
         utoipa::openapi::RefOr<utoipa::openapi::Schema>,
     >,
 ) -> Option<&'a utoipa::openapi::Schema> {
-    document::resolve_when(schema, schemas, ComponentKind::Schemas, |reference| {
-        *reference == utoipa::openapi::Ref::new(&reference.ref_location)
-    })
+    document::resolve_when(
+        schema,
+        schemas,
+        ComponentKind::Schemas,
+        document::is_bare_reference,
+    )
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct IdempotentOperations(Vec<(Box<str>, &'static str)>);
+pub(crate) struct IdempotentOperations(Vec<MountedOperation>);
+
+#[derive(Clone)]
+struct MountedOperation {
+    path: Box<str>,
+    method: &'static str,
+}
 
 impl IdempotentOperations {
     pub(crate) fn contains(&self, path: &str, method: &str) -> bool {
         self.0
             .iter()
-            .any(|(registered, verb)| registered.as_ref() == path && *verb == method)
+            .any(|operation| operation.path.as_ref() == path && operation.method == method)
+    }
+
+    fn register(&mut self, path: &str, method: &'static str) {
+        self.0.push(MountedOperation {
+            path: path.into(),
+            method,
+        });
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn append(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+
+    fn nest(&mut self, prefix: &str) {
+        for operation in &mut self.0 {
+            operation.path = nested_path(prefix, &operation.path);
+        }
     }
 }
 // template:end http-idempotency:http-mounted-operations
@@ -275,7 +317,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         }
         Ok(Self {
             routes: OpenApiRouter::with_openapi(metadata),
-            application: true,
+            is_application_root: true,
             ..Self::default()
         })
     }
@@ -301,10 +343,12 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         validate_single_native_path(&paths)?;
         let mut components = Components::default();
         components::merge_map(ComponentKind::Schemas, &mut components.schemas, schemas)?;
-        let mut contract = Self::default().with_components(components)?;
-        contract.routes = contract.routes.routes((Vec::new(), paths, router));
-        normalize_root(&mut contract.routes.get_openapi_mut().paths)?;
-        Ok(contract)
+        Self::from_route(
+            utoipa::openapi::OpenApiBuilder::new()
+                .components(Some(components))
+                .build(),
+            (Vec::new(), paths, router),
+        )
     }
 
     #[cfg(test)]
@@ -315,16 +359,13 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     {
         let paths = std::mem::take(&mut document.paths);
         let filter = validate_single_native_path(&paths)?;
-        Self::feature_route(
+        Self::from_route(
             document,
             (Vec::new(), paths, axum::routing::on(filter, handler)),
         )
     }
 
-    fn feature_route(
-        metadata: OpenApi,
-        route: UtoipaMethodRouter<S>,
-    ) -> Result<Self, FinalizeError> {
+    fn from_route(metadata: OpenApi, route: UtoipaMethodRouter<S>) -> Result<Self, FinalizeError> {
         if metadata.security.is_some()
             || !metadata.paths.paths.is_empty()
             || metadata.servers.is_some()
@@ -369,7 +410,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             return Err(FinalizeError::new(FinalizeKind::InvalidRegistration));
         }
         let mut item = PathItem::default();
-        if method.as_str() == "QUERY" {
+        if method.as_str() == StandardMethod::Query.as_str() {
             item.query = Some(operation);
         } else {
             item.additional_operations
@@ -383,10 +424,10 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
                 paths,
                 axum::routing::on(MethodFilter::CONNECT, handler),
             );
-            return self.merge(Self::feature_route(OpenApi::default(), route)?);
+            return self.merge(Self::from_route(OpenApi::default(), route)?);
         }
         let mut feature =
-            Self::feature_route(OpenApi::default(), (Vec::new(), paths, MethodRouter::new()))?;
+            Self::from_route(OpenApi::default(), (Vec::new(), paths, MethodRouter::new()))?;
         feature
             .extension_routers
             .insert(method, extension_router(path, handler));
@@ -401,8 +442,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
                 .into_iter()
                 .map(|(method, router)| (method, router.with_state(state.clone())))
                 .collect(),
-            probes: self.probes,
-            application: self.application,
+            probe_paths: self.probe_paths,
+            is_application_root: self.is_application_root,
             // template:begin http-idempotency:http-state-mounted-operations
             idempotency: self.idempotency,
             // template:end http-idempotency:http-state-mounted-operations
@@ -414,10 +455,10 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         metadata: OpenApi,
         route: UtoipaMethodRouter<S>,
     ) -> Result<Self, FinalizeError> {
-        let mut contract = Self::feature_route(metadata, route)?;
+        let mut contract = Self::from_route(metadata, route)?;
         for (path, item) in &contract.routes.get_openapi().paths.paths {
-            for (method, _) in document::fixed_operations(item) {
-                contract.idempotency.0.push((path.as_str().into(), method));
+            for (method, _) in document::standard_operations(item) {
+                contract.idempotency.register(path, method);
             }
         }
         Ok(contract)
@@ -425,12 +466,12 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
 
     #[must_use]
     pub fn idempotent_operations(&self) -> usize {
-        self.idempotency.0.len()
+        self.idempotency.len()
     }
     // template:end http-idempotency:http-typed-registration
 
     pub fn merge(mut self, mut other: Self) -> Result<Self, FinalizeError> {
-        if other.application {
+        if other.is_application_root {
             return Err(FinalizeError::new(FinalizeKind::ApplicationMetadata));
         }
         normalize_root(&mut self.routes.get_openapi_mut().paths)?;
@@ -449,15 +490,15 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             let existing = self.extension_routers.entry(method).or_default();
             *existing = std::mem::take(existing).merge(router);
         }
-        self.probes.extend(other.probes);
+        self.probe_paths.extend(other.probe_paths);
         // template:begin http-idempotency:http-merge-mounted-operations
-        self.idempotency.0.extend(other.idempotency.0);
+        self.idempotency.append(other.idempotency);
         // template:end http-idempotency:http-merge-mounted-operations
         Ok(self)
     }
 
     pub fn nest(self, prefix: &str, mut other: Self) -> Result<Self, FinalizeError> {
-        if other.application {
+        if other.is_application_root {
             return Err(FinalizeError::new(FinalizeKind::ApplicationMetadata));
         }
         normalize_root(&mut other.routes.get_openapi_mut().paths)?;
@@ -467,13 +508,11 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         for router in other.extension_routers.values_mut() {
             *router = Router::new().nest(prefix, std::mem::take(router));
         }
-        for path in &mut other.probes {
+        for path in &mut other.probe_paths {
             *path = nested_path(prefix, path);
         }
         // template:begin http-idempotency:http-nest-mounted-operations
-        for (path, _) in &mut other.idempotency.0 {
-            *path = nested_path(prefix, path);
-        }
+        other.idempotency.nest(prefix);
         // template:end http-idempotency:http-nest-mounted-operations
         self.merge(other)
     }
@@ -482,8 +521,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     where
         health::ReadinessReader: axum::extract::FromRef<S>,
     {
-        let mut probes = crate::probes::router()?;
-        probes.probes = probes
+        let mut probe_contract = crate::probes::router()?;
+        probe_contract.probe_paths = probe_contract
             .routes
             .get_openapi()
             .paths
@@ -492,16 +531,16 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             .map(|path| path.as_str().into())
             .collect();
         if prefix.is_empty() || prefix == "/" {
-            self.merge(probes)
+            self.merge(probe_contract)
         } else {
-            self.nest(prefix, probes)
+            self.nest(prefix, probe_contract)
         }
     }
 
     fn probe_routes(&self) -> ProbeRoutes {
         let paths = &self.routes.get_openapi().paths.paths;
         ProbeRoutes::new(
-            self.probes
+            self.probe_paths
                 .iter()
                 .map(|path| {
                     let implicit_head = paths
@@ -521,12 +560,12 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         Ok(self.routes.into_openapi())
     }
 
-    fn finalize(&mut self, probes: &ProbeRoutes) -> Result<Policy, FinalizeError> {
+    fn finalize(&mut self, probe_routes: &ProbeRoutes) -> Result<Policy, FinalizeError> {
         let document = self.routes.get_openapi_mut();
         normalize_root(&mut document.paths)?;
         if document.paths.paths.values().any(has_extension_operations) {
             use utoipa::openapi::OpenApiVersion;
-            if self.application && document.openapi != OpenApiVersion::Version32 {
+            if self.is_application_root && document.openapi != OpenApiVersion::Version32 {
                 return Err(FinalizeError::new(FinalizeKind::OpenApi32Required));
             }
             document.openapi = OpenApiVersion::Version32;
@@ -538,7 +577,8 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             // template:end http-idempotency:http-policy-compile-mounts
         )?;
         outcomes::compose(
-            document, probes,
+            document,
+            probe_routes,
             // template:begin authn:http-compose-policy
             &policy,
             // template:end authn:http-compose-policy
@@ -583,13 +623,13 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         store: Option<infra_idempotency_store::Store>,
         // template:end http-idempotency:http-build-store-parameter
     ) -> Result<Application, FinalizeError> {
-        let probes = self.probe_routes();
-        let policy = self.finalize(&probes)?;
+        let probe_routes = self.probe_routes();
+        let policy = self.finalize(&probe_routes)?;
         let (routes, document) = self.routes.split_for_parts();
         let routes = mount_extensions(routes, self.extension_routers, &document.paths, &state);
-        let routes = authentication.finalize(routes, policy)?;
+        let routes = authentication.enforce(routes, policy)?;
         // template:begin http-idempotency:http-build-bind-store
-        let routes = if self.idempotency.0.is_empty() {
+        let routes = if self.idempotency.is_empty() {
             routes
         } else {
             routes.layer(axum::Extension(store.ok_or_else(|| {
@@ -600,7 +640,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         Ok(Application(crate::harden::assemble(
             routes.with_state(state),
             options,
-            probes,
+            probe_routes,
         )))
     }
 }
@@ -641,7 +681,7 @@ impl tower::Service<Request> for Application {
 }
 
 impl Authentication {
-    fn finalize<S>(self, routes: Router<S>, policy: Policy) -> Result<Router<S>, FinalizeError>
+    fn enforce<S>(self, routes: Router<S>, policy: Policy) -> Result<Router<S>, FinalizeError>
     where
         S: Clone + Send + Sync + 'static,
     {
@@ -722,9 +762,13 @@ fn check_path_merge(
     if existing.ref_path != incoming.ref_path {
         return Err(conflict(PathItemField::Ref));
     }
-    let left = existing.parameters.as_deref().unwrap_or_default();
-    let right = incoming.parameters.as_deref().unwrap_or_default();
-    if left.len() != right.len() || !left.iter().all(|parameter| right.contains(parameter)) {
+    let existing_parameters = existing.parameters.as_deref().unwrap_or_default();
+    let incoming_parameters = incoming.parameters.as_deref().unwrap_or_default();
+    if existing_parameters.len() != incoming_parameters.len()
+        || !existing_parameters
+            .iter()
+            .all(|parameter| incoming_parameters.contains(parameter))
+    {
         return Err(conflict(PathItemField::Parameters));
     }
     if existing.servers != incoming.servers {
