@@ -24,7 +24,7 @@ pub enum HistoryError {
 }
 
 impl HistoryError {
-    fn report(
+    fn logged(
         self,
         stage: &'static str,
         cause: &'static str,
@@ -43,44 +43,46 @@ impl HistoryError {
 }
 
 pub async fn verify_history(pool: &Pool) -> Result<(), HistoryError> {
+    let history = read_history_within_budget(pool).await?;
+    let unapplied = pending(&MIGRATOR, &history).map_err(|error| {
+        let (cause, version) = match error {
+            PendingError::ChecksumMismatch(v) => ("checksum_mismatch", v),
+            PendingError::MissingVersion(v) => ("version_missing", v),
+            PendingError::DuplicateVersion(v) => ("duplicate_version", v),
+        };
+        HistoryError::Mismatch.logged("compare", cause, None, Some(version))
+    })?;
+    match unapplied.first() {
+        Some(next) => {
+            Err(HistoryError::Pending.logged("compare", "pending", None, Some(next.version)))
+        }
+        None => Ok(()),
+    }
+}
+
+async fn read_history_within_budget(pool: &Pool) -> Result<Vec<AppliedMigration>, HistoryError> {
     let mut stage = "acquire";
     let check = async {
         let mut conn = pool.acquire("check migration history").await?;
         stage = "read";
         read_history(&mut conn, &MIGRATOR.table_name).await
     };
-    let history = match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
-        Ok(Ok(HistoryRead::History(history))) => history,
+    match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
+        Ok(Ok(HistoryRead::History(history))) => Ok(history),
         Ok(Ok(HistoryRead::NotVisible)) => {
-            return Err(HistoryError::NotVisible.report(stage, "not_visible", None, None));
+            Err(HistoryError::NotVisible.logged(stage, "not_visible", None, None))
         }
         Ok(Err(MigrateError::Dirty(version))) => {
-            return Err(HistoryError::Mismatch.report(stage, "dirty", None, Some(version)));
+            Err(HistoryError::Mismatch.logged(stage, "dirty", None, Some(version)))
         }
-        Ok(Err(MigrateError::Execute(error))) => {
-            return Err(HistoryError::Unavailable.report(
-                stage,
-                failure_cause(&error),
-                sqlstate(&error).as_deref(),
-                None,
-            ));
-        }
-        Ok(Err(_)) => return Err(HistoryError::Unavailable.report(stage, "driver", None, None)),
-        Err(_) => return Err(HistoryError::Unavailable.report(stage, "deadline", None, None)),
-    };
-    let pending = pending(&MIGRATOR, &history).map_err(|error| {
-        let (cause, version) = match error {
-            PendingError::ChecksumMismatch(v) => ("checksum_mismatch", v),
-            PendingError::MissingVersion(v) => ("version_missing", v),
-            PendingError::DuplicateVersion(v) => ("duplicate_version", v),
-        };
-        HistoryError::Mismatch.report("compare", cause, None, Some(version))
-    })?;
-    match pending.first() {
-        Some(next) => {
-            Err(HistoryError::Pending.report("compare", "pending", None, Some(next.version)))
-        }
-        None => Ok(()),
+        Ok(Err(MigrateError::Execute(error))) => Err(HistoryError::Unavailable.logged(
+            stage,
+            failure_cause(&error),
+            sqlstate(&error).as_deref(),
+            None,
+        )),
+        Ok(Err(_)) => Err(HistoryError::Unavailable.logged(stage, "driver", None, None)),
+        Err(_) => Err(HistoryError::Unavailable.logged(stage, "deadline", None, None)),
     }
 }
 
@@ -148,15 +150,12 @@ pub(crate) fn pending<'m>(
         .filter(|migration| !migration.migration_type.is_down_migration())
         .collect();
     let mut by_version = HashMap::with_capacity(embedded.len());
-    let mut newest = None;
     for &migration in &embedded {
         if by_version.insert(migration.version, migration).is_some() {
             return Err(PendingError::DuplicateVersion(migration.version));
         }
-        newest = Some(newest.map_or(migration.version, |current: i64| {
-            current.max(migration.version)
-        }));
     }
+    let newest = embedded.iter().map(|migration| migration.version).max();
     let mut applied_versions = HashSet::with_capacity(history.len());
     for applied in history {
         match by_version.get(&applied.version) {

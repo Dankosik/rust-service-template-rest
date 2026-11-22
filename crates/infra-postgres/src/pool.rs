@@ -120,10 +120,10 @@ pub struct SessionOptions<'a> {
 #[derive(Clone)]
 pub struct Pool {
     inner: PgPool,
-    policy: Arc<PoolPolicy>,
+    shared: Arc<PoolShared>,
 }
 
-struct PoolPolicy {
+struct PoolShared {
     slots: Option<Slots>,
     notifications: bool,
     target: ConnectionTarget,
@@ -165,8 +165,8 @@ impl fmt::Debug for Pool {
             .field("size", &self.inner.size())
             .field("num_idle", &self.inner.num_idle())
             .field("is_closed", &self.inner.is_closed())
-            .field("notifications", &self.policy.notifications)
-            .field("adaptive_slots", &self.policy.slots.is_some())
+            .field("notifications", &self.shared.notifications)
+            .field("adaptive_slots", &self.shared.slots.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -278,22 +278,30 @@ impl ListenerPool {
     }
 }
 
+fn startup_session_settings(options: &PoolOptions<'_>) -> Vec<(&'static str, String)> {
+    let mut settings = Vec::new();
+    if options.session_settings_source == SessionSettingsSource::Startup {
+        settings.push(("statement_timeout", format_pg_duration(STATEMENT_TIMEOUT)));
+        settings.push((
+            "idle_in_transaction_session_timeout",
+            format_pg_duration(IDLE_IN_TRANSACTION_TIMEOUT),
+        ));
+        if let Some(level) = options.default_isolation.as_sql() {
+            settings.push(("default_transaction_isolation", level.to_owned()));
+        }
+    }
+    settings
+}
+
 impl Pool {
     pub fn prepare(dsn: &Dsn, options: &PoolOptions<'_>) -> PoolStartup {
         crate::observe::describe();
-        let mut settings = Vec::new();
-        if options.session_settings_source == SessionSettingsSource::Startup {
-            settings.push(("statement_timeout", format_pg_duration(STATEMENT_TIMEOUT)));
-            settings.push((
-                "idle_in_transaction_session_timeout",
-                format_pg_duration(IDLE_IN_TRANSACTION_TIMEOUT),
-            ));
-            if let Some(level) = options.default_isolation.as_sql() {
-                settings.push(("default_transaction_isolation", level.to_owned()));
-            }
-        }
-        let connect_options = session_connect_options(dsn, options.application_name, settings)
-            .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
+        let connect_options = session_connect_options(
+            dsn,
+            options.application_name,
+            startup_session_settings(options),
+        )
+        .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
         let pool_options = PgPoolOptions::new()
             .max_connections(options.max_connections.get())
             .acquire_timeout(ACQUIRE_TIMEOUT)
@@ -316,7 +324,7 @@ impl Pool {
         let target = ConnectionTarget::from_options(&connect_options);
         let pool = Self {
             inner: pool_options.connect_lazy_with(connect_options),
-            policy: Arc::new(PoolPolicy {
+            shared: Arc::new(PoolShared {
                 slots,
                 notifications: options.notifications,
                 target,
@@ -332,18 +340,17 @@ impl Pool {
 
     pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<Self, ConnectError> {
         let startup = Self::prepare(dsn, options);
-        match startup.admit().await {
-            Ok(pool) => Ok(pool),
-            Err(refused) => {
-                if startup.close(SESSION_REJECTION_CLOSE_TIMEOUT).await == CloseOutcome::TimedOut {
-                    tracing::warn!(
-                        budget = ?SESSION_REJECTION_CLOSE_TIMEOUT,
-                        "postgres_session_rejection_close_timed_out"
-                    );
-                }
-                Err(refused)
-            }
+        let refused = match startup.admit().await {
+            Ok(pool) => return Ok(pool),
+            Err(refused) => refused,
+        };
+        if startup.close(SESSION_REJECTION_CLOSE_TIMEOUT).await == CloseOutcome::TimedOut {
+            tracing::warn!(
+                budget = ?SESSION_REJECTION_CLOSE_TIMEOUT,
+                "postgres_session_rejection_close_timed_out"
+            );
         }
+        Err(refused)
     }
 
     pub async fn close(&self, budget: Duration) -> CloseOutcome {
@@ -396,7 +403,7 @@ impl Pool {
 
     #[must_use]
     pub fn notifications_enabled(&self) -> bool {
-        self.policy.notifications
+        self.shared.notifications
     }
 
     #[cfg(test)]
@@ -411,7 +418,7 @@ impl Pool {
     }
 
     pub(crate) fn target(&self) -> &ConnectionTarget {
-        &self.policy.target
+        &self.shared.target
     }
 
     #[must_use]
@@ -438,7 +445,7 @@ impl Pool {
     }
 
     pub(crate) fn metrics(&self) -> &PoolMetrics {
-        &self.policy.metrics
+        &self.shared.metrics
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -447,7 +454,7 @@ impl Pool {
         let target = ConnectionTarget::from_options(inner.connect_options().as_ref());
         Self {
             inner,
-            policy: Arc::new(PoolPolicy {
+            shared: Arc::new(PoolShared {
                 slots: None,
                 notifications: true,
                 target,
@@ -482,14 +489,13 @@ impl Pool {
             (Instant::now() + budget, budget)
         };
         observe_acquisition(operation, budget, async {
-            let _slot = take_slot(self.policy.slots.as_ref(), deadline, queue).await?;
-            if let Some(deadline) = caller_deadline {
+            let _slot = take_slot(self.shared.slots.as_ref(), deadline, queue).await?;
+            if caller_deadline.is_some() {
                 self.acquire_until_deadline(deadline).await
             } else {
-                match timeout_at(deadline, self.inner.acquire()).await {
-                    Ok(result) => result,
-                    Err(_elapsed) => Err(sqlx::Error::PoolTimedOut),
-                }
+                timeout_at(deadline, self.inner.acquire())
+                    .await
+                    .unwrap_or_else(|_elapsed| Err(sqlx::Error::PoolTimedOut))
             }
         })
         .await
@@ -766,7 +772,7 @@ mod tests {
         let in_arrival_order = unreachable_pool(WaitOrder::Arrival);
         for queue in [Queue::Regular, Queue::Probe] {
             assert!(
-                take_slot(in_arrival_order.policy.slots.as_ref(), deadline, queue)
+                take_slot(in_arrival_order.shared.slots.as_ref(), deadline, queue)
                     .await
                     .unwrap()
                     .is_none()
@@ -774,7 +780,7 @@ mod tests {
         }
 
         let newest_first = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let slots = newest_first.policy.slots.as_ref();
+        let slots = newest_first.shared.slots.as_ref();
         let held = take_slot(slots, deadline, Queue::Regular).await.unwrap();
         assert!(held.is_some());
         let beyond_the_pool = take_slot(slots, deadline, Queue::Regular).await;
@@ -799,10 +805,10 @@ mod tests {
     async fn pool_slots_outlive_a_rotated_password_and_end_with_the_pool() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         let pool = unreachable_pool(WaitOrder::NewestOnceStanding);
-        let policy = Arc::downgrade(&pool.policy);
+        let policy = Arc::downgrade(&pool.shared);
         pool.set_password("rotated");
         assert!(
-            take_slot(pool.policy.slots.as_ref(), deadline, Queue::Regular)
+            take_slot(pool.shared.slots.as_ref(), deadline, Queue::Regular)
                 .await
                 .unwrap()
                 .is_some()

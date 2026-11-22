@@ -45,7 +45,7 @@ struct Refresh {
 
 impl Refresh {
     async fn step(&mut self, pool: &Pool, path: &Path) {
-        let password = match read(path).await {
+        let password = match read_password_in_blocking_task(path).await {
             Ok(password) => password,
             Err(error) => {
                 metrics::counter!(REFRESHES_METRIC, "outcome" => "read_failed").increment(1);
@@ -68,7 +68,7 @@ impl Refresh {
     }
 }
 
-async fn read(path: &Path) -> Result<Zeroizing<String>, DsnErrorKind> {
+async fn read_password_in_blocking_task(path: &Path) -> Result<Zeroizing<String>, DsnErrorKind> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || read_password(&path))
         .await

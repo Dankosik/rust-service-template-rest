@@ -134,8 +134,8 @@ pub struct CleanupPass {
     started: tokio::time::Instant,
     outcome: CleanupOutcome,
     active: metrics::Gauge,
-    batches: metrics::Counter,
-    rows: metrics::Counter,
+    batches_metric: metrics::Counter,
+    removed_rows_metric: metrics::Counter,
     committed_batches: u64,
     removed_rows: u64,
 }
@@ -194,8 +194,8 @@ impl CleanupPass {
             started,
             outcome: CleanupOutcome::Cancelled,
             active,
-            batches: metrics::counter!(CLEANUP_BATCHES_METRIC, "cleanup" => label),
-            rows: metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => label),
+            batches_metric: metrics::counter!(CLEANUP_BATCHES_METRIC, "cleanup" => label),
+            removed_rows_metric: metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => label),
             committed_batches: 0,
             removed_rows: 0,
         }
@@ -218,11 +218,11 @@ impl CleanupPass {
                     end: PassEnd::Cancelled,
                 });
             }
-            let rows = self.run_batch(pool, options, &mut delete).await?;
+            let batch_rows = self.run_batch(pool, options, &mut delete).await?;
             if let Some(metric) = options.removed_metric {
-                metrics::counter!(metric).increment(rows);
+                metrics::counter!(metric).increment(batch_rows);
             }
-            if rows < u64::from(options.limit.get()) {
+            if batch_rows < u64::from(options.limit.get()) {
                 let removed_rows = self.complete();
                 return Ok(CleanupPassResult {
                     removed_rows,
@@ -290,8 +290,8 @@ impl CleanupPass {
     }
 
     pub fn committed(&mut self, rows: u64) {
-        self.batches.increment(1);
-        self.rows.increment(rows);
+        self.batches_metric.increment(1);
+        self.removed_rows_metric.increment(rows);
         self.committed_batches = self.committed_batches.saturating_add(1);
         self.removed_rows = self.removed_rows.saturating_add(rows);
     }

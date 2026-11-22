@@ -49,10 +49,14 @@ impl Store {
         Ok(Self {
             inner: Arc::new(Inner {
                 pool,
-                retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
+                retention: whole_microseconds(retention),
             }),
         })
     }
+}
+
+fn whole_microseconds(duration: Duration) -> Duration {
+    Duration::new(duration.as_secs(), duration.subsec_micros() * 1_000)
 }
 
 #[cfg(test)]

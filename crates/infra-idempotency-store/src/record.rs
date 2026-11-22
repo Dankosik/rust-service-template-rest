@@ -229,16 +229,16 @@ impl Record {
     }
 
     pub(crate) fn decode(
-        status: i16,
+        stored_status: i16,
         headers: Vec<HeaderPair>,
         body: Bytes,
     ) -> Result<Self, Undecodable> {
         if body.len() > MAX_STORED_BODY_BYTES {
             return Err(Undecodable::BodyLimit);
         }
-        let status = u16::try_from(status)
+        let status = u16::try_from(stored_status)
             .ok()
-            .and_then(|status| StatusCode::from_u16(status).ok())
+            .and_then(|code| StatusCode::from_u16(code).ok())
             .filter(|status| status.is_success() || is_terminal_refusal(*status))
             .ok_or(Undecodable::Status)?;
         Ok(Self {
@@ -290,9 +290,7 @@ fn decode_headers(headers: Vec<HeaderPair>) -> Result<HeaderMap, Undecodable> {
         let name = name.0.ok_or(Undecodable::HeaderName)?;
         let value = HeaderValue::try_from(value).map_err(|_| Undecodable::HeaderValue)?;
         size = size.saturating_add(header_size(name, &value));
-        if size <= MAX_TOTAL_STORED_HEADER_BYTES {
-            admitted.append(name, value);
-        }
+        admitted.append(name, value);
     }
     if size > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Undecodable::HeaderLimit);

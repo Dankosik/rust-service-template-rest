@@ -113,7 +113,7 @@ impl TxMode for () {}
 impl TxMode for OperationDeadline {}
 
 trait TxModeExt<E: From<TxError>>: TxMode {
-    fn acquisition_expired(&self, _error: &TxError) -> Option<E> {
+    fn expired_acquisition_error(&self, _error: &TxError) -> Option<E> {
         None
     }
 
@@ -133,7 +133,7 @@ impl<E: From<TxError>> TxModeExt<E> for () {
 }
 
 impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for OperationDeadline {
-    fn acquisition_expired(&self, error: &TxError) -> Option<E> {
+    fn expired_acquisition_error(&self, error: &TxError) -> Option<E> {
         if matches!(error, TxError::Acquire(sqlx::Error::PoolTimedOut)) && Instant::now() >= self.at
         {
             Some(OperationDeadlineElapsed.into())
@@ -157,6 +157,12 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for Operati
     }
 }
 
+async fn sleep_until_reached(at: Instant) {
+    if Instant::now() < at {
+        tokio::time::sleep_until(at).await;
+    }
+}
+
 fn deadline_elapsed_error() -> sqlx::Error {
     sqlx::Error::Io(std::io::ErrorKind::TimedOut.into())
 }
@@ -169,22 +175,23 @@ impl OperationDeadline {
             .as_millis();
         if self.expired || ms == 0 {
             self.expired = true;
-            if Instant::now() < self.at {
-                tokio::time::sleep_until(self.at).await;
-            }
+            sleep_until_reached(self.at).await;
             return None;
         }
         Some(i32::try_from(ms).unwrap_or(i32::MAX))
+    }
+
+    async fn remaining_ms_or_elapsed(&mut self) -> Result<i32, sqlx::Error> {
+        self.remaining_ms_or_expire()
+            .await
+            .ok_or_else(deadline_elapsed_error)
     }
 
     async fn arm(&mut self, conn: &mut PgConnection) -> Result<(), sqlx::Error> {
         const ARM_ARG_COUNT: usize = 2;
         const ARM_ARG_BYTES: usize = 2 * (size_of::<i32>() + size_of::<i32>());
 
-        let remaining_ms = self
-            .remaining_ms_or_expire()
-            .await
-            .ok_or_else(deadline_elapsed_error)?;
+        let remaining_ms = self.remaining_ms_or_elapsed().await?;
         let mut arguments = PgArguments::default();
         arguments.reserve(ARM_ARG_COUNT, ARM_ARG_BYTES);
         let result = sqlx::query_with(
@@ -205,10 +212,8 @@ impl OperationDeadline {
         .await;
         let deadline_controls_statement_timeout = self.observe_cancellation(result).await?;
         self.armed_timeout_ms = deadline_controls_statement_timeout.then_some(remaining_ms);
-        self.remaining_ms_or_expire()
-            .await
-            .map(|_| ())
-            .ok_or_else(deadline_elapsed_error)
+        self.remaining_ms_or_elapsed().await?;
+        Ok(())
     }
 
     fn observe_error<T>(
@@ -221,8 +226,8 @@ impl OperationDeadline {
         self.expired |= rounded_expiry;
         let at = self.at;
         async move {
-            if rounded_expiry && Instant::now() < at {
-                tokio::time::sleep_until(at).await;
+            if rounded_expiry {
+                sleep_until_reached(at).await;
             }
             Err(error)
         }
@@ -327,7 +332,7 @@ impl<M: TxMode> Tx<'_, M> {
             ))
         })?;
         let saved_notifications = self.notifications.len();
-        self.execute(savepoint_sql(id, false))
+        self.execute(savepoint_sql(id))
             .await
             .map_err(SavepointError::Begin)?;
         match f(self).await {
@@ -348,12 +353,9 @@ impl<M: TxMode> Tx<'_, M> {
         saved_notifications: usize,
     ) -> Result<(), sqlx::Error> {
         self.proven_alive = false;
-        let rollback = collect_query_result(self.conn.fetch_many(savepoint_sql(id, true)));
+        let rollback = collect_query_result(self.conn.fetch_many(rollback_to_savepoint_sql(id)));
         if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
-            budget
-                .remaining_ms_or_expire()
-                .await
-                .ok_or_else(deadline_elapsed_error)?;
+            budget.remaining_ms_or_elapsed().await?;
             let response = tokio::time::timeout_at(budget.at, rollback)
                 .await
                 .map_err(|_| {
@@ -370,12 +372,17 @@ impl<M: TxMode> Tx<'_, M> {
     }
 }
 
-fn savepoint_sql(id: u32, rollback: bool) -> AssertSqlSafe<Cow<'static, str>> {
-    AssertSqlSafe(match (id, rollback) {
-        (0, false) => Cow::Borrowed("SAVEPOINT _tx_sp_0"),
-        (0, true) => Cow::Borrowed("ROLLBACK TO SAVEPOINT _tx_sp_0"),
-        (id, false) => Cow::Owned(format!("SAVEPOINT _tx_sp_{id}")),
-        (id, true) => Cow::Owned(format!("ROLLBACK TO SAVEPOINT _tx_sp_{id}")),
+fn savepoint_sql(id: u32) -> AssertSqlSafe<Cow<'static, str>> {
+    AssertSqlSafe(match id {
+        0 => Cow::Borrowed("SAVEPOINT _tx_sp_0"),
+        id => Cow::Owned(format!("SAVEPOINT _tx_sp_{id}")),
+    })
+}
+
+fn rollback_to_savepoint_sql(id: u32) -> AssertSqlSafe<Cow<'static, str>> {
+    AssertSqlSafe(match id {
+        0 => Cow::Borrowed("ROLLBACK TO SAVEPOINT _tx_sp_0"),
+        id => Cow::Owned(format!("ROLLBACK TO SAVEPOINT _tx_sp_{id}")),
     })
 }
 
@@ -411,22 +418,26 @@ impl Notification {
     }
 }
 
+fn retain_due(notifications: &mut SmallVec<[Notification; 1]>, now: Instant) {
+    static LAST_SENT: LazyLock<parking_lot::Mutex<foldhash::HashMap<NotificationKey, Instant>>> =
+        LazyLock::new(|| parking_lot::Mutex::new(foldhash::HashMap::default()));
+
+    let mut last_sent = LAST_SENT.lock();
+    notifications.retain(|notification| notification.record_if_due(&mut last_sent, now));
+}
+
 fn dispatch_notifications(
     pool: &Pool,
     mut guard: DiscardOnDrop,
     mut notifications: SmallVec<[Notification; 1]>,
 ) {
     const SEND_BUDGET: Duration = Duration::from_millis(100);
-    static LAST_SENT: LazyLock<parking_lot::Mutex<foldhash::HashMap<NotificationKey, Instant>>> =
-        LazyLock::new(|| parking_lot::Mutex::new(foldhash::HashMap::default()));
 
     if notifications.is_empty() || !pool.notifications_enabled() {
         return;
     }
     let now = Instant::now();
-    let mut last_sent = LAST_SENT.lock();
-    notifications.retain(|notification| notification.record_if_due(&mut last_sent, now));
-    drop(last_sent);
+    retain_due(&mut notifications, now);
     if notifications.is_empty() {
         return;
     }
@@ -544,9 +555,9 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
                 Ok(row)
             })
         } else {
-            let row = conn.fetch_optional(query);
+            let pending_row = conn.fetch_optional(query);
             Box::pin(async move {
-                let row = row.await?;
+                let row = pending_row.await?;
                 *proven_alive = true;
                 Ok(row)
             })
@@ -717,7 +728,10 @@ impl Pool {
 }
 
 enum StepFailure<E> {
-    Driver { error: TxError, mapped: Option<E> },
+    Driver {
+        error: TxError,
+        deadline_error: Option<E>,
+    },
     RolledBack(E),
 }
 
@@ -725,7 +739,7 @@ impl<E> From<TxError> for StepFailure<E> {
     fn from(error: TxError) -> Self {
         Self::Driver {
             error,
-            mapped: None,
+            deadline_error: None,
         }
     }
 }
@@ -748,49 +762,45 @@ where
         observation.record_connection_wait();
         let connection = acquired.map_err(|error| {
             let error = TxError::Acquire(error);
-            let mapped = mode.acquisition_expired(&error);
-            StepFailure::Driver { error, mapped }
+            let deadline_error = mode.expired_acquisition_error(&error);
+            StepFailure::Driver {
+                error,
+                deadline_error,
+            }
         })?;
         let mut guard = DiscardOnDrop {
             connection,
             discard: true,
         };
-        let mut tx = match options.begin_statement() {
+        let mut sqlx_tx = match options.begin_statement() {
             None => guard.connection.begin().await,
             Some(statement) => guard.connection.begin_with(statement).await,
         }
         .map_err(TxError::Begin)?;
         guard.discard = false;
 
-        let mut handle = Tx {
-            conn: &mut tx,
+        let mut tx = Tx {
+            conn: &mut sqlx_tx,
             proven_alive: true,
             mode,
             notifications: SmallVec::new(),
             next_savepoint: 0,
         };
-        let result = f(&mut handle).await;
-        handle
-            .mode
-            .check_expiry()
-            .map_err(StepFailure::RolledBack)?;
+        let result = f(&mut tx).await;
+        tx.mode.check_expiry().map_err(StepFailure::RolledBack)?;
         let value = result.map_err(StepFailure::RolledBack)?;
-        if !(options.read_only || handle.proven_alive) {
-            let proof = (&mut handle).execute("SELECT 1").await;
-            handle
-                .mode
-                .check_expiry()
-                .map_err(StepFailure::RolledBack)?;
+        if !(options.read_only || tx.proven_alive) {
+            let proof = (&mut tx).execute("SELECT 1").await;
+            tx.mode.check_expiry().map_err(StepFailure::RolledBack)?;
             proof.map_err(TxError::CommitFailed)?;
         }
-        handle
-            .mode
+        tx.mode
             .check_before_commit()
             .await
             .map_err(StepFailure::RolledBack)?;
-        let notifications = handle.notifications;
+        let notifications = tx.notifications;
         observation.begin_commit();
-        tx.commit().await.map_err(classify_commit)?;
+        sqlx_tx.commit().await.map_err(classify_commit)?;
         dispatch_notifications(pool, guard, notifications);
         Ok(value)
     }
@@ -805,9 +815,12 @@ where
             observation.roll_back();
             Err(error)
         }
-        Err(StepFailure::Driver { error, mapped }) => {
+        Err(StepFailure::Driver {
+            error,
+            deadline_error,
+        }) => {
             observation.fail(&error);
-            Err(mapped.unwrap_or_else(|| error.into()))
+            Err(deadline_error.unwrap_or_else(|| error.into()))
         }
     }
 }
