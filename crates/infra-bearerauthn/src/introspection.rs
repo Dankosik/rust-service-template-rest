@@ -220,7 +220,6 @@ impl IntrospectionVerifier {
         context: &OperationContext,
         unix_now: impl Fn() -> Result<Duration, VerificationError> + Clone + Send + Sync + 'static,
     ) -> Result<Principal, VerificationError> {
-        context.check().map_err(|_| ProviderFailure::Timeout)?;
         let Some(cache) = &self.cache else {
             return self
                 .introspect(token.as_str(), StopProbe::Context(context), &unix_now)

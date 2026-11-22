@@ -55,7 +55,6 @@ pub(crate) async fn admit_caller(
             .into_classified_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
         return Err(reject_with_budget(context, request, status).await);
     }
-    check_open(context)?;
     tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert::<Caller>(caller);
