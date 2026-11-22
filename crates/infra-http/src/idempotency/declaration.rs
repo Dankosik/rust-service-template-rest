@@ -107,11 +107,12 @@ pub(super) fn prepare(
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
     let at_operation = |rule| CompositionError::finalize(&operation_id, rule);
-    let method = match (!has_additional, method) {
-        (true, "POST") => MethodFilter::POST,
-        (true, "PUT") => MethodFilter::PUT,
-        (true, "PATCH") => MethodFilter::PATCH,
-        (true, "DELETE") => MethodFilter::DELETE,
+    let method_filter = match method {
+        _ if has_additional => return Err(at_operation(Rule::Method)),
+        "POST" => MethodFilter::POST,
+        "PUT" => MethodFilter::PUT,
+        "PATCH" => MethodFilter::PATCH,
+        "DELETE" => MethodFilter::DELETE,
         _ => return Err(at_operation(Rule::Method)),
     };
 
@@ -137,7 +138,7 @@ pub(super) fn prepare(
         .ok_or_else(|| at_operation(Rule::RetryDocumentation))?;
     Ok(PreparedOperation {
         id: operation_id,
-        method,
+        method: method_filter,
         fingerprint_headers,
         rules_link,
     })
@@ -298,13 +299,13 @@ fn supplement_content(
     annotation: RefOr<Content>,
     schemas: &BTreeMap<String, RefOr<Schema>>,
 ) -> Option<()> {
-    let (command, mut annotation) = match (command, annotation) {
+    let (command_content, mut annotation_content) = match (command, annotation) {
         (RefOr::T(command), RefOr::T(annotation)) => (command, annotation),
         (RefOr::Ref(command), RefOr::Ref(annotation)) if *command == annotation => return Some(()),
         _ => return None,
     };
-    if let Some(annotation_schema) = &annotation.schema {
-        let command_schema = command.schema.as_ref()?;
+    if let Some(annotation_schema) = &annotation_content.schema {
+        let command_schema = command_content.schema.as_ref()?;
         if !same_definition(command_schema, annotation_schema)
             && !same_definition(
                 crate::contract::resolve_schema(command_schema, schemas)?,
@@ -313,23 +314,39 @@ fn supplement_content(
         {
             return None;
         }
-        command.schema.clone_from(&annotation.schema);
+        command_content
+            .schema
+            .clone_from(&annotation_content.schema);
     } else {
-        annotation.schema.clone_from(&command.schema);
+        annotation_content
+            .schema
+            .clone_from(&command_content.schema);
     }
-    if annotation.example.is_some() || !annotation.examples.is_empty() {
-        command.example.clone_from(&annotation.example);
-        command.examples.clone_from(&annotation.examples);
+    if annotation_content.example.is_some() || !annotation_content.examples.is_empty() {
+        command_content
+            .example
+            .clone_from(&annotation_content.example);
+        command_content
+            .examples
+            .clone_from(&annotation_content.examples);
     } else {
-        annotation.example.clone_from(&command.example);
-        annotation.examples.clone_from(&command.examples);
+        annotation_content
+            .example
+            .clone_from(&command_content.example);
+        annotation_content
+            .examples
+            .clone_from(&command_content.examples);
     }
-    if annotation.description.is_some() {
-        command.description.clone_from(&annotation.description);
+    if annotation_content.description.is_some() {
+        command_content
+            .description
+            .clone_from(&annotation_content.description);
     } else {
-        annotation.description.clone_from(&command.description);
+        annotation_content
+            .description
+            .clone_from(&command_content.description);
     }
-    same_definition(command, &annotation).then_some(())
+    same_definition(command_content, &annotation_content).then_some(())
 }
 
 fn prepare_success_headers(response: &mut Response, status: &str) -> Result<(), Rule> {

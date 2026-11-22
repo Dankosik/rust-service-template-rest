@@ -61,12 +61,24 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-pub(super) fn capture_fingerprint(
+pub(super) fn retain_headers(source: &HeaderMap, fingerprint_headers: &[HeaderName]) -> HeaderMap {
+    let mut retained = HeaderMap::new();
+    for name in std::iter::once(&CONTENT_TYPE).chain(fingerprint_headers) {
+        for value in source.get_all(name) {
+            let mut copy = value.clone();
+            copy.set_sensitive(true);
+            retained.append(name.clone(), copy);
+        }
+    }
+    retained
+}
+
+pub(super) fn request_fingerprint(
     parts: &Parts,
     fingerprint_headers: &[HeaderName],
     body: &[u8],
     trailers: &HeaderMap,
-) -> (HeaderMap, RequestFingerprint) {
+) -> RequestFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(if fingerprint_headers.is_empty() {
         REQUEST_DOMAIN
@@ -83,18 +95,12 @@ pub(super) fn capture_fingerprint(
         }
         None => hasher.update([0]),
     }
-    let mut selected_headers = HeaderMap::new();
-    select_and_frame_header(
-        &mut hasher,
-        &parts.headers,
-        &mut selected_headers,
-        &CONTENT_TYPE,
-    );
+    frame_header(&mut hasher, &parts.headers, &CONTENT_TYPE);
     if !fingerprint_headers.is_empty() {
         hasher.update((fingerprint_headers.len() as u64).to_be_bytes());
         for name in fingerprint_headers {
             frame(&mut hasher, name.as_str().as_bytes());
-            select_and_frame_header(&mut hasher, &parts.headers, &mut selected_headers, name);
+            frame_header(&mut hasher, &parts.headers, name);
         }
     }
     frame(&mut hasher, body);
@@ -111,27 +117,12 @@ pub(super) fn capture_fingerprint(
             }
         }
     }
-    (
-        selected_headers,
-        RequestFingerprint::from_bytes(hasher.finalize().into()),
-    )
+    RequestFingerprint::from_bytes(hasher.finalize().into())
 }
 
-fn select_and_frame_header(
-    hasher: &mut Sha256,
-    source: &HeaderMap,
-    selected: &mut HeaderMap,
-    name: &HeaderName,
-) {
+fn frame_header(hasher: &mut Sha256, source: &HeaderMap, name: &HeaderName) {
     let values = source.get_all(name);
-    let mut count = 0_u64;
-    for value in &values {
-        let mut copy = value.clone();
-        copy.set_sensitive(true);
-        selected.append(name.clone(), copy);
-        count += 1;
-    }
-    hasher.update(count.to_be_bytes());
+    hasher.update((values.iter().count() as u64).to_be_bytes());
     for value in values {
         frame(hasher, value.as_bytes());
     }

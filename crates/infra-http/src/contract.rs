@@ -28,7 +28,7 @@ mod outcomes;
 mod policy;
 
 pub(crate) use components::ComponentKind;
-use document::{StandardMethod, documented_methods};
+use document::{StandardMethod, documented_methods, has_extension_operations};
 use outcomes::ResponseFault;
 // template:begin authn:http-contract-policy-reexports
 pub(crate) use policy::{Access, contract_path};
@@ -233,7 +233,7 @@ pub(crate) fn resolve_schema<'a>(
         utoipa::openapi::RefOr<utoipa::openapi::Schema>,
     >,
 ) -> Option<&'a utoipa::openapi::Schema> {
-    document::resolve_when(schema, schemas, "#/components/schemas/", |reference| {
+    document::resolve_when(schema, schemas, ComponentKind::Schemas, |reference| {
         *reference == utoipa::openapi::Ref::new(&reference.ref_location)
     })
 }
@@ -524,12 +524,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
     fn finalize(&mut self, probes: &ProbeRoutes) -> Result<Policy, FinalizeError> {
         let document = self.routes.get_openapi_mut();
         normalize_root(&mut document.paths)?;
-        if document
-            .paths
-            .paths
-            .values()
-            .any(|item| item.query.is_some() || !item.additional_operations.is_empty())
-        {
+        if document.paths.paths.values().any(has_extension_operations) {
             use utoipa::openapi::OpenApiVersion;
             if self.application && document.openapi != OpenApiVersion::Version32 {
                 return Err(FinalizeError::new(FinalizeKind::OpenApi32Required));
@@ -718,25 +713,22 @@ fn check_path_merge(
             method: method.to_owned(),
         }));
     }
+    let conflict = |field| {
+        FinalizeError::new(FinalizeKind::ConflictingPathItem {
+            path: path.to_owned(),
+            field,
+        })
+    };
+    if existing.ref_path != incoming.ref_path {
+        return Err(conflict(PathItemField::Ref));
+    }
     let left = existing.parameters.as_deref().unwrap_or_default();
     let right = incoming.parameters.as_deref().unwrap_or_default();
-    if existing.ref_path != incoming.ref_path {
-        return Err(FinalizeError::new(FinalizeKind::ConflictingPathItem {
-            path: path.to_owned(),
-            field: PathItemField::Ref,
-        }));
-    }
     if left.len() != right.len() || !left.iter().all(|parameter| right.contains(parameter)) {
-        return Err(FinalizeError::new(FinalizeKind::ConflictingPathItem {
-            path: path.to_owned(),
-            field: PathItemField::Parameters,
-        }));
+        return Err(conflict(PathItemField::Parameters));
     }
     if existing.servers != incoming.servers {
-        return Err(FinalizeError::new(FinalizeKind::ConflictingPathItem {
-            path: path.to_owned(),
-            field: PathItemField::Servers,
-        }));
+        return Err(conflict(PathItemField::Servers));
     }
     Ok(())
 }

@@ -62,6 +62,23 @@ impl Outcome {
             Self::Abandoned => "abandoned",
         }
     }
+
+    const fn yields_to_request_timeout(self) -> bool {
+        match self {
+            Self::Unavailable
+            | Self::InProgress
+            | Self::KeyMismatch
+            | Self::Integrity
+            | Self::Internal
+            | Self::Unstorable => true,
+            Self::InvalidKey
+            | Self::Replayed
+            | Self::Executed
+            | Self::TerminalRefusal
+            | Self::NotStored
+            | Self::Abandoned => false,
+        }
+    }
 }
 
 pub(super) struct RouteState {
@@ -166,7 +183,7 @@ impl Attempt {
             }
         };
         map_attempted(attempted, &scope, &route)
-            .settle(deadline.at(), &route, guard)
+            .settle(deadline.at(), guard)
             .await
     }
 }
@@ -230,37 +247,22 @@ impl<T> From<Problem> for Rollback<T> {
 struct Answer {
     response: Response,
     outcome: Outcome,
-    yield_to_request_timeout: bool,
 }
 
 impl Answer {
-    fn boundary_problem(response: Response, outcome: Outcome) -> Self {
-        Self {
-            response,
-            outcome,
-            yield_to_request_timeout: true,
-        }
-    }
-
-    fn operation_response(response: Response, outcome: Outcome) -> Self {
-        Self {
-            response,
-            outcome,
-            yield_to_request_timeout: false,
-        }
+    const fn new(response: Response, outcome: Outcome) -> Self {
+        Self { response, outcome }
     }
 
     async fn settle<'a>(
         self,
         deadline: Instant,
-        route: &RouteState,
         guard: DropGuard<&'a Arc<RouteState>, impl FnOnce(&'a Arc<RouteState>)>,
     ) -> Response {
-        if self.yield_to_request_timeout && Instant::now() >= deadline {
+        if self.outcome.yields_to_request_timeout() && Instant::now() >= deadline {
             return std::future::pending().await;
         }
-        DropGuard::dismiss(guard);
-        route.record(self.outcome);
+        DropGuard::dismiss(guard).record(self.outcome);
         self.response
     }
 }
@@ -286,7 +288,7 @@ fn map_attempted(
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
         Ok(Attempted::RolledBack(AttemptRollback::Refused(problem))) => {
-            Answer::operation_response((*problem).into_response(), Outcome::NotStored)
+            Answer::new((*problem).into_response(), Outcome::NotStored)
         }
         Ok(Attempted::RolledBack(AttemptRollback::Database(error))) => {
             let class = AttemptError::classify_sql(&error);
@@ -305,10 +307,10 @@ fn map_attempted(
                 failure = %error,
                 "http_idempotency_success_not_stored"
             );
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
+            Answer::new(sanitized_internal_error(), Outcome::Unstorable)
         }
         Ok(Attempted::Mismatch) => {
-            Answer::boundary_problem(key_mismatch(route.rules_link.clone()), Outcome::KeyMismatch)
+            Answer::new(key_mismatch(route.rules_link.clone()), Outcome::KeyMismatch)
         }
         Ok(Attempted::Replay(record)) => {
             let mut response = response_from_record(record);
@@ -316,16 +318,21 @@ fn map_attempted(
                 REPLAYED_HEADER_NAME,
                 HeaderValue::from_static(REPLAYED_VALUE),
             );
-            Answer::operation_response(response, Outcome::Replayed)
+            Answer::new(response, Outcome::Replayed)
         }
         Ok(Attempted::InProgress) => {
-            Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
+            tracing::info!(
+                scope_digest = %const_hex::display(scope.digest()),
+                operation = operation_id,
+                "http_idempotency_in_progress"
+            );
+            Answer::new(in_progress(), Outcome::InProgress)
         }
         Ok(Attempted::Committed(record)) => {
-            Answer::operation_response(response_from_record(record), Outcome::Executed)
+            Answer::new(response_from_record(record), Outcome::Executed)
         }
         Ok(Attempted::TerminalRefusal(record)) => {
-            Answer::operation_response(response_from_record(record), Outcome::TerminalRefusal)
+            Answer::new(response_from_record(record), Outcome::TerminalRefusal)
         }
     }
 }
@@ -333,11 +340,9 @@ fn map_attempted(
 fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) -> Answer {
     match error {
         AttemptError::Unavailable | AttemptError::Deadline => {
-            Answer::boundary_problem(unavailable(), Outcome::Unavailable)
+            Answer::new(unavailable(), Outcome::Unavailable)
         }
-        AttemptError::Internal => {
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
-        }
+        AttemptError::Internal => Answer::new(sanitized_internal_error(), Outcome::Internal),
         AttemptError::Integrity => {
             tracing::error!(
                 scope_digest = %const_hex::display(scope.digest()),
@@ -345,7 +350,7 @@ fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) ->
                 failure = "store_undecodable",
                 "http_idempotency_integrity_failed"
             );
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
+            Answer::new(sanitized_internal_error(), Outcome::Integrity)
         }
     }
 }
@@ -365,12 +370,7 @@ fn key_mismatch(rules_link: HeaderValue) -> Response {
         .into_response()
 }
 
-fn in_progress(scope: &ScopeKey, operation_id: &str) -> Response {
-    tracing::info!(
-        scope_digest = %const_hex::display(scope.digest()),
-        operation = operation_id,
-        "http_idempotency_in_progress"
-    );
+fn in_progress() -> Response {
     Problem::new(Code::IdempotencyRequestInProgress)
         .detail_static(IN_PROGRESS_DETAIL)
         .retry_after(RETRY_AFTER_HINT)

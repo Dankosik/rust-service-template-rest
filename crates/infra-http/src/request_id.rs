@@ -24,15 +24,15 @@ fn generate() -> Option<HeaderValue> {
 }
 
 pub(crate) fn ensure<B>(request: &mut Request<B>) -> Option<RequestId> {
-    let valid = match request
+    let valid = request
         .headers()
         .get_all(&REQUEST_ID_HEADER)
         .iter()
         .at_most_one()
-    {
-        Ok(Some(value)) if is_valid(value.as_bytes()) => Some(value.clone()),
-        _ => None,
-    };
+        .ok()
+        .flatten()
+        .filter(|value| is_valid(value.as_bytes()))
+        .cloned();
     let value = if let Some(value) = valid {
         value
     } else {

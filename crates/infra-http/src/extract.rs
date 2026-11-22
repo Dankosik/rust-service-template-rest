@@ -12,10 +12,8 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
-use crate::context::{RequestContext, read_request_bytes};
-use crate::problem::{
-    Code, Problem, body_too_large, body_unreadable, caused_by_length_limit, sanitized_problem,
-};
+use crate::context::{RequestContext, read_request_bytes, wiring_failure};
+use crate::problem::{Code, Problem, body_read_problem, sanitized_problem};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
@@ -38,45 +36,32 @@ where
     type Rejection = Problem;
 
     async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
-        if let Err(problem) = require_json_content_type(request.headers().get(CONTENT_TYPE)) {
-            return Err(problem.with_request_id_from(request.extensions()));
-        }
+        require_json_content_type(request.headers().get(CONTENT_TYPE))
+            .map_err(|problem| problem.with_request_id_from(request.extensions()))?;
         let (parts, body) = request.with_limited_body().into_parts();
         let attach = |problem: Problem| problem.with_request_id_from(&parts.extensions);
         let bytes = read_request_bytes(parts.extensions.get::<RequestContext>(), body)
             .await
-            .map_err(|error| {
-                attach(if caused_by_length_limit(&error) {
-                    body_too_large()
-                } else {
-                    body_unreadable()
-                })
-            })?;
+            .map_err(|error| attach(body_read_problem(&error)))?;
         decode_json(&bytes).map(Self).map_err(attach)
     }
 }
 
-fn parse_json_media_type(value: &str) -> bool {
-    mediatype::MediaType::parse(value).is_ok_and(|media_type| {
-        media_type.ty == mediatype::names::APPLICATION
-            && (media_type.subty == mediatype::names::JSON
-                || media_type.suffix == Some(mediatype::names::JSON))
-            && media_type
-                .params
-                .iter()
-                .all(|(_, param)| !param.as_str().is_empty())
-    })
-}
-
 pub(crate) fn is_json_media_type(value: &str) -> bool {
-    value.eq_ignore_ascii_case("application/json") || parse_json_media_type(value)
+    value.eq_ignore_ascii_case("application/json")
+        || mediatype::MediaType::parse(value).is_ok_and(|media_type| {
+            media_type.ty == mediatype::names::APPLICATION
+                && (media_type.subty == mediatype::names::JSON
+                    || media_type.suffix == Some(mediatype::names::JSON))
+                && media_type
+                    .params
+                    .iter()
+                    .all(|(_, param)| !param.as_str().is_empty())
+        })
 }
 
 pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> Result<(), Problem> {
-    let json = content_type.is_some_and(|value| {
-        value.as_bytes().eq_ignore_ascii_case(b"application/json")
-            || value.to_str().is_ok_and(parse_json_media_type)
-    });
+    let json = content_type.is_some_and(|value| value.to_str().is_ok_and(is_json_media_type));
     if json {
         Ok(())
     } else {
@@ -322,11 +307,6 @@ fn invalid_path(name: Option<&str>) -> Problem {
 
 fn param_name(prefix: &str, name: &str) -> Option<CompactString> {
     (name.len() <= MAX_PARAM_NAME_BYTES - prefix.len()).then(|| format_compact!("{prefix}{name}"))
-}
-
-fn wiring_failure(extractor: &'static str) -> Problem {
-    tracing::error!(extractor, "http_extractor_wiring_failed");
-    sanitized_problem()
 }
 
 fn with_param(problem: Problem, name: Option<CompactString>) -> Problem {

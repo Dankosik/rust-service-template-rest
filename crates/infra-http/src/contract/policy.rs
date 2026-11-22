@@ -8,14 +8,15 @@ use axum::response::Response;
 use enum_map::EnumMap;
 use foldhash::{HashMap, HashMapExt as _};
 use itertools::Itertools as _;
-use utoipa::openapi::path::Operation;
+use utoipa::openapi::path::{Operation, PathItem};
 use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr};
 
-use super::document::{StandardMethod, documented_methods};
+use super::document::{StandardMethod, documented_methods, has_extension_operations};
 use super::{FinalizeError, FinalizeKind};
 // template:begin http-idempotency:http-policy-idempotency-import
 use super::IdempotentOperations;
+use super::components::ComponentKind;
 use super::document::resolve;
 // template:end http-idempotency:http-policy-idempotency-import
 use crate::problem::sanitized_internal_error;
@@ -77,18 +78,7 @@ impl Policy {
         let mut routes = HashMap::with_capacity(document.paths.paths.len());
         for (path, item) in &document.paths.paths {
             let path = path.as_str();
-            let extension_allow = if item.query.is_some() || !item.additional_operations.is_empty()
-            {
-                let methods = documented_methods(item)
-                    .chain((item.get.is_some() && item.head.is_none()).then_some("HEAD"))
-                    .join(",");
-                Some(
-                    HeaderValue::from_str(&methods)
-                        .map_err(|_| FinalizeError::new(FinalizeKind::InvalidRegistration))?,
-                )
-            } else {
-                None
-            };
+            let extension_allow = extension_allow(item)?;
             let mut standard = EnumMap::<StandardMethod, Option<Access>>::default();
             for method in StandardMethod::ALL {
                 let Some(operation) = method.operation(item) else {
@@ -180,6 +170,18 @@ impl Policy {
     }
 }
 
+fn extension_allow(item: &PathItem) -> Result<Option<HeaderValue>, FinalizeError> {
+    if !has_extension_operations(item) {
+        return Ok(None);
+    }
+    let methods = documented_methods(item)
+        .chain((item.get.is_some() && item.head.is_none()).then_some("HEAD"))
+        .join(",");
+    HeaderValue::from_str(&methods)
+        .map(Some)
+        .map_err(|_| FinalizeError::new(FinalizeKind::InvalidRegistration))
+}
+
 pub(super) async fn enforce_public(
     State(policy): State<Policy>,
     request: Request,
@@ -248,14 +250,14 @@ fn declares_idempotency(document: &OpenApi, path: &str, operation: &Operation) -
         .into_iter()
         .flatten()
         .chain(operation.parameters.iter().flatten())
-        .filter_map(|value| resolve(value, parameters, "#/components/parameters/"))
+        .filter_map(|value| resolve(value, parameters, ComponentKind::Parameters))
         .any(|parameter| {
             parameter.parameter_in == ParameterIn::Header
                 && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         });
     key || operation.responses.responses.iter().any(|(status, value)| {
         status.starts_with('2')
-            && resolve(value, responses, "#/components/responses/").is_some_and(|response| {
+            && resolve(value, responses, ComponentKind::Responses).is_some_and(|response| {
                 response
                     .headers
                     .keys()

@@ -22,11 +22,7 @@ where
 {
     if body.is_end_stream() {
         drop(guard);
-        let end = match remaining {
-            None | Some(0) => BodyEnd::Complete,
-            Some(_) => BodyEnd::Error,
-        };
-        finish(end);
+        finish(stream_end(remaining));
         return body;
     }
     let finish = if let Some(end) = body_end(false, remaining) {
@@ -46,10 +42,17 @@ where
     })
 }
 
+fn stream_end(remaining: Option<u64>) -> BodyEnd {
+    match remaining {
+        None | Some(0) => BodyEnd::Complete,
+        Some(_) => BodyEnd::Error,
+    }
+}
+
 fn body_end(end_stream: bool, remaining: Option<u64>) -> Option<BodyEnd> {
     match (end_stream, remaining) {
-        (_, Some(0)) | (true, None) => Some(BodyEnd::Complete),
-        (true, Some(_)) => Some(BodyEnd::Error),
+        (true, _) => Some(stream_end(remaining)),
+        (false, Some(0)) => Some(BodyEnd::Complete),
         (false, _) => None,
     }
 }
