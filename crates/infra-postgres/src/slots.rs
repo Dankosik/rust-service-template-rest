@@ -35,6 +35,11 @@ struct ActiveRegularQueue {
     waiters: BTreeMap<u64, oneshot::Sender<()>>,
 }
 
+struct DequeuedWaiter {
+    grant: oneshot::Sender<()>,
+    emptied_queue: Option<ActiveRegularQueue>,
+}
+
 impl RegularQueue {
     fn push(&mut self, id: u64, grant: oneshot::Sender<()>) {
         let active = self.0.get_or_insert_with(|| ActiveRegularQueue {
@@ -44,35 +49,29 @@ impl RegularQueue {
         active.waiters.insert(id, grant);
     }
 
-    fn newest_first(&self) -> bool {
-        self.0.as_ref().is_some_and(|active| {
-            active.waiters.len() > 1
-                && Instant::now().saturating_duration_since(active.since) > STANDING_AFTER
-        })
-    }
-
-    fn pop(&mut self, newest_first: bool) -> Option<oneshot::Sender<()>> {
+    fn pop(&mut self) -> Option<DequeuedWaiter> {
         let active = self.0.as_mut()?;
+        let newest_first = active.waiters.len() > 1
+            && Instant::now().saturating_duration_since(active.since) > STANDING_AFTER;
         let (_, grant) = if newest_first {
             active.waiters.pop_last()
         } else {
             active.waiters.pop_first()
         }?;
-        if active.waiters.is_empty() {
-            self.0 = None;
-        }
-        Some(grant)
+        let emptied_queue = self.0.take_if(|active| active.waiters.is_empty());
+        Some(DequeuedWaiter {
+            grant,
+            emptied_queue,
+        })
     }
 
-    fn remove(&mut self, id: u64) -> bool {
-        let Some(active) = self.0.as_mut() else {
-            return false;
-        };
-        let removed = active.waiters.remove(&id).is_some();
-        if active.waiters.is_empty() {
-            self.0 = None;
-        }
-        removed
+    fn remove(&mut self, id: u64) -> Option<DequeuedWaiter> {
+        let grant = self.0.as_mut()?.waiters.remove(&id)?;
+        let emptied_queue = self.0.take_if(|active| active.waiters.is_empty());
+        Some(DequeuedWaiter {
+            grant,
+            emptied_queue,
+        })
     }
 }
 
@@ -117,38 +116,52 @@ impl Slots {
             }
             (id, granted)
         };
-        let mut wait = DropGuard::new(granted, |_receiver| self.cancel_wait(queue, id));
+        let mut wait = DropGuard::new(granted, |receiver| self.cancel_wait(queue, id, receiver));
         let _ = timeout_at(deadline, &mut *wait).await?;
         let _receiver = DropGuard::dismiss(wait);
         Ok(Slot(self))
     }
 
     fn release(&self) {
-        let mut state = self.state.lock();
-        while let Some((_, grant)) = state.probes.pop_first() {
-            if grant.send(()).is_ok() {
-                return;
+        let handoff = {
+            let mut state = self.state.lock();
+            if let Some((_, grant)) = state.probes.pop_first() {
+                Some(DequeuedWaiter {
+                    grant,
+                    emptied_queue: None,
+                })
+            } else if let Some(waiter) = state.regular.pop() {
+                Some(waiter)
+            } else {
+                state.free += 1;
+                None
             }
+        };
+        if let Some(DequeuedWaiter {
+            grant,
+            emptied_queue,
+        }) = handoff
+        {
+            let _ = grant.send(());
+            drop(emptied_queue);
         }
-        let newest_first = state.regular.newest_first();
-        while let Some(grant) = state.regular.pop(newest_first) {
-            if grant.send(()).is_ok() {
-                return;
-            }
-        }
-        state.free += 1;
     }
 
-    fn cancel_wait(&self, queue: Queue, id: u64) {
-        let queued = {
+    fn cancel_wait(&self, queue: Queue, id: u64, receiver: oneshot::Receiver<()>) {
+        let removed = {
             let mut state = self.state.lock();
             match queue {
-                Queue::Probe => state.probes.remove(&id).is_some(),
+                Queue::Probe => state.probes.remove(&id).map(|grant| DequeuedWaiter {
+                    grant,
+                    emptied_queue: None,
+                }),
                 Queue::Regular => state.regular.remove(id),
             }
         };
-        if !queued {
-            self.release();
+        drop(receiver);
+        match removed {
+            Some(waiter) => drop(waiter),
+            None => self.release(),
         }
     }
 }
@@ -320,5 +333,123 @@ mod tests {
         drop(lone_slot);
         assert!(poll(newer.as_mut()).is_pending());
         assert!(poll(older.as_mut()).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_queued_wait_does_not_wake_and_release_wakes_outside_the_lock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        struct LockCheckingWake {
+            slots: Arc<Slots>,
+            wakes: AtomicUsize,
+            unlocked_on_wake: AtomicBool,
+        }
+
+        impl Wake for LockCheckingWake {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::Relaxed);
+                if self.slots.state.try_lock().is_none() {
+                    self.unlocked_on_wake.store(false, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let slots = Arc::new(Slots::new(1));
+        let held = take(&slots, Queue::Regular).await;
+        for queue in [Queue::Regular, Queue::Probe] {
+            let wake = Arc::new(LockCheckingWake {
+                slots: Arc::clone(&slots),
+                wakes: AtomicUsize::new(0),
+                unlocked_on_wake: AtomicBool::new(true),
+            });
+            let waker = Waker::from(Arc::clone(&wake));
+            {
+                let mut wait = pin!(take(&slots, queue));
+                assert!(
+                    wait.as_mut()
+                        .poll(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
+            }
+            assert_eq!(wake.wakes.load(Ordering::Relaxed), 0);
+        }
+
+        let mut held = Some(held);
+        for queue in [Queue::Regular, Queue::Probe] {
+            let wake = Arc::new(LockCheckingWake {
+                slots: Arc::clone(&slots),
+                wakes: AtomicUsize::new(0),
+                unlocked_on_wake: AtomicBool::new(true),
+            });
+            let waker = Waker::from(Arc::clone(&wake));
+            let mut wait = pin!(take(&slots, queue));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            drop(held.take());
+            assert_eq!(wake.wakes.load(Ordering::Relaxed), 1);
+            assert!(wake.unlocked_on_wake.load(Ordering::Relaxed));
+            let Poll::Ready(slot) = wait.as_mut().poll(&mut Context::from_waker(&waker)) else {
+                panic!("released slot did not reach the waiting future");
+            };
+            held = Some(slot);
+        }
+        drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_releases_and_cancellations_conserve_every_slot() {
+        use std::sync::Arc;
+
+        const CAPACITY: usize = 2;
+        const WORKERS: usize = 8;
+        const ROUNDS: usize = 64;
+
+        async fn exercise_round(slots: &Slots, step: usize) {
+            let queue = if step.is_multiple_of(4) {
+                Queue::Probe
+            } else {
+                Queue::Regular
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            if step.is_multiple_of(3) {
+                tokio::select! {
+                    biased;
+                    slot = slots.take(queue, deadline) => {
+                        let _slot = slot.unwrap();
+                        tokio::task::yield_now().await;
+                    }
+                    () = tokio::task::yield_now() => {}
+                }
+            } else if let Ok(_slot) = slots.take(queue, deadline).await {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        let slots = Arc::new(Slots::new(CAPACITY));
+        let mut tasks = tokio::task::JoinSet::new();
+        for worker in 0..WORKERS {
+            let slots = Arc::clone(&slots);
+            tasks.spawn(async move {
+                for round in 0..ROUNDS {
+                    exercise_round(&slots, worker + round).await;
+                }
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            joined.unwrap();
+        }
+        let state = slots.state.lock();
+        assert_eq!(state.free, CAPACITY);
+        assert!(state.probes.is_empty());
+        assert!(state.regular.0.is_none());
     }
 }
