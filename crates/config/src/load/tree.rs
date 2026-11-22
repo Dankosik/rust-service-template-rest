@@ -67,7 +67,12 @@ impl NodeKind {
     }
 }
 
-pub(super) fn merge(files: Vec<ScannedFile>, variables: Variables) -> Result<Node, InputError> {
+pub(super) struct Root {
+    origin: Origin,
+    sections: BTreeMap<String, Node>,
+}
+
+pub(super) fn merge(files: Vec<ScannedFile>, variables: Variables) -> Result<Root, InputError> {
     let mut root = BTreeMap::new();
     let mut origin = Origin::Empty;
     let mut segments = Vec::new();
@@ -79,15 +84,19 @@ pub(super) fn merge(files: Vec<ScannedFile>, variables: Variables) -> Result<Nod
     for variable in variables.into_values() {
         insert_variable(&mut root, &mut origin, variable)?;
     }
-    Ok(Node {
+    Ok(Root {
         origin,
-        kind: NodeKind::Table(root),
+        sections: root,
     })
 }
 
 #[cfg(test)]
-pub(super) fn from_test_toml(table: toml::Table) -> Node {
-    from_toml_table(table, &Arc::from(Path::new("<test>")))
+pub(super) fn from_test_toml(table: toml::Table) -> Root {
+    let file: Arc<Path> = Arc::from(Path::new("<test>"));
+    Root {
+        origin: Origin::File(Arc::clone(&file)),
+        sections: from_toml_entries(table, &file),
+    }
 }
 
 fn merge_toml_table(
@@ -132,14 +141,17 @@ fn merge_toml_table(
 }
 
 fn from_toml_table(table: toml::Table, path: &Arc<Path>) -> Node {
-    let entries = table
-        .into_iter()
-        .map(|(key, value)| (key, from_toml_value(value, path)))
-        .collect();
     Node {
         origin: Origin::File(Arc::clone(path)),
-        kind: NodeKind::Table(entries),
+        kind: NodeKind::Table(from_toml_entries(table, path)),
     }
+}
+
+fn from_toml_entries(table: toml::Table, path: &Arc<Path>) -> BTreeMap<String, Node> {
+    table
+        .into_iter()
+        .map(|(key, value)| (key, from_toml_value(value, path)))
+        .collect()
 }
 
 fn from_toml_value(value: toml::Value, path: &Arc<Path>) -> Node {
@@ -183,14 +195,9 @@ fn insert_variable(
     } = variable;
     let origin = Origin::Variable(source);
     root_origin.merge(&origin);
-    let mut segments = key.split('.');
-    let Some(first) = segments.next() else {
-        return Ok(());
-    };
     insert_variable_path(
         root,
-        &mut segments,
-        first,
+        &key,
         PendingVariable {
             key: &key,
             original_name: &original_name,
@@ -202,13 +209,12 @@ fn insert_variable(
 
 fn insert_variable_path(
     table: &mut BTreeMap<String, Node>,
-    segments: &mut std::str::Split<'_, char>,
-    current: &str,
+    path: &str,
     pending: PendingVariable<'_>,
 ) -> Result<(), InputError> {
-    let Some(next) = segments.next() else {
+    let Some((head, rest)) = path.split_once('.') else {
         if table
-            .get(current)
+            .get(path)
             .is_some_and(|node| matches!(node.kind, NodeKind::Table(_)))
         {
             return Err(InputError::TableOverride {
@@ -217,7 +223,7 @@ fn insert_variable_path(
             });
         }
         table.insert(
-            current.to_owned(),
+            path.to_owned(),
             Node {
                 origin: pending.origin,
                 kind: NodeKind::String(pending.value),
@@ -225,17 +231,17 @@ fn insert_variable_path(
         );
         return Ok(());
     };
-    if let Some(node) = table.get_mut(current)
+    if let Some(node) = table.get_mut(head)
         && let NodeKind::Table(nested) = &mut node.kind
     {
         node.origin.merge(&pending.origin);
-        return insert_variable_path(nested, segments, next, pending);
+        return insert_variable_path(nested, rest, pending);
     }
     let origin = pending.origin.clone();
     let mut nested = BTreeMap::new();
-    insert_variable_path(&mut nested, segments, next, pending)?;
+    insert_variable_path(&mut nested, rest, pending)?;
     table.insert(
-        current.to_owned(),
+        head.to_owned(),
         Node {
             origin,
             kind: NodeKind::Table(nested),
@@ -244,19 +250,13 @@ fn insert_variable_path(
     Ok(())
 }
 
-impl Node {
+impl Root {
     pub(super) fn first_datetime(&self) -> Option<(String, &Path)> {
-        let NodeKind::Table(table) = &self.kind else {
-            return None;
-        };
-        find_datetime(table, &mut Vec::new())
+        find_datetime(&self.sections, &mut Vec::new())
     }
 
     pub(super) fn first_unknown_section(&self, retained: &[&str]) -> Option<&str> {
-        let NodeKind::Table(sections) = &self.kind else {
-            return None;
-        };
-        sections
+        self.sections
             .keys()
             .map(String::as_str)
             .find(|key| !retained.contains(key))
@@ -264,7 +264,11 @@ impl Node {
 
     pub(super) fn deserialize_into<T: DeserializeOwned>(self) -> Result<T, DecodeError> {
         let origin = self.origin.clone();
-        T::deserialize(self).map_err(|error| error.with_origin(origin))
+        let node = Node {
+            origin: self.origin,
+            kind: NodeKind::Table(self.sections),
+        };
+        T::deserialize(node).map_err(|error| error.with_origin(origin))
     }
 }
 
@@ -276,7 +280,7 @@ fn find_datetime<'a>(
         segments.push(key);
         let found = match &node.kind {
             NodeKind::Table(nested) => find_datetime(nested, segments),
-            _ => datetime_path(node).map(|path| (segments.join("."), path)),
+            _ => datetime_file(node).map(|file| (segments.join("."), file)),
         };
         segments.pop();
         if found.is_some() {
@@ -286,30 +290,30 @@ fn find_datetime<'a>(
     None
 }
 
-fn datetime_path(node: &Node) -> Option<&Path> {
+fn datetime_file(node: &Node) -> Option<&Path> {
     match (&node.kind, &node.origin) {
-        (NodeKind::Datetime, Origin::File(path)) => Some(path.as_ref()),
-        (NodeKind::Array(items), _) => items.iter().find_map(datetime_path),
+        (NodeKind::Datetime, Origin::File(file)) => Some(file.as_ref()),
+        (NodeKind::Array(items), _) => items.iter().find_map(datetime_file),
         _ => None,
     }
 }
 
 pub(super) struct DecodeError {
     detail: DecodeDetail,
-    segments: Vec<PathSegment>,
+    key_path: Vec<KeySegment>,
     origin: Option<Origin>,
 }
 
 enum DecodeDetail {
     KeysOnly(String),
     Expected {
-        full: Zeroizing<String>,
+        with_value: Zeroizing<String>,
         expected: String,
     },
     Opaque(Zeroizing<String>),
 }
 
-enum PathSegment {
+enum KeySegment {
     Key(String),
     Index(usize),
 }
@@ -318,7 +322,7 @@ impl DecodeError {
     const fn new(detail: DecodeDetail) -> Self {
         Self {
             detail,
-            segments: Vec::new(),
+            key_path: Vec::new(),
             origin: None,
         }
     }
@@ -329,18 +333,18 @@ impl DecodeError {
     }
 
     fn push_key(mut self, key: String) -> Self {
-        self.segments.push(PathSegment::Key(key));
+        self.key_path.push(KeySegment::Key(key));
         self
     }
 
     fn push_index(mut self, index: usize) -> Self {
-        self.segments.push(PathSegment::Index(index));
+        self.key_path.push(KeySegment::Index(index));
         self
     }
 
     pub(super) fn render(&self) -> String {
-        let place =
-            format_path(&self.segments).map_or_else(String::new, |key| format!(" for key `{key}`"));
+        let place = format_key_path(&self.key_path)
+            .map_or_else(String::new, |key| format!(" for key `{key}`"));
         let origin_suffix = match &self.origin {
             Some(Origin::Variable(source)) => format!(" in {}", source.as_str()),
             Some(Origin::MixedVariables) => format!(
@@ -353,9 +357,9 @@ impl DecodeError {
         match (&self.detail, &self.origin) {
             (DecodeDetail::KeysOnly(message), _) => format!("{message}{place}"),
             (
-                DecodeDetail::Expected { full, .. } | DecodeDetail::Opaque(full),
-                Some(Origin::File(path)),
-            ) => format!("{}{place} in {}", full.as_str(), path.display()),
+                DecodeDetail::Expected { with_value, .. } | DecodeDetail::Opaque(with_value),
+                Some(Origin::File(file)),
+            ) => format!("{}{place} in {}", with_value.as_str(), file.display()),
             (DecodeDetail::Expected { expected, .. }, _) => {
                 format!("invalid value, expected {expected}{place}{origin_suffix}")
             }
@@ -385,14 +389,14 @@ impl serde::de::Error for DecodeError {
 
     fn invalid_type(unexp: Unexpected<'_>, exp: &dyn Expected) -> Self {
         Self::new(DecodeDetail::Expected {
-            full: Zeroizing::new(format!("invalid type: {unexp}, expected {exp}")),
+            with_value: Zeroizing::new(format!("invalid type: {unexp}, expected {exp}")),
             expected: exp.to_string(),
         })
     }
 
     fn invalid_value(unexp: Unexpected<'_>, exp: &dyn Expected) -> Self {
         Self::new(DecodeDetail::Expected {
-            full: Zeroizing::new(format!("invalid value: {unexp}, expected {exp}")),
+            with_value: Zeroizing::new(format!("invalid value: {unexp}, expected {exp}")),
             expected: exp.to_string(),
         })
     }
@@ -404,26 +408,23 @@ impl serde::de::Error for DecodeError {
     }
 
     fn unknown_variant(variant: &str, expected: &'static [&'static str]) -> Self {
-        if expected.is_empty() {
-            return Self::new(DecodeDetail::Opaque(Zeroizing::new(format!(
+        match format_one_of(expected) {
+            Some(expected) => Self::new(DecodeDetail::Expected {
+                with_value: Zeroizing::new(format!(
+                    "unknown variant `{variant}`, expected {expected}"
+                )),
+                expected,
+            }),
+            None => Self::new(DecodeDetail::Opaque(Zeroizing::new(format!(
                 "unknown variant `{variant}`, there are no variants"
-            ))));
+            )))),
         }
-        let expected = format_one_of(expected);
-        Self::new(DecodeDetail::Expected {
-            full: Zeroizing::new(format!("unknown variant `{variant}`, expected {expected}")),
-            expected,
-        })
     }
 
     fn unknown_field(field: &str, expected: &'static [&'static str]) -> Self {
-        let message = if expected.is_empty() {
-            format!("unknown field `{field}`, there are no fields")
-        } else {
-            format!(
-                "unknown field `{field}`, expected {}",
-                format_one_of(expected)
-            )
+        let message = match format_one_of(expected) {
+            Some(expected) => format!("unknown field `{field}`, expected {expected}"),
+            None => format!("unknown field `{field}`, there are no fields"),
         };
         Self::new(DecodeDetail::KeysOnly(message))
     }
@@ -437,33 +438,33 @@ impl serde::de::Error for DecodeError {
     }
 }
 
-fn format_one_of(names: &[&str]) -> String {
+fn format_one_of(names: &[&str]) -> Option<String> {
     match names {
-        [] => String::new(),
-        [only] => format!("`{only}`"),
-        [first, second] => format!("`{first}` or `{second}`"),
-        many => format!(
+        [] => None,
+        [only] => Some(format!("`{only}`")),
+        [first, second] => Some(format!("`{first}` or `{second}`")),
+        many => Some(format!(
             "one of {}",
             many.iter()
                 .format_with(", ", |name, f| f(&format_args!("`{name}`")))
-        ),
+        )),
     }
 }
 
-fn format_path(segments: &[PathSegment]) -> Option<String> {
+fn format_key_path(segments: &[KeySegment]) -> Option<String> {
     if segments.is_empty() {
         return None;
     }
     let mut path = String::new();
     for segment in segments.iter().rev() {
         match segment {
-            PathSegment::Key(key) => {
+            KeySegment::Key(key) => {
                 if !path.is_empty() {
                     path.push('.');
                 }
                 path.push_str(key);
             }
-            PathSegment::Index(index) => {
+            KeySegment::Index(index) => {
                 let _ = write!(path, "[{index}]");
             }
         }

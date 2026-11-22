@@ -141,8 +141,13 @@ impl MessagingInput {
                 1..=MAX_PAYLOAD_BYTES,
             )
             .and_then(|max_payload_bytes| {
-                validate_resident_delivery_bound(self.max_payload_bytes, self.consumer_concurrency)
-                    .map(|consumer_concurrency| (max_payload_bytes.get(), consumer_concurrency))
+                check_resident_delivery_bound(self.max_payload_bytes, self.consumer_concurrency)?;
+                let consumer_concurrency = nonzero_usize_range(
+                    "messaging.consumer_concurrency",
+                    self.consumer_concurrency.get(),
+                    1..=usize::MAX,
+                )?;
+                Ok((max_payload_bytes.get(), consumer_concurrency))
             }),
         );
         let (max_payload_bytes, consumer_concurrency) = delivery_bounds?;
@@ -216,16 +221,14 @@ impl MessagingConfig {
     }
 }
 
-fn validate_resident_delivery_bound(
+fn check_resident_delivery_bound(
     max_payload_bytes: ByteSize,
     consumer_concurrency: NonZeroU32,
-) -> Result<NonZeroUsize, ValidationError> {
+) -> Result<(), ValidationError> {
     let resident = u64::from(consumer_concurrency.get())
         * (max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES);
-    if resident <= MAX_RESIDENT_DELIVERY_BYTES
-        && let Ok(concurrency) = NonZeroUsize::try_from(consumer_concurrency)
-    {
-        return Ok(concurrency);
+    if resident <= MAX_RESIDENT_DELIVERY_BYTES {
+        return Ok(());
     }
     Err(ValidationError::new(
         "messaging.consumer_concurrency",

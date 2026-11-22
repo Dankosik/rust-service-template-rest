@@ -19,10 +19,7 @@ impl BuildInfo {
     }
 }
 
-pub(crate) fn validate_local_development(
-    env: &str,
-    requested: bool,
-) -> Result<bool, ValidationError> {
+fn validate_local_development(env: &str, requested: bool) -> Result<bool, ValidationError> {
     if requested && !matches!(env, "local" | "development") {
         return Err(ValidationError::new(
             "app.allow_insecure_development",
@@ -86,30 +83,39 @@ pub struct AppConfig {
     pub instance_id: Option<String>,
 }
 
+impl<Meta: Mode, Instance: Mode> AppFields<Meta, Instance> {
+    pub(crate) fn admit_insecure_development(&self, v: &mut Violations) -> bool {
+        v.record(validate_local_development(
+            &self.env,
+            self.allow_insecure_development,
+        ))
+        .unwrap_or(false)
+    }
+}
+
 impl<Instance: Mode> AppFields<Keep, Instance> {
-    pub(crate) fn admit(mut self, build: BuildInfo, v: &mut Violations) -> AppConfig {
-        if self.version.trim().is_empty() {
-            build.version.clone_into(&mut self.version);
-        }
-        if self.commit.trim().is_empty() {
-            build.commit.clone_into(&mut self.commit);
-        }
+    pub(crate) fn admit(self, build: BuildInfo, v: &mut Violations) -> AppConfig {
         v.check(non_blank("app.env", &self.env));
-        let local_development = v
-            .record(validate_local_development(
-                &self.env,
-                self.allow_insecure_development,
-            ))
-            .unwrap_or(false);
-        v.check(non_blank("app.version", &self.version));
-        v.check(non_blank("app.commit", &self.commit));
+        let local_development = self.admit_insecure_development(v);
+        let version = or_build_value(self.version, build.version);
+        let commit = or_build_value(self.commit, build.commit);
+        v.check(non_blank("app.version", &version));
+        v.check(non_blank("app.commit", &commit));
         AppConfig {
             env: self.env,
             local_development,
-            version: self.version,
-            commit: self.commit,
+            version,
+            commit,
             instance_id: self.instance_id,
         }
+    }
+}
+
+fn or_build_value(configured: String, build: &str) -> String {
+    if configured.trim().is_empty() {
+        build.to_owned()
+    } else {
+        configured
     }
 }
 

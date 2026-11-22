@@ -8,6 +8,25 @@ pub(super) const DEFAULT_MAX_IN_FLIGHT: u32 = 256;
 pub(super) const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(1);
 pub(super) const DEFAULT_MAX_CONNECTIONS: u32 = 4096;
 
+#[derive(Clone, Copy)]
+pub(super) struct ListenerKind {
+    section: &'static str,
+    subject: &'static str,
+}
+
+impl ListenerKind {
+    pub(super) const HTTP: Self = Self {
+        section: "http",
+        subject: "requests",
+    };
+    // template:begin grpc:listener-kind
+    pub(super) const GRPC: Self = Self {
+        section: "grpc",
+        subject: "calls",
+    };
+    // template:end grpc:listener-kind
+}
+
 pub(super) struct RawListenerLimits {
     pub(super) request_timeout: Duration,
     pub(super) max_in_flight: u32,
@@ -27,9 +46,8 @@ pub(super) struct AdmittedListenerLimits {
 impl RawListenerLimits {
     pub(super) fn admit(
         self,
-        section: &str,
+        ListenerKind { section, subject }: ListenerKind,
         drain_budget: Option<Duration>,
-        subject: &str,
         violations: &mut Violations,
     ) -> AdmittedListenerLimits {
         violations.check(validate_request_timeout(

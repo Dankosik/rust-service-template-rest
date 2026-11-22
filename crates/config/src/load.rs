@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -97,7 +96,7 @@ impl From<ValidationErrors> for Error {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ErrorKind {
     #[error(transparent)]
-    Input(#[from] InputError),
+    Input(InputError),
     #[error(
         "configuration inputs are invalid: {}",
         crate::validate::join_errors(.0)
@@ -106,7 +105,7 @@ pub(crate) enum ErrorKind {
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
     #[error("configuration is invalid: {0}")]
-    Validate(#[from] ValidationErrors),
+    Validate(ValidationErrors),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -162,7 +161,7 @@ pub fn load(
     build: BuildInfo,
     shutdown_tail: crate::ShutdownTail,
 ) -> Result<Config, Error> {
-    load_with_tail_from(options, build, Some(shutdown_tail), std::env::vars_os())
+    load_with_tail_from(options, build, shutdown_tail, std::env::vars_os())
 }
 
 #[cfg(test)]
@@ -171,13 +170,13 @@ pub(crate) fn load_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Config, Error> {
-    load_with_tail_from(options, build, None, environment)
+    load_with_tail_from(options, build, crate::http::NO_SHUTDOWN_TAIL, environment)
 }
 
 pub(crate) fn load_with_tail_from(
     options: &LoadOptions,
     build: BuildInfo,
-    shutdown_tail: Option<crate::ShutdownTail>,
+    shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Config, Error> {
     let input: ConfigInput = merge(options, environment)?;
@@ -190,7 +189,7 @@ pub fn load_worker(
     build: BuildInfo,
     shutdown_tail: crate::ShutdownTail,
 ) -> Result<crate::WorkerConfig, Error> {
-    load_worker_with_tail_from(options, build, Some(shutdown_tail), std::env::vars_os())
+    load_worker_with_tail_from(options, build, shutdown_tail, std::env::vars_os())
 }
 
 #[cfg(test)]
@@ -199,13 +198,13 @@ pub(crate) fn load_worker_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::WorkerConfig, Error> {
-    load_worker_with_tail_from(options, build, None, environment)
+    load_worker_with_tail_from(options, build, crate::http::NO_SHUTDOWN_TAIL, environment)
 }
 
 pub(crate) fn load_worker_with_tail_from(
     options: &LoadOptions,
     build: BuildInfo,
-    shutdown_tail: Option<crate::ShutdownTail>,
+    shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::WorkerConfig, Error> {
     let input: crate::WorkerInput = merge(options, environment)?;
@@ -276,11 +275,13 @@ fn collect_inputs(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<(Vec<ScannedFile>, variables::Variables), Error> {
     let mut errors = Vec::new();
-    let variables =
-        collect_variables(options.secrets_dir.as_deref(), environment).unwrap_or_else(|error| {
+    let variables = match collect_variables(options.secrets_dir.as_deref(), environment) {
+        Ok(variables) => variables,
+        Err(error) => {
             errors.push(error);
-            BTreeMap::new()
-        });
+            variables::Variables::new()
+        }
+    };
     let mut files = Vec::new();
     for path in options.files() {
         match scan_file(path) {
@@ -308,12 +309,13 @@ fn merge_inputs<T: DeserializeOwned>(
         .into());
     }
     if let Some(key) = root.first_unknown_section(RETAINED_SECTIONS) {
-        return Err(Error(ErrorKind::Deserialize(
+        return Err(ErrorKind::Deserialize(
             <tree::DecodeError as serde::de::Error>::unknown_field(key, RETAINED_SECTIONS).render(),
-        )));
+        )
+        .into());
     }
     root.deserialize_into()
-        .map_err(|error| Error(ErrorKind::Deserialize(error.render())))
+        .map_err(|error| ErrorKind::Deserialize(error.render()).into())
 }
 
 #[cfg(test)]

@@ -31,18 +31,9 @@ impl Audiences {
     }
 
     fn from_values(values: impl IntoIterator<Item = String>) -> Option<Self> {
-        let deduplicated: Vec<String> = values
-            .into_iter()
-            .map(|value| {
-                if value.trim().is_empty() {
-                    Err(())
-                } else {
-                    Ok(value)
-                }
-            })
-            .process_results(|iter| iter.unique().collect())
-            .ok()?;
-        (!deduplicated.is_empty()).then_some(Self(deduplicated))
+        let values: Vec<String> = values.into_iter().unique().collect();
+        (!values.is_empty() && values.iter().all(|value| !value.trim().is_empty()))
+            .then_some(Self(values))
     }
 }
 
@@ -421,8 +412,6 @@ impl AuthnInput {
 
     // template:begin oidc-introspection:authn-admit-introspection
     fn admit_introspection(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
-        use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
-
         self.reject_jwt_fields(v);
         let condition = "authn.mode = oidc-introspection";
         let issuer = v.record(required_non_blank("authn.issuer", self.issuer, condition));
@@ -451,33 +440,46 @@ impl AuthnInput {
                 ValidationError::new("authn.provider_concurrency", "cannot fit this platform")
             }),
         );
-        let cache_enabled = self.cache_enabled.unwrap_or(false);
-        let cache_capacity = self.cache_capacity.unwrap_or(DEFAULT_CACHE_CAPACITY);
-        let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
-        let cache_capacity = v.record(crate::validate::nonzero_usize_range(
-            "authn.cache_capacity",
-            cache_capacity,
-            CACHE_CAPACITY,
-        ));
-        v.check(crate::validate::duration_range(
-            "authn.cache_ttl",
-            cache_ttl,
-            CACHE_TTL,
-        ));
-        let provider_concurrency = provider_concurrency?;
-        let cache_capacity = cache_capacity?;
+        let cache = Self::admit_introspection_cache(
+            self.cache_enabled,
+            self.cache_capacity,
+            self.cache_ttl,
+            v,
+        );
         Ok(AuthnConfig::OidcIntrospection {
             issuer: issuer?,
             audience: audience?,
             introspection_endpoint: introspection_endpoint?,
             introspection_client_id: introspection_client_id?,
             introspection_client_secret: secret?,
-            provider_concurrency,
-            cache: cache_enabled.then_some(IntrospectionCacheConfig {
-                capacity: cache_capacity,
-                ttl: cache_ttl,
-            }),
+            provider_concurrency: provider_concurrency?,
+            cache: cache?,
         })
+    }
+
+    fn admit_introspection_cache(
+        enabled: Option<bool>,
+        capacity: Option<usize>,
+        ttl: Option<Duration>,
+        v: &mut Violations,
+    ) -> Result<Option<IntrospectionCacheConfig>, Rejected> {
+        use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
+
+        let ttl = ttl.unwrap_or(DEFAULT_CACHE_TTL);
+        let capacity = v.record(crate::validate::nonzero_usize_range(
+            "authn.cache_capacity",
+            capacity.unwrap_or(DEFAULT_CACHE_CAPACITY),
+            CACHE_CAPACITY,
+        ));
+        v.check(crate::validate::duration_range(
+            "authn.cache_ttl",
+            ttl,
+            CACHE_TTL,
+        ));
+        let capacity = capacity?;
+        Ok(enabled
+            .unwrap_or(false)
+            .then_some(IntrospectionCacheConfig { capacity, ttl }))
     }
     // template:end oidc-introspection:authn-admit-introspection
 

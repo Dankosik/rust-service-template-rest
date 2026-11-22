@@ -195,7 +195,7 @@ where
         D: Deserializer<'de>,
     {
         let raw = Option::<String>::deserialize(deserializer)?;
-        Ok(raw.and_then(|value| (!value.trim().is_empty()).then(|| T::from(value))))
+        Ok(raw.filter(|value| !value.trim().is_empty()).map(T::from))
     }
 }
 

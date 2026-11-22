@@ -10,7 +10,7 @@ use crate::de::{
 };
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
+    DEFAULT_REQUEST_TIMEOUT, ListenerKind, RawListenerLimits,
 };
 use crate::validate::{Rejected, Violations, required};
 
@@ -42,18 +42,28 @@ pub(crate) struct GrpcInput {
     private_key: Option<SecretString>,
     #[serde_as(as = "BlankAsNone")]
     client_ca: Option<String>,
+    /// Budget for one call. It must fit inside the HTTP drain budget left
+    /// after readiness propagation.
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_REQUEST_TIMEOUT))]
     request_timeout: Duration,
+    /// Calls in handlers at once. Calls above the limit wait up to
+    /// `admission_wait`. Zero disables the limit.
     #[serde_as(as = "StrictCount")]
     #[educe(Default(expression = DEFAULT_MAX_IN_FLIGHT))]
     max_in_flight: u32,
+    /// Longest wait for a handler slot. It cannot outlast `request_timeout`.
+    /// Zero sheds at once.
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_ADMISSION_WAIT))]
     admission_wait: Duration,
+    /// Accepted connections at once. Zero accepts without a bound.
     #[serde_as(as = "StrictCount")]
     #[educe(Default(expression = DEFAULT_MAX_CONNECTIONS))]
     max_connections: u32,
+    /// Age after which a connection is told to finish and close, so its client
+    /// reconnects and is balanced again. Defaults to 30 minutes. Zero leaves
+    /// connection age unbounded.
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_mins(30)))]
     max_connection_age: Duration,
@@ -76,7 +86,7 @@ impl GrpcInput {
             max_connections: self.max_connections,
             max_connection_age: self.max_connection_age,
         }
-        .admit("grpc", drain_budget, "calls", violations);
+        .admit(ListenerKind::GRPC, drain_budget, violations);
         let security = Self::admit_security(
             self.security,
             self.certificate,

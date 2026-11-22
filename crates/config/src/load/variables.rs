@@ -65,14 +65,14 @@ pub(super) struct Variable {
 
 pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 
-fn insert_variable(
+fn register_variable(
     variables: &mut Variables,
     name: &str,
     suffix: &str,
     value: Zeroizing<String>,
     source: VariableSource,
 ) -> Result<(), InputError> {
-    let name_key = name.to_ascii_lowercase();
+    let lowercase_name = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
     let variable = Variable {
         original_name: name.to_owned(),
@@ -80,7 +80,7 @@ fn insert_variable(
         value,
         source,
     };
-    match variables.insert(name_key, variable) {
+    match variables.insert(lowercase_name, variable) {
         Some(other) => Err(InputError::AmbiguousName {
             name: name.to_owned(),
             other: other.original_name,
@@ -130,7 +130,7 @@ fn read_environment(
                 name: name.into_owned(),
             });
         };
-        insert_variable(
+        register_variable(
             &mut variables,
             &name,
             suffix,
@@ -157,20 +157,14 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
         let active = generation.take();
-        let Some(scan_dir) = active.as_deref() else {
+        let Some(scan_dir) = active else {
             generation = projected_generation(dir)?;
             continue;
         };
-        let variables = read_secret_files(dir, scan_dir);
+        let variables = read_secret_files(dir, &scan_dir);
         let current = projected_generation(dir)?;
-        let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
-            && matches!(
-                &variables,
-                Err(InputError::ReadSecretsDir { error, .. }
-                    | InputError::ReadSecret { error, .. })
-                    if error.kind() == io::ErrorKind::NotFound
-            );
-        if current == active && !retry_not_found {
+        let removed_mid_scan = attempt < SECRETS_SNAPSHOT_ATTEMPTS && is_not_found(&variables);
+        if current.as_ref() == Some(&scan_dir) && !removed_mid_scan {
             return variables;
         }
         generation = current;
@@ -183,6 +177,14 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
             "the projected secrets generation changed while reading",
         ),
     })
+}
+
+fn is_not_found(variables: &Result<Variables, InputError>) -> bool {
+    matches!(
+        variables,
+        Err(InputError::ReadSecretsDir { error, .. } | InputError::ReadSecret { error, .. })
+            if error.kind() == io::ErrorKind::NotFound
+    )
 }
 
 #[expect(
@@ -256,7 +258,7 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
             path: reported_path,
             error,
         })?;
-        insert_variable(
+        register_variable(
             &mut variables,
             &name,
             suffix,
@@ -300,13 +302,17 @@ fn read_secret_file(path: &Path) -> io::Result<Zeroizing<String>> {
             "the value exceeds the 1 MiB secret file limit",
         ));
     }
+    decode_secret(bytes)
+}
+
+fn decode_secret(mut bytes: Zeroizing<Vec<u8>>) -> io::Result<Zeroizing<String>> {
     let mut text = match String::from_utf8(std::mem::take(&mut *bytes)) {
         Ok(text) => Zeroizing::new(text),
         Err(error) => {
             drop(Zeroizing::new(error.into_bytes()));
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "secret file is not valid UTF-8",
+                "the value is not valid UTF-8",
             ));
         }
     };

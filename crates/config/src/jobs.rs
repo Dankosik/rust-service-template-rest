@@ -30,12 +30,7 @@ impl JobsOperatorConfig {
 impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
         let postgres = admit_with(|v| {
-            let local_development = v
-                .record(crate::app::validate_local_development(
-                    &self.app.env,
-                    self.app.allow_insecure_development,
-                ))
-                .unwrap_or(false);
+            let local_development = self.app.admit_insecure_development(v);
             self.postgres.admit(local_development, v)
         })
         .map_err(Error::from)?

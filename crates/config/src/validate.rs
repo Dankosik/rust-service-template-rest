@@ -111,20 +111,26 @@ pub(crate) fn validate_with(
     })
 }
 
+pub(crate) fn out_of_range(
+    key: &str,
+    low: impl std::fmt::Display,
+    high: impl std::fmt::Display,
+    got: impl std::fmt::Display,
+) -> ValidationError {
+    ValidationError::new(key, format!("must be between {low} and {high}, got {got}"))
+}
+
 pub(crate) fn duration_range(
     key: &str,
     value: Duration,
     range: RangeInclusive<Duration>,
 ) -> Result<(), ValidationError> {
     if !range.contains(&value) {
-        return Err(ValidationError::new(
+        return Err(out_of_range(
             key,
-            format!(
-                "must be between {} and {}, got {}",
-                crate::de::display_duration(*range.start()),
-                crate::de::display_duration(*range.end()),
-                crate::de::display_duration(value)
-            ),
+            crate::de::display_duration(*range.start()),
+            crate::de::display_duration(*range.end()),
+            crate::de::display_duration(value),
         ));
     }
     Ok(())
@@ -136,14 +142,7 @@ pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
     range: RangeInclusive<T>,
 ) -> Result<(), ValidationError> {
     if !range.contains(&value) {
-        return Err(ValidationError::new(
-            key,
-            format!(
-                "must be between {} and {}, got {value}",
-                range.start(),
-                range.end()
-            ),
-        ));
+        return Err(out_of_range(key, range.start(), range.end(), value));
     }
     Ok(())
 }
@@ -162,14 +161,7 @@ where
     {
         return Ok(nonzero);
     }
-    Err(ValidationError::new(
-        key,
-        format!(
-            "must be between {} and {}, got {value}",
-            range.start(),
-            range.end()
-        ),
-    ))
+    Err(out_of_range(key, range.start(), range.end(), value))
 }
 
 pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {

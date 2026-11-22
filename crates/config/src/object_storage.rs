@@ -8,10 +8,11 @@ use serde::Deserialize;
 use crate::app::local_development_only;
 use crate::de::{BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
-    Rejected, ValidationError, Violations, duration_range, non_blank, nonzero_usize_range, required,
+    Rejected, ValidationError, Violations, duration_range, non_blank, nonzero_usize_range,
+    out_of_range, required,
 };
 
-const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
+const SINGLE_PUT_MAX_BYTES: u64 = 5 * GIB - 5 * MIB;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -223,53 +224,40 @@ impl ProviderFields {
         v: &mut Violations,
     ) -> Result<Option<ObjectStorageProvider>, Rejected> {
         let path_style = self.path_style;
-        match provider {
-            ProviderKind::None => Ok(None),
-            ProviderKind::AmazonS3 => self.admit_amazon_s3(bucket, credentials, v).map(Some),
-            ProviderKind::CloudflareR2 => {
-                self.admit_cloudflare_r2(bucket, credentials, v).map(Some)
+        let provider = match provider {
+            ProviderKind::None => return Ok(None),
+            ProviderKind::AmazonS3 => self.admit_amazon_s3(bucket, credentials, v)?,
+            ProviderKind::CloudflareR2 => self.admit_cloudflare_r2(bucket, credentials, v)?,
+            ProviderKind::Railway => {
+                let (endpoint, region, credentials) =
+                    self.admit_endpoint(provider, bucket, credentials, v)?;
+                ObjectStorageProvider::Railway {
+                    endpoint,
+                    region,
+                    credentials,
+                }
             }
-            ProviderKind::Railway => self
-                .admit_endpoint(
-                    bucket,
+            ProviderKind::S3Compatible => {
+                let (endpoint, region, credentials) =
+                    self.admit_endpoint(provider, bucket, credentials, v)?;
+                ObjectStorageProvider::S3Compatible {
+                    endpoint,
+                    region,
+                    path_style,
                     credentials,
-                    false,
-                    v,
-                    |endpoint, region, credentials| ObjectStorageProvider::Railway {
-                        endpoint,
-                        region,
-                        credentials,
-                    },
-                )
-                .map(Some),
-            ProviderKind::S3Compatible => self
-                .admit_endpoint(
-                    bucket,
+                }
+            }
+            ProviderKind::Local => {
+                let (endpoint, region, credentials) =
+                    self.admit_endpoint(provider, bucket, credentials, v)?;
+                ObjectStorageProvider::Local {
+                    endpoint,
+                    region,
                     credentials,
-                    true,
-                    v,
-                    |endpoint, region, credentials| ObjectStorageProvider::S3Compatible {
-                        endpoint,
-                        region,
-                        path_style,
-                        credentials,
-                    },
-                )
-                .map(Some),
-            ProviderKind::Local => self
-                .admit_endpoint(
-                    bucket,
-                    credentials,
-                    false,
-                    v,
-                    |endpoint, region, credentials| ObjectStorageProvider::Local {
-                        endpoint,
-                        region,
-                        credentials,
-                    },
-                )
-                .map(Some),
-        }
+                }
+            }
+        };
+        Ok(Some(provider))
     }
 
     fn admit_amazon_s3(
@@ -327,20 +315,19 @@ impl ProviderFields {
 
     fn admit_endpoint(
         self,
+        provider: ProviderKind,
         bucket: &str,
         credentials: CredentialFields,
-        allow_path_style: bool,
         v: &mut Violations,
-        build: impl FnOnce(String, Option<String>, ObjectStorageAccessKey) -> ObjectStorageProvider,
-    ) -> Result<ObjectStorageProvider, Rejected> {
+    ) -> Result<(String, Option<String>, ObjectStorageAccessKey), Rejected> {
         let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
         refuse_owner(self.expected_bucket_owner.is_some(), v);
-        if !allow_path_style {
+        if provider != ProviderKind::S3Compatible {
             refuse_path_style(self.path_style, v);
         }
         v.check(non_blank("object_storage.bucket", bucket));
         let credentials = credentials.admit_access_key(v);
-        Ok(build(endpoint?, self.region, credentials?))
+        Ok((endpoint?, self.region, credentials?))
     }
 }
 
@@ -352,12 +339,10 @@ fn refuse_owner(present: bool, v: &mut Violations) {
 }
 
 fn refuse_path_style(path_style: bool, v: &mut Violations) {
-    if path_style {
-        v.reject(ValidationError::new(
-            "object_storage.path_style",
-            "must be false unless object_storage.provider = s3_compatible",
-        ));
-    }
+    v.reject_present(
+        &[("object_storage.path_style", path_style)],
+        "must be false unless object_storage.provider = s3_compatible",
+    );
 }
 
 fn refuse_access_key(has_id: bool, has_secret: bool, v: &mut Violations) {
@@ -392,14 +377,13 @@ impl ObjectStorageInput {
         } = self;
         let max_object_bytes = v.record(
             NonZeroU64::new(max_object_bytes.as_u64())
-                .filter(|bytes| bytes.get() <= MAX_OBJECT_BYTES_CEILING)
+                .filter(|bytes| bytes.get() <= SINGLE_PUT_MAX_BYTES)
                 .ok_or_else(|| {
-                    ValidationError::new(
+                    out_of_range(
                         "object_storage.max_object_bytes",
-                        format!(
-                            "must be between 1 and {MAX_OBJECT_BYTES_CEILING}, got {}",
-                            max_object_bytes.as_u64()
-                        ),
+                        1,
+                        SINGLE_PUT_MAX_BYTES,
+                        max_object_bytes.as_u64(),
                     )
                 }),
         );
@@ -433,12 +417,12 @@ impl ObjectStorageInput {
                 secret_access_key,
             },
             v,
-        )
-        .transpose() else {
+        )?
+        else {
             return Ok(None);
         };
         Ok(Some(ObjectStorageConfig {
-            provider: provider?,
+            provider,
             bucket,
             max_object_bytes: max_object_bytes?,
             max_concurrency: max_concurrency?,
