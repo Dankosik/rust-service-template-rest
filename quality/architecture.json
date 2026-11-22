@@ -12,7 +12,8 @@
         "authority": "docs/repo-architecture.md#global-invariants",
         "members": [
           "crates/infra-jobs/Cargo.toml",
-          "crates/infra-messaging/Cargo.toml"
+          "crates/infra-messaging/Cargo.toml",
+          "crates/infra-temporal/Cargo.toml"
         ]
       }
     },
@@ -31,7 +32,8 @@
           "crates/infra-oauth2-client-credentials/Cargo.toml",
           "crates/infra-object-storage/Cargo.toml",
           "crates/infra-outbound-grpc/Cargo.toml",
-          "crates/infra-outbound-http/Cargo.toml"
+          "crates/infra-outbound-http/Cargo.toml",
+          "crates/infra-temporal/Cargo.toml"
         ]
       }
     },
@@ -51,6 +53,7 @@
     "crates/infra-outbound-grpc/Cargo.toml": {"role": "outbound-grpc"},
     "crates/infra-outbound-http/Cargo.toml": {"role": "outbound-http"},
     "crates/infra-postgres/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-temporal/Cargo.toml": {"role": "health-provider"},
     "crates/infra-telemetry/Cargo.toml": {"role": "telemetry"},
     "crates/infra-webhooks/Cargo.toml": {"role": "webhooks"},
     "crates/jobs-worker/Cargo.toml": {"role": "root"},
@@ -116,6 +119,10 @@
         },
         "crates/infra-object-storage/Cargo.toml": {
           "reason": "Features own keys and policy for object operations and presigned GET.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-temporal/Cargo.toml": {
+          "reason": "Features invoke typed Temporal client workflow operations through the adapter seam.",
           "authority": "docs/repo-architecture.md#global-invariants"
         }
       }

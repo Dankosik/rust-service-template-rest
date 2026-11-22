@@ -17,25 +17,27 @@ all-features = true
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
-# chrono reaches only tests (axum-test's non-optional expect-json) and the
-# opt-in hotpath profiler's MCP server (rmcp, directly and through schemars `chrono04`);
+# chrono reaches only tests (axum-test's non-optional expect-json), the
+# opt-in hotpath profiler's MCP server (rmcp, directly and through schemars `chrono04`),
+# and Temporal SDK transitive types (temporalio-common-wasm, prost-wkt, prost-wkt-types);
 # `[bans]` refuses it on every other path, so service code cannot adopt it
 # under this waiver. Remove when those parents drop chrono.
 ignore = [
-    { id = "RUSTSEC-2026-0543", reason = "chrono reaches only tests and the opt-in hotpath MCP server; bans deny every other path" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono reaches only tests, the opt-in hotpath MCP server, and Temporal SDK transitive types; bans deny every other path" },
 ]
 
 [licenses]
 include-dev = true
 # Permissive licenses that the current graph uses; cargo-deny warns on an
 # allowance no crate matches, so a new license is added when a crate brings
-# it. CC0-1.0 covers
-# tracing-opentelemetry-instrumentation-sdk; dual-licensed crates (r-efi, ryu,
-# memchr, zerocopy) are satisfied by MIT or Apache-2.0. The rustls stack
-# (sqlx + OTLP reqwest, both aws-lc-rs) adds ISC (rustls-webpki, untrusted,
+# it. 0BSD covers enum-iterator / enum-iterator-derive (temporalio-sdk-core);
+# CC0-1.0 covers tracing-opentelemetry-instrumentation-sdk; dual-licensed crates
+# (r-efi, ryu, memchr, zerocopy) are satisfied by MIT or Apache-2.0. The rustls
+# stack (sqlx + OTLP reqwest, both aws-lc-rs) adds ISC (rustls-webpki, untrusted,
 # aws-lc-sys) and the Mozilla root store's CDLA-Permissive-2.0 (webpki-roots).
 allow = [
     "MIT",
+    "0BSD",
     # template:begin cache:deny-cache-license
     # xxhash-rust (redis key hashing) uses the Boost Software License 1.0.
     "BSL-1.0",
@@ -62,7 +64,7 @@ multiple-versions = "deny"
 deny = [
     { crate = "opentelemetry", deny-multiple-versions = true },
     { crate = "opentelemetry_sdk", deny-multiple-versions = true },
-    { crate = "chrono", wrappers = ["expect-json", "rmcp", "schemars"], reason = "unmaintained (RUSTSEC-2026-0543); only axum-test assertions and the hotpath MCP schema may bring it" },
+    { crate = "chrono", wrappers = ["expect-json", "prost-wkt", "prost-wkt-types", "rmcp", "schemars", "temporalio-common-wasm"], reason = "unmaintained (RUSTSEC-2026-0543); only axum-test assertions, hotpath MCP schema, and Temporal SDK transitive types may bring it" },
 ]
 skip = [
     { crate = "base64@0.22", reason = "async-nats, headers, jsonwebtoken, and metrics-exporter-prometheus have not moved to 0.23" },
@@ -71,11 +73,19 @@ skip = [
     { crate = "cpufeatures@0.2", reason = "sha2 0.10 and sha1 0.10 transitive chain alongside sha2 0.11" },
     { crate = "crypto-common@0.1", reason = "digest 0.10 transitive chain alongside digest 0.11" },
     { crate = "digest@0.10", reason = "sqlx-core, ed25519-dalek, and crc-fast alongside digest 0.11" },
+    { crate = "foldhash@0.1", reason = "hashbrown 0.15 via petgraph and prost-build alongside foldhash 0.2" },
     { crate = "getrandom@0.2", reason = "rand 0.8 via nkeys has not moved to getrandom 0.4" },
     { crate = "getrandom@0.3", reason = "rand 0.9 and aws-sdk-s3 have not moved to getrandom 0.4" },
+    { crate = "hashbrown@0.15", reason = "petgraph 0.8 via prost-build alongside hashbrown 0.17" },
     { crate = "hashbrown@0.16", reason = "moka and metrics-exporter-prometheus transitive chain alongside indexmap on 0.17" },
     { crate = "itertools@0.13", reason = "prost-derive 0.14 has not moved to itertools 0.15" },
+    { crate = "itertools@0.14", reason = "temporalio-sdk-core 0.11 and pbjson-build 0.9 have not moved to itertools 0.15" },
+    { crate = "logos@0.15", reason = "protox-parse 0.9 via protox alongside prost-reflect 0.16 on logos 0.16" },
+    { crate = "logos-codegen@0.15", reason = "logos 0.15 via protox-parse alongside logos 0.16" },
+    { crate = "logos-derive@0.15", reason = "logos 0.15 via protox-parse alongside logos 0.16" },
+    { crate = "lru@0.18", reason = "aws-sdk-s3 1.155 alongside temporalio-sdk-core 0.11 on lru 0.19" },
     { crate = "pem@3", reason = "jsonwebtoken 11 has not moved to pem 4, which rcgen uses in tls-test-support" },
+    { crate = "prettyplease@0.2", reason = "prost-build 0.14 and tonic-build 0.14 alongside bon-macros 3.10 on prettyplease 0.3" },
     { crate = "rand@0.8", reason = "nkeys 0.4 via async-nats has not moved to rand 0.10" },
     { crate = "rand@0.9", reason = "metrics-util 0.20 and opentelemetry_sdk 0.33 have not moved to rand 0.10" },
     { crate = "rand_chacha@0.3", reason = "rand 0.8 via nkeys alongside rand 0.9 on rand_chacha 0.9" },

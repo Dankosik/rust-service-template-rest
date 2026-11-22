@@ -1,0 +1,42 @@
+[package]
+name = "infra-temporal"
+description = "Temporal durable workflow client and optional Core worker runtime adapter."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+worker = [
+    "dep:temporalio-sdk",
+    "dep:temporalio-sdk-core",
+    "temporalio-sdk/dynamic-tls",
+    "temporalio-sdk-core/dynamic-tls",
+]
+test-support = ["worker"]
+integration = ["worker"]
+
+[dependencies]
+health = { workspace = true }
+json-payload = { workspace = true }
+metrics = { workspace = true }
+operation-context = { workspace = true }
+temporalio-client = { workspace = true, features = ["tls-aws-lc", "vendored-protox", "dynamic-tls"] }
+temporalio-common = { workspace = true, features = ["vendored-protox"] }
+temporalio-sdk = { workspace = true, optional = true, features = ["dynamic-tls"] }
+temporalio-sdk-core = { workspace = true, optional = true, features = ["dynamic-tls"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["alloc", "std"] }
+metrics-util = { workspace = true, features = ["debugging"] }
+temporalio-macros = { workspace = true }
+temporalio-workflow = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
