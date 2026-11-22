@@ -79,27 +79,29 @@ fn add_outcomes(
     probe: bool,
 ) -> Result<(), (String, ResponseFault)> {
     let json_body = declares_json_body(operation, components);
-    let responses = &mut operation.responses.responses;
+    let operation_responses = &mut operation.responses.responses;
     let unsupported_media_type = http_status(Code::UnsupportedMediaType);
     if json_body
-        && responses
+        && operation_responses
             .get(unsupported_media_type.as_str())
             .is_none_or(|response| can_merge_json_media_type_outcome(response, components))
     {
         let (_, shared) = responses::UnsupportedMediaType::response();
-        merge_response(
-            responses,
+        merge_status(
+            operation_responses,
             components,
             unsupported_media_type.as_str(),
             shared,
-        )
-        .map_err(|fault| (unsupported_media_type.as_str().to_owned(), fault))?;
+        )?;
     }
     let mut add = |code: Code, (name, _): (&str, RefOr<Response>)| {
-        let status = http_status(code);
         let reference = Ref::from_response_name(name).into();
-        merge_response(responses, components, status.as_str(), reference)
-            .map_err(|fault| (status.as_str().to_owned(), fault))
+        merge_status(
+            operation_responses,
+            components,
+            http_status(code).as_str(),
+            reference,
+        )
     };
     add(
         Code::RequestEntityTooLarge,
@@ -124,11 +126,10 @@ fn add_outcomes(
         use utoipa::IntoResponses as _;
 
         for (status, reference) in crate::authn::ProtectedOperationProblemResponses::responses() {
-            if status == "504" {
+            if status == http_status(Code::GatewayTimeout).as_str() {
                 continue;
             }
-            merge_response(responses, components, &status, reference)
-                .map_err(|fault| (status, fault))?;
+            merge_status(operation_responses, components, &status, reference)?;
         }
     }
     // template:end authn:http-protected-response-composition
@@ -166,21 +167,31 @@ fn can_merge_json_media_type_outcome(response: &RefOr<Response>, components: &Co
     })
 }
 
+fn merge_status(
+    responses: &mut BTreeMap<String, RefOr<Response>>,
+    components: &Components,
+    status: &str,
+    shared: RefOr<Response>,
+) -> Result<(), (String, ResponseFault)> {
+    merge_response(responses, components, status, shared)
+        .map_err(|fault| (status.to_owned(), fault))
+}
+
 fn merge_response(
     responses: &mut BTreeMap<String, RefOr<Response>>,
     components: &Components,
     status: &str,
-    common: RefOr<Response>,
+    shared_ref: RefOr<Response>,
 ) -> Result<(), ResponseFault> {
     let slot = match responses.entry(status.to_owned()) {
         Entry::Vacant(slot) => {
-            slot.insert(common);
+            slot.insert(shared_ref);
             return Ok(());
         }
-        Entry::Occupied(slot) if slot.get() == &common => return Ok(()),
+        Entry::Occupied(slot) if slot.get() == &shared_ref => return Ok(()),
         Entry::Occupied(slot) => slot.into_mut(),
     };
-    let shared = resolve(&common, &components.responses, ComponentKind::Responses)
+    let shared = resolve(&shared_ref, &components.responses, ComponentKind::Responses)
         .ok_or(ResponseFault::SharedResponse)?;
     let mut merged = resolve(slot, &components.responses, ComponentKind::Responses)
         .ok_or(ResponseFault::ExistingResponse)?
@@ -216,9 +227,10 @@ fn merge_response_content(
         let mut existing = resolve(slot, &components.media_types, ComponentKind::MediaTypes)
             .ok_or(ResponseFault::ExistingMediaType)?
             .clone();
-        let other = resolve(content, &components.media_types, ComponentKind::MediaTypes)
-            .ok_or(ResponseFault::SharedMediaType)?;
-        union_schema(&mut existing.schema, other.schema.as_ref());
+        let shared_media_type =
+            resolve(content, &components.media_types, ComponentKind::MediaTypes)
+                .ok_or(ResponseFault::SharedMediaType)?;
+        union_schema(&mut existing.schema, shared_media_type.schema.as_ref());
         *slot = RefOr::T(existing);
     }
     Ok(())
@@ -244,10 +256,10 @@ fn merge_response_headers(
         let mut existing = resolve(slot, &components.headers, ComponentKind::Headers)
             .ok_or(ResponseFault::ExistingHeader)?
             .clone();
-        let other = resolve(header, &components.headers, ComponentKind::Headers)
+        let shared_header = resolve(header, &components.headers, ComponentKind::Headers)
             .ok_or(ResponseFault::SharedHeader)?;
-        union_schema(&mut existing.schema, other.schema.as_ref());
-        if let Some(description) = &other.description {
+        union_schema(&mut existing.schema, shared_header.schema.as_ref());
+        if let Some(description) = &shared_header.description {
             append_description(existing.description.get_or_insert_default(), description);
         }
         *slot = RefOr::T(existing);

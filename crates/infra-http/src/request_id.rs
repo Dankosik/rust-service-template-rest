@@ -24,7 +24,7 @@ fn generate() -> Option<HeaderValue> {
 }
 
 pub(crate) fn ensure<B>(request: &mut Request<B>) -> Option<RequestId> {
-    let valid = request
+    let client_id = request
         .headers()
         .get_all(&REQUEST_ID_HEADER)
         .iter()
@@ -33,7 +33,7 @@ pub(crate) fn ensure<B>(request: &mut Request<B>) -> Option<RequestId> {
         .flatten()
         .filter(|value| is_valid(value.as_bytes()))
         .cloned();
-    let value = if let Some(value) = valid {
+    let value = if let Some(value) = client_id {
         value
     } else {
         let Some(value) = generate() else {

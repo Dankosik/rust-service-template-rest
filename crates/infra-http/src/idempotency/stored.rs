@@ -16,8 +16,8 @@ use crate::problem::{Code, PROBLEM_MEDIA_TYPE, Problem, http_status};
 
 pub(super) use infra_idempotency_store::is_replayable_header_name;
 
-const JSON: &str = "application/json";
-const TEXT: &str = "text/plain";
+const JSON_MEDIA_TYPE: &str = "application/json";
+const TEXT_MEDIA_TYPE: &str = "text/plain";
 
 pub trait ReplaySuccess: IntoResponses {
     #[must_use]
@@ -35,7 +35,7 @@ pub fn json_responses(
     description: &str,
     schema: RefOr<Schema>,
 ) -> BTreeMap<String, RefOr<ApiResponse>> {
-    typed_response(status, description, JSON, schema)
+    typed_response(status, description, JSON_MEDIA_TYPE, schema)
 }
 
 #[derive(Debug)]
@@ -67,13 +67,18 @@ impl From<String> for CreatedText {
 
 impl IntoResponses for CreatedText {
     fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
-        typed_response(StatusCode::CREATED, "created", TEXT, String::schema())
+        typed_response(
+            StatusCode::CREATED,
+            "created",
+            TEXT_MEDIA_TYPE,
+            String::schema(),
+        )
     }
 }
 
 impl ReplaySuccess for CreatedText {
     fn capture(mut self) -> Result<ReplayableResponse, ReplayError> {
-        set_uncoded_content_type(&mut self.headers, TEXT)?;
+        set_uncoded_content_type(&mut self.headers, TEXT_MEDIA_TYPE)?;
         ReplayableResponse::bytes(StatusCode::CREATED, &self.headers, self.body.into())
     }
 }
@@ -126,7 +131,7 @@ fn typed_response(
 pub struct ReplayError(ReplayErrorKind);
 
 impl ReplayError {
-    const fn capture(error: CaptureError) -> Self {
+    const fn from_capture(error: CaptureError) -> Self {
         Self(ReplayErrorKind::Capture(error))
     }
 }
@@ -149,7 +154,7 @@ impl TerminalProblem {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE));
         TerminalRefusal::capture(http_status(self.0.code()), &headers, json_body(&self.0)?)
-            .map_err(ReplayError::capture)
+            .map_err(ReplayError::from_capture)
     }
 
     #[must_use]
@@ -198,7 +203,7 @@ impl ReplayableResponse {
     ) -> Result<Self, ReplayError> {
         SuccessRecord::capture(status, headers, body)
             .map(Self)
-            .map_err(ReplayError::capture)
+            .map_err(ReplayError::from_capture)
     }
 
     pub fn json<T: Serialize + ?Sized>(
@@ -206,7 +211,7 @@ impl ReplayableResponse {
         mut headers: HeaderMap,
         value: &T,
     ) -> Result<Self, ReplayError> {
-        set_uncoded_content_type(&mut headers, JSON)?;
+        set_uncoded_content_type(&mut headers, JSON_MEDIA_TYPE)?;
         Self::bytes(status, &headers, json_body(value)?)
     }
 
@@ -236,14 +241,13 @@ fn set_uncoded_content_type(
     headers: &mut HeaderMap,
     media_type: &'static str,
 ) -> Result<(), ReplayError> {
-    for value in headers.get_all(CONTENT_ENCODING) {
-        if value
-            .as_bytes()
-            .split(|&byte| byte == b',')
-            .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
-        {
-            return Err(ReplayError(ReplayErrorKind::ContentEncoding));
-        }
+    if headers
+        .get_all(CONTENT_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+        .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
+    {
+        return Err(ReplayError(ReplayErrorKind::ContentEncoding));
     }
     headers.remove(CONTENT_ENCODING);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(media_type));
@@ -255,7 +259,7 @@ fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, ReplayError> {
     let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
     serde_json::to_writer(&mut writer, value).map_err(|error| {
         if error.io_error_kind() == Some(std::io::ErrorKind::WriteZero) {
-            ReplayError::capture(CaptureError::BodyLimit)
+            ReplayError::from_capture(CaptureError::BodyLimit)
         } else {
             ReplayError(ReplayErrorKind::Serialization)
         }

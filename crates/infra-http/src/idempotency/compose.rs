@@ -323,12 +323,12 @@ where
             }
         }
     };
-    let route = (
+    let registration = (
         Vec::new(),
         std::mem::take(&mut document.paths),
         on(method, handler),
     );
-    HttpContract::from_idempotent(document, route)?.with_components(
+    HttpContract::from_idempotent(document, registration)?.with_components(
         IdempotencyComponents::openapi()
             .components
             .unwrap_or_default(),
@@ -358,20 +358,20 @@ async fn capture_attempt(
         .extensions
         .remove::<Principal>()
         .ok_or_else(|| wiring_failure(&route.operation_id, "principal_missing"))?;
-    let Some(scope) = identity::decode_key(
+    let Some(key) = identity::decode_key(
         parts
             .headers
             .get_all(&KEY_HEADER_NAME)
             .iter()
             .map(HeaderValue::as_bytes),
-    )
-    .map(|key| {
-        let caller = identity::caller_identity(principal.issuer(), principal.identity());
-        ScopeKey::new(caller, &key)
-    }) else {
+    ) else {
         route.record(Outcome::InvalidKey);
         return Err(invalid_key(route.rules_link.clone(), &parts.extensions));
     };
+    let scope = ScopeKey::new(
+        identity::caller_identity(principal.issuer(), principal.identity()),
+        &key,
+    );
     let collected = buffer_body(&parts.extensions, body)
         .await
         .inspect_err(|_| route.record(Outcome::NotStored))?;

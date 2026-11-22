@@ -31,15 +31,14 @@ pub(super) fn caller_identity(issuer: &str, identity: PrincipalIdentity<'_>) -> 
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
     let value = trim_ows(values.into_iter().exactly_one().ok()?);
     let decoded = if value.first() == Some(&b'"') {
-        let item = sfv::Parser::new(value)
-            .parse_item::<sfv::BareItemFromInput<'_>>()
-            .ok()?;
-        let sfv::BareItemFromInput::String(value) = item else {
+        let Ok(sfv::BareItemFromInput::String(string)) =
+            sfv::Parser::new(value).parse_item::<sfv::BareItemFromInput<'_>>()
+        else {
             return None;
         };
-        match value {
-            Cow::Borrowed(value) => Cow::Borrowed(value.as_str().as_bytes()),
-            Cow::Owned(value) => Cow::Owned(String::from(value).into_bytes()),
+        match string {
+            Cow::Borrowed(string) => Cow::Borrowed(string.as_str().as_bytes()),
+            Cow::Owned(string) => Cow::Owned(String::from(string).into_bytes()),
         }
     } else if value.iter().all(u8::is_ascii_graphic) {
         Cow::Borrowed(value)
@@ -61,7 +60,10 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-pub(super) fn retain_headers(source: &HeaderMap, fingerprint_headers: &[HeaderName]) -> HeaderMap {
+pub(super) fn sensitive_fingerprint_headers(
+    source: &HeaderMap,
+    fingerprint_headers: &[HeaderName],
+) -> HeaderMap {
     let mut retained = HeaderMap::new();
     for name in std::iter::once(&CONTENT_TYPE).chain(fingerprint_headers) {
         for value in source.get_all(name) {
