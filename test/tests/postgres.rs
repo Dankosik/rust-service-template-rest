@@ -1283,6 +1283,86 @@ async fn a_budgeted_attempt_rejects_multi_statement_sql_and_an_expired_commit(po
 }
 
 #[sqlx::test(migrations = false)]
+async fn a_budgeted_transaction_parses_every_statement_timeout_unit_and_streams_rows(pool: PgPool) {
+    use tokio::time::Instant;
+
+    const READ_TIMEOUT: &str = "SELECT setting::integer FROM pg_settings \
+                                WHERE name = 'statement_timeout'";
+    let ours = template_pool(&dsn_for(&pool).await, 1).await;
+    let raw = infra_postgres::test_support::as_sqlx(&ours);
+    let options = TxOptions::default();
+
+    for (server_setting, budget, expected_ms) in [
+        ("0", Duration::from_secs(2), 1..=2_000),
+        ("500ms", Duration::from_secs(10), 500..=500),
+        ("4s", Duration::from_secs(10), 4_000..=4_000),
+        ("2min", Duration::from_mins(3), 120_000..=120_000),
+        ("1h", Duration::from_hours(2), 3_600_000..=3_600_000),
+        ("1d", Duration::from_hours(48), 86_400_000..=86_400_000),
+        ("2147483647ms", Duration::from_secs(2), 1..=2_000),
+    ] {
+        sqlx::query(
+            "SELECT set_config('statement_timeout', $1, false), \
+             set_config('IntervalStyle', 'iso_8601', false)",
+        )
+        .bind(server_setting)
+        .fetch_one(raw)
+        .await
+        .unwrap();
+        let rows: Result<Vec<i32>, AppError> = ours
+            .in_tx_with_deadline(Instant::now() + budget, options, async |tx| {
+                Ok(sqlx::query_scalar(READ_TIMEOUT).fetch_all(&mut *tx).await?)
+            })
+            .await;
+        let effective_ms = rows.unwrap();
+        assert_eq!(effective_ms.len(), 1);
+        assert!(
+            expected_ms.contains(&effective_ms[0]),
+            "setting {server_setting} yielded {} ms",
+            effective_ms[0]
+        );
+    }
+
+    sqlx::query("SELECT set_config('statement_timeout', '8000ms', false)")
+        .fetch_one(raw)
+        .await
+        .unwrap();
+    let streamed: Result<Vec<i32>, AppError> = ours
+        .in_tx_with_deadline(
+            Instant::now() + Duration::from_secs(2),
+            options,
+            async |tx| {
+                Ok(sqlx::query_scalar("SELECT generate_series(1, 3)")
+                    .fetch_all(&mut *tx)
+                    .await?)
+            },
+        )
+        .await;
+    assert_eq!(streamed.unwrap(), [1, 2, 3]);
+
+    let mut connection = pool.acquire().await.unwrap();
+    let mut holder = connection.begin().await.unwrap();
+    (&mut *holder)
+        .execute("SELECT pg_advisory_xact_lock(7654321)")
+        .await
+        .unwrap();
+    let cutoff = Instant::now() + Duration::from_millis(150);
+    let cancelled: Result<Vec<i32>, AppError> = ours
+        .in_tx_with_deadline(cutoff, options, async |tx| {
+            let err = sqlx::query_scalar::<_, i32>("SELECT 1 FROM pg_advisory_xact_lock(7654321)")
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap_err();
+            assert_eq!(sqlstate(&err).as_deref(), Some("57014"));
+            Err(AppError::Business)
+        })
+        .await;
+    std::assert_matches!(cancelled, Err(AppError::Deadline(_)));
+    holder.rollback().await.unwrap();
+    raw.close().await;
+}
+
+#[sqlx::test(migrations = false)]
 async fn a_finished_transaction_returns_its_connection_outside_any_transaction(pool: PgPool) {
     pool.execute("CREATE TABLE t (id int PRIMARY KEY)")
         .await

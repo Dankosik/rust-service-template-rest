@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
-use futures_util::{Stream, StreamExt as _, TryFutureExt as _, TryStreamExt as _};
+use futures_util::{Stream, TryFutureExt as _, TryStreamExt as _};
 use smallvec::SmallVec;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{
@@ -188,9 +188,10 @@ impl OperationDeadline {
         let mut arguments = PgArguments::default();
         arguments.reserve(ARM_ARG_COUNT, ARM_ARG_BYTES);
         let result = sqlx::query_with(
-            "WITH prior AS MATERIALIZED (SELECT setting::integer AS ms FROM pg_settings \
-             WHERE name = 'statement_timeout') \
-             SELECT set_config('statement_timeout', LEAST(NULLIF(ms, 0), $1)::text, true), \
+            "WITH prior AS MATERIALIZED (\
+             SELECT (EXTRACT(EPOCH FROM pg_catalog.current_setting('statement_timeout')::interval) * 1000)::integer AS ms\
+             ) \
+             SELECT pg_catalog.set_config('statement_timeout', LEAST(NULLIF(ms, 0), $1)::text, true), \
              ms = 0 OR $1 < ms OR (ms = $1 AND ms IS NOT DISTINCT FROM $2) FROM prior",
             arguments,
         )
@@ -210,14 +211,12 @@ impl OperationDeadline {
             .ok_or_else(deadline_elapsed_error)
     }
 
-    fn observe_cancellation<T>(
+    fn observe_error<T>(
         &mut self,
-        result: Result<T, sqlx::Error>,
+        error: sqlx::Error,
     ) -> impl Future<Output = Result<T, sqlx::Error>> + use<T> {
         let rounded_expiry = self.armed_timeout_ms.is_some()
-            && result
-                .as_ref()
-                .is_err_and(|e| sqlstate(e).as_deref() == Some(QUERY_CANCELED))
+            && sqlstate(&error).as_deref() == Some(QUERY_CANCELED)
             && self.at.saturating_duration_since(Instant::now()) < Duration::from_millis(1);
         self.expired |= rounded_expiry;
         let at = self.at;
@@ -225,7 +224,17 @@ impl OperationDeadline {
             if rounded_expiry && Instant::now() < at {
                 tokio::time::sleep_until(at).await;
             }
-            result
+            Err(error)
+        }
+    }
+
+    async fn observe_cancellation<T>(
+        &mut self,
+        result: Result<T, sqlx::Error>,
+    ) -> Result<T, sqlx::Error> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => self.observe_error(error).await,
         }
     }
 }
@@ -339,7 +348,7 @@ impl<M: TxMode> Tx<'_, M> {
         saved_notifications: usize,
     ) -> Result<(), sqlx::Error> {
         self.proven_alive = false;
-        let rollback = self.conn.execute(savepoint_sql(id, true));
+        let rollback = collect_query_result(self.conn.fetch_many(savepoint_sql(id, true)));
         if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
             budget
                 .remaining_ms_or_expire()
@@ -428,10 +437,10 @@ fn dispatch_notifications(
         let send = async {
             for notification in notifications {
                 let NotificationKey { channel, payload } = notification.key;
+                let query = sqlx::query!("SELECT pg_notify($1, $2)", channel, payload);
                 observed!(
                     "post-commit notification",
-                    sqlx::query!("SELECT pg_notify($1, $2)", channel, payload)
-                        .execute(&mut *guard.connection),
+                    collect_query_result((&mut *guard.connection).fetch_many(query)),
                 )
                 .await?;
             }
@@ -506,7 +515,7 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
                         statement: conn.fetch_many(SingleStatement(query)),
                         proof_to_restore,
                     };
-                    Ok(statement.then(move |item| budget.observe_cancellation(item)))
+                    Ok(statement.or_else(move |error| budget.observe_error(error)))
                 }
                 .try_flatten_stream(),
             );
