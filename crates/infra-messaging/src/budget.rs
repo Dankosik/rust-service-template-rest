@@ -1,25 +1,79 @@
 use std::time::Duration;
 
 use operation_context::{Deadline, OperationContext, Stopped};
+use tokio_util::sync::CancellationToken;
 
 use crate::error::MessagingError;
 
 pub const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 
-pub(crate) async fn bounded_operation<T>(
+#[derive(Clone, Copy)]
+pub(crate) struct BrokerBudget<'a> {
+    deadline: Deadline,
+    cancellation: &'a CancellationToken,
+}
+
+impl<'a> BrokerBudget<'a> {
+    pub(crate) fn from_context(context: &'a OperationContext) -> Self {
+        Self::new(
+            context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET)),
+            context.cancellation(),
+        )
+    }
+
+    pub(crate) const fn new(deadline: Deadline, cancellation: &'a CancellationToken) -> Self {
+        Self {
+            deadline,
+            cancellation,
+        }
+    }
+
+    pub(crate) const fn deadline(self) -> Deadline {
+        self.deadline
+    }
+
+    pub(crate) fn remaining(self) -> Duration {
+        self.deadline.remaining()
+    }
+
+    pub(crate) fn stopped(self) -> Option<Stopped> {
+        if self.deadline.expired() {
+            Some(Stopped::Deadline)
+        } else if self.cancellation.is_cancelled() {
+            Some(Stopped::Cancelled)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn wait_stopped(self) -> Stopped {
+        tokio::select! {
+            biased;
+            () = self.deadline.wait() => Stopped::Deadline,
+            () = self.cancellation.cancelled() => Stopped::Cancelled,
+        }
+    }
+}
+
+pub(crate) fn bounded_operation<T>(
     context: &OperationContext,
     operation: impl Future<Output = Result<T, MessagingError>>,
+) -> impl Future<Output = Result<T, MessagingError>> {
+    bounded_with(BrokerBudget::from_context(context), operation)
+}
+
+pub(crate) async fn bounded_with<T>(
+    budget: BrokerBudget<'_>,
+    operation: impl Future<Output = Result<T, MessagingError>>,
 ) -> Result<T, MessagingError> {
-    let deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
-    let budget = deadline.remaining();
-    if budget.is_zero() {
-        return Err(MessagingError::TimedOut { budget });
+    let remaining = budget.remaining();
+    if remaining.is_zero() {
+        return Err(MessagingError::TimedOut { budget: remaining });
     }
-    let bounded = OperationContext::new(Some(deadline), context.cancellation().clone());
     tokio::select! {
         biased;
-        reason = bounded.wait_stopped() => Err(match reason {
-            Stopped::Deadline => MessagingError::TimedOut { budget },
+        reason = budget.wait_stopped() => Err(match reason {
+            Stopped::Deadline => MessagingError::TimedOut { budget: remaining },
             Stopped::Cancelled => MessagingError::Cancelled,
         }),
         result = operation => result,
@@ -28,8 +82,6 @@ pub(crate) async fn bounded_operation<T>(
 
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
-
     use super::*;
 
     #[tokio::test(start_paused = true)]
@@ -60,5 +112,25 @@ mod tests {
 
         let result = operation.await;
         std::assert_matches!(result, Err(MessagingError::TimedOut { budget: elapsed }) if elapsed == budget);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn broker_budget_clamps_to_five_seconds_and_prefers_deadline_over_cancellation() {
+        let cancel = CancellationToken::new();
+        let long = OperationContext::new(
+            Some(Deadline::after(Duration::from_secs(30))),
+            cancel.clone(),
+        );
+        let clamped = BrokerBudget::from_context(&long);
+        assert_eq!(clamped.remaining(), BROKER_OPERATION_BUDGET);
+        assert_eq!(clamped.stopped(), None);
+
+        cancel.cancel();
+        assert_eq!(clamped.stopped(), Some(Stopped::Cancelled));
+        assert_eq!(clamped.wait_stopped().await, Stopped::Cancelled);
+
+        tokio::time::advance(BROKER_OPERATION_BUDGET).await;
+        assert_eq!(clamped.stopped(), Some(Stopped::Deadline));
+        assert_eq!(clamped.wait_stopped().await, Stopped::Deadline);
     }
 }

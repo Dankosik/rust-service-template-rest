@@ -54,7 +54,15 @@ pub fn to_vec_bounded<T: Serialize + ?Sized>(
     value: &T,
     max_bytes: usize,
 ) -> Result<Vec<u8>, EncodeError> {
-    let mut writer = BoundedWriter::new(max_bytes);
+    to_vec_bounded_with_capacity(value, max_bytes, 0)
+}
+
+pub fn to_vec_bounded_with_capacity<T: Serialize + ?Sized>(
+    value: &T,
+    max_bytes: usize,
+    capacity: usize,
+) -> Result<Vec<u8>, EncodeError> {
+    let mut writer = BoundedWriter::with_capacity(max_bytes, capacity);
     to_writer(&mut writer, value).map_err(EncodeError::Serialize)?;
     if writer.total_bytes > max_bytes {
         return Err(EncodeError::TooLarge {
@@ -71,9 +79,9 @@ struct BoundedWriter {
 }
 
 impl BoundedWriter {
-    const fn new(limit: usize) -> Self {
+    fn with_capacity(limit: usize, capacity: usize) -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: Vec::with_capacity(capacity.min(limit)),
             total_bytes: 0,
             limit,
         }
@@ -430,7 +438,9 @@ mod tests {
         ser::{self, SerializeMap, SerializeSeq},
     };
 
-    use super::{BoundedWriter, EncodeError, to_vec_bounded, to_writer};
+    use super::{
+        BoundedWriter, EncodeError, to_vec_bounded, to_vec_bounded_with_capacity, to_writer,
+    };
 
     #[derive(Serialize)]
     struct Newtype<T>(T);
@@ -726,7 +736,7 @@ mod tests {
             calls: Cell::new(0),
         };
         for limit in [0, 1, 31, 256] {
-            let mut writer = BoundedWriter::new(limit);
+            let mut writer = BoundedWriter::with_capacity(limit, 0);
             assert_eq!(writer.bytes.capacity(), 0);
             to_writer(&mut writer, &payload).expect("streamed zeros serialize");
             assert_eq!(writer.total_bytes, 32_769);
@@ -734,7 +744,7 @@ mod tests {
             assert!(writer.bytes.capacity() <= limit);
         }
 
-        let mut writer = BoundedWriter::new(1_024);
+        let mut writer = BoundedWriter::with_capacity(1_024, 0);
         to_writer(&mut writer, "x").expect("small string serializes");
         assert_eq!(writer.bytes, br#""x""#);
         assert!(writer.bytes.capacity() < 1_024);
@@ -747,7 +757,7 @@ mod tests {
         assert_eq!(writer.bytes.len(), 1_024);
         assert!(writer.bytes.capacity() <= 1_024);
 
-        let mut overflow = BoundedWriter::new(8);
+        let mut overflow = BoundedWriter::with_capacity(8, 0);
         overflow.total_bytes = usize::MAX;
         assert!(overflow.write(&[0]).is_err());
     }
@@ -795,5 +805,21 @@ mod tests {
             }
             assert_eq!(payload.calls.get(), 1);
         }
+    }
+
+    #[test]
+    fn to_vec_bounded_with_capacity_preallocates_without_exceeding_the_limit() {
+        let value = "a".repeat(3_000);
+        let expected_len = value.len() + 2;
+        let encoded = to_vec_bounded_with_capacity(&value, 4_096, expected_len).unwrap();
+        assert_eq!(encoded.len(), expected_len);
+        assert_eq!(encoded.capacity(), expected_len);
+
+        let clamped = to_vec_bounded_with_capacity("x", 16, usize::MAX).unwrap();
+        assert_eq!(clamped, br#""x""#);
+        assert!(clamped.capacity() <= 16);
+
+        let err = to_vec_bounded_with_capacity(&value, 16, usize::MAX).unwrap_err();
+        std::assert_matches!(err, EncodeError::TooLarge { bytes } if bytes == expected_len);
     }
 }

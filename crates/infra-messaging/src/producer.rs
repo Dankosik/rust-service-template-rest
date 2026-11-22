@@ -1,15 +1,15 @@
 use std::error::Error as _;
 use std::sync::Arc;
 
-use async_nats::Subject;
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
-use operation_context::{Deadline, OperationContext};
+use async_nats::{HeaderValue, Subject};
+use operation_context::OperationContext;
 use tokio::time::Instant;
 use tracing::Instrument as _;
 
-use crate::budget::BROKER_OPERATION_BUDGET;
+use crate::budget::BrokerBudget;
 use crate::error::{PublishEnvelopeError, PublishError, PublishRejection};
 use crate::messaging::Shared;
 use crate::observe::{Outcomes, record_span_outcome};
@@ -76,14 +76,18 @@ impl Producer {
         context: &OperationContext,
         event: &PreparedEvent,
     ) -> Result<PublishAck, PublishError> {
-        self.publish_after_admission(&event.publication(), context, std::future::ready(Ok(())))
-            .await
+        self.publish_after_admission(
+            &event.publication(),
+            BrokerBudget::from_context(context),
+            std::future::ready(Ok(())),
+        )
+        .await
     }
 
     pub(crate) async fn publish_after_admission(
         &self,
         event: &Publication<'_>,
-        context: &OperationContext,
+        budget: BrokerBudget<'_>,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
@@ -101,7 +105,7 @@ impl Producer {
             otel.status_code = tracing::field::Empty,
         );
         let result = self
-            .send(event, &span, context, admission)
+            .send(event, &span, budget, admission)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -132,7 +136,7 @@ impl Producer {
         &self,
         event: &Publication<'_>,
         span: &tracing::Span,
-        context: &OperationContext,
+        budget: BrokerBudget<'_>,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         if self.shared.refuses_work() {
@@ -145,14 +149,14 @@ impl Producer {
             self.shared.max_payload_bytes,
         )?;
         admission.await?;
-        send_publication(&self.shared, event.subject, message, context).await
+        send_publication(&self.shared, event.subject, message, budget).await
     }
 }
 
 fn publish_message(
     event: &Publication<'_>,
     span: &tracing::Span,
-    expected_stream: &str,
+    expected_stream: &HeaderValue,
     max_payload_bytes: usize,
 ) -> Result<PublishMessage, PublishRejection> {
     if event.payload.len() > max_payload_bytes {
@@ -160,7 +164,10 @@ fn publish_message(
     }
     let mut headers = encode_publication(event);
     crate::trace::inject(span, &mut headers);
-    headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
+    headers.insert(
+        async_nats::header::NATS_EXPECTED_STREAM,
+        expected_stream.clone(),
+    );
     validate_header_bytes(&headers)?;
     Ok(PublishMessage::build()
         .headers(headers)
@@ -171,11 +178,9 @@ pub(crate) async fn send_publication(
     shared: &Shared,
     subject: &Subject,
     message: PublishMessage,
-    context: &OperationContext,
+    budget: BrokerBudget<'_>,
 ) -> Result<PublishAck, PublishError> {
-    let deadline = context.effective_deadline(Deadline::after(BROKER_OPERATION_BUDGET));
-    let bounded = OperationContext::new(Some(deadline), context.cancellation().clone());
-    if bounded.stopped().is_some() {
+    if budget.stopped().is_some() {
         return Err(PublishRejection::ContextStopped.into());
     }
     let exchange = async {
@@ -194,7 +199,7 @@ pub(crate) async fn send_publication(
     };
     let result = tokio::select! {
         biased;
-        _ = bounded.wait_stopped() => Err(PublishError::Ambiguous),
+        _ = budget.wait_stopped() => Err(PublishError::Ambiguous),
         result = exchange => result,
     };
     if matches!(
@@ -334,9 +339,22 @@ mod tests {
             "\r\n",
         );
         let stream = "s".repeat(8192 - fixed.len());
-        assert!(publish_message(&publication, &tracing::Span::none(), &stream, 4).is_ok());
+        assert!(
+            publish_message(
+                &publication,
+                &tracing::Span::none(),
+                &HeaderValue::from(stream.as_str()),
+                4
+            )
+            .is_ok()
+        );
         std::assert_matches!(
-            publish_message(&publication, &tracing::Span::none(), &(stream + "s"), 4),
+            publish_message(
+                &publication,
+                &tracing::Span::none(),
+                &HeaderValue::from(stream + "s"),
+                4
+            ),
             Err(PublishRejection::InvalidEnvelope(
                 PublishEnvelopeError::HeadersTooLarge
             ))

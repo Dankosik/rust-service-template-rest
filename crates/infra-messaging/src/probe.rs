@@ -7,7 +7,7 @@ use health::{Probe, ProbeError};
 use parking_lot::Mutex;
 
 use crate::messaging::Shared;
-use crate::topology::{classify_topology, validate_server};
+use crate::topology::{classify_topology, fetch_stream_info, validate_server};
 
 const PUBLISH_WORK_IN_FLIGHT: &str = "messaging_publish_work_in_flight";
 const PUBLISH_WORK_LAST_OBSERVED_SECONDS: &str =
@@ -105,11 +105,11 @@ impl Probe for MessagingProbe {
             .publish_work_metrics
             .observe(&self.shared.jetstream);
         self.check_local_state()?;
-        match self
-            .shared
-            .jetstream
-            .get_stream(&self.shared.source_stream)
-            .await
+        match fetch_stream_info(
+            &self.shared.jetstream,
+            &self.shared.source_stream_info_subject,
+        )
+        .await
         {
             Ok(_) => self.check_local_state(),
             Err(error) => {

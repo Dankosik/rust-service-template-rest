@@ -3,12 +3,44 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{
-    EnqueueError, MAX_UNIQUE_KEY_BYTES, encode_payload, is_valid_unique_key,
+    EnqueueError, MAX_UNIQUE_KEY_BYTES, encode_payload_with_capacity, is_valid_unique_key,
     notify_workers_after_commit,
 };
 use crate::{Handler, JobId, KindError, Kinds, Policy, trace_context};
 
 pub(crate) const KIND: &str = "publish_domain_event";
+
+#[derive(Debug)]
+pub struct Intent<'a, T: ?Sized> {
+    payload: &'a T,
+    capacity_hint: usize,
+}
+
+impl<T: ?Sized> Clone for Intent<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: ?Sized> Copy for Intent<'_, T> {}
+
+impl<'a, T: ?Sized> Intent<'a, T> {
+    #[must_use]
+    pub const fn new(payload: &'a T) -> Self {
+        Self {
+            payload,
+            capacity_hint: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_capacity(payload: &'a T, capacity_hint: usize) -> Self {
+        Self {
+            payload,
+            capacity_hint,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Order<'a> {
@@ -64,7 +96,7 @@ where
 
 pub async fn enqueue<T>(
     tx: &mut Tx<'_, impl TxMode>,
-    intent: &T,
+    intent: Intent<'_, T>,
     order: Option<Order<'_>>,
 ) -> Result<OutboxEnqueued, OutboxEnqueueError>
 where
@@ -122,7 +154,7 @@ where
 
 pub async fn reconcile<T>(
     tx: &mut Tx<'_, impl TxMode>,
-    intent: &T,
+    intent: Intent<'_, T>,
     order: Option<Order<'_>>,
 ) -> Result<ReconcileOutcome, OutboxEnqueueError>
 where
@@ -136,14 +168,17 @@ where
     }
 }
 
-fn prepare_intent<T>(intent: &T, order: Option<Order<'_>>) -> Result<String, OutboxEnqueueError>
+fn prepare_intent<T>(
+    intent: Intent<'_, T>,
+    order: Option<Order<'_>>,
+) -> Result<String, OutboxEnqueueError>
 where
     T: Serialize + DeserializeOwned,
 {
     if order.is_some_and(|order| !is_valid_unique_key(order.aggregate_key) || order.version < 1) {
         return Err(OutboxEnqueueError::InvalidOrder);
     }
-    let payload = encode_payload(intent)?;
+    let payload = encode_payload_with_capacity(intent.payload, intent.capacity_hint)?;
     if contains_decoded_nul(&payload) {
         return Err(OutboxEnqueueError::PayloadContainsNul);
     }
@@ -202,41 +237,47 @@ async fn compare_receipt(
 
 #[cfg(test)]
 mod tests {
-    use super::{KIND, OutboxEnqueueError, Policy, prepare_intent, publisher_kinds};
+    use super::{Intent, KIND, OutboxEnqueueError, Policy, prepare_intent, publisher_kinds};
     use crate::{Job, KindError};
 
     #[test]
     fn outbox_admission_distinguishes_literal_escapes_from_nul() {
         #[derive(serde::Deserialize, serde::Serialize)]
-        struct Intent(String);
+        struct Payload(String);
 
         for prefix in ["", "\\", "\\\\"] {
-            let literal = Intent(format!(r"{prefix}\u0000"));
-            assert!(prepare_intent(&literal, None).is_ok());
-            let nul = Intent(format!("\\u0000{prefix}\0"));
+            let literal = Payload(format!(r"{prefix}\u0000"));
+            assert!(prepare_intent(Intent::new(&literal), None).is_ok());
+            let nul = Payload(format!("\\u0000{prefix}\0"));
             std::assert_matches!(
-                prepare_intent(&nul, None).err(),
+                prepare_intent(Intent::new(&nul), None).err(),
                 Some(OutboxEnqueueError::PayloadContainsNul)
             );
         }
+
+        let sized = Payload("x".repeat(3_000));
+        let expected_len = sized.0.len() + 2;
+        let encoded = prepare_intent(Intent::with_capacity(&sized, expected_len), None).unwrap();
+        assert_eq!(encoded.len(), expected_len);
+        assert_eq!(encoded.capacity(), expected_len);
     }
 
     #[test]
     fn publisher_kinds_builds_single_persistent_outbox_entry_and_validates_policy() {
         #[derive(serde::Deserialize)]
-        struct Intent;
+        struct Payload;
 
         let invalid = publisher_kinds(
             Policy {
                 max_attempts: 0,
                 ..Policy::default()
             },
-            |_: Job<Intent>| async { Ok(()) },
+            |_: Job<Payload>| async { Ok(()) },
         )
         .unwrap_err();
         assert_eq!(invalid, KindError::InvalidMaxAttempts { kind: KIND });
 
-        let kinds = publisher_kinds(Policy::default(), |_: Job<Intent>| async { Ok(()) }).unwrap();
+        let kinds = publisher_kinds(Policy::default(), |_: Job<Payload>| async { Ok(()) }).unwrap();
         assert_eq!(kinds.names().collect::<Vec<_>>(), [KIND]);
         let registered = kinds.get(KIND).unwrap();
         assert_eq!(registered.mode, crate::kind::KindMode::Outbox);
