@@ -21,7 +21,7 @@ use crate::{ObjectMetadata, ObjectStorageError, error};
 pub struct Download {
     metadata: ObjectMetadata,
     shared: Arc<Mutex<State>>,
-    timer: JoinHandle<()>,
+    timer: Option<JoinHandle<()>>,
 }
 
 #[expect(
@@ -183,7 +183,10 @@ impl State {
         if let Some(stopped) = resources.context.stopped() {
             return self.fail_poll(Failure::not_applied_stop(stopped), None);
         }
-        resources.waker = Some(context.waker().clone());
+        match &mut resources.waker {
+            Some(waker) => waker.clone_from(context.waker()),
+            slot => *slot = Some(context.waker().clone()),
+        }
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
             return (Poll::Pending, None);
         };
@@ -220,18 +223,10 @@ impl State {
             },
         }
     }
-}
 
-enum Termination {
-    Stopped(BoundedStop),
-    Fallback(Outcome),
-}
-
-fn terminate(shared: &Mutex<State>, termination: Termination) {
-    let completion = {
-        let mut state = shared.lock();
-        let State::Open(resources) = &*state else {
-            return;
+    fn terminate(&mut self, termination: Termination) -> Option<Completion> {
+        let State::Open(resources) = self else {
+            return None;
         };
         let outcome = match termination {
             Termination::Stopped(stopped) => Outcome::Failure(Failure::not_applied_stop(stopped)),
@@ -241,8 +236,17 @@ fn terminate(shared: &Mutex<State>, termination: Termination) {
                 })
             }
         };
-        state.close(outcome, None)
-    };
+        self.close(outcome, None)
+    }
+}
+
+enum Termination {
+    Stopped(BoundedStop),
+    Fallback(Outcome),
+}
+
+fn terminate_from_timer(shared: &Mutex<State>, termination: Termination) {
+    let completion = shared.lock().terminate(termination);
     if let Some(completion) = completion {
         completion.finish();
     }
@@ -266,7 +270,7 @@ impl Download {
         })));
         let shared_on_exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {
-                terminate(
+                terminate_from_timer(
                     &shared,
                     Termination::Fallback(Outcome::Failure(
                         LocalFailure::DownloadTimerExited.into(),
@@ -278,13 +282,13 @@ impl Download {
             let stopped = context.wait_stopped().await;
             let shared = std::mem::DropGuard::dismiss(shared_on_exit).upgrade();
             if let Some(shared) = shared {
-                terminate(&shared, Termination::Stopped(stopped));
+                terminate_from_timer(&shared, Termination::Stopped(stopped));
             }
         });
         Self {
             metadata,
             shared,
-            timer,
+            timer: Some(timer),
         }
     }
 
@@ -331,16 +335,26 @@ impl Download {
         Ok(Bytes::from(buffer))
     }
 
-    fn finish_completion(&self, completion: Option<Completion>) {
+    fn finish_completion(&mut self, completion: Option<Completion>) {
         if let Some(completion) = completion {
+            if let Some(timer) = self.timer.take() {
+                timer.abort();
+            }
             completion.finish();
-            self.timer.abort();
         }
     }
 
-    fn cancel(&self) {
-        terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
-        self.timer.abort();
+    fn cancel(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            let completion = self
+                .shared
+                .lock()
+                .terminate(Termination::Fallback(Outcome::Cancelled));
+            timer.abort();
+            if let Some(completion) = completion {
+                completion.finish();
+            }
+        }
     }
 }
 

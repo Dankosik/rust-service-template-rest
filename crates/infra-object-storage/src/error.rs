@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
@@ -306,18 +307,26 @@ pub(crate) type PutCallResult = Result<(PutReply, Option<BoundedStop>), Interrup
 pub(crate) fn interpret_put_result(
     result: &PutCallResult,
     mode: MutationMode,
-    length_mismatch: bool,
+    mismatch: Option<&AtomicBool>,
 ) -> Result<(), Failure<MutationError>> {
     match result {
         Ok((Ok(_), _)) => Ok(()),
-        Ok((Err(sdk_error), stopped_on_reply)) => Err(from_sdk_mutation(
-            sdk_error,
-            mode,
-            length_mismatch,
-            *stopped_on_reply,
-        )),
-        Err(_) if length_mismatch => Err(UploadFailure::Length.into()),
-        Err(interrupted) => Err((*interrupted).into()),
+        Ok((Err(sdk_error), stopped_on_reply)) => {
+            let length_mismatch = mismatch.is_some_and(|flag| flag.load(Ordering::Acquire));
+            Err(from_sdk_mutation(
+                sdk_error,
+                mode,
+                length_mismatch,
+                *stopped_on_reply,
+            ))
+        }
+        Err(interrupted) => {
+            if mismatch.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                Err(UploadFailure::Length.into())
+            } else {
+                Err((*interrupted).into())
+            }
+        }
     }
 }
 
@@ -349,7 +358,7 @@ where
     }
 }
 
-pub(crate) fn from_sdk_mutation<E>(
+fn from_sdk_mutation<E>(
     error: &SdkFailure<E>,
     mode: MutationMode,
     length_mismatch: bool,

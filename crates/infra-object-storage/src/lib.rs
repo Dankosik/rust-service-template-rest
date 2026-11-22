@@ -14,35 +14,37 @@ mod response_limit;
 mod tests;
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use aws_sdk_s3::config::{
     BehaviorVersion, Region, RequestChecksumCalculation, ResponseChecksumValidation,
-    SharedCredentialsProvider, SharedHttpClient, StalledStreamProtectionConfig,
+    SharedCredentialsProvider, SharedHttpClient, SharedInterceptor, StalledStreamProtectionConfig,
 };
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
-use aws_sdk_s3::operation::{RequestId, RequestIdExt};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_smithy_http_client::tls;
 use operation_context::{BoundedContext, OperationContext};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 
-use self::call::{Interrupted, RetryPolicy, call_policy, check_active, within, within_mutation};
+use self::call::{
+    RetryPolicy, call_timeout, check_active, read_retry_config, single_attempt_retry_config,
+    within, within_mutation,
+};
 pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::{AccessKey, AmazonCredentials};
 pub use self::download::Download;
 pub use self::error::{
     ConfigError, MutationError, MutationFailure, ObjectStorageError, UnknownOutcome,
 };
-use self::error::{ConfigErrorKind, Failure, LocalFailure, MutationMode, OutcomeError};
+use self::error::{ConfigErrorKind, Failure, LocalFailure, MutationMode};
 pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
+use self::put_body::Payload;
 pub use self::put_body::{PutBody, PutOutcomes};
 use self::response_limit::ResponseLimit;
 
@@ -85,10 +87,17 @@ struct Inner {
     max_object_bytes: u64,
     operation_timeout: Duration,
     admission: Arc<Semaphore>,
+    success_limit: SharedInterceptor,
     histograms: Arc<Histograms>,
 }
 
 impl Inner {
+    fn cloud_region(&self) -> Option<&str> {
+        self.amazon_s3
+            .as_ref()
+            .map(|target| target.cloud_region.as_str())
+    }
+
     fn expected_bucket_owner(&self) -> Option<String> {
         self.amazon_s3
             .as_ref()
@@ -136,20 +145,17 @@ pub struct ObjectMetadata {
 
 impl ObjectMetadata {
     fn from_response_fields(
-        content_length: Option<i64>,
-        content_type: Option<&str>,
-        last_modified: Option<&DateTime>,
-        e_tag: Option<&str>,
-    ) -> Result<Self, Failure> {
-        let size = content_length
-            .and_then(|size| u64::try_from(size).ok())
-            .ok_or_else(|| Failure::from(LocalFailure::ContentLength))?;
-        Ok(Self {
+        size: u64,
+        content_type: Option<String>,
+        last_modified: Option<DateTime>,
+        e_tag: Option<String>,
+    ) -> Self {
+        Self {
             size,
-            content_type: content_type.map(str::to_owned),
-            last_modified: last_modified.and_then(|at| SystemTime::try_from(*at).ok()),
-            e_tag: e_tag.map(str::to_owned),
-        })
+            content_type,
+            last_modified: last_modified.and_then(|at| SystemTime::try_from(at).ok()),
+            e_tag,
+        }
     }
 }
 
@@ -192,21 +198,24 @@ impl ObjectStorage {
             max_concurrency,
             operation_timeout,
         } = options;
-        let (timeout, retry) = call_policy(RetryPolicy::Read, operation_timeout, operation_timeout);
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
             .credentials_provider(credentials)
             .http_client(http_client)
-            .interceptor(ResponseLimit::ErrorBody)
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
-            .retry_config(retry)
-            .timeout_config(timeout)
+            .retry_config(read_retry_config())
+            .timeout_config(call_timeout(
+                RetryPolicy::Read,
+                operation_timeout,
+                operation_timeout,
+            ))
             .stalled_stream_protection(
                 StalledStreamProtectionConfig::enabled()
                     .grace_period(STALL_GRACE)
                     .build(),
             );
+        config.push_interceptor(SharedInterceptor::permanent(ResponseLimit::ErrorBody));
         let amazon_s3 = match resolved.target {
             provider::Target::AmazonS3 {
                 expected_bucket_owner,
@@ -234,6 +243,7 @@ impl ObjectStorage {
                 max_object_bytes,
                 operation_timeout,
                 admission: Arc::new(Semaphore::new(max_concurrency)),
+                success_limit: SharedInterceptor::permanent(ResponseLimit::SuccessBody),
                 histograms: Arc::default(),
             }),
         }
@@ -251,16 +261,25 @@ impl ObjectStorage {
         body: PutBody,
         options: PutOptions,
     ) -> Result<(), MutationError> {
-        self.observe(parent, Operation::Put, async |context, guard| {
-            check_active(context)?;
-            if body.len() > self.inner.max_object_bytes {
+        let context = parent.bounded(self.inner.operation_timeout);
+        let guard = self.start_borrowed_observation(Operation::Put);
+        let PutBody { payload, outcomes } = body;
+        let (result, mismatch, inflight) = match async {
+            check_active(&context)?;
+            if payload.len() > self.inner.max_object_bytes {
                 return Err(Failure::too_large());
             }
             let _permit = self.try_admit().ok_or_else(Failure::busy)?;
-            let PutBody { payload, outcomes } = body;
-            let payload = within(context, payload.normalize_empty_stream())
-                .await
-                .map_err(|interrupted| Failure::not_applied_stop(interrupted.stopped))??;
+            let payload = match payload {
+                Payload::Streamed {
+                    len: 0,
+                    stream,
+                    mismatch,
+                } => within(&context, Payload::verify_empty_stream(stream, mismatch))
+                    .await
+                    .map_err(|interrupted| Failure::not_applied_stop(interrupted.stopped))??,
+                payload => payload,
+            };
             let checksum = self
                 .inner
                 .checksum
@@ -268,7 +287,7 @@ impl ObjectStorage {
                 .then_some(ChecksumAlgorithm::Crc64Nvme);
             let (len, stream, mismatch) = payload.into_stream();
             let mut call_config =
-                self.operation_config(context, RetryPolicy::SingleAttempt, SuccessBody::Bounded);
+                self.bounded_operation_config(&context, RetryPolicy::SingleAttempt);
             if checksum.is_some() {
                 call_config = call_config
                     .request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
@@ -289,29 +308,31 @@ impl ObjectStorage {
                 .config_override(call_config)
                 .send();
             let mut inflight = None;
-            let result = within_mutation(context, async {
+            let result = within_mutation(&context, async {
                 inflight = outcomes.as_ref().map(PutOutcomes::begin_dispatch);
                 request.await
             })
             .await;
-            if let Ok((answer, _)) = &result {
-                guard.record_request_ids(answer);
-            }
-            let mismatched = mismatch.is_some_and(|flag| flag.load(Ordering::Acquire));
-            let outcome = error::interpret_put_result(&result, options.mode, mismatched);
-            if !matches!(
-                outcome,
-                Err(Failure {
-                    error: MutationError::OutcomeUnknown(_),
-                    ..
-                })
-            ) && let Some(inflight) = inflight
-            {
-                inflight.settle();
-            }
-            outcome
-        })
+            Ok::<_, Failure<MutationError>>((result, mismatch, inflight))
+        }
         .await
+        {
+            Ok(completed) => completed,
+            Err(failure) => return Err(guard.fail(&failure)),
+        };
+        let outcome = error::interpret_put_result(&result, options.mode, mismatch.as_deref());
+        if !matches!(
+            outcome,
+            Err(Failure {
+                error: MutationError::OutcomeUnknown(_),
+                ..
+            })
+        ) && let Some(inflight) = inflight
+        {
+            inflight.settle();
+        }
+        let reply = result.as_ref().ok().map(|(reply, _)| reply);
+        guard.finish_with_reply(outcome, reply)
     }
 
     pub async fn get(
@@ -320,10 +341,10 @@ impl ObjectStorage {
         key: &ObjectKey,
     ) -> Result<Download, ObjectStorageError> {
         let context = parent.bounded(self.inner.operation_timeout);
-        let mut guard = self.start_observation(Operation::Get);
-        let opened = async {
+        let mut guard = self.start_owned_observation(Operation::Get);
+        let (reply, permit) = match async {
             check_active(&context)?;
-            let permit = self.try_admit().ok_or_else(Failure::busy)?;
+            let permit = self.try_admit_owned().ok_or_else(Failure::busy)?;
             let request = Box::pin(
                 self.inner
                     .client
@@ -333,25 +354,38 @@ impl ObjectStorage {
                     .checksum_mode(ChecksumMode::Enabled)
                     .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                     .customize()
-                    .config_override(self.operation_config(
-                        &context,
-                        RetryPolicy::Read,
-                        SuccessBody::Streamed,
-                    ))
+                    .config_override(self.operation_config(&context, RetryPolicy::Read))
                     .send(),
             );
-            let reply =
-                Self::checked_read_reply(within(&context, request).await, &context, &mut guard)?;
-            let output = reply.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
-            let metadata = download_metadata(&output, self.inner.max_object_bytes)?;
-            Ok((metadata, output.body, permit))
+            let reply = within(&context, request).await?;
+            Ok::<_, Failure>((reply, permit))
         }
-        .await;
-        let (metadata, body, permit) = match opened {
-            Ok(opened) => opened,
+        .await
+        {
+            Ok(received) => received,
             Err(failure) => return Err(guard.fail(&failure)),
         };
-        let mut download = Download::open(metadata, body, guard, permit, context);
+        if let Err(failure) = check_active(&context) {
+            return Err(guard.fail_with_reply(&failure, &reply));
+        }
+        let output = match reply {
+            Ok(output) => output,
+            Err(sdk_error) => {
+                return Err(guard.fail_with_reply(&error::from_sdk(&sdk_error), &sdk_error));
+            }
+        };
+        let size = match validate_download_headers(&output, self.inner.max_object_bytes) {
+            Ok(size) => size,
+            Err(failure) => return Err(guard.fail_with_reply(&failure, &output)),
+        };
+        guard.retain_request_ids(&output);
+        let metadata = ObjectMetadata::from_response_fields(
+            size,
+            output.content_type,
+            output.last_modified,
+            output.e_tag,
+        );
+        let mut download = Download::open(metadata, output.body, guard, permit, context);
         if download.metadata().size == 0 {
             download.next_chunk().await?;
         }
@@ -363,8 +397,10 @@ impl ObjectStorage {
         parent: &OperationContext,
         key: &ObjectKey,
     ) -> Result<ObjectMetadata, ObjectStorageError> {
-        self.observe(parent, Operation::Head, async |context, guard| {
-            check_active(context)?;
+        let context = parent.bounded(self.inner.operation_timeout);
+        let guard = self.start_borrowed_observation(Operation::Head);
+        let reply = match async {
+            check_active(&context)?;
             let _permit = self.try_admit().ok_or_else(Failure::busy)?;
             let request = self
                 .inner
@@ -374,22 +410,35 @@ impl ObjectStorage {
                 .key(key.as_str())
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
-                .config_override(self.operation_config(
-                    context,
-                    RetryPolicy::Read,
-                    SuccessBody::Bounded,
-                ))
+                .config_override(self.bounded_operation_config(&context, RetryPolicy::Read))
                 .send();
-            let reply = Self::checked_read_reply(within(context, request).await, context, guard)?;
-            let output = reply.map_err(|sdk_error| error::from_sdk(&sdk_error))?;
-            ObjectMetadata::from_response_fields(
-                output.content_length(),
-                output.content_type(),
-                output.last_modified(),
-                output.e_tag(),
-            )
-        })
+            within(&context, request).await.map_err(Failure::from)
+        }
         .await
+        {
+            Ok(reply) => reply,
+            Err(failure) => return Err(guard.fail(&failure)),
+        };
+        if let Err(failure) = check_active(&context) {
+            return Err(guard.fail_with_reply(&failure, &reply));
+        }
+        let output = match reply {
+            Ok(output) => output,
+            Err(sdk_error) => {
+                return Err(guard.fail_with_reply(&error::from_sdk(&sdk_error), &sdk_error));
+            }
+        };
+        let size = match response_size(output.content_length) {
+            Ok(size) => size,
+            Err(failure) => return Err(guard.fail_with_reply(&failure, &output)),
+        };
+        guard.succeed_with_reply(&output);
+        Ok(ObjectMetadata::from_response_fields(
+            size,
+            output.content_type,
+            output.last_modified,
+            output.e_tag,
+        ))
     }
 
     pub async fn delete(
@@ -397,8 +446,10 @@ impl ObjectStorage {
         parent: &OperationContext,
         key: &ObjectKey,
     ) -> Result<(), MutationError> {
-        self.observe(parent, Operation::Delete, async |context, guard| {
-            check_active(context)?;
+        let context = parent.bounded(self.inner.operation_timeout);
+        let guard = self.start_borrowed_observation(Operation::Delete);
+        let (reply, stopped_on_reply) = match async {
+            check_active(&context)?;
             let _permit = self.try_admit().ok_or_else(Failure::busy)?;
             let request = self
                 .inner
@@ -408,17 +459,19 @@ impl ObjectStorage {
                 .key(key.as_str())
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
-                .config_override(self.operation_config(
-                    context,
-                    RetryPolicy::SingleAttempt,
-                    SuccessBody::Bounded,
-                ))
+                .config_override(
+                    self.bounded_operation_config(&context, RetryPolicy::SingleAttempt),
+                )
                 .send();
-            let (reply, stopped_on_reply) = within_mutation(context, request).await?;
-            guard.record_request_ids(&reply);
-            error::interpret_delete_result(&reply, stopped_on_reply)
-        })
+            Ok::<_, Failure<MutationError>>(within_mutation(&context, request).await?)
+        }
         .await
+        {
+            Ok(reply) => reply,
+            Err(failure) => return Err(guard.fail(&failure)),
+        };
+        let outcome = error::interpret_delete_result(&reply, stopped_on_reply);
+        guard.finish_with_reply(outcome, Some(&reply))
     }
 
     pub async fn presign_get(
@@ -427,8 +480,10 @@ impl ObjectStorage {
         key: &ObjectKey,
         expires_in: Duration,
     ) -> Result<PresignedUrl, ObjectStorageError> {
-        self.observe(parent, Operation::PresignGet, async |context, _| {
-            check_active(context)?;
+        let context = parent.bounded(self.inner.operation_timeout);
+        let guard = self.start_borrowed_observation(Operation::PresignGet);
+        let result = async {
+            check_active(&context)?;
             if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
                 return Err(LocalFailure::PresignExpiry.into());
             }
@@ -441,14 +496,10 @@ impl ObjectStorage {
                 .bucket(&self.inner.bucket)
                 .key(key.as_str())
                 .customize()
-                .config_override(self.operation_config(
-                    context,
-                    RetryPolicy::Read,
-                    SuccessBody::Bounded,
-                ))
+                .config_override(self.operation_config(&context, RetryPolicy::Read))
                 .presigned(config);
-            let reply = within(context, request).await?;
-            check_active(context)?;
+            let reply = within(&context, request).await?;
+            check_active(&context)?;
             match reply {
                 Ok(request) if request.headers().next().is_some() => {
                     Err(LocalFailure::PresignedHeaders.into())
@@ -456,89 +507,80 @@ impl ObjectStorage {
                 Ok(request) => Ok(PresignedUrl(SecretString::from(request.uri()))),
                 Err(sdk_error) => Err(error::from_sdk(&sdk_error)),
             }
-        })
-        .await
-    }
-
-    async fn observe<T, E: OutcomeError>(
-        &self,
-        parent: &OperationContext,
-        operation: Operation,
-        body: impl AsyncFnOnce(&BoundedContext, &mut OperationGuard) -> Result<T, Failure<E>>,
-    ) -> Result<T, E> {
-        let context = parent.bounded(self.inner.operation_timeout);
-        let mut guard = self.start_observation(operation);
-        let result = body(&context, &mut guard).await;
+        }
+        .await;
         guard.finish(result)
     }
 
-    fn start_observation(&self, operation: Operation) -> OperationGuard {
+    fn start_borrowed_observation(&self, operation: Operation) -> OperationGuard<&Histograms> {
         OperationGuard::start(
-            Arc::clone(&self.inner.histograms),
+            &*self.inner.histograms,
             operation,
-            self.inner
-                .amazon_s3
-                .as_ref()
-                .map(|target| target.cloud_region.as_str()),
+            self.inner.cloud_region(),
         )
     }
 
-    fn try_admit(&self) -> Option<OwnedSemaphorePermit> {
-        Arc::clone(&self.inner.admission).try_acquire_owned().ok()
+    fn start_owned_observation(&self, operation: Operation) -> OperationGuard {
+        OperationGuard::start(
+            Arc::clone(&self.inner.histograms),
+            operation,
+            self.inner.cloud_region(),
+        )
     }
 
-    fn checked_read_reply<R: RequestId + RequestIdExt>(
-        result: Result<R, Interrupted>,
-        context: &BoundedContext,
-        guard: &mut OperationGuard,
-    ) -> Result<R, Failure> {
-        let reply = result?;
-        guard.record_request_ids(&reply);
-        check_active(context)?;
-        Ok(reply)
+    fn try_admit(&self) -> Option<SemaphorePermit<'_>> {
+        self.inner.admission.try_acquire().ok()
+    }
+
+    fn try_admit_owned(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.inner.admission).try_acquire_owned().ok()
     }
 
     fn operation_config(
         &self,
         context: &BoundedContext,
         policy: RetryPolicy,
-        success_body: SuccessBody,
     ) -> aws_sdk_s3::config::Builder {
-        let remaining = context.remaining();
-        let (timeout, retry) = call_policy(policy, remaining, self.inner.operation_timeout);
-        let config = aws_sdk_s3::Config::builder()
-            .timeout_config(timeout)
-            .retry_config(retry);
-        match success_body {
-            SuccessBody::Bounded => config.interceptor(ResponseLimit::SuccessBody),
-            SuccessBody::Streamed => config,
+        let config = aws_sdk_s3::Config::builder().timeout_config(call_timeout(
+            policy,
+            context.remaining(),
+            self.inner.operation_timeout,
+        ));
+        match policy {
+            RetryPolicy::Read => config,
+            RetryPolicy::SingleAttempt => config.retry_config(single_attempt_retry_config()),
         }
     }
+
+    fn bounded_operation_config(
+        &self,
+        context: &BoundedContext,
+        policy: RetryPolicy,
+    ) -> aws_sdk_s3::config::Builder {
+        let mut config = self.operation_config(context, policy);
+        config.push_interceptor(self.inner.success_limit.clone());
+        config
+    }
 }
 
-#[derive(Clone, Copy)]
-enum SuccessBody {
-    Bounded,
-    Streamed,
+fn response_size(content_length: Option<i64>) -> Result<u64, Failure> {
+    content_length
+        .and_then(|size| u64::try_from(size).ok())
+        .ok_or_else(|| LocalFailure::ContentLength.into())
 }
 
-fn download_metadata(
+fn validate_download_headers(
     output: &GetObjectOutput,
     max_object_bytes: u64,
-) -> Result<ObjectMetadata, Failure> {
-    if output.content_range().is_some() {
+) -> Result<u64, Failure> {
+    if output.content_range.is_some() {
         return Err(LocalFailure::ContentRange.into());
     }
-    let metadata = ObjectMetadata::from_response_fields(
-        output.content_length(),
-        output.content_type(),
-        output.last_modified(),
-        output.e_tag(),
-    )?;
-    if metadata.size > max_object_bytes {
+    let size = response_size(output.content_length)?;
+    if size > max_object_bytes {
         return Err(Failure::too_large());
     }
-    Ok(metadata)
+    Ok(size)
 }
 
 fn https_client() -> SharedHttpClient {
@@ -546,5 +588,6 @@ fn https_client() -> SharedHttpClient {
         .tls_provider(tls::Provider::Rustls(
             tls::rustls_provider::CryptoMode::AwsLc,
         ))
+        .per_request_connect_timeout()
         .build_https()
 }

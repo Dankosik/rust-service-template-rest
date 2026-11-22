@@ -88,7 +88,7 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "crates/infra-object-storage/**", "crates/health/**", "crates/operation-context/**",
         "crates/shared-rules/**", "crates/infra-telemetry/**", "crates/observe-test-support/**",
         "crates/tls-test-support/**",
-        "vendor/aws-smithy-http-client/**", "vendor/hyper-util/**",
+        "vendor/aws-runtime/**", "vendor/aws-smithy-http-client/**", "vendor/hyper-util/**",
         *_INTEGRATION_SHARED,
     ),
     "integration_messaging": (

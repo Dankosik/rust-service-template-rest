@@ -1,4 +1,4 @@
-# hyper-util 0.1.21: same-family TCP opportunity
+# hyper-util 0.1.21: same-family TCP opportunity and scoped dial budgets
 
 Upstream reviewed: 0.1.21
 
@@ -13,10 +13,17 @@ socket wins, losing attempts drop before TLS or protocol negotiation, all-failur
 keeps the resolver-order first error, and disabling Happy Eyeballs preserves
 serial dialing. `Cargo.toml` enables `futures-util/alloc` on `client-legacy`
 (`Cargo.toml.orig` preserves the published manifest), and `.gitignore` adds
-`!/Cargo.lock` so the standalone `make native-transport-regressions` lockfile
+`!/Cargo.lock` so the standalone `just native-transport` lockfile
 remains tracked.
+
+The legacy client exposes mutable access to its call-local connector clone
+without replacing its shared pool. An opted-in native connector captures a
+scoped TCP timeout when called and retains it through DNS and candidate dialing.
+The scope lets Smithy preserve that duration through deferred connector polls.
+Connectors without the opt-in use their configured static timeout.
 
 Retire this vendor directory, root Cargo patch/exclusion, and profile, Docker,
 and native-regression carriers together when an upstream `hyper-util` release
 provides equivalent same-family race, loser custody, and error-order semantics
-and passes the native regression against the production dependency graph.
+plus a way to carry exact per-request TCP budgets through pooled dispatch and
+background handoff. Verify those behaviors against the production dependency graph.
