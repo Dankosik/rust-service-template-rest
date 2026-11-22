@@ -7,16 +7,14 @@ use utoipa::openapi::schema::{AnyOfBuilder, Schema};
 use utoipa::openapi::{Components, OpenApi, Ref, RefOr};
 use utoipa::{OpenApi as _, ToResponse};
 
+use super::components::ComponentKind;
 use super::document::{path_operations_mut, resolve};
 use super::{FinalizeError, FinalizeKind};
 // template:begin authn:http-outcomes-policy-import
 use super::Policy;
 // template:end authn:http-outcomes-policy-import
 use crate::probes::ProbeRoutes;
-use crate::problem::{PROBLEM_MEDIA_TYPE, responses};
-
-const RESPONSE_REFERENCE_PREFIX: &str = "#/components/responses/";
-const MEDIA_TYPE_REFERENCE_PREFIX: &str = "#/components/mediaTypes/";
+use crate::problem::{Code, PROBLEM_MEDIA_TYPE, http_status, responses};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum ResponseFault {
@@ -80,31 +78,46 @@ fn add_outcomes(
     // template:end authn:http-outcomes-protected-parameter
     probe: bool,
 ) -> Result<(), (String, ResponseFault)> {
-    let declares_request_body = operation.request_body.is_some();
-    let declares_json_body = declares_json_body(operation, components);
+    let json_body = declares_json_body(operation, components);
     let responses = &mut operation.responses.responses;
-    if declares_json_body
+    let unsupported_media_type = http_status(Code::UnsupportedMediaType);
+    if json_body
         && responses
-            .get("415")
+            .get(unsupported_media_type.as_str())
             .is_none_or(|response| can_merge_json_media_type_outcome(response, components))
     {
-        let (_, common) = responses::UnsupportedMediaType::response();
-        merge_response(responses, components, "415", common)
-            .map_err(|fault| ("415".to_owned(), fault))?;
+        let (_, shared) = responses::UnsupportedMediaType::response();
+        merge_response(
+            responses,
+            components,
+            unsupported_media_type.as_str(),
+            shared,
+        )
+        .map_err(|fault| (unsupported_media_type.as_str().to_owned(), fault))?;
     }
-    let mut add = |status: &str, (name, _): (&str, RefOr<Response>)| {
+    let mut add = |code: Code, (name, _): (&str, RefOr<Response>)| {
+        let status = http_status(code);
         let reference = Ref::from_response_name(name).into();
-        merge_response(responses, components, status, reference)
-            .map_err(|fault| (status.to_owned(), fault))
+        merge_response(responses, components, status.as_str(), reference)
+            .map_err(|fault| (status.as_str().to_owned(), fault))
     };
-    add("413", responses::RequestEntityTooLarge::response())?;
-    add("500", responses::InternalServerError::response())?;
-    add("504", responses::GatewayTimeout::response())?;
-    if declares_request_body {
-        add("408", responses::RequestTimeout::response())?;
+    add(
+        Code::RequestEntityTooLarge,
+        responses::RequestEntityTooLarge::response(),
+    )?;
+    add(
+        Code::InternalServerError,
+        responses::InternalServerError::response(),
+    )?;
+    add(Code::GatewayTimeout, responses::GatewayTimeout::response())?;
+    if operation.request_body.is_some() {
+        add(Code::RequestTimeout, responses::RequestTimeout::response())?;
     }
     if !probe {
-        add("503", responses::AdmissionUnavailable::response())?;
+        add(
+            Code::ServiceUnavailable,
+            responses::AdmissionUnavailable::response(),
+        )?;
     }
     // template:begin authn:http-protected-response-composition
     if protected {
@@ -130,7 +143,7 @@ fn declares_json_body(operation: &Operation, components: &Components) -> bool {
             resolve(
                 body,
                 &components.request_bodies,
-                "#/components/requestBodies/",
+                ComponentKind::RequestBodies,
             )
         })
         .is_some_and(|body| {
@@ -143,17 +156,12 @@ fn declares_json_body(operation: &Operation, components: &Components) -> bool {
 }
 
 fn can_merge_json_media_type_outcome(response: &RefOr<Response>, components: &Components) -> bool {
-    resolve(response, &components.responses, RESPONSE_REFERENCE_PREFIX).is_some_and(|response| {
+    resolve(response, &components.responses, ComponentKind::Responses).is_some_and(|response| {
         response
             .content
             .get(PROBLEM_MEDIA_TYPE)
             .is_none_or(|content| {
-                resolve(
-                    content,
-                    &components.media_types,
-                    MEDIA_TYPE_REFERENCE_PREFIX,
-                )
-                .is_some()
+                resolve(content, &components.media_types, ComponentKind::MediaTypes).is_some()
             })
     })
 }
@@ -172,10 +180,9 @@ fn merge_response(
         Entry::Occupied(slot) if slot.get() == &common => return Ok(()),
         Entry::Occupied(slot) => slot.into_mut(),
     };
-    let Some(common) = resolve(&common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
-        return Err(ResponseFault::SharedResponse);
-    };
-    let mut merged = resolve(slot, &components.responses, RESPONSE_REFERENCE_PREFIX)
+    let shared = resolve(&common, &components.responses, ComponentKind::Responses)
+        .ok_or(ResponseFault::SharedResponse)?;
+    let mut merged = resolve(slot, &components.responses, ComponentKind::Responses)
         .ok_or(ResponseFault::ExistingResponse)?
         .clone();
     if let RefOr::Ref(reference) = slot {
@@ -186,19 +193,19 @@ fn merge_response(
             merged.summary = Some(reference.summary.clone());
         }
     }
-    append_description(&mut merged.description, &common.description);
-    merge_response_content(&mut merged, common, components)?;
-    merge_response_headers(&mut merged, common, components)?;
+    append_description(&mut merged.description, &shared.description);
+    merge_response_content(&mut merged, shared, components)?;
+    merge_response_headers(&mut merged, shared, components)?;
     *slot = RefOr::T(merged);
     Ok(())
 }
 
 fn merge_response_content(
     merged: &mut Response,
-    common: &Response,
+    shared: &Response,
     components: &Components,
 ) -> Result<(), ResponseFault> {
-    for (media_type, content) in &common.content {
+    for (media_type, content) in &shared.content {
         let Some(slot) = merged.content.get_mut(media_type) else {
             merged.content.insert(media_type.clone(), content.clone());
             continue;
@@ -206,15 +213,11 @@ fn merge_response_content(
         if slot == content {
             continue;
         }
-        let mut existing = resolve(slot, &components.media_types, MEDIA_TYPE_REFERENCE_PREFIX)
+        let mut existing = resolve(slot, &components.media_types, ComponentKind::MediaTypes)
             .ok_or(ResponseFault::ExistingMediaType)?
             .clone();
-        let other = resolve(
-            content,
-            &components.media_types,
-            MEDIA_TYPE_REFERENCE_PREFIX,
-        )
-        .ok_or(ResponseFault::SharedMediaType)?;
+        let other = resolve(content, &components.media_types, ComponentKind::MediaTypes)
+            .ok_or(ResponseFault::SharedMediaType)?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         *slot = RefOr::T(existing);
     }
@@ -223,10 +226,10 @@ fn merge_response_content(
 
 fn merge_response_headers(
     merged: &mut Response,
-    common: &Response,
+    shared: &Response,
     components: &Components,
 ) -> Result<(), ResponseFault> {
-    for (name, header) in &common.headers {
+    for (name, header) in &shared.headers {
         let Some((_, slot)) = merged
             .headers
             .iter_mut()
@@ -238,10 +241,10 @@ fn merge_response_headers(
         if slot == header {
             continue;
         }
-        let mut existing = resolve(slot, &components.headers, "#/components/headers/")
+        let mut existing = resolve(slot, &components.headers, ComponentKind::Headers)
             .ok_or(ResponseFault::ExistingHeader)?
             .clone();
-        let other = resolve(header, &components.headers, "#/components/headers/")
+        let other = resolve(header, &components.headers, ComponentKind::Headers)
             .ok_or(ResponseFault::SharedHeader)?;
         union_schema(&mut existing.schema, other.schema.as_ref());
         if let Some(description) = &other.description {

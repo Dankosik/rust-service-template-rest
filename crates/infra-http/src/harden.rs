@@ -129,7 +129,7 @@ async fn handle(
 ) -> Response {
     let request_id = request_id::ensure(&mut request);
     let version = request.version();
-    let (mut observation, is_probe) =
+    let (mut observation, bypasses_admission) =
         state
             .observer
             .start(&mut request, matched, request_id, state.admission.is_some());
@@ -138,7 +138,8 @@ async fn handle(
     let fallback = observation.take_fallback_context();
 
     let traced = async {
-        let (mut response, cancel_guard) = run_admitted(&state, is_probe, request, next).await;
+        let (mut response, cancel_guard) =
+            run_admitted(&state, bypasses_admission, request, next).await;
         let problem_code = context::attach_request_id(&mut response, response_id);
         (response, cancel_guard, problem_code)
     }
@@ -165,35 +166,36 @@ async fn handle(
 
 async fn run_admitted(
     state: &Hardened,
-    is_probe: bool,
+    bypasses_admission: bool,
     request: Request,
     next: Next,
 ) -> (Response, Option<context::CancelGuard>) {
-    let (arrived, permit) = match (&state.admission, is_probe) {
+    let admitted = match (&state.admission, bypasses_admission) {
         (Some(admission), false) => {
             let arrived = tokio::time::Instant::now();
-            match infra_http_transport::acquire_borrowed_within(
+            let permit = match infra_http_transport::acquire_borrowed_within(
                 &admission.permits,
                 admission.max_wait,
                 || (),
             )
             .await
             {
-                infra_http_transport::Admission::Immediate(permit) => (Some(arrived), Some(permit)),
+                infra_http_transport::Admission::Immediate(permit) => permit,
                 infra_http_transport::Admission::Waited { permit, waited } => {
                     admission_wait_histogram().record(waited);
-                    (Some(arrived), Some(permit))
+                    permit
                 }
                 infra_http_transport::Admission::Shed { waited } => {
                     admission_wait_histogram().record(waited);
                     shed_requests_counter().increment(1);
                     return (shed_response(), None);
                 }
-            }
+            };
+            Some((arrived, permit))
         }
-        _ => (None, None),
+        _ => None,
     };
-    context::enforce_request_budget(state.request_timeout, arrived, permit, request, |request| {
+    context::enforce_request_budget(state.request_timeout, admitted, request, |request| {
         limit_body(state.max_body_bytes, request, next)
     })
     .await

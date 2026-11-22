@@ -32,14 +32,7 @@ where
         parts: &mut Parts,
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(
-            parts
-                .extensions
-                .get::<Principal>()
-                .cloned()
-                .map(Self)
-                .ok_or_else(crate::context::missing_extension::<Self>),
-        )
+        std::future::ready(crate::context::extension::<Principal>(parts).map(Self))
     }
 }
 
@@ -56,14 +49,7 @@ where
         parts: &mut Parts,
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(
-            parts
-                .extensions
-                .get::<DelegationCredential>()
-                .cloned()
-                .map(Self)
-                .ok_or_else(crate::context::missing_extension::<Self>),
-        )
+        std::future::ready(crate::context::extension::<DelegationCredential>(parts).map(Self))
     }
 }
 

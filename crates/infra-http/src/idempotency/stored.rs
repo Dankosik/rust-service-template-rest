@@ -236,9 +236,7 @@ fn set_uncoded_content_type(
     headers: &mut HeaderMap,
     media_type: &'static str,
 ) -> Result<(), ReplayError> {
-    let mut has_encoding = false;
     for value in headers.get_all(CONTENT_ENCODING) {
-        has_encoding = true;
         if value
             .as_bytes()
             .split(|&byte| byte == b',')
@@ -247,9 +245,7 @@ fn set_uncoded_content_type(
             return Err(ReplayError(ReplayErrorKind::ContentEncoding));
         }
     }
-    if has_encoding {
-        headers.remove(CONTENT_ENCODING);
-    }
+    headers.remove(CONTENT_ENCODING);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(media_type));
     Ok(())
 }

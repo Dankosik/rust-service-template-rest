@@ -7,7 +7,7 @@ use http_body_util::Collected;
 use infra_idempotency_store::RequestFingerprint;
 use serde::de::DeserializeOwned;
 
-use super::identity::capture_fingerprint;
+use super::identity::{request_fingerprint, retain_headers};
 use crate::Problem;
 use crate::extract::{Path, decode_json, decode_query, require_json_content_type};
 
@@ -36,9 +36,8 @@ impl CommandInput {
             trailers
         });
         let body = collected.to_bytes();
-        let (headers, fingerprint) =
-            capture_fingerprint(&parts, fingerprint_headers, &body, &trailers);
-        parts.headers = headers;
+        let fingerprint = request_fingerprint(&parts, fingerprint_headers, &body, &trailers);
+        parts.headers = retain_headers(&parts.headers, fingerprint_headers);
         (
             Self {
                 parts,

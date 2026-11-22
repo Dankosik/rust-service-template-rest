@@ -32,7 +32,7 @@ pub struct RequestContext {
 
 #[derive(Debug, Default)]
 pub(super) struct RequestTracking {
-    pending: AtomicUsize,
+    pending_reads: AtomicUsize,
     pending_at_deadline: AtomicBool,
     // template:begin object-storage:http-request-put-outcomes
     put_outcomes: std::sync::OnceLock<infra_object_storage::PutOutcomes>,
@@ -91,7 +91,7 @@ fn stopped_response(
 ) -> Response {
     if reason == Stopped::Deadline
         && tracking.is_some_and(|tracking| {
-            tracking.pending.load(Ordering::Acquire) != 0
+            tracking.pending_reads.load(Ordering::Acquire) != 0
                 || tracking.pending_at_deadline.load(Ordering::Relaxed)
         })
     {
@@ -130,7 +130,7 @@ pub(crate) async fn collect_body(
 pub(crate) struct BodyReadTracker<T: Deref<Target = RequestTracking>> {
     tracking: T,
     deadline: Deadline,
-    pending: bool,
+    counted: bool,
 }
 
 impl<T: Deref<Target = RequestTracking>> BodyReadTracker<T> {
@@ -138,31 +138,31 @@ impl<T: Deref<Target = RequestTracking>> BodyReadTracker<T> {
         Self {
             tracking,
             deadline,
-            pending: false,
+            counted: false,
         }
     }
 
-    fn clear_pending(&mut self) {
-        if self.pending {
-            self.pending = false;
+    fn release_count(&mut self) {
+        if self.counted {
+            self.counted = false;
             if self.deadline.expired() {
                 self.tracking
                     .pending_at_deadline
                     .store(true, Ordering::Relaxed);
             }
-            self.tracking.pending.fetch_sub(1, Ordering::Release);
+            self.tracking.pending_reads.fetch_sub(1, Ordering::Release);
         }
     }
 
     pub(crate) fn poll_with<R>(&mut self, poll: impl FnOnce() -> Poll<R>) -> Poll<R> {
         let polled = poll();
         if polled.is_pending() {
-            if !self.pending && !self.deadline.expired() {
-                self.tracking.pending.fetch_add(1, Ordering::Relaxed);
-                self.pending = true;
+            if !self.counted && !self.deadline.expired() {
+                self.tracking.pending_reads.fetch_add(1, Ordering::Relaxed);
+                self.counted = true;
             }
         } else {
-            self.clear_pending();
+            self.release_count();
         }
         polled
     }
@@ -170,7 +170,7 @@ impl<T: Deref<Target = RequestTracking>> BodyReadTracker<T> {
 
 impl<T: Deref<Target = RequestTracking>> Drop for BodyReadTracker<T> {
     fn drop(&mut self) {
-        self.clear_pending();
+        self.release_count();
     }
 }
 
@@ -280,12 +280,13 @@ pub(crate) fn extension<T: Clone + Send + Sync + 'static>(parts: &Parts) -> Resu
         .ok_or_else(missing_extension::<T>)
 }
 
-pub(crate) fn missing_extension_problem<T>() -> Problem {
-    tracing::error!(
-        extractor = std::any::type_name::<T>(),
-        "http_extractor_wiring_failed"
-    );
+pub(crate) fn wiring_failure(extractor: &'static str) -> Problem {
+    tracing::error!(extractor, "http_extractor_wiring_failed");
     sanitized_problem()
+}
+
+pub(crate) fn missing_extension_problem<T>() -> Problem {
+    wiring_failure(std::any::type_name::<T>())
 }
 
 pub(crate) fn missing_extension<T>() -> Response {
@@ -307,8 +308,7 @@ pub(crate) fn attach_request_id(response: &mut Response, id: Option<RequestId>) 
 
 pub(crate) async fn enforce_request_budget<P, F, Fut>(
     budget: Duration,
-    arrived: Option<tokio::time::Instant>,
-    permit: Option<P>,
+    admitted: Option<(tokio::time::Instant, P)>,
     mut request: Request,
     run: F,
 ) -> (Response, Option<CancelGuard>)
@@ -316,7 +316,9 @@ where
     F: FnOnce(Request) -> Fut,
     Fut: Future<Output = Response>,
 {
-    let origin = arrived.unwrap_or_else(tokio::time::Instant::now);
+    let origin = admitted
+        .as_ref()
+        .map_or_else(tokio::time::Instant::now, |(arrived, _)| *arrived);
     let deadline = Deadline::new(origin, budget);
     let cancel_guard: CancelGuard =
         std::mem::DropGuard::new(OperationContext::from_deadline(deadline), |context| {
@@ -341,7 +343,7 @@ where
         // template:end request-budget:http-request-deadline-field-init
     });
     let outcome = {
-        let _permit = permit;
+        let _admitted = admitted;
         cancel_guard.run(run(request)).await
     };
     match outcome {

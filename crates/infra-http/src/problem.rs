@@ -334,6 +334,14 @@ pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail_static("request body could not be read")
 }
 
+pub(crate) fn body_read_problem(error: &axum::Error) -> Problem {
+    if caused_by_length_limit(error) {
+        body_too_large()
+    } else {
+        body_unreadable()
+    }
+}
+
 #[must_use]
 pub fn sanitized_problem() -> Problem {
     Problem::new(Code::InternalServerError).detail_static(SANITIZED_DETAIL)

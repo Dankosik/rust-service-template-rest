@@ -4,6 +4,8 @@ use enum_map::Enum;
 use utoipa::openapi::path::{Operation, PathItem};
 use utoipa::openapi::{Ref, RefOr};
 
+use super::components::ComponentKind;
+
 #[derive(Clone, Copy, Debug, Enum, Eq, PartialEq)]
 pub(super) enum StandardMethod {
     Get,
@@ -82,6 +84,10 @@ pub(super) fn fixed_operations(
         .filter_map(move |method| method.operation(item).map(|op| (method.as_str(), op)))
 }
 
+pub(super) fn has_extension_operations(item: &PathItem) -> bool {
+    item.query.is_some() || !item.additional_operations.is_empty()
+}
+
 pub(super) fn documented_methods(item: &PathItem) -> impl Iterator<Item = &str> {
     fixed_operations(item)
         .map(|(method, _)| method)
@@ -116,22 +122,27 @@ pub(crate) fn path_operations_mut<'a>(
 pub(super) fn resolve<'a, T>(
     value: &'a RefOr<T>,
     components: &'a BTreeMap<String, RefOr<T>>,
-    prefix: &str,
+    kind: ComponentKind,
 ) -> Option<&'a T> {
-    resolve_when(value, components, prefix, |_| true)
+    resolve_when(value, components, kind, |_| true)
 }
 
 pub(super) fn resolve_when<'a, T>(
     mut value: &'a RefOr<T>,
     components: &'a BTreeMap<String, RefOr<T>>,
-    prefix: &str,
+    kind: ComponentKind,
     accept: impl Fn(&Ref) -> bool,
 ) -> Option<&'a T> {
     for _ in 0..=components.len() {
         match value {
             RefOr::T(resolved) => return Some(resolved),
             RefOr::Ref(reference) if accept(reference) => {
-                value = components.get(reference.ref_location.strip_prefix(prefix)?)?;
+                let name = reference
+                    .ref_location
+                    .strip_prefix("#/components/")?
+                    .strip_prefix(kind.as_str())?
+                    .strip_prefix('/')?;
+                value = components.get(name)?;
             }
             RefOr::Ref(_) => return None,
         }

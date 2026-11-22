@@ -12,7 +12,7 @@ use infra_idempotency_store::{ScopeKey, Store};
 use serde::de::DeserializeOwned;
 use utoipa::{IntoResponses as _, OpenApi as _};
 
-use super::declaration;
+use super::declaration::{self, PreparedOperation};
 use super::execute::{
     Attempt, FreshCommand, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, RouteState,
 };
@@ -21,10 +21,7 @@ use super::openapi::IdempotencyComponents;
 use super::{CommandInput, KEY_HEADER, KEY_HEADER_NAME, ReplaySuccess as _};
 use crate::context::{RequestContext, collect_body};
 use crate::extract::{Json, Path, Query};
-use crate::problem::{
-    Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
-    sanitized_internal_error,
-};
+use crate::problem::{Code, Problem, body_read_problem, sanitized_internal_error};
 use crate::{
     DelegationCredential, FinalizeError, HttpContract, Principal, VerifiedDelegation,
     VerifiedPrincipal,
@@ -284,14 +281,19 @@ impl_command_handler!([T1, T2, T3, T4, T5, T6, T7], T8);
 
 pub fn route<S, Args, H>(
     mut document: utoipa::openapi::OpenApi,
-    prepare: H,
+    command_handler: H,
 ) -> Result<HttpContract<S>, FinalizeError>
 where
     S: Clone + Send + Sync + 'static,
     Args: 'static,
     H: CommandHandler<Args, S>,
 {
-    let operation = declaration::prepare(
+    let PreparedOperation {
+        id,
+        method,
+        fingerprint_headers,
+        rules_link,
+    } = declaration::prepare(
         &mut document,
         <H::Command as FreshCommand>::Success::responses(),
         <H::Command as FreshCommand>::Success::schemas(),
@@ -301,12 +303,7 @@ where
         metrics::Unit::Count,
         "Idempotency capture refusals, handler refusals, and execution outcomes."
     );
-    let method = operation.method;
-    let route_state = Arc::new(RouteState::new(
-        operation.id,
-        operation.fingerprint_headers,
-        operation.rules_link,
-    ));
+    let route_state = Arc::new(RouteState::new(id, fingerprint_headers, rules_link));
     let handler = move |State(state): State<S>, mut request: Request| async move {
         let delegation = request.extensions_mut().remove::<DelegationCredential>();
         let (input, principal, attempt) = match capture_attempt(route_state, request).await {
@@ -318,7 +315,7 @@ where
             delegation: delegation.as_ref(),
             state: &state,
         };
-        match prepare.call(input, &cx).await {
+        match command_handler.call(input, &cx).await {
             Ok(command) => attempt.run(command).await,
             Err(problem) => {
                 attempt.route.record(Outcome::NotStored);
@@ -397,12 +394,9 @@ async fn buffer_body(extensions: &Extensions, body: Body) -> Result<Collected<By
     collect_body(extensions.get::<RequestContext>(), body)
         .await
         .map_err(|error| {
-            let problem = if caused_by_length_limit(&error) {
-                body_too_large()
-            } else {
-                body_unreadable()
-            };
-            problem.with_request_id_from(extensions).into_response()
+            body_read_problem(&error)
+                .with_request_id_from(extensions)
+                .into_response()
         })
 }
 

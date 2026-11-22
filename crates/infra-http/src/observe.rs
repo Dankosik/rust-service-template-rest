@@ -96,7 +96,7 @@ impl Observer {
         request: &mut Request,
         matched: Option<MatchedPath>,
         request_id: Option<RequestId>,
-        check_probe: bool,
+        classify_for_admission: bool,
     ) -> (ActiveObservation, bool) {
         let started = Instant::now();
         let connection = request.extensions_mut().remove::<ConnectionInfo>();
@@ -105,8 +105,8 @@ impl Observer {
         let scheme = url_scheme(request.uri(), connection.as_ref());
         let route = matched.as_ref().map(MatchedPath::as_str);
         let is_probe = match method {
-            HttpMethod::Get => check_probe || !self.log_health_probes,
-            HttpMethod::Head => check_probe,
+            HttpMethod::Get => classify_for_admission || !self.log_health_probes,
+            HttpMethod::Head => classify_for_admission,
             _ => false,
         } && route.is_some_and(|route| self.probes.contains(method, route));
         let log_access = !suppresses_access_log(self.log_health_probes, method, is_probe);
@@ -510,24 +510,25 @@ impl Series {
             histogram.record(seconds);
             return;
         }
-        let guard = self.durations_write.lock();
-        let current = self.durations.load_full();
-        if let Some(histogram) = current.get(route, &key) {
-            drop(guard);
-            histogram.record(seconds);
-            return;
-        }
-        let cached_route = route.map(|route| {
-            current.matched.get_key_value(route).map_or_else(
-                || Arc::<str>::from(route),
-                |(existing, _)| Arc::clone(existing),
-            )
-        });
-        let histogram = duration_histogram(cached_route.clone(), key);
-        let mut next = (*current).clone();
-        next.insert(cached_route, key, histogram.clone());
-        self.durations.store(Arc::new(next));
-        drop(guard);
+        let histogram = {
+            let _write = self.durations_write.lock();
+            let current = self.durations.load_full();
+            if let Some(existing) = current.get(route, &key) {
+                existing.clone()
+            } else {
+                let cached_route = route.map(|route| {
+                    current.matched.get_key_value(route).map_or_else(
+                        || Arc::<str>::from(route),
+                        |(existing, _)| Arc::clone(existing),
+                    )
+                });
+                let histogram = duration_histogram(cached_route.clone(), key);
+                let mut next = (*current).clone();
+                next.insert(cached_route, key, histogram.clone());
+                self.durations.store(Arc::new(next));
+                histogram
+            }
+        };
         histogram.record(seconds);
     }
 }
