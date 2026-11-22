@@ -100,7 +100,7 @@ pub mod worker {
 #[cfg(test)]
 mod tests {
     use metrics_util::MetricKind;
-    use metrics_util::debugging::DebuggingRecorder;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use temporalio_common::WorkflowDefinition;
     use temporalio_common::telemetry::metrics::{
         CoreMeter, MetricKeyValue, MetricParameters, NewAttributes,
@@ -184,16 +184,19 @@ mod tests {
             );
             match (ckey.kind(), name) {
                 (MetricKind::Counter, "temporal_request") => {
-                    assert_eq!(value, metrics_util::debugging::DebugValue::Counter(3));
+                    assert_eq!(value, DebugValue::Counter(3));
                     saw_counter = true;
                 }
                 (MetricKind::Histogram, "temporal_request_latency") => {
+                    assert_eq!(value, DebugValue::Histogram(vec![0.25.into()]));
                     saw_histogram = true;
                 }
                 (MetricKind::Gauge, "temporal_sticky_cache_size") => {
+                    assert_eq!(value, DebugValue::Gauge(7.0.into()));
                     saw_gauge = true;
                 }
                 (MetricKind::Gauge, "temporal_active_tasks") => {
+                    assert_eq!(value, DebugValue::Gauge(2.0.into()));
                     saw_up_down = true;
                 }
                 other => panic!("unexpected metric recorded: {other:?}"),
@@ -201,6 +204,28 @@ mod tests {
         }
 
         assert!(saw_counter && saw_histogram && saw_gauge && saw_up_down);
+
+        ::metrics::with_local_recorder(&recorder, || {
+            let meter = WorkspaceMetricsMeter::new(METRIC_PREFIX);
+            let attrs = meter.new_attributes(NewAttributes::new(vec![
+                MetricKeyValue::new("task-queue", "orders"),
+                MetricKeyValue::new("namespace", "default"),
+            ]));
+            let up_down = meter.up_down_counter(MetricParameters::from("active_tasks"));
+            up_down.add(-4, &attrs);
+        });
+
+        let active_tasks =
+            snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .find_map(|(ckey, _, _, value)| {
+                    (ckey.kind() == MetricKind::Gauge
+                        && ckey.key().name() == "temporal_active_tasks")
+                        .then_some(value)
+                });
+        assert_eq!(active_tasks, Some(DebugValue::Gauge((-4.0).into())));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -233,16 +258,19 @@ mod worker_tests {
     use std::time::Duration;
 
     use futures::FutureExt;
-    use metrics_util::debugging::DebuggingRecorder;
+    use metrics_util::MetricKind;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use temporalio_client::callback_based::{
         CallbackBasedGrpcService, GrpcRequest, GrpcSuccessResponse,
     };
     use temporalio_client::{Client, ClientOptions, Connection, ConnectionOptions, Url};
+    use temporalio_common::telemetry::TaskQueueLabelStrategy;
     use temporalio_common::worker::{WorkerDeploymentOptions, WorkerDeploymentVersion};
     use temporalio_macros::{activities, workflow, workflow_methods};
     use temporalio_sdk::activities::{ActivityContext, ActivityError};
     use temporalio_sdk::runtime::worker_tuner::{ResourceBasedTuner, ResourceBasedTunerOptions};
     use temporalio_sdk::{ActivityOptions, Worker, WorkerOptions, WorkflowContext, WorkflowResult};
+    use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
 
     use super::worker::{build_runtime, spawn_worker_thread};
@@ -280,18 +308,20 @@ mod worker_tests {
 
     fn assert_send<T: Send>() {}
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn worker_is_send_and_runs_on_os_thread_with_handle_block_on_and_resource_tuner() {
-        assert_send::<Worker>();
-
-        let shutdown = CancellationToken::new();
-        let rpc_shutdown = shutdown.clone();
-        let callback = CallbackBasedGrpcService {
+    fn callback_grpc_service(
+        shutdown: CancellationToken,
+        poll_started: Option<Arc<Notify>>,
+    ) -> CallbackBasedGrpcService {
+        CallbackBasedGrpcService {
             callback: Arc::new(move |mut req: GrpcRequest| {
-                let rpc_shutdown = rpc_shutdown.clone();
+                let shutdown = shutdown.clone();
+                let poll_started = poll_started.clone();
                 async move {
                     if req.rpc.starts_with("Poll") {
-                        rpc_shutdown.cancelled().await;
+                        if let Some(notify) = poll_started {
+                            notify.notify_one();
+                        }
+                        shutdown.cancelled().await;
                     }
                     req.headers.clear();
                     Ok(GrpcSuccessResponse {
@@ -301,7 +331,16 @@ mod worker_tests {
                 }
                 .boxed()
             }),
-        };
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_is_send_and_runs_on_os_thread_with_handle_block_on_and_resource_tuner() {
+        assert_send::<Worker>();
+
+        let shutdown = CancellationToken::new();
+        let poll_started = Arc::new(Notify::new());
+        let callback = callback_grpc_service(shutdown.clone(), Some(Arc::clone(&poll_started)));
 
         let meter = WorkspaceMetricsMeter::new(METRIC_PREFIX);
         let runtime = build_runtime(&meter).expect("CoreRuntime attaches to current Tokio pool");
@@ -352,7 +391,9 @@ mod worker_tests {
         )
         .expect("worker OS thread spawns");
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(5), poll_started.notified())
+            .await
+            .expect("worker OS thread did not enter gRPC polling before timeout");
         shutdown.cancel();
 
         let result = tokio::task::spawn_blocking(move || join.join())
@@ -374,36 +415,27 @@ mod worker_tests {
         let opts = meter.telemetry_options();
         assert_eq!(opts.metric_prefix, "");
         assert!(!opts.attach_service_name);
+        assert!(opts.metrics.is_some());
+        assert!(matches!(
+            opts.task_queue_label_strategy,
+            TaskQueueLabelStrategy::UseNormal
+        ));
+        assert!(matches!(
+            meter.temporal_meter().get_task_queue_label_strategy(),
+            TaskQueueLabelStrategy::UseNormal
+        ));
 
         let runtime = build_runtime(&meter).expect("CoreRuntime initializes with CoreMeter");
         let shutdown = CancellationToken::new();
-        let rpc_shutdown = shutdown.clone();
-        let callback = CallbackBasedGrpcService {
-            callback: Arc::new(move |mut req: GrpcRequest| {
-                let rpc_shutdown = rpc_shutdown.clone();
-                async move {
-                    if req.rpc.starts_with("Poll") {
-                        rpc_shutdown.cancelled().await;
-                    }
-                    req.headers.clear();
-                    Ok(GrpcSuccessResponse {
-                        headers: req.headers,
-                        proto: Vec::new(),
-                    })
-                }
-                .boxed()
-            }),
-        };
+        let callback = callback_grpc_service(shutdown.clone(), None);
 
         let conn_opts = ConnectionOptions::new(
             Url::parse("http://127.0.0.1:7233").expect("valid loopback url"),
         )
         .dns_load_balancing(None)
         .service_override(callback)
-        .metrics_meter(meter.temporal_meter())
         .build();
 
-        let guard = ::metrics::set_default_local_recorder(&recorder);
         let connection = Connection::connect(conn_opts)
             .await
             .expect("callback connection succeeds");
@@ -417,8 +449,10 @@ mod worker_tests {
             .expect("workflow registers")
             .register_activities(SmokeActivities)
             .build();
-        let worker = Worker::new(&runtime, client, worker_opts).expect("worker initializes");
-        drop(guard);
+        let worker = ::metrics::with_local_recorder(&recorder, || {
+            Worker::new(&runtime, client, worker_opts)
+        })
+        .expect("worker initializes");
 
         shutdown.cancel();
         let join = spawn_worker_thread(
@@ -437,9 +471,10 @@ mod worker_tests {
         let snapshot = snapshotter.snapshot().into_vec();
         assert!(
             !snapshot.is_empty(),
-            "expected CoreMeter to record at least one client/worker metric"
+            "expected CoreMeter to record Core worker initialization metrics"
         );
-        for (ckey, _, _, _) in snapshot {
+        let mut saw_worker_start = false;
+        for (ckey, _, _, value) in snapshot {
             let name = ckey.key().name();
             assert!(
                 name.starts_with(METRIC_PREFIX),
@@ -449,6 +484,27 @@ mod worker_tests {
                 !name.starts_with("temporal_temporal_"),
                 "double temporal_ prefix: {name}"
             );
+            let labels: Vec<(&str, &str)> = ckey
+                .key()
+                .labels()
+                .map(|label| (label.key(), label.value()))
+                .collect();
+            assert!(
+                !labels.iter().any(|(key, _)| *key == "service_name"),
+                "unexpected service_name label on {name}: {labels:?}"
+            );
+            if (ckey.kind(), name) == (MetricKind::Counter, "temporal_worker_start") {
+                assert_eq!(value, DebugValue::Counter(1));
+                assert_eq!(
+                    labels,
+                    vec![("namespace", "default"), ("task_queue", "orders")]
+                );
+                saw_worker_start = true;
+            }
         }
+        assert!(
+            saw_worker_start,
+            "expected Core worker initialization to record temporal_worker_start"
+        );
     }
 }
