@@ -21,18 +21,15 @@ use crate::{
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const TOKEN_LIMITS: Limits = Limits::new(FETCH_TIMEOUT, 64, 1024 * 1024);
 
-pub(crate) fn build_https_client(
-    url: &Url,
-    endpoint: &'static str,
-) -> Result<Client, PreparationError> {
+pub(crate) fn build_https_client(url: &Url, key: &'static str) -> Result<Client, PreparationError> {
     let origin = Origin::parse_https(&url.origin().ascii_serialization()).map_err(|_| {
         ConfigurationError {
-            key: endpoint,
+            key,
             reason: "must be a valid HTTPS URL",
         }
     })?;
     Client::try_new(origin, TOKEN_LIMITS)
-        .map_err(|cause| TransportBuildFailure::new(endpoint, cause).into())
+        .map_err(|cause| TransportBuildFailure::new(key, cause).into())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -108,23 +105,23 @@ impl TokenEndpoint {
         grant: Grant<'_>,
         context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
-        let started = Instant::now();
+        let requested_at = Instant::now();
         let check = || context.check().map_err(AcquisitionError::from);
-        let metric = std::mem::DropGuard::new(grant.kind(), |grant_kind| {
+        let record_on_drop = std::mem::DropGuard::new(grant.kind(), |grant_kind| {
             let error = check().err().unwrap_or(AcquisitionError::Cancelled);
             self.record_acquisition(grant_kind, AcquisitionOutcome::Error(error));
         });
-        let result = match check() {
-            Ok(()) => self.request_token(grant, started, context).await,
-            Err(error) => Err(error),
+        let attempt = async {
+            check()?;
+            self.request_token(grant, requested_at, context).await
+        }
+        .await;
+        let result = check().and(attempt);
+        let grant_kind = std::mem::DropGuard::dismiss(record_on_drop);
+        let outcome = match &result {
+            Ok(_) => AcquisitionOutcome::Success,
+            Err(error) => AcquisitionOutcome::Error(*error),
         };
-        let result = check().and(result);
-        let grant_kind = std::mem::DropGuard::dismiss(metric);
-        let outcome = result
-            .as_ref()
-            .err()
-            .copied()
-            .map_or(AcquisitionOutcome::Success, AcquisitionOutcome::Error);
         self.record_acquisition(grant_kind, outcome);
         result
     }
@@ -144,7 +141,7 @@ impl TokenEndpoint {
     async fn request_token(
         &self,
         grant: Grant<'_>,
-        started: Instant,
+        requested_at: Instant,
         context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         let _permit = self
@@ -154,20 +151,16 @@ impl TokenEndpoint {
         let request = self.token_request(grant)?;
         let http_response = self.http.execute(context, request).await;
         let token_response = classify_token_response(http_response)?;
-        token_from_response(&token_response, started, grant.expected_issued_type())
+        token_from_response(
+            &token_response,
+            requested_at,
+            grant.expected_issued_token_type(),
+        )
     }
 
     fn token_request(&self, grant: Grant<'_>) -> Result<Request<Bytes>, AcquisitionError> {
-        let body = {
-            let assertion = self.signer.sign()?;
-            let fields = grant.fields().chain(self.signer.form_fields(&assertion));
-            let capacity = fields.clone().fold(0_usize, |total, (key, value)| {
-                total.saturating_add(max_form_pair_len(key, value))
-            });
-            Serializer::new(String::with_capacity(capacity))
-                .extend_pairs(fields)
-                .finish()
-        };
+        let assertion = self.signer.sign()?;
+        let body = encode_form(grant.fields().chain(self.signer.form_fields(&assertion)));
         Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
@@ -204,6 +197,15 @@ impl AcquisitionOutcome {
             Self::Error(error) => error.label(),
         }
     }
+}
+
+fn encode_form<'k, 'v>(fields: impl Iterator<Item = (&'k str, &'v str)> + Clone) -> String {
+    let capacity = fields.clone().fold(0_usize, |total, (key, value)| {
+        total.saturating_add(max_form_pair_len(key, value))
+    });
+    Serializer::new(String::with_capacity(capacity))
+        .extend_pairs(fields)
+        .finish()
 }
 
 fn max_form_pair_len(key: &str, value: &str) -> usize {
@@ -255,7 +257,7 @@ impl<'a> Grant<'a> {
         }
     }
 
-    fn expected_issued_type(self) -> Option<&'static str> {
+    fn expected_issued_token_type(self) -> Option<&'static str> {
         match self {
             Self::ClientCredentials(_) => None,
             Self::TokenExchange { .. } => Some(TOKEN_TYPE_ACCESS_TOKEN),
@@ -321,7 +323,7 @@ fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, Ac
 /// RFC 8693 §2.2.1
 fn token_from_response(
     response: &TokenResponse,
-    started: Instant,
+    requested_at: Instant,
     expected_issued_token_type: Option<&str>,
 ) -> Result<Token, AcquisitionError> {
     if !response.token_type.eq_ignore_ascii_case("bearer") {
@@ -332,5 +334,10 @@ fn token_from_response(
     {
         return Err(AcquisitionError::InvalidResponse);
     }
-    Token::bearer(&response.access_token, started, response.expires_in)
+    Token::bearer(
+        &response.access_token,
+        requested_at,
+        response.expires_in,
+        Instant::now(),
+    )
 }

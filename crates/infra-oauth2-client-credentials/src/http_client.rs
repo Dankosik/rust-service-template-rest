@@ -29,7 +29,7 @@ pub struct ExchangeHttpClient {
 impl ServiceTokens {
     pub fn http(&self, resource: Client) -> Result<ServiceHttpClient, ConfigurationError> {
         if !resource.matches_origin(self.resource_origin()) {
-            return Err(ConfigurationError::resource_origin());
+            return Err(ConfigurationError::resource_origin_mismatch());
         }
         Ok(ServiceHttpClient {
             tokens: self.clone(),
@@ -41,7 +41,7 @@ impl ServiceTokens {
 impl ExchangeTokens {
     pub fn http(&self, resource: Client) -> Result<ExchangeHttpClient, ConfigurationError> {
         if !resource.matches_origin(self.resource_origin()) {
-            return Err(ConfigurationError::resource_origin());
+            return Err(ConfigurationError::resource_origin_mismatch());
         }
         Ok(ExchangeHttpClient {
             tokens: self.clone(),
@@ -74,7 +74,7 @@ impl ServiceHttpClient {
             &self.resource,
             context,
             request,
-            Grant::Service(&self.tokens),
+            TokenSource::Service(&self.tokens),
         )
         .await
     }
@@ -105,27 +105,30 @@ impl ExchangeHttpClient {
             &self.resource,
             context,
             request,
-            Grant::Exchange(&self.tokens, subject),
+            TokenSource::Exchange(&self.tokens, subject),
         )
         .await
     }
 }
 
 #[derive(Clone, Copy)]
-enum Grant<'a> {
+pub(crate) enum TokenSource<'a> {
     Service(&'a ServiceTokens),
     Exchange(&'a ExchangeTokens, &'a OnBehalfOf),
 }
 
-impl Grant<'_> {
-    fn check_active(self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+impl TokenSource<'_> {
+    pub(crate) fn check_active(
+        self,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<(), AcquisitionError> {
         match self {
             Self::Service(tokens) => tokens.check_active(deadline),
             Self::Exchange(tokens, _) => tokens.check_active(deadline),
         }
     }
 
-    async fn acquire_for_request(
+    pub(crate) async fn acquire_for_request(
         self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
@@ -140,7 +143,7 @@ async fn execute_authenticated(
     resource: &Client,
     context: &OperationContext,
     request: Request<Bytes>,
-    grant: Grant<'_>,
+    grant: TokenSource<'_>,
 ) -> Result<Response<Bytes>, Error> {
     let mut prepared = resource
         .prepare(context, request)

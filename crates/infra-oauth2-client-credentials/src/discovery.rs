@@ -24,13 +24,7 @@ impl Registration {
         options: Options,
     ) -> Result<Self, DiscoveryError> {
         let validated = validate_options(options)?;
-        if issuer.url() == &validated.token_url {
-            return Err(ConfigurationError {
-                key: "issuer",
-                reason: "must differ from the token endpoint",
-            }
-            .into());
-        }
+        ensure_issuer_differs(&issuer, &validated.token_url)?;
         verify_https_metadata(&issuer, &validated.token_url).await?;
         let token_http = token_endpoint::build_https_client(&validated.token_url, "token_url")?;
         Self::build(validated, token_http).map_err(DiscoveryError::from)
@@ -41,16 +35,16 @@ impl Registration {
         issuer: IssuerUrl,
         options: crate::test_support::HttpOptions,
     ) -> Result<Self, DiscoveryError> {
-        let build_test_http = |url: &Url, endpoint: &'static str| {
+        let build_test_http = |url: &Url, key: &'static str| {
             token_endpoint::build_http_client(url).map_err(|error| match error {
                 infra_outbound_http::test_support::TestBuildError::InvalidOrigin(_) => {
                     DiscoveryError::from(ConfigurationError {
-                        key: endpoint,
+                        key,
                         reason: "requires an HTTP loopback IP address",
                     })
                 }
                 infra_outbound_http::test_support::TestBuildError::Tls(cause) => {
-                    DiscoveryError::from(TransportBuildFailure::new(endpoint, cause))
+                    DiscoveryError::from(TransportBuildFailure::new(key, cause))
                 }
             })
         };
@@ -61,13 +55,7 @@ impl Registration {
             options.auth,
             options.provider_concurrency,
         )?;
-        if issuer.url() == &validated.token_url {
-            return Err(ConfigurationError {
-                key: "issuer",
-                reason: "must differ from the token endpoint",
-            }
-            .into());
-        }
+        ensure_issuer_differs(&issuer, &validated.token_url)?;
         let discovery_http = build_test_http(issuer.url(), "issuer")?;
         verify_metadata(&issuer, &validated.token_url, &discovery_http).await?;
         let token_http = build_test_http(&validated.token_url, "token_url")?;
@@ -79,25 +67,29 @@ pub async fn verify_oidc_metadata(
     issuer: &IssuerUrl,
     token_url: &TokenUrl,
 ) -> Result<(), DiscoveryError> {
-    if issuer.url() == token_url.url() {
-        return Err(ConfigurationError {
-            key: "issuer",
-            reason: "must differ from the token endpoint",
-        }
-        .into());
-    }
+    ensure_issuer_differs(issuer, token_url.url())?;
     verify_https_metadata(issuer, token_url.url()).await
 }
 
-async fn verify_https_metadata(issuer: &IssuerUrl, endpoint: &Url) -> Result<(), DiscoveryError> {
+fn ensure_issuer_differs(issuer: &IssuerUrl, token_url: &Url) -> Result<(), ConfigurationError> {
+    if issuer.url() == token_url {
+        return Err(ConfigurationError {
+            key: "issuer",
+            reason: "must differ from the token endpoint",
+        });
+    }
+    Ok(())
+}
+
+async fn verify_https_metadata(issuer: &IssuerUrl, token_url: &Url) -> Result<(), DiscoveryError> {
     prepare_tls().await.map_err(TransportBuildFailure::issuer)?;
     let discovery_http = token_endpoint::build_https_client(issuer.url(), "issuer")?;
-    verify_metadata(issuer, endpoint, &discovery_http).await
+    verify_metadata(issuer, token_url, &discovery_http).await
 }
 
 async fn verify_metadata(
     issuer: &IssuerUrl,
-    endpoint: &Url,
+    token_url: &Url,
     discovery_http: &Client,
 ) -> Result<(), DiscoveryError> {
     let metadata = fetch_metadata(issuer.url(), discovery_http).await?;
@@ -106,7 +98,7 @@ async fn verify_metadata(
             "issuer differs from configured issuer",
         ));
     }
-    if parse_discovered_token_endpoint(&metadata.token_endpoint).as_ref() != Some(endpoint) {
+    if parse_discovered_token_endpoint(&metadata.token_endpoint).as_ref() != Some(token_url) {
         return Err(DiscoveryError::Metadata(
             "token_endpoint is invalid or differs from token_url",
         ));
@@ -124,13 +116,11 @@ async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, Disco
         .map_err(|_| DiscoveryError::Metadata("issuer discovery URL is invalid"))?;
     let context = OperationContext::with_timeout(FETCH_TIMEOUT);
     let response = match client.execute(&context, request).await {
-        Ok(response) if response.status() != StatusCode::OK => {
-            return Err(DiscoveryError::Status(response.status()));
-        }
+        Ok(response) if response.status() == StatusCode::OK => response,
+        Ok(response) => return Err(DiscoveryError::Status(response.status())),
         Err(ExchangeError::AfterResponse { status, .. }) if status != StatusCode::OK => {
             return Err(DiscoveryError::Status(status));
         }
-        Ok(response) => response,
         Err(error) => {
             return Err(DiscoveryError::Transport(DiscoveryTransportError::new(
                 error.into_error(),

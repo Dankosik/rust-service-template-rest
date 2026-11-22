@@ -73,9 +73,7 @@ impl TokenSource {
             header,
             name: options.name,
         };
-        signer
-            .sign(&signer.name, 0)
-            .map_err(|_| InvalidSigningKey)?;
+        signer.prove_key().map_err(|_| InvalidSigningKey)?;
         Ok(Self(Signing::Key(Arc::new(signer))))
     }
 
@@ -112,11 +110,11 @@ struct ActiveReceiver {
     signer: Arc<Signer>,
     audience: ServiceName,
     origin: http::Uri,
-    cached: ArcSwapOption<Cached>,
+    cached: ArcSwapOption<CachedAuthorization>,
     refresh: Mutex<()>,
 }
 
-struct Cached {
+struct CachedAuthorization {
     issued_at: u64,
     authorization: HeaderValue,
 }
@@ -160,10 +158,10 @@ pub fn has_cached_authorization(tokens: &ReceiverTokens) -> bool {
 }
 
 impl ActiveReceiver {
-    fn reusable(cached: Option<&Arc<Cached>>, now: u64) -> Option<HeaderValue> {
+    fn reusable(cached: Option<&Arc<CachedAuthorization>>, now: u64) -> Option<HeaderValue> {
         cached
-            .filter(|token| (token.issued_at..token.issued_at + REUSE_SECONDS).contains(&now))
-            .map(|token| token.authorization.clone())
+            .filter(|cached| (cached.issued_at..cached.issued_at + REUSE_SECONDS).contains(&now))
+            .map(|cached| cached.authorization.clone())
     }
 
     fn authorization_at(&self, now: u64) -> Result<HeaderValue, TokenIssueError> {
@@ -174,15 +172,20 @@ impl ActiveReceiver {
         if let Some(authorization) = Self::reusable(self.cached.load().as_ref(), now) {
             return Ok(authorization);
         }
+        let authorization = self.issue(now)?;
+        self.cached.store(Some(Arc::new(CachedAuthorization {
+            issued_at: now,
+            authorization: authorization.clone(),
+        })));
+        Ok(authorization)
+    }
+
+    fn issue(&self, now: u64) -> Result<HeaderValue, TokenIssueError> {
         let token = self.signer.sign(&self.audience, now)?;
         let bearer = Zeroizing::new(format!("Bearer {}", token.as_str()));
         let mut authorization =
             HeaderValue::from_str(bearer.as_str()).map_err(|_| TokenIssueError::Signing)?;
         authorization.set_sensitive(true);
-        self.cached.store(Some(Arc::new(Cached {
-            issued_at: now,
-            authorization: authorization.clone(),
-        })));
         Ok(authorization)
     }
 }
@@ -203,6 +206,10 @@ struct Claims<'a> {
 }
 
 impl Signer {
+    fn prove_key(&self) -> Result<(), TokenIssueError> {
+        self.sign(&self.name, 0).map(drop)
+    }
+
     fn sign(&self, audience: &ServiceName, now: u64) -> Result<Zeroizing<String>, TokenIssueError> {
         let claims = Claims {
             iss: self.name.as_str(),

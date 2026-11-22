@@ -12,7 +12,7 @@ pub struct ConfigurationError {
 }
 
 impl ConfigurationError {
-    pub(crate) const fn resource_origin() -> Self {
+    pub(crate) const fn resource_origin_mismatch() -> Self {
         Self {
             key: "resource_origin",
             reason: "must match the transport origin registered for these credentials",
@@ -39,16 +39,16 @@ impl PreparationError {
 }
 
 #[derive(derive_more::Debug, thiserror::Error)]
-#[error("OAuth2 transport construction failed for {endpoint} ({cause})")]
+#[error("OAuth2 transport construction failed for {key} ({cause})")]
 pub struct TransportBuildFailure {
-    endpoint: &'static str,
+    key: &'static str,
     #[debug(skip)]
     cause: infra_outbound_http::TlsError,
 }
 
 impl TransportBuildFailure {
-    pub(crate) const fn new(endpoint: &'static str, cause: infra_outbound_http::TlsError) -> Self {
-        Self { endpoint, cause }
+    pub(crate) const fn new(key: &'static str, cause: infra_outbound_http::TlsError) -> Self {
+        Self { key, cause }
     }
 
     pub(crate) const fn issuer(cause: infra_outbound_http::TlsError) -> Self {
