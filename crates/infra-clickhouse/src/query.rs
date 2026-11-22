@@ -278,6 +278,9 @@ impl<'a> Query<'a> {
             return Err(QueryError::Busy);
         };
         let _task_token = shared.tasks.token();
+        if shared.closing.load(Ordering::Acquire) || shared.tasks.is_closed() {
+            return Err(QueryError::Unavailable);
+        }
 
         let guard =
             OperationGuard::start(&shared.metrics, operation, self.summary, &shared.endpoint);

@@ -16,6 +16,9 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use operation_context::{OperationContext, Stopped};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
+use tracing::instrument::WithSubscriber as _;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 fn env_or_panic(name: &str) -> String {
     std::env::var(name)
@@ -474,6 +477,21 @@ async fn assert_rolling_schema_evolution(
     );
 }
 
+struct SpanEnterNotify(Arc<Notify>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanEnterNotify {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if attrs.metadata().name() == "clickhouse" {
+            self.0.notify_one();
+        }
+    }
+}
+
 async fn assert_live_busy_shedding(
     url: String,
     db: String,
@@ -485,15 +503,27 @@ async fn assert_live_busy_shedding(
     let mut busy_opts = options_for(url, db, user, password, QuerySettings::Client);
     busy_opts.max_concurrency = 1;
     let ch_busy = Arc::new(ClickHouse::start(busy_opts).await.expect("start busy"));
+    let entered = Arc::new(Notify::new());
+    let registered = entered.notified();
+    tokio::pin!(registered);
+    registered.as_mut().enable();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::Registry::default().with(SpanEnterNotify(Arc::clone(&entered))),
+    );
     let ch_holder = Arc::clone(&ch_busy);
     let ctx_holder = ctx.clone();
-    let holder = tokio::spawn(async move {
-        ch_holder
-            .query("busy_sleep", "SELECT sleep(1) AS id")
-            .fetch_one::<u8>(&ctx_holder)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let holder = tokio::spawn(
+        async move {
+            ch_holder
+                .query("busy_sleep", "SELECT sleep(1) AS id")
+                .fetch_one::<u8>(&ctx_holder)
+                .await
+        }
+        .with_subscriber(dispatch),
+    );
+    tokio::time::timeout(Duration::from_secs(5), registered)
+        .await
+        .expect("holder entered clickhouse span");
     assert_eq!(
         ch_busy
             .query("shed_read", "SELECT 1 AS id")

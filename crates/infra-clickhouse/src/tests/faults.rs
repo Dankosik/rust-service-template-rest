@@ -11,7 +11,7 @@ use serde::Serialize;
 use tls_test_support::TlsMaterial;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::{
     SampleRow, base_options, rbwnat_describe_id_column, rbwnat_u64_rows, spawn_http_server,
@@ -24,9 +24,13 @@ use crate::{
 
 async fn spawn_read_fault_server(
     captured_uris: Arc<Mutex<Vec<String>>>,
+    stall_entered: Arc<Notify>,
+    stall_release: Arc<Notify>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     spawn_http_server(move |req: Request<Incoming>| {
         let uris_req = Arc::clone(&captured_uris);
+        let entered = Arc::clone(&stall_entered);
+        let release = Arc::clone(&stall_release);
         async move {
             uris_req.lock().await.push(req.uri().to_string());
             let body = req.into_body().collect().await.expect("body").to_bytes();
@@ -43,6 +47,11 @@ async fn spawn_read_fault_server(
                     Bytes::from_static(b"Code: 47. DB::Exception: Unknown column"),
                 ),
                 () if s.contains("bad_decode") => (StatusCode::OK, rbwnat_u64_rows("wrong", &[1])),
+                () if s.contains("stall_hold") => {
+                    entered.notify_waiters();
+                    release.notified().await;
+                    (StatusCode::OK, rbwnat_u64_rows("id", &[7]))
+                }
                 () if s.contains("stall") => {
                     std::future::pending::<()>().await;
                     unreachable!()
@@ -61,7 +70,12 @@ async fn spawn_read_fault_server(
 #[tokio::test]
 async fn read_pre_dispatch_limits_and_cardinality() {
     let captured_uris = Arc::new(Mutex::new(Vec::new()));
-    let (addr, srv) = spawn_read_fault_server(Arc::clone(&captured_uris)).await;
+    let (addr, srv) = spawn_read_fault_server(
+        Arc::clone(&captured_uris),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+    )
+    .await;
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.max_concurrency = 1;
@@ -201,11 +215,18 @@ async fn assert_server_settings_and_closed_read(
 #[tokio::test]
 async fn read_precedence_bytes_cap_busy_and_server_settings() {
     let captured_uris = Arc::new(Mutex::new(Vec::new()));
-    let (addr, srv) = spawn_read_fault_server(Arc::clone(&captured_uris)).await;
+    let stall_entered = Arc::new(Notify::new());
+    let stall_release = Arc::new(Notify::new());
+    let (addr, srv) = spawn_read_fault_server(
+        Arc::clone(&captured_uris),
+        Arc::clone(&stall_entered),
+        Arc::clone(&stall_release),
+    )
+    .await;
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.max_concurrency = 1;
-    opts.query_timeout = Duration::from_millis(80);
+    opts.query_timeout = Duration::from_secs(2);
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
 
@@ -235,22 +256,26 @@ async fn read_precedence_bytes_cap_busy_and_server_settings() {
         Err(QueryError::Unavailable)
     );
 
+    let entered = stall_entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
     let ch_busy = ch.clone();
     let ctx_busy = ctx.clone();
     let holder = tokio::spawn(async move {
         ch_busy
-            .query("holder", "SELECT stall")
+            .query("holder", "SELECT stall_hold")
             .fetch_one::<SampleRow>(&ctx_busy)
             .await
     });
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    entered.await;
     assert_eq!(
         ch.query("shed", "SELECT 1")
             .fetch_one::<SampleRow>(&ctx)
             .await,
         Err(QueryError::Busy)
     );
-    let _ = holder.await;
+    stall_release.notify_waiters();
+    assert_eq!(holder.await.expect("join holder"), Ok(SampleRow { id: 7 }));
 
     let raw_bytes = rbwnat_u64_rows("id", &[7]);
     assert_eq!(
@@ -732,4 +757,164 @@ async fn response_phase_tls_fault_is_outcome_unknown() {
         CloseOutcome::Complete
     );
     mtls_srv.abort();
+}
+
+async fn spawn_stallable_drain_server() -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    Arc<Notify>,
+    Arc<Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+
+    let reqs_srv = Arc::clone(&requests);
+    let entered_srv = Arc::clone(&entered);
+    let release_srv = Arc::clone(&release);
+    let (addr, srv) = spawn_http_server(move |req: Request<Incoming>| {
+        let reqs = Arc::clone(&reqs_srv);
+        let entered = Arc::clone(&entered_srv);
+        let release = Arc::clone(&release_srv);
+        async move {
+            reqs.fetch_add(1, Ordering::SeqCst);
+            let uri = req.uri().to_string();
+            let body = req.into_body().collect().await.expect("body").to_bytes();
+            let body_str = String::from_utf8_lossy(&body);
+            if uri.contains("DESCRIBE") || body_str.contains("DESCRIBE") {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(rbwnat_describe_id_column()))
+                    .expect("resp");
+            }
+            if uri.contains("stall") || body_str.contains("stall") {
+                entered.notify_one();
+                release.notified().await;
+            }
+            let resp = if uri.contains("INSERT") || body_str.contains("INSERT") {
+                Bytes::new()
+            } else {
+                rbwnat_u64_rows("id", &[7])
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Full::new(resp))
+                .expect("resp")
+        }
+    })
+    .await;
+
+    (addr, requests, entered, release, srv)
+}
+
+#[tokio::test]
+async fn close_drains_in_flight_operations_and_times_out() {
+    let (addr, requests, entered, release, srv) = spawn_stallable_drain_server().await;
+
+    let ch = ClickHouse::start(base_options(format!("http://{addr}")))
+        .await
+        .expect("start");
+    let ctx = OperationContext::with_timeout(Duration::from_secs(5));
+
+    let ch_q = ch.clone();
+    let ctx_q = ctx.clone();
+    let q_entered = entered.notified();
+    tokio::pin!(q_entered);
+    q_entered.as_mut().enable();
+    let q_task = tokio::spawn(async move {
+        ch_q.query("drain_q", "SELECT stall")
+            .fetch_one::<SampleRow>(&ctx_q)
+            .await
+    });
+    q_entered.await;
+
+    let ch_i = ch.clone();
+    let ctx_i = ctx.clone();
+    let i_entered = entered.notified();
+    tokio::pin!(i_entered);
+    i_entered.as_mut().enable();
+    let i_task = tokio::spawn(async move {
+        ch_i.insert_batch(
+            &ctx_i,
+            "drain_i",
+            "events_stall",
+            &[SampleRow { id: 1 }],
+            BatchInsertOptions::new(),
+        )
+        .await
+    });
+    i_entered.await;
+
+    assert_eq!(
+        ch.close(Duration::from_millis(20)).await,
+        CloseOutcome::TimedOut
+    );
+    let requests_at_close = requests.load(Ordering::SeqCst);
+    assert_eq!(
+        ch.query("post_close_q", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await,
+        Err(QueryError::Unavailable)
+    );
+    assert_eq!(
+        ch.insert_batch(
+            &ctx,
+            "post_close_i",
+            "events",
+            &[SampleRow { id: 2 }],
+            BatchInsertOptions::new(),
+        )
+        .await,
+        Err(InsertError::NotApplied(InsertFailure::Unavailable))
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), requests_at_close);
+
+    let ch_close = ch.clone();
+    let close_task = tokio::spawn(async move { ch_close.close(Duration::from_secs(5)).await });
+    tokio::task::yield_now().await;
+    assert!(!close_task.is_finished());
+
+    release.notify_waiters();
+    assert_eq!(q_task.await.expect("join q"), Ok(SampleRow { id: 7 }));
+    assert_eq!(i_task.await.expect("join i"), Ok(InsertReport { rows: 1 }));
+    assert_eq!(
+        close_task.await.expect("join close"),
+        CloseOutcome::Complete
+    );
+    srv.abort();
+}
+
+#[tokio::test]
+async fn close_token_barrier_rejects_post_close_tasks_without_io() {
+    let (addr, requests, _entered, _release, srv) = spawn_stallable_drain_server().await;
+    let ctx = OperationContext::with_timeout(Duration::from_secs(5));
+    let ch = ClickHouse::start(base_options(format!("http://{addr}")))
+        .await
+        .expect("start barrier");
+
+    ch.inner.shared.tasks.close();
+    assert_eq!(
+        ch.query("barrier_q", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await,
+        Err(QueryError::Unavailable)
+    );
+    assert_eq!(
+        ch.insert_batch(
+            &ctx,
+            "barrier_i",
+            "events",
+            &[SampleRow { id: 3 }],
+            BatchInsertOptions::new(),
+        )
+        .await,
+        Err(InsertError::NotApplied(InsertFailure::Unavailable))
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    srv.abort();
 }

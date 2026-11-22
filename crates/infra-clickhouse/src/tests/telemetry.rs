@@ -7,9 +7,9 @@ use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Bytes, Incoming};
 use observe_test_support::{EventCapture, SpanCapture};
-use opentelemetry::trace::{SpanKind, TracerProvider as _};
+use opentelemetry::trace::{SpanKind, Status, TracerProvider as _};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use operation_context::OperationContext;
 use tokio::sync::{Mutex, Notify};
 use tracing_subscriber::filter::filter_fn;
@@ -271,15 +271,6 @@ async fn exercise_read_telemetry(
             ok_span.span_context.span_id()
         )
     );
-    assert!(
-        !ok_span
-            .attributes
-            .iter()
-            .any(|kv| kv.key.as_str() == "error.type")
-    );
-    assert!(ok_span.attributes.iter().any(|kv| {
-        kv.key.as_str() == "server.port" && kv.value.as_str() == srv.addr.port().to_string()
-    }));
 
     let bytes_after_ok = count_lines_with(
         &recorder.handle().render(),
@@ -318,12 +309,135 @@ async fn exercise_read_telemetry(
     );
 }
 
+fn otel_attr(span: &SpanData, key: &str) -> Option<String> {
+    span.attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == key)
+        .map(|kv| kv.value.as_str().into_owned())
+}
+
+fn assert_span_contracts(
+    finished: &[SpanData],
+    captured: &[observe_test_support::CapturedSpan],
+    expected_address: &str,
+    expected_port: &str,
+) {
+    let expected = [
+        ("SELECT", "read_ok_summary", None),
+        ("SELECT", "too_many_summary", Some("too_many_rows")),
+        ("SELECT", "raw_err_summary", Some("rejected")),
+        ("INSERT", "batch_ok", None),
+        ("SELECT", "drop_read", Some("cancelled")),
+        ("INSERT", "drop_pre_dispatch", Some("cancelled")),
+        ("INSERT", "drop_post_dispatch", Some("outcome_unknown")),
+        ("SELECT", "no_tp_q", None),
+    ];
+    assert_eq!(finished.len(), expected.len());
+    assert_eq!(captured.len(), expected.len());
+
+    for (db_op, summary, expected_error) in expected {
+        let mut otel_matches = finished
+            .iter()
+            .filter(|s| otel_attr(s, "db.query.summary").as_deref() == Some(summary));
+        let otel = otel_matches.next().unwrap_or_else(|| {
+            panic!("missing exported OTel span for summary {summary}");
+        });
+        assert!(
+            otel_matches.next().is_none(),
+            "duplicate OTel span for {summary}"
+        );
+        assert_eq!(otel.span_kind, SpanKind::Client, "{summary}");
+        assert_eq!(otel.name.as_ref(), format!("{db_op} {summary}"));
+        assert_eq!(
+            otel_attr(otel, "db.system.name").as_deref(),
+            Some("clickhouse"),
+            "{summary}"
+        );
+        assert_eq!(
+            otel_attr(otel, "db.operation.name").as_deref(),
+            Some(db_op),
+            "{summary}"
+        );
+        assert_eq!(
+            otel_attr(otel, "db.query.summary").as_deref(),
+            Some(summary),
+            "{summary}"
+        );
+        assert_eq!(
+            otel_attr(otel, "db.namespace").as_deref(),
+            Some("app"),
+            "{summary}"
+        );
+        assert_eq!(
+            otel_attr(otel, "server.address").as_deref(),
+            Some(expected_address),
+            "{summary}"
+        );
+        assert_eq!(
+            otel_attr(otel, "server.port").as_deref(),
+            Some(expected_port),
+            "{summary}"
+        );
+
+        let mut cap_matches = captured
+            .iter()
+            .filter(|s| s.unquoted("db.query.summary") == Some(summary));
+        let cap = cap_matches.next().unwrap_or_else(|| {
+            panic!("missing captured tracing span for summary {summary}");
+        });
+        assert!(
+            cap_matches.next().is_none(),
+            "duplicate captured span for {summary}"
+        );
+        assert_eq!(
+            cap.unquoted("db.system.name"),
+            Some("clickhouse"),
+            "{summary}"
+        );
+        assert_eq!(cap.unquoted("db.operation.name"), Some(db_op), "{summary}");
+        assert_eq!(cap.unquoted("db.query.summary"), Some(summary), "{summary}");
+        assert_eq!(cap.unquoted("db.namespace"), Some("app"), "{summary}");
+        assert_eq!(
+            cap.unquoted("server.address"),
+            Some(expected_address),
+            "{summary}"
+        );
+        assert_eq!(cap.field("server.port"), Some(expected_port), "{summary}");
+
+        if let Some(error_type) = expected_error {
+            assert_eq!(
+                otel_attr(otel, "error.type").as_deref(),
+                Some(error_type),
+                "{summary}"
+            );
+            assert!(
+                matches!(otel.status, Status::Error { .. }),
+                "{summary}: expected OTel Status::Error, got {:?}",
+                otel.status
+            );
+            assert_eq!(cap.unquoted("error.type"), Some(error_type), "{summary}");
+            assert_eq!(cap.unquoted("otel.status_code"), Some("ERROR"), "{summary}");
+        } else {
+            assert_eq!(otel_attr(otel, "error.type"), None, "{summary}");
+            assert_eq!(otel.status, Status::Unset, "{summary}");
+            assert_eq!(cap.unquoted("error.type"), None, "{summary}");
+            assert_eq!(cap.unquoted("otel.status_code"), None, "{summary}");
+        }
+    }
+}
+
 fn assert_scrape_and_redaction(
     recorder: &metrics_exporter_prometheus::PrometheusRecorder,
     exporter: &InMemorySpanExporter,
     spans: &SpanCapture,
     events: &EventCapture,
+    expected_address: &str,
+    expected_port: &str,
 ) {
+    let finished = exporter.get_finished_spans().expect("all spans");
+    let captured_spans = spans.snapshot();
+    assert_span_contracts(&finished, &captured_spans, expected_address, expected_port);
+
     let scrape = recorder.handle().render();
     assert_eq!(
         gauge_value(&scrape, "clickhouse_operations_in_flight"),
@@ -333,22 +447,27 @@ fn assert_scrape_and_redaction(
         count_lines_with(&scrape, "clickhouse_insert_rows_total", &["mode=\"batch\""]),
         2
     );
-    assert_eq!(
-        count_lines_with(
-            &scrape,
-            "clickhouse_operation_duration_seconds_count",
-            &["operation=\"insert_batch\"", "outcome=\"cancelled\""]
-        ),
-        1
-    );
-    assert_eq!(
-        count_lines_with(
-            &scrape,
-            "clickhouse_operation_duration_seconds_count",
-            &["operation=\"insert_batch\"", "outcome=\"outcome_unknown\""]
-        ),
-        1
-    );
+    for (operation, outcome, expected_count) in [
+        ("fetch_one", "ok", 2),
+        ("fetch_one", "too_many_rows", 1),
+        ("fetch_one", "rejected", 1),
+        ("fetch_one", "cancelled", 1),
+        ("insert_batch", "ok", 1),
+        ("insert_batch", "cancelled", 1),
+        ("insert_batch", "outcome_unknown", 1),
+    ] {
+        let op_label = format!("operation=\"{operation}\"");
+        let outcome_label = format!("outcome=\"{outcome}\"");
+        assert_eq!(
+            count_lines_with(
+                &scrape,
+                "clickhouse_operation_duration_seconds_count",
+                &[&op_label, &outcome_label]
+            ),
+            expected_count,
+            "duration count mismatch for ({operation}, {outcome}) in:\n{scrape}"
+        );
+    }
     assert_eq!(
         count_lines_with(
             &scrape,
@@ -357,11 +476,17 @@ fn assert_scrape_and_redaction(
         ),
         1
     );
+    assert_eq!(
+        count_lines_with(
+            &scrape,
+            "clickhouse_admission_refused_total",
+            &["operation=\"insert_batch\""]
+        ),
+        1
+    );
 
     let dump = format!(
-        "{scrape}\n{:?}\n{:?}\n{:?}",
-        exporter.get_finished_spans().expect("all spans"),
-        spans.snapshot(),
+        "{scrape}\n{finished:?}\n{captured_spans:?}\n{:?}",
         events.snapshot()
     );
     for forbidden in [
@@ -436,7 +561,16 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
         .expect("no tp ok");
     assert_eq!(srv.traceparents.lock().await[before_tp], None);
 
-    assert_scrape_and_redaction(&recorder, &exporter, &spans, &events);
+    let expected_address = srv.addr.ip().to_string();
+    let expected_port = srv.addr.port().to_string();
+    assert_scrape_and_redaction(
+        &recorder,
+        &exporter,
+        &spans,
+        &events,
+        &expected_address,
+        &expected_port,
+    );
 
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,

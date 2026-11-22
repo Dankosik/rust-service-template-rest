@@ -7,6 +7,12 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use secrecy::{ExposeSecret as _, SecretString};
+use shared_rules::clickhouse::{
+    MAX_CONCURRENCY_CEILING, MAX_MEMORY_USAGE, MAX_RESULT_BYTES, MAX_RESULT_ROWS_CEILING,
+    MAX_TIMEOUT, MIN_MEMORY_USAGE, MIN_RESULT_BYTES, MIN_TIMEOUT, strip_root_trailing_slash,
+    trim_path_prefix, validate_url_lexical,
+};
+use shared_rules::rfc9110::has_ascii_control;
 use url::Url;
 use zeroize::{Zeroize as _, Zeroizing};
 
@@ -27,15 +33,6 @@ const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 const MAX_PEM_CHAIN_BYTES: usize = 1024 * 1024;
 const MAX_PRIVATE_KEY_BYTES: usize = 64 * 1024;
 
-const MIN_TIMEOUT: Duration = Duration::from_millis(10);
-const MAX_TIMEOUT: Duration = Duration::from_mins(5);
-const MAX_CONCURRENCY_CEILING: usize = 1024;
-const MAX_RESULT_ROWS_CEILING: u64 = 10_000_000;
-const MIN_RESULT_BYTES: usize = 64 * 1024;
-const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
-const MIN_MEMORY_USAGE: u64 = 16 * 1024 * 1024;
-const MAX_MEMORY_USAGE: u64 = 64 * 1024 * 1024 * 1024;
-
 pub(crate) struct Admitted {
     pub(crate) client: clickhouse::Client,
     pub(crate) endpoint: EndpointMetadata,
@@ -52,11 +49,12 @@ pub(crate) struct Admitted {
     pub(crate) propagate_trace_context: bool,
 }
 
-struct AdmittedUrl {
-    normalized: String,
-    is_https: bool,
-    host: String,
-    port: u16,
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct AdmittedUrl {
+    pub(crate) normalized: String,
+    pub(crate) is_https: bool,
+    pub(crate) host: String,
+    pub(crate) port: u16,
 }
 
 struct AdmittedCredentials {
@@ -161,65 +159,37 @@ fn validate_limits(options: &ClickHouseOptions) -> Result<(), StartErrorKind> {
     Ok(())
 }
 
-fn validate_url(raw: &str, allow_plaintext: bool) -> Result<AdmittedUrl, StartErrorKind> {
-    if shared_rules::uri::has_whitespace_or_control(raw)
-        || shared_rules::uri::authority_has_userinfo(raw)
-        || raw.contains('?')
-        || raw.contains('#')
-    {
-        return Err(StartErrorKind::InvalidUrl);
-    }
-    let parsed = Url::parse(raw).map_err(|_| StartErrorKind::InvalidUrl)?;
+pub(crate) fn validate_url(
+    raw: &str,
+    allow_plaintext: bool,
+) -> Result<AdmittedUrl, StartErrorKind> {
+    validate_url_lexical(raw).map_err(|_| StartErrorKind::InvalidUrl)?;
+    let mut parsed = Url::parse(raw).map_err(|_| StartErrorKind::InvalidUrl)?;
     let is_https = match parsed.scheme() {
         "https" => true,
         "http" if allow_plaintext => false,
         "http" => return Err(StartErrorKind::PlaintextRefused),
         _ => return Err(StartErrorKind::InvalidUrl),
     };
-    if parsed.cannot_be_a_base() || parsed.host_str().is_none_or(str::is_empty) {
+    if parsed.cannot_be_a_base()
+        || parsed.host_str().is_none_or(str::is_empty)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return Err(StartErrorKind::InvalidUrl);
     }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(StartErrorKind::InvalidUrl);
-    }
-    let after_scheme = raw.split_once("://").map_or("", |(_, rest)| rest);
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    if authority.contains('@') {
-        return Err(StartErrorKind::InvalidUrl);
-    }
-    if let Some((_, raw_path)) = after_scheme.split_once('/') {
-        let path_with_slash = format!("/{raw_path}");
-        let trimmed = path_with_slash
-            .strip_suffix('/')
-            .unwrap_or(&path_with_slash);
-        if !trimmed.is_empty() {
-            if trimmed.contains("//") {
-                return Err(StartErrorKind::InvalidUrl);
-            }
-            for segment in trimmed.trim_start_matches('/').split('/') {
-                if segment.is_empty()
-                    || segment == "."
-                    || segment == ".."
-                    || segment.eq_ignore_ascii_case("%2e")
-                    || segment.eq_ignore_ascii_case("%2e%2e")
-                {
-                    return Err(StartErrorKind::InvalidUrl);
-                }
-            }
-        }
-    }
-    let mut normalized = parsed;
-    let clean_path = normalized.path().trim_end_matches('/').to_owned();
-    normalized.set_path(&clean_path);
-    let host = normalized
+    let clean_path = trim_path_prefix(parsed.path()).to_owned();
+    parsed.set_path(&clean_path);
+    let host = parsed
         .host_str()
         .ok_or(StartErrorKind::InvalidUrl)?
         .to_owned();
-    let port = normalized
+    let port = parsed
         .port_or_known_default()
         .ok_or(StartErrorKind::InvalidUrl)?;
+    let normalized = strip_root_trailing_slash(parsed.into(), &clean_path);
     Ok(AdmittedUrl {
-        normalized: normalized.into(),
+        normalized,
         is_https,
         host,
         port,
@@ -383,7 +353,7 @@ pub(crate) fn read_password_file(path: &Path) -> Result<Zeroizing<String>, Start
     let trimmed = Zeroizing::new(shared_rules::secret_file::value(std::mem::take(
         &mut *content,
     )));
-    if trimmed.is_empty() || trimmed.bytes().any(is_ascii_ctl) {
+    if trimmed.is_empty() || has_ascii_control(trimmed.as_bytes()) {
         return Err(StartErrorKind::PasswordFileEmpty);
     }
     Ok(trimmed)
@@ -433,19 +403,15 @@ fn read_secret_file(path: &Path, max_bytes: usize) -> io::Result<Zeroizing<Vec<u
 }
 
 fn validate_printable_non_blank(value: &str, err: StartErrorKind) -> Result<(), StartErrorKind> {
-    if value.trim().is_empty() || value.bytes().any(is_ascii_ctl) {
+    if value.trim().is_empty() || has_ascii_control(value.as_bytes()) {
         return Err(err);
     }
     Ok(())
 }
 
 fn validate_header_safe_non_empty(value: &str, err: StartErrorKind) -> Result<(), StartErrorKind> {
-    if value.is_empty() || value.bytes().any(is_ascii_ctl) {
+    if value.is_empty() || has_ascii_control(value.as_bytes()) {
         return Err(err);
     }
     Ok(())
-}
-
-const fn is_ascii_ctl(byte: u8) -> bool {
-    byte < 0x20 || byte == 0x7f
 }

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tls_test_support::TlsMaterial;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -769,19 +769,29 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
     }
 }
 
-async fn handle_raw_insert_capture_conn(
-    mut stream: TcpStream,
-    received_inserts: Arc<Mutex<Vec<Vec<u8>>>>,
-) {
+struct CaptureServerState {
+    describe_calls: AtomicUsize,
+    open_conns: AtomicUsize,
+    conns_closed: Notify,
+    received_inserts: Mutex<Vec<Vec<u8>>>,
+}
+
+struct CaptureConnGuard(Arc<CaptureServerState>);
+
+impl Drop for CaptureConnGuard {
+    fn drop(&mut self) {
+        if self.0.open_conns.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.conns_closed.notify_waiters();
+        }
+    }
+}
+
+async fn handle_raw_insert_capture_conn(mut stream: TcpStream, state: Arc<CaptureServerState>) {
+    let _conn_guard = CaptureConnGuard(Arc::clone(&state));
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let mut describe_handled = false;
-    loop {
-        let read_res =
-            tokio::time::timeout(Duration::from_millis(200), stream.read(&mut tmp)).await;
-        let Ok(Ok(n)) = read_res else {
-            break;
-        };
+    while let Ok(n) = stream.read(&mut tmp).await {
         if n == 0 {
             break;
         }
@@ -800,6 +810,7 @@ async fn handle_raw_insert_capture_conn(
                 })
                 .unwrap_or(0);
             if buf.len() >= pos + 4 + content_len {
+                state.describe_calls.fetch_add(1, Ordering::SeqCst);
                 let resp_body = rbwnat_describe_id_column();
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
@@ -814,7 +825,7 @@ async fn handle_raw_insert_capture_conn(
         }
     }
     if !buf.is_empty() {
-        received_inserts.lock().await.push(buf);
+        state.received_inserts.lock().await.push(buf);
     }
 }
 
@@ -834,14 +845,20 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
-    let received_inserts = Arc::new(Mutex::new(Vec::new()));
-    let received_srv = Arc::clone(&received_inserts);
+    let state = Arc::new(CaptureServerState {
+        describe_calls: AtomicUsize::new(0),
+        open_conns: AtomicUsize::new(0),
+        conns_closed: Notify::new(),
+        received_inserts: Mutex::new(Vec::new()),
+    });
+    let srv_state = Arc::clone(&state);
 
     let srv = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
+            srv_state.open_conns.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(handle_raw_insert_capture_conn(
                 stream,
-                Arc::clone(&received_srv),
+                Arc::clone(&srv_state),
             ));
         }
     });
@@ -867,8 +884,22 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
     );
     drop(ch);
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let inserts = received_inserts.lock().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let closed = state.conns_closed.notified();
+            tokio::pin!(closed);
+            closed.as_mut().enable();
+            if state.open_conns.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            closed.await;
+        }
+    })
+    .await
+    .expect("capture connections closed after dropping ClickHouse");
+
+    assert_eq!(state.describe_calls.load(Ordering::SeqCst), 1);
+    let inserts = state.received_inserts.lock().await;
     assert!(
         inserts.len() <= 1,
         "expected at most 1 INSERT HTTP connection, got {}",
@@ -877,8 +908,13 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
     for raw in inserts.iter() {
         let text = String::from_utf8_lossy(raw);
         let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
-            panic!("expected complete HTTP headers or empty stream, got: {text}");
+            panic!("expected complete HTTP headers, got: {text}");
         };
+        let head = String::from_utf8_lossy(&raw[..pos]);
+        assert!(
+            head.contains("INSERT"),
+            "expected INSERT request headers, got: {head}"
+        );
         let body = &raw[pos + 4..];
         assert!(
             body.is_empty(),

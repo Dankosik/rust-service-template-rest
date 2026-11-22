@@ -170,6 +170,9 @@ impl ClickHouse {
             return Err(InsertError::NotApplied(InsertFailure::Busy));
         };
         let _task_token = shared.tasks.token();
+        if shared.closing.load(Ordering::Acquire) || shared.tasks.is_closed() {
+            return Err(InsertError::NotApplied(InsertFailure::Unavailable));
+        }
 
         let mut guard =
             OperationGuard::start(&shared.metrics, operation, summary, &shared.endpoint);
@@ -312,7 +315,7 @@ fn validate_insert_inputs(
     if let Some(tok) = token
         && (tok.is_empty()
             || tok.len() > MAX_DEDUP_TOKEN_BYTES
-            || tok.bytes().any(|b| b < 0x20 || b == 0x7f))
+            || shared_rules::rfc9110::has_ascii_control(tok.as_bytes()))
     {
         return Err(InsertError::NotApplied(InsertFailure::InvalidInput));
     }
@@ -322,12 +325,10 @@ fn validate_insert_inputs(
 fn is_valid_table_name(table: &str) -> bool {
     !table.is_empty()
         && table.len() <= MAX_TABLE_BYTES
-        && !table.bytes().any(|b| {
-            b.is_ascii_whitespace()
-                || b < 0x20
-                || b == 0x7f
-                || matches!(b, b'.' | b'`' | b'\'' | b'"' | b';')
-        })
+        && !shared_rules::rfc9110::has_ascii_control(table.as_bytes())
+        && !table
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || matches!(b, b'.' | b'`' | b'\'' | b'"' | b';'))
 }
 
 pub(crate) const fn pre_dispatch_stop(stop: BoundedStop) -> InsertError {

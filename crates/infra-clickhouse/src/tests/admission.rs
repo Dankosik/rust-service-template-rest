@@ -20,6 +20,11 @@ async fn url_database_and_limits_admission_boundaries() {
         "https://127.0.0.1:8123/a/./b",
         "https://127.0.0.1:8123/a/../b",
         "https://127.0.0.1:8123/a/%2e%2e/b",
+        "https://127.0.0.1:8123/a/.%2e/b",
+        "https://127.0.0.1:8123/a/%2e./b",
+        "https://127.0.0.1:8123/a\\..\\b",
+        "https:///127.0.0.1:8443",
+        "https:/127.0.0.1:8443",
         "https://127.0.0.1:8123/a//b",
         "https://127.0.0.1:8123//",
         " https://127.0.0.1:8123",
@@ -80,6 +85,25 @@ async fn url_database_and_limits_admission_boundaries() {
     let ch = ClickHouse::start(min_boundary).await.expect("boundary ok");
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+
+    let root_norm =
+        crate::admission::validate_url("https://127.0.0.1:8443/", false).expect("root url ok");
+    assert_eq!(root_norm.normalized, "https://127.0.0.1:8443");
+    assert_eq!(root_norm.host, "127.0.0.1");
+    assert_eq!(root_norm.port, 8443);
+    assert!(root_norm.is_https);
+
+    let prefix_norm = crate::admission::validate_url("https://127.0.0.1:8443/prefix/", false)
+        .expect("prefix url ok");
+    assert_eq!(prefix_norm.normalized, "https://127.0.0.1:8443/prefix");
+
+    let ch_root = ClickHouse::start(base_options("http://127.0.0.1:8123/".to_owned()))
+        .await
+        .expect("root slash start ok");
+    assert_eq!(
+        ch_root.close(Duration::from_secs(1)).await,
         CloseOutcome::Complete
     );
 }

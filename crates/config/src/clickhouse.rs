@@ -5,6 +5,13 @@ use std::time::Duration;
 use bytesize::ByteSize;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
+use shared_rules::clickhouse::{
+    DEFAULT_HTTP_RESPONSE_BUFFER_BYTES, MAX_CONCURRENCY_CEILING, MAX_MEMORY_USAGE,
+    MAX_RESULT_BYTES, MAX_RESULT_ROWS_CEILING, MAX_TIMEOUT, MIN_MEMORY_USAGE, MIN_RESULT_BYTES,
+    MIN_TIMEOUT, UrlLexicalError, strip_root_trailing_slash, trim_path_prefix,
+    validate_url_lexical,
+};
+use shared_rules::rfc9110::has_ascii_control;
 use url::Url;
 
 use crate::app::local_development_only;
@@ -13,17 +20,6 @@ use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, int_range, missing, nonzero_usize_range,
     optional_pair, required,
 };
-
-const MIN_TIMEOUT: Duration = Duration::from_millis(10);
-const MAX_TIMEOUT: Duration = Duration::from_mins(5);
-const MAX_CONCURRENCY_CEILING: usize = 1024;
-const MAX_RESULT_ROWS_CEILING: u64 = 10_000_000;
-const MIN_RESULT_BYTES: usize = 64 * 1024;
-const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
-const DEFAULT_HTTP_RESPONSE_BUFFER_BYTES: NonZeroUsize =
-    NonZeroUsize::MIN.saturating_add(2 * 1024 * 1024 - 1);
-const MIN_MEMORY_USAGE: u64 = 16 * 1024 * 1024;
-const MAX_MEMORY_USAGE: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Where per-query execution, overflow, and memory budgets live.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -363,11 +359,17 @@ fn validate_url(
     v: &mut Violations,
 ) -> Result<(String, UrlScheme), Rejected> {
     let key = "clickhouse.url";
-    if shared_rules::uri::has_whitespace_or_control(raw) || raw.contains(['?', '#', '\\']) {
-        return Err(v.reject(ValidationError::new(
-            key,
-            "must be a valid http:// or https:// URL without whitespace, controls, query, fragment, or backslash",
-        )));
+    if let Err(err) = validate_url_lexical(raw) {
+        let reason = match err {
+            UrlLexicalError::ForbiddenCharacters => {
+                "must be a valid http:// or https:// URL without whitespace, controls, query, fragment, or backslash"
+            }
+            UrlLexicalError::MissingHost => "must include a valid host",
+            UrlLexicalError::UserinfoNotAllowed => "must not include userinfo",
+            UrlLexicalError::EmptyPathSegment => "path prefix must not contain empty segments",
+            UrlLexicalError::DotPathSegment => "path prefix must not contain empty or dot segments",
+        };
+        return Err(v.reject(ValidationError::new(key, reason)));
     }
     let Ok(mut parsed) = Url::parse(raw) else {
         return Err(v.reject(ValidationError::new(
@@ -390,62 +392,20 @@ fn validate_url(
             return Err(v.reject(ValidationError::new(key, "must use https:// or http://")));
         }
     };
-    let after_scheme = raw.split_once("://").map_or("", |(_, rest)| rest);
-    let authority = after_scheme.split('/').next().unwrap_or("");
-    if parsed.cannot_be_a_base()
-        || parsed.host_str().is_none_or(str::is_empty)
-        || after_scheme.starts_with('/')
-        || authority.is_empty()
-    {
+    if parsed.cannot_be_a_base() || parsed.host_str().is_none_or(str::is_empty) {
         return Err(v.reject(ValidationError::new(key, "must include a valid host")));
     }
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || shared_rules::uri::authority_has_userinfo(raw)
-    {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(v.reject(ValidationError::new(key, "must not include userinfo")));
     }
-    if let Some((_, raw_path)) = after_scheme.split_once('/') {
-        let path_with_slash = format!("/{raw_path}");
-        let trimmed = path_with_slash
-            .strip_suffix('/')
-            .unwrap_or(&path_with_slash);
-        if !trimmed.is_empty() {
-            if trimmed.contains("//") {
-                return Err(v.reject(ValidationError::new(
-                    key,
-                    "path prefix must not contain empty segments",
-                )));
-            }
-            for segment in trimmed.trim_start_matches('/').split('/') {
-                if segment.is_empty()
-                    || segment == "."
-                    || segment == ".."
-                    || segment.eq_ignore_ascii_case("%2e")
-                    || segment.eq_ignore_ascii_case("%2e%2e")
-                    || segment.eq_ignore_ascii_case(".%2e")
-                    || segment.eq_ignore_ascii_case("%2e.")
-                {
-                    return Err(v.reject(ValidationError::new(
-                        key,
-                        "path prefix must not contain empty or dot segments",
-                    )));
-                }
-            }
-        }
-    }
-    let clean_path = parsed.path().trim_end_matches('/').to_owned();
+    let clean_path = trim_path_prefix(parsed.path()).to_owned();
     parsed.set_path(&clean_path);
-    let mut normalized: String = parsed.into();
-    if clean_path.is_empty() && normalized.ends_with('/') {
-        normalized.pop();
-    }
+    let normalized = strip_root_trailing_slash(parsed.into(), &clean_path);
     Ok((normalized, scheme))
 }
 
 fn header_safe(key: &str, value: &str) -> Result<(), ValidationError> {
-    // RFC 9110 §5.5
-    if value.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+    if has_ascii_control(value.as_bytes()) {
         return Err(ValidationError::new(
             key,
             "must not contain ASCII control characters",
