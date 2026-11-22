@@ -41,7 +41,7 @@ impl Pki {
         std::fs::write(&path, pem).expect("write a PEM file");
         TrustFile {
             scope,
-            variable,
+            name: variable,
             path,
         }
     }
@@ -49,7 +49,7 @@ impl Pki {
     fn certificate_file(&self) -> TrustFile {
         self.file(
             EnvScope::Common,
-            CERTIFICATE_VARS[1],
+            CERTIFICATE_VARS[1].1,
             "ca.pem",
             &self.issuer.pem(),
         )
@@ -63,7 +63,7 @@ impl Pki {
         if bundled {
             let certificate = self.file(
                 EnvScope::Common,
-                CLIENT_CERTIFICATE_VARS[1],
+                CLIENT_CERTIFICATE_VARS[1].1,
                 "client-bundle.pem",
                 &format!("{}\n{}", certificate.pem(), key.serialize_pem()),
             );
@@ -78,7 +78,7 @@ impl Pki {
             };
             let key = TrustFile {
                 scope: EnvScope::Common,
-                variable: CLIENT_KEY_VARS[1],
+                name: CLIENT_KEY_VARS[1].1,
                 path: certificate.path.clone(),
             };
             return (certificate, key);
@@ -86,13 +86,13 @@ impl Pki {
         (
             self.file(
                 EnvScope::Common,
-                CLIENT_CERTIFICATE_VARS[1],
+                CLIENT_CERTIFICATE_VARS[1].1,
                 "client.pem",
                 &certificate.pem(),
             ),
             self.file(
                 EnvScope::Common,
-                CLIENT_KEY_VARS[1],
+                CLIENT_KEY_VARS[1].1,
                 "client.key",
                 &key.serialize_pem(),
             ),
@@ -134,11 +134,11 @@ impl Pki {
 }
 
 fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
-    span_exporter(
+    build_span_exporter(
         &format!("https://{}/v1/traces", collector.addr),
         HashMap::new(),
         trust,
-        export_timeout(&|_: &str| None),
+        export_timeout_from_env(&|_: &str| None),
         None,
     )
     .expect("the exporter builds")
@@ -236,7 +236,7 @@ fn admitted_credentials_reach_only_the_selected_tls_collector() {
         child.args(["--exact", "traces::tests::delivery::tls::admitted_credentials_reach_only_the_selected_tls_collector", "--nocapture"])
             .env_clear()
             .env(CHILD, mode)
-            .env(CERTIFICATE_VARS[0], &ca.path);
+            .env(CERTIFICATE_VARS[0].1, &ca.path);
         match mode {
             "typed" => {
                 child.env(ENDPOINT, &endpoint);

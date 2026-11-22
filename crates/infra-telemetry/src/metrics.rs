@@ -25,6 +25,13 @@ macro_rules! static_metric_key {
 
 pub(crate) use static_metric_key;
 
+pub(crate) fn static_counter(
+    key: &'static metrics::Key,
+    metadata: &'static metrics::Metadata<'static>,
+) -> metrics::Counter {
+    metrics::with_recorder(|recorder| recorder.register_counter(key, metadata))
+}
+
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -56,7 +63,12 @@ fn parse_memory_limit(contents: &str) -> Option<u64> {
         .filter(|bytes| *bytes < CGROUP_V1_UNLIMITED_FLOOR)
 }
 
-fn publish_memory_limit() {
+fn describe_and_publish_memory_limit() {
+    metrics::describe_gauge!(
+        MEMORY_LIMIT_METRIC,
+        metrics::Unit::Bytes,
+        "Memory limit of the control group the process started in; absent when the group has no limit."
+    );
     if let Some(limit) = cgroup_memory_limit() {
         #[expect(
             clippy::cast_precision_loss,
@@ -176,12 +188,7 @@ impl Metrics {
         crate::logging::describe_metrics();
         crate::logging::publish_observations();
         Progress::describe_and_initialize();
-        metrics::describe_gauge!(
-            MEMORY_LIMIT_METRIC,
-            metrics::Unit::Bytes,
-            "Memory limit of the control group the process started in; absent when the group has no limit."
-        );
-        publish_memory_limit();
+        describe_and_publish_memory_limit();
         Ok(Self {
             handle,
             process,
@@ -247,6 +254,33 @@ pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     let _ = cancel.run_until_cancelled(reporter).await;
 }
 
+const READY_METRIC: &str = "readiness_ready";
+
+fn append_readiness_gauge(body: &mut String, labels: &LabelSet, ready: bool) {
+    static READY_PREFIX: LazyLock<String> = LazyLock::new(|| {
+        let mut prefix = String::new();
+        formatting::write_help_line(
+            &mut prefix,
+            READY_METRIC,
+            None,
+            None,
+            "1 if ready at scrape time, 0 otherwise.",
+        );
+        formatting::write_type_line(&mut prefix, READY_METRIC, None, None, "gauge");
+        prefix
+    });
+    body.push_str(&READY_PREFIX);
+    formatting::write_metric_line(
+        body,
+        READY_METRIC,
+        None,
+        labels,
+        None::<(&str, &str)>,
+        u8::from(ready),
+        None,
+    );
+}
+
 #[expect(
     clippy::disallowed_methods,
     reason = "the private Prometheus listener is outside the application OpenAPI contract"
@@ -255,35 +289,13 @@ pub fn diagnostics_router(
     metrics: Metrics,
     is_ready: impl Fn() -> bool + Clone + Send + Sync + 'static,
 ) -> Router {
-    const READY: &str = "readiness_ready";
-    static READY_PREFIX: LazyLock<String> = LazyLock::new(|| {
-        let mut prefix = String::new();
-        formatting::write_help_line(
-            &mut prefix,
-            READY,
-            None,
-            None,
-            "1 if ready at scrape time, 0 otherwise.",
-        );
-        formatting::write_type_line(&mut prefix, READY, None, None, "gauge");
-        prefix
-    });
-    let ready_prefix = READY_PREFIX.as_str();
-    let labels = LabelSet::from_key_and_global(&metrics::Key::from_static_name(READY), &[].into());
+    let ready_labels =
+        LabelSet::from_key_and_global(&metrics::Key::from_static_name(READY_METRIC), &[].into());
     Router::new().route(
         "/metrics",
         get(async move || {
             let mut body = metrics.render();
-            body.push_str(ready_prefix);
-            formatting::write_metric_line(
-                &mut body,
-                READY,
-                None,
-                &labels,
-                None::<(&str, &str)>,
-                u8::from(is_ready()),
-                None,
-            );
+            append_readiness_gauge(&mut body, &ready_labels, is_ready());
             (
                 [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
                 body,

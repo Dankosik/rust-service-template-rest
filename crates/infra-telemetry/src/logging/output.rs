@@ -22,11 +22,11 @@ static METRIC_METADATA: metrics::Metadata<'static> =
 static TOTALS: Counters = Counters::new();
 
 thread_local! {
-    static WRITER_CONTEXT: Cell<bool> = const { Cell::new(false) };
+    static ON_WRITER_THREAD: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn on_writer_thread() -> bool {
-    WRITER_CONTEXT.try_with(Cell::get).unwrap_or(false)
+    ON_WRITER_THREAD.try_with(Cell::get).unwrap_or(false)
 }
 
 pub(super) type Record = Vec<u8>;
@@ -196,17 +196,21 @@ pub(super) struct Output {
 impl Output {
     pub(super) fn submit(&self, record: Record) {
         let gate = self.shared.shutdown_gate.read();
-        match gate.is_some().then(|| self.sender.try_send(record)) {
-            Some(Ok(())) => {
+        if gate.is_none() {
+            self.record_drop(DropReason::Closed);
+            return;
+        }
+        match self.sender.try_send(record) {
+            Ok(()) => {
                 drop(gate);
                 if self.sender.len() >= DEEP_QUEUE_RECORDS {
                     self.worker_thread.unpark();
                 }
             }
-            Some(Err(crossbeam_channel::TrySendError::Full(_))) => {
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
                 self.record_drop(DropReason::QueueFull);
             }
-            None | Some(Err(crossbeam_channel::TrySendError::Disconnected(_))) => {
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                 self.record_drop(DropReason::Closed);
             }
         }
@@ -329,15 +333,15 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
     let worker = thread::Builder::new()
         .name("telemetry-writer".into())
         .spawn(move || {
-            WRITER_CONTEXT.set(true);
+            ON_WRITER_THREAD.set(true);
             let shared: &Shared = &worker_shared;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 write_records(writer, records_rx, &shutdown_rx, shared);
-            }));
-            if result.is_err() {
+            }))
+            .is_err()
+            {
                 worker_shared.record_sink_error(SinkOperation::Worker);
             }
-            drop(result);
             let _ = completion_tx.try_send(());
         })?;
     Ok((
@@ -399,54 +403,47 @@ fn write_records<W: Write>(
     shutdown: &crossbeam_channel::Receiver<()>,
     shared: &Shared,
 ) {
-    let mut dirty = false;
+    let mut unflushed = false;
     let mut batch = Batch::default();
     let mut carried: Option<Record> = None;
     let mut last_write: Option<Instant> = None;
     loop {
-        let first = if let Some(record) = carried.take() {
-            record
-        } else {
-            let record = match wait_for_record(&records, shutdown, dirty.then_some(FLUSH_INTERVAL))
-            {
-                NextRecord::Record(record) => record,
-                NextRecord::Flush => {
-                    flush_sink(&mut writer, shared);
-                    dirty = false;
-                    continue;
+        let first = match carried.take() {
+            Some(record) => record,
+            None => {
+                match wait_for_record(&records, shutdown, unflushed.then_some(FLUSH_INTERVAL)) {
+                    NextRecord::Record(record) => {
+                        if last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
+                            wait_for_backlog(&records, BATCH_WINDOW);
+                        }
+                        record
+                    }
+                    NextRecord::Flush => {
+                        flush_sink(&mut writer, shared);
+                        unflushed = false;
+                        continue;
+                    }
+                    NextRecord::Closed => break,
                 }
-                NextRecord::Closed => break,
-            };
-            if last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
-                gather(&records, BATCH_WINDOW);
             }
-            record
         };
-        batch.clear();
-        batch.push(&first);
-        while let Ok(record) = records.try_recv() {
-            if !batch.fits(record.len()) {
-                carried = Some(record);
-                break;
-            }
-            batch.push(&record);
-        }
+        carried = batch.refill(&first, &records);
         batch.write(&mut writer, shared);
         last_write = Some(Instant::now());
-        dirty = true;
+        unflushed = true;
     }
     flush_sink(&mut writer, shared);
     drop(records);
 }
 
-fn gather(records: &crossbeam_channel::Receiver<Record>, window: Duration) {
-    let until = Instant::now() + window;
+fn wait_for_backlog(records: &crossbeam_channel::Receiver<Record>, window: Duration) {
+    let window_end = Instant::now() + window;
     while records.len() < DEEP_QUEUE_RECORDS {
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let remaining = window_end.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             break;
         }
-        thread::park_timeout(left);
+        thread::park_timeout(remaining);
     }
 }
 
@@ -465,6 +462,22 @@ impl Batch {
 
     fn fits(&self, record_bytes: usize) -> bool {
         self.bytes.len() + record_bytes <= MAX_BATCH_BYTES
+    }
+
+    fn refill(
+        &mut self,
+        first: &[u8],
+        records: &crossbeam_channel::Receiver<Record>,
+    ) -> Option<Record> {
+        self.clear();
+        self.push(first);
+        while let Ok(record) = records.try_recv() {
+            if !self.fits(record.len()) {
+                return Some(record);
+            }
+            self.push(&record);
+        }
+        None
     }
 
     fn push(&mut self, record: &[u8]) {
@@ -563,14 +576,10 @@ pub(super) fn describe_metrics() {
 pub(super) fn publish() {
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
-        let key = reason.metric_key();
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METRIC_METADATA))
-            .absolute(dropped);
+        crate::metrics::static_counter(reason.metric_key(), &METRIC_METADATA).absolute(dropped);
     }
     for (operation, &errors) in &snapshot.sink_errors {
-        let key = operation.metric_key();
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METRIC_METADATA))
-            .absolute(errors);
+        crate::metrics::static_counter(operation.metric_key(), &METRIC_METADATA).absolute(errors);
     }
 }
 

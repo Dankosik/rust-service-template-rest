@@ -142,7 +142,7 @@ fn span_processor_uses_positive_sizes_and_preserves_valid_overrides() {
         (vec![(batch, "")], 16_384, 512, vec![]),
         (vec![(batch, "4096")], 16_384, 4096, vec![]),
     ] {
-        let (config, invalid) = batch_config(&env(&vars));
+        let (config, invalid) = batch_config_from_env(&env(&vars));
         let config = format!("{config:?}");
         assert!(config.contains(&format!("max_queue_size: {queue_size},")));
         assert!(config.contains(&format!("max_export_batch_size: {batch_size},")));
@@ -195,7 +195,7 @@ fn finished_exports_are_counted_by_outcome() {
         let export = |exporter: Fixed, timeout: Duration, spans: usize| {
             let _ = ObservedExporter {
                 inner: exporter,
-                timeout,
+                export_timeout: timeout,
                 drain: Arc::default(),
             }
             .export(Vec::from_fn(spans, |_| span()))

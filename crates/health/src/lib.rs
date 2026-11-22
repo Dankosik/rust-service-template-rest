@@ -228,7 +228,7 @@ impl RefreshPolicy {
 #[derive(Clone, Debug)]
 enum State {
     NotEvaluated,
-    Evaluated(Check),
+    Evaluated(Evaluation),
     Draining,
 }
 
@@ -247,6 +247,32 @@ struct RefreshLog {
     event: RefreshEvent,
 }
 
+impl RefreshLog {
+    fn emit(self, stale_after: Duration, failure_threshold: NonZeroU32) {
+        if let Some(age) = self.stale_age {
+            tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
+        }
+        match self.event {
+            RefreshEvent::Unchanged => {}
+            RefreshEvent::Recovered => tracing::info!("readiness_recovered"),
+            RefreshEvent::Lost(reason) => {
+                tracing::warn!(reason = %NotReady::from(reason), "readiness_lost");
+            }
+            RefreshEvent::AbsorbedFailure {
+                reason,
+                consecutive_failures,
+            } => {
+                tracing::warn!(
+                    reason = %NotReady::from(reason),
+                    consecutive_failures,
+                    failure_threshold,
+                    "readiness_check_failed"
+                );
+            }
+        }
+    }
+}
+
 impl State {
     fn apply_round(
         &mut self,
@@ -263,25 +289,17 @@ impl State {
         let stale_age = previous.and_then(|check| check.stale_age(now));
         let is_fresh = stale_age.is_none();
         let (verdict, event) = match (observed, previous.map(|check| &check.verdict)) {
-            (Ok(()), Some(Verdict::Ready { .. })) if is_fresh => (
-                Verdict::Ready {
-                    consecutive_failures: 0,
-                },
-                RefreshEvent::Unchanged,
-            ),
-            (Ok(()), _) => (
-                Verdict::Ready {
-                    consecutive_failures: 0,
-                },
-                RefreshEvent::Recovered,
-            ),
+            (Ok(()), Some(Verdict::Ready { .. })) if is_fresh => {
+                (Verdict::READY, RefreshEvent::Unchanged)
+            }
+            (Ok(()), _) => (Verdict::READY, RefreshEvent::Recovered),
             (
                 Err(reason),
                 Some(Verdict::Ready {
-                    consecutive_failures,
+                    consecutive_failures: previous_failures,
                 }),
             ) => {
-                let consecutive_failures = consecutive_failures.saturating_add(1);
+                let consecutive_failures = previous_failures.saturating_add(1);
                 if is_fresh && consecutive_failures < failure_threshold.get() {
                     (
                         Verdict::Ready {
@@ -303,24 +321,18 @@ impl State {
                 (Verdict::NotReady(reason), RefreshEvent::Unchanged)
             }
         };
-        *self = Self::Evaluated(Check::new(now, stale_after, verdict));
+        *self = Self::Evaluated(Evaluation::new(now, stale_after, verdict));
         Some(RefreshLog { stale_age, event })
     }
 
     fn readiness(&self) -> (bool, Option<Instant>) {
-        let Self::Evaluated(check) = self else {
-            return (false, None);
-        };
-        if !check.verdict.is_ready() {
-            return (false, None);
-        }
-        if check
-            .stale_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            (false, None)
-        } else {
-            (true, check.stale_at)
+        match self {
+            Self::Evaluated(check)
+                if check.verdict.is_ready() && check.stale_age(Instant::now()).is_none() =>
+            {
+                (true, check.stale_at)
+            }
+            _ => (false, None),
         }
     }
 
@@ -330,14 +342,8 @@ impl State {
             Self::NotEvaluated => return Err(NotReady::NotEvaluated),
             Self::Evaluated(check) => check,
         };
-        if let Some(deadline) = check.stale_at {
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(NotReady::Stale {
-                    age: now.duration_since(check.checked_at),
-                    stale_after,
-                });
-            }
+        if let Some(age) = check.stale_age(Instant::now()) {
+            return Err(NotReady::Stale { age, stale_after });
         }
         check.verdict.to_result()
     }
@@ -350,6 +356,10 @@ enum Verdict {
 }
 
 impl Verdict {
+    const READY: Self = Self::Ready {
+        consecutive_failures: 0,
+    };
+
     fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
@@ -363,17 +373,17 @@ impl Verdict {
 }
 
 #[derive(Clone, Debug)]
-struct Check {
+struct Evaluation {
     checked_at: Instant,
     stale_at: Option<Instant>,
     verdict: Verdict,
 }
 
-impl Check {
+impl Evaluation {
     fn new(checked_at: Instant, stale_after: Duration, verdict: Verdict) -> Self {
         Self {
             checked_at,
-            stale_at: stale_at(checked_at, stale_after),
+            stale_at: stale_deadline(checked_at, stale_after),
             verdict,
         }
     }
@@ -385,7 +395,7 @@ impl Check {
     }
 }
 
-fn stale_at(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
+fn stale_deadline(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
     checked_at
         .checked_add(stale_after)?
         .checked_add(Duration::from_nanos(1))
@@ -396,7 +406,7 @@ fn check_freshness(
     now: Instant,
     stale_after: Duration,
 ) -> Result<(), NotReady> {
-    if stale_at(checked_at, stale_after).is_some_and(|deadline| now >= deadline) {
+    if stale_deadline(checked_at, stale_after).is_some_and(|deadline| now >= deadline) {
         Err(NotReady::Stale {
             age: now.duration_since(checked_at),
             stale_after,
@@ -551,12 +561,10 @@ impl PreparedReadiness {
             if admission.is_err() {
                 return false;
             }
-            *state = State::Evaluated(Check::new(
+            *state = State::Evaluated(Evaluation::new(
                 self.checked_at,
                 stale_after,
-                Verdict::Ready {
-                    consecutive_failures: 0,
-                },
+                Verdict::READY,
             ));
             true
         });
@@ -582,29 +590,8 @@ impl ReadinessRefresher {
             log = state.apply_round(observed, Instant::now(), failure_threshold, stale_after);
             log.is_some()
         });
-        let Some(log) = log else { return };
-        if let Some(age) = log.stale_age {
-            tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
-        }
-        match log.event {
-            RefreshEvent::Unchanged => {}
-            RefreshEvent::Recovered => tracing::info!("readiness_recovered"),
-            RefreshEvent::Lost(reason) => {
-                let reason = NotReady::from(reason);
-                tracing::warn!(%reason, "readiness_lost");
-            }
-            RefreshEvent::AbsorbedFailure {
-                reason,
-                consecutive_failures,
-            } => {
-                let reason = NotReady::from(reason);
-                tracing::warn!(
-                    %reason,
-                    consecutive_failures,
-                    failure_threshold,
-                    "readiness_check_failed"
-                );
-            }
+        if let Some(log) = log {
+            log.emit(stale_after, failure_threshold);
         }
     }
 

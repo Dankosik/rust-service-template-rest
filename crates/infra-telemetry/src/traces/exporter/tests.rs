@@ -116,30 +116,33 @@ fn typed_collector_requires_each_client_identity_file_to_have_a_matching_standar
     );
     for (pairs, expected) in [
         (
-            &[(CLIENT_CERTIFICATE_VARS[0], identity)][..],
-            CLIENT_CERTIFICATE_VARS[0],
+            &[(CLIENT_CERTIFICATE_VARS[0].1, identity)][..],
+            CLIENT_CERTIFICATE_VARS[0].1,
         ),
-        (&[(CLIENT_KEY_VARS[1], identity)][..], CLIENT_KEY_VARS[1]),
         (
-            &[common, (CLIENT_CERTIFICATE_VARS[0], identity)][..],
-            CLIENT_CERTIFICATE_VARS[0],
+            &[(CLIENT_KEY_VARS[1].1, identity)][..],
+            CLIENT_KEY_VARS[1].1,
+        ),
+        (
+            &[common, (CLIENT_CERTIFICATE_VARS[0].1, identity)][..],
+            CLIENT_CERTIFICATE_VARS[0].1,
         ),
         (
             &[
                 common,
                 signal,
-                (CLIENT_CERTIFICATE_VARS[0], identity),
-                (CLIENT_KEY_VARS[1], identity),
+                (CLIENT_CERTIFICATE_VARS[0].1, identity),
+                (CLIENT_KEY_VARS[1].1, identity),
             ][..],
-            CLIENT_KEY_VARS[1],
+            CLIENT_KEY_VARS[1].1,
         ),
         (
             &[
                 (OTEL_EXPORTER_OTLP_ENDPOINT, "https://collector"),
                 (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, "https://other/traces"),
-                (CLIENT_KEY_VARS[1], identity),
+                (CLIENT_KEY_VARS[1].1, identity),
             ][..],
-            CLIENT_KEY_VARS[1],
+            CLIENT_KEY_VARS[1].1,
         ),
     ] {
         let error = tracer_provider_for_test(&options, pairs).unwrap_err();
@@ -208,12 +211,12 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
         CollectorTrust {
             certificate: Some(TrustFile {
                 scope: EnvScope::Signal,
-                variable: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+                name: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
                 path: "/traces/ca.pem".into(),
             }),
             client_certificate: Some(TrustFile {
                 scope: EnvScope::Common,
-                variable: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+                name: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
                 path: "/general/client.pem".into(),
             }),
             client_key: None,
@@ -277,6 +280,6 @@ fn compression_falls_back_and_remembers_only_ignored_variable_names() {
             vec![traces, general],
         ),
     ] {
-        assert_eq!(compression(&env(pairs)), (expected, ignored));
+        assert_eq!(compression_from_env(&env(pairs)), (expected, ignored));
     }
 }
