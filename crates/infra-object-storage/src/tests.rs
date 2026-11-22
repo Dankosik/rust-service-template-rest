@@ -864,6 +864,8 @@ async fn head_reports_size_above_the_limit() {
             .status(StatusCode::OK)
             .header("content-length", "2097152")
             .header("content-type", "application/json")
+            .header("last-modified", "Thu, 01 Jan 1970 00:00:01 GMT")
+            .header("etag", r#""head-tag""#)
             .body(Body::empty())
             .unwrap()
     })
@@ -871,6 +873,12 @@ async fn head_reports_size_above_the_limit() {
     let storage = stub.storage(|options| options.max_object_bytes = 4);
     let metadata = storage.head(&parent, &key()).await.unwrap();
     assert_eq!(metadata.size, 2_097_152);
+    assert_eq!(metadata.content_type.as_deref(), Some("application/json"));
+    assert_eq!(
+        metadata.last_modified,
+        Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+    );
+    assert_eq!(metadata.e_tag.as_deref(), Some(r#""head-tag""#));
 
     let stub = Stub::start(|_, _| {
         Response::builder()
@@ -918,6 +926,9 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
         storage.head(&parent, &key()).await,
         Err(ObjectStorageError::Busy)
     );
+    let busy = Err(MutationError::NotApplied(MutationFailure::Busy));
+    assert_eq!(put_json(&storage).await, busy);
+    assert_eq!(storage.delete(&parent, &key()).await, busy);
     assert_eq!(stub.seen().len(), 1);
     drop(held);
     let mut completed = storage.get(&parent, &key()).await.unwrap();
@@ -1131,30 +1142,50 @@ impl Records {
     }
 }
 
+const REQUEST_ID: &str = "4442587FB7D0A2F9";
+const EXTENDED_REQUEST_ID: &str =
+    "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
+
+fn request_identifier_response(index: usize) -> Response {
+    let mut response = match index {
+        3 => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-length", "8")
+            .body(Body::empty())
+            .unwrap(),
+        4 => xml_error(StatusCode::NOT_FOUND, "NoSuchKey"),
+        5 => ok_empty(),
+        6 => object(
+            b"download",
+            &[
+                ("x-amz-checksum-crc64nvme", "AAAAAAAAAAA="),
+                ("x-amz-checksum-type", "FULL_OBJECT"),
+            ],
+        ),
+        _ => xml_error(StatusCode::FORBIDDEN, "AccessDenied"),
+    };
+    let headers = response.headers_mut();
+    if index == 1 {
+        headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
+    } else {
+        headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
+        headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
+    }
+    response
+}
+
 #[tokio::test]
 async fn a_failure_reports_the_request_identifiers_of_its_response() {
-    const REQUEST_ID: &str = "4442587FB7D0A2F9";
-    const EXTENDED_REQUEST_ID: &str =
-        "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
     if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
         return;
     }
     let parent = OperationContext::unbounded();
-    let stub = Stub::start(|_, index| {
-        let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
-        let headers = response.headers_mut();
-        if index == 1 {
-            headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
-        } else {
-            headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
-            headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
-        }
-        response
-    })
-    .await;
+    let stub = Stub::start(|_, index| request_identifier_response(index)).await;
     let storage = stub.storage(|_| {});
     let records = Records::default();
     let _subscriber = records.install_default();
+    let request_id = format!(" aws.request_id={REQUEST_ID}");
+    let extended_id = format!(" aws.extended_request_id={EXTENDED_REQUEST_ID}");
 
     assert_eq!(
         storage.head(&parent, &key()).await,
@@ -1165,18 +1196,10 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
         panic!("one failure event: {failed:?}");
     };
     assert!(event.contains(" error.type=403"), "{event}");
-    assert!(
-        event.contains(&format!(" aws.request_id={REQUEST_ID}")),
-        "{event}"
-    );
-    assert!(
-        event.contains(&format!(" aws.extended_request_id={EXTENDED_REQUEST_ID}")),
-        "{event}"
-    );
+    assert!(event.contains(&request_id), "{event}");
+    assert!(event.contains(&extended_id), "{event}");
     assert_eq!(
-        records
-            .matching("span", &format!(" aws.request_id={REQUEST_ID}"))
-            .len(),
+        records.matching("span", &request_id).len(),
         1,
         "the span carries the identifier"
     );
@@ -1210,11 +1233,45 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     );
     let failed = records.matching("event", "object_storage_operation_failed");
     assert_eq!(failed.len(), 3);
-    assert!(
-        failed[2].contains(&format!(" aws.request_id={REQUEST_ID}")),
-        "{}",
-        failed[2]
+    assert!(failed[2].contains(&request_id), "{}", failed[2]);
+
+    assert_eq!(storage.head(&parent, &key()).await.unwrap().size, 8);
+    storage.delete(&parent, &key()).await.unwrap();
+    put_json(&storage).await.unwrap();
+    assert_eq!(
+        records
+            .matching("event", "object_storage_operation_failed")
+            .len(),
+        3
     );
+    for identifier in [&request_id, &extended_id] {
+        let spans = records.matching("span", identifier);
+        assert_eq!(spans.len(), 5, "{identifier}");
+    }
+    assert_eq!(
+        records.matching("span", " object_storage.outcome=ok").len(),
+        3
+    );
+
+    let download = storage.get(&parent, &key()).await.unwrap();
+    assert_eq!(
+        download.into_bytes(8).await,
+        Err(ObjectStorageError::Integrity)
+    );
+    assert_eq!(
+        storage.delete(&parent, &key()).await,
+        Err(MutationError::NotApplied(MutationFailure::Rejected))
+    );
+    let failed = records.matching("event", "object_storage_operation_failed");
+    assert_eq!(failed.len(), 5);
+    for (event, operation) in [(&failed[3], "get"), (&failed[4], "delete")] {
+        assert!(
+            event.contains(&format!(" object_storage.operation={operation}")),
+            "{event}"
+        );
+        assert!(event.contains(&request_id), "{event}");
+        assert!(event.contains(&extended_id), "{event}");
+    }
 }
 
 #[tokio::test]
@@ -1224,13 +1281,13 @@ async fn metrics_carry_only_operation_and_outcome() {
     let stub = Stub::start(|_, _| xml_error(StatusCode::NOT_FOUND, "NoSuchKey")).await;
     let storage = stub.storage(|_| {});
     metrics::with_local_recorder(&recorder, || {
-        let guard = storage.start_observation(crate::observe::Operation::Head);
+        let guard = storage.start_borrowed_observation(crate::observe::Operation::Head);
         drop(guard);
         storage
-            .start_observation(crate::observe::Operation::Head)
+            .start_borrowed_observation(crate::observe::Operation::Head)
             .succeed();
         storage
-            .start_observation(crate::observe::Operation::Head)
+            .start_borrowed_observation(crate::observe::Operation::Head)
             .fail(&Failure {
                 error: ObjectStorageError::NotFound,
                 error_type: "404".into(),
@@ -1238,7 +1295,7 @@ async fn metrics_carry_only_operation_and_outcome() {
             });
         let failure: Failure = LocalFailure::ContentLength.into();
         storage
-            .start_observation(crate::observe::Operation::Head)
+            .start_borrowed_observation(crate::observe::Operation::Head)
             .fail(&failure);
     });
     let rendered = handle.render();
@@ -1607,6 +1664,45 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     );
     assert_eq!(stub.seen().len(), 1);
     stub.stop().await;
+}
+
+#[tokio::test]
+async fn head_reuses_connection_across_distinct_remaining_deadlines() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut options = options(Provider::Local {
+        endpoint: format!("http://{}", listener.local_addr().unwrap()),
+        region: None,
+        credentials: default_access_key(),
+    });
+    options.operation_timeout = Duration::from_secs(4);
+    let storage = ObjectStorage::try_new(options).unwrap();
+
+    let server = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        for size in [4, 7] {
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            assert!(request.starts_with(b"HEAD "));
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\n\r\n");
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    };
+    let client = async {
+        for (remaining_ms, size) in [(1_900, 4), (1_100, 7)] {
+            let parent = OperationContext::with_timeout(Duration::from_millis(remaining_ms));
+            assert_eq!(storage.head(&parent, &key()).await.unwrap().size, size);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .expect("both HEAD calls should complete on the same socket");
 }
 
 #[derive(Debug)]

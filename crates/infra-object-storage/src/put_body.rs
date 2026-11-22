@@ -69,15 +69,10 @@ impl Payload {
         }
     }
 
-    pub(crate) async fn normalize_empty_stream(self) -> Result<Self, UploadFailure> {
-        let Self::Streamed {
-            len: 0,
-            mut stream,
-            mismatch,
-        } = self
-        else {
-            return Ok(self);
-        };
+    pub(crate) async fn verify_empty_stream(
+        mut stream: ByteStream,
+        mismatch: Arc<AtomicBool>,
+    ) -> Result<Self, UploadFailure> {
         match stream.next().await {
             Some(_) if mismatch.load(Ordering::Acquire) => Err(UploadFailure::Length),
             Some(_) => Err(UploadFailure::Body),

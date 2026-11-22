@@ -123,6 +123,7 @@ COPY --from=planner /src/vendor/async-nats /src/vendor/async-nats
 # template:end messaging:docker-messaging-vendor
 # template:begin object-storage:docker-object-storage-vendor
 # Excluded from the chef skeleton: cook the actual patched dependency.
+COPY --from=planner /src/vendor/aws-runtime /src/vendor/aws-runtime
 COPY --from=planner /src/vendor/aws-smithy-http-client /src/vendor/aws-smithy-http-client
 # template:end object-storage:docker-object-storage-vendor
 # Shared HTTP clients, including telemetry, use the same native connector.

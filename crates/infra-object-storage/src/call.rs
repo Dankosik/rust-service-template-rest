@@ -17,26 +17,30 @@ pub(crate) enum RetryPolicy {
     SingleAttempt,
 }
 
-pub(crate) fn call_policy(
+pub(crate) fn read_retry_config() -> RetryConfig {
+    RetryConfig::standard()
+        .with_max_attempts(MAX_ATTEMPTS)
+        .with_max_backoff(MAX_BACKOFF)
+}
+
+pub(crate) fn single_attempt_retry_config() -> RetryConfig {
+    RetryConfig::standard().with_max_attempts(1)
+}
+
+pub(crate) fn call_timeout(
     policy: RetryPolicy,
     remaining: Duration,
     ceiling: Duration,
-) -> (TimeoutConfig, RetryConfig) {
-    let (attempt_timeout, retry_config) = match policy {
-        RetryPolicy::Read => (
-            remaining.min(ceiling / READ_ATTEMPT_DIVISOR),
-            RetryConfig::standard()
-                .with_max_attempts(MAX_ATTEMPTS)
-                .with_max_backoff(MAX_BACKOFF),
-        ),
-        RetryPolicy::SingleAttempt => (remaining, RetryConfig::standard().with_max_attempts(1)),
+) -> TimeoutConfig {
+    let attempt_timeout = match policy {
+        RetryPolicy::Read => remaining.min(ceiling / READ_ATTEMPT_DIVISOR),
+        RetryPolicy::SingleAttempt => remaining,
     };
-    let timeout = TimeoutConfig::builder()
+    TimeoutConfig::builder()
         .operation_timeout(remaining)
         .operation_attempt_timeout(attempt_timeout)
         .connect_timeout(CONNECT_TIMEOUT.min(attempt_timeout))
-        .build();
-    (timeout, retry_config)
+        .build()
 }
 
 pub(crate) fn check_active<E: OutcomeError>(context: &BoundedContext) -> Result<(), Failure<E>> {

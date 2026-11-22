@@ -22,6 +22,7 @@ vendor/*
 !vendor/async-nats/
 # template:end messaging:dockerignore-messaging-vendor
 # template:begin object-storage:dockerignore-object-storage-vendor
+!vendor/aws-runtime/
 !vendor/aws-smithy-http-client/
 # template:end object-storage:dockerignore-object-storage-vendor
 !vendor/hyper-util/

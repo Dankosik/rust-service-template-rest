@@ -7,6 +7,8 @@ mod dns;
 pub mod pool;
 /// Proxy configuration
 pub mod proxy;
+#[cfg(all(test, feature = "rustls-aws-lc"))]
+mod request_connect_tests;
 mod timeout;
 /// TLS connector(s)
 pub mod tls;
@@ -150,6 +152,7 @@ pub struct ConnectorBuilder<Tls = TlsUnset> {
     enable_tcp_nodelay: bool,
     interface: Option<String>,
     proxy_config: Option<proxy::ProxyConfig>,
+    use_scoped_connect_timeout: bool,
     #[allow(unused)]
     tls: Tls,
 }
@@ -171,6 +174,7 @@ impl<Tls: Default> Default for ConnectorBuilder<Tls> {
             enable_tcp_nodelay: true,
             interface: None,
             proxy_config: None,
+            use_scoped_connect_timeout: false,
             tls: Tls::default(),
         }
     }
@@ -201,6 +205,7 @@ impl ConnectorBuilder<TlsUnset> {
             enable_tcp_nodelay: self.enable_tcp_nodelay,
             interface: self.interface,
             proxy_config: self.proxy_config,
+            use_scoped_connect_timeout: self.use_scoped_connect_timeout,
             pool_idle_timeout: self.pool_idle_timeout,
             pool_max_idle_per_host: self.pool_max_idle_per_host,
             tls: TlsProviderSelected {
@@ -311,6 +316,7 @@ impl<Any> ConnectorBuilder<Any> {
                 .as_ref()
                 .and_then(HttpConnectorSettings::connect_timeout),
         );
+        conn.set_use_scoped_connect_timeout(self.use_scoped_connect_timeout);
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         if let Some(interface) = &self.interface {
             conn.set_interface(interface);
@@ -662,6 +668,12 @@ where
                 .set_connection_retriever(move || extract_smithy_connection(&capture_connection));
         }
         let mut client = self.client.clone();
+        if let Some(RequestConnectTimeout { duration, sleep }) = request.extensions_mut().remove() {
+            client
+                .inner_mut()
+                .connector_mut()
+                .set_request_timeout(sleep, duration);
+        }
         use tower::Service;
         let fut = client.call(request);
         HttpConnectorFuture::new(async move {
@@ -769,21 +781,38 @@ pub(crate) fn error_chain<'a>(
     })
 }
 
-// TODO(https://github.com/awslabs/aws-sdk-rust/issues/1090): CacheKey must also include ptr equality to any
-// runtime components that are used—sleep_impl as a base (unless we prohibit overriding sleep impl)
-// If we decide to put a DnsResolver in RuntimeComponents, then we'll need to handle that as well.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+// https://github.com/awslabs/aws-sdk-rust/issues/1090
+#[derive(Debug, Eq, PartialEq, Hash)]
 struct CacheKey {
     connect_timeout: Option<Duration>,
     read_timeout: Option<Duration>,
 }
 
-impl From<&HttpConnectorSettings> for CacheKey {
-    fn from(value: &HttpConnectorSettings) -> Self {
-        Self {
-            connect_timeout: value.connect_timeout(),
-            read_timeout: value.read_timeout(),
-        }
+#[derive(Clone, Debug)]
+struct RequestConnectTimeout {
+    duration: Duration,
+    sleep: SharedAsyncSleep,
+}
+
+#[derive(Debug)]
+struct RequestTimedConnector {
+    connector: SharedHttpConnector,
+    duration: Duration,
+    sleep: Option<SharedAsyncSleep>,
+}
+
+impl HttpConnector for RequestTimedConnector {
+    fn call(&self, mut request: HttpRequest) -> HttpConnectorFuture {
+        let Some(sleep) = &self.sleep else {
+            return HttpConnectorFuture::ready(Err(ConnectorError::user(
+                "a sleep impl must be provided in order to have a connect timeout".into(),
+            )));
+        };
+        request.add_extension(RequestConnectTimeout {
+            duration: self.duration,
+            sleep: sleep.clone(),
+        });
+        self.connector.call(request)
     }
 }
 
@@ -791,6 +820,7 @@ struct HyperClient<F> {
     connector_cache: RwLock<HashMap<CacheKey, SharedHttpConnector>>,
     client_builder: hyper_util::client::legacy::Builder,
     connector_fn: F,
+    per_request_connect_timeout: bool,
 }
 
 impl<F> fmt::Debug for HyperClient<F> {
@@ -818,31 +848,55 @@ where
         settings: &HttpConnectorSettings,
         components: &RuntimeComponents,
     ) -> SharedHttpConnector {
-        let key = CacheKey::from(settings);
-        let mut connector = self.connector_cache.read().unwrap().get(&key).cloned();
-        if connector.is_none() {
+        let (connect_timeout, request_timeout) = if self.per_request_connect_timeout {
+            (None, settings.connect_timeout())
+        } else {
+            (settings.connect_timeout(), None)
+        };
+        let read_timeout = settings.read_timeout();
+        let key = CacheKey {
+            connect_timeout,
+            read_timeout,
+        };
+        let connector = self.connector_cache.read().unwrap().get(&key).cloned();
+        let connector = connector.unwrap_or_else(|| {
             let mut cache = self.connector_cache.write().unwrap();
-            // Short-circuit if another thread already wrote a connector to the cache for this key
-            if !cache.contains_key(&key) {
-                let start = components.time_source().map(|ts| ts.now());
-                let connector = (self.connector_fn)(
-                    self.client_builder.clone(),
-                    Some(settings),
-                    Some(components),
-                );
-                let end = components.time_source().map(|ts| ts.now());
-                if let (Some(start), Some(end)) = (start, end) {
-                    if let Ok(elapsed) = end.duration_since(start) {
-                        tracing::debug!("new connector created in {:?}", elapsed);
+            cache
+                .entry(key)
+                .or_insert_with(|| {
+                    let mut transport_settings = HttpConnectorSettings::builder();
+                    transport_settings.set_read_timeout(read_timeout);
+                    let transport_settings = transport_settings.build();
+                    let settings = if self.per_request_connect_timeout {
+                        &transport_settings
+                    } else {
+                        settings
+                    };
+                    let start = components.time_source().map(|ts| ts.now());
+                    let connector = (self.connector_fn)(
+                        self.client_builder.clone(),
+                        Some(settings),
+                        Some(components),
+                    );
+                    let end = components.time_source().map(|ts| ts.now());
+                    if let (Some(start), Some(end)) = (start, end) {
+                        if let Ok(elapsed) = end.duration_since(start) {
+                            tracing::debug!("new connector created in {:?}", elapsed);
+                        }
                     }
-                }
-                let connector = SharedHttpConnector::new(connector);
-                cache.insert(key.clone(), connector);
-            }
-            connector = cache.get(&key).cloned();
-        }
+                    SharedHttpConnector::new(connector)
+                })
+                .clone()
+        });
 
-        connector.expect("cache populated above")
+        match request_timeout {
+            Some(duration) => SharedHttpConnector::new(RequestTimedConnector {
+                connector,
+                duration,
+                sleep: components.sleep_impl().or_else(default_async_sleep),
+            }),
+            None => connector,
+        }
     }
 
     fn validate_base_client_config(
@@ -879,6 +933,7 @@ pub struct Builder<Tls = TlsUnset> {
     client_builder: Option<hyper_util::client::legacy::Builder>,
     pool_idle_timeout: Option<Option<Duration>>,
     pool_max_idle_per_host: Option<usize>,
+    per_request_connect_timeout: bool,
     #[allow(unused)]
     tls_provider: Tls,
 }
@@ -952,6 +1007,12 @@ cfg_tls! {
     }
 
     impl Builder<TlsProviderSelected> {
+        /// Keep a shared pool for requests with the same read timeout and different connect timeouts.
+        pub fn per_request_connect_timeout(mut self) -> Self {
+            self.per_request_connect_timeout = true;
+            self
+        }
+
         /// Create an HTTPS client with the selected TLS provider.
         ///
         /// The trusted certificates will be loaded later when this becomes the selected
@@ -961,8 +1022,11 @@ cfg_tls! {
                 self.client_builder,
                 self.pool_idle_timeout,
                 self.pool_max_idle_per_host,
+                self.per_request_connect_timeout,
                 move |client_builder, settings, runtime_components| {
-                    let builder = new_conn_builder(client_builder, settings, runtime_components)
+                    let mut builder = new_conn_builder(client_builder, settings, runtime_components);
+                    builder.use_scoped_connect_timeout = self.per_request_connect_timeout;
+                    let builder = builder
                         .tls_provider(self.tls_provider.provider.clone())
                         .tls_context(self.tls_provider.context.clone());
                     builder.build()
@@ -979,8 +1043,11 @@ cfg_tls! {
                 self.client_builder,
                 self.pool_idle_timeout,
                 self.pool_max_idle_per_host,
+                self.per_request_connect_timeout,
                 move |client_builder, settings, runtime_components| {
-                    let builder = new_conn_builder(client_builder, settings, runtime_components)
+                    let mut builder = new_conn_builder(client_builder, settings, runtime_components);
+                    builder.use_scoped_connect_timeout = self.per_request_connect_timeout;
+                    let builder = builder
                         .tls_provider(self.tls_provider.provider.clone())
                         .tls_context(self.tls_provider.context.clone());
                     builder.build_with_resolver(resolver.clone())
@@ -1110,6 +1177,7 @@ impl Builder<TlsUnset> {
             self.client_builder,
             self.pool_idle_timeout,
             self.pool_max_idle_per_host,
+            false,
             move |_builder, settings, runtime_components| {
                 connector_fn(settings, runtime_components)
             },
@@ -1123,6 +1191,7 @@ impl Builder<TlsUnset> {
             self.client_builder,
             self.pool_idle_timeout,
             self.pool_max_idle_per_host,
+            false,
             move |client_builder, settings, runtime_components| {
                 let builder = new_conn_builder(client_builder, settings, runtime_components);
                 builder.build_http()
@@ -1136,6 +1205,7 @@ impl Builder<TlsUnset> {
             client_builder: self.client_builder,
             pool_idle_timeout: self.pool_idle_timeout,
             pool_max_idle_per_host: self.pool_max_idle_per_host,
+            per_request_connect_timeout: false,
             tls_provider: TlsProviderSelected {
                 provider,
                 context: TlsContext::default(),
@@ -1148,6 +1218,7 @@ pub(crate) fn build_with_conn_fn<F>(
     client_builder: Option<hyper_util::client::legacy::Builder>,
     pool_idle_timeout: Option<Option<Duration>>,
     pool_max_idle_per_host: Option<usize>,
+    per_request_connect_timeout: bool,
     connector_fn: F,
 ) -> SharedHttpClient
 where
@@ -1166,6 +1237,7 @@ where
         connector_cache: RwLock::new(HashMap::new()),
         client_builder,
         connector_fn,
+        per_request_connect_timeout,
     })
 }
 
@@ -1189,6 +1261,7 @@ where
         client_builder,
         pool_idle_timeout,
         pool_max_idle_per_host,
+        false,
         move |client_builder, settings, runtime_components| {
             let builder = new_conn_builder(client_builder, settings, runtime_components);
             builder.wrap_connector(tcp_connector_fn())
@@ -1435,14 +1508,20 @@ mod test {
         impl tower::Service<Name> for TestResolver {
             type Response = std::vec::IntoIter<SocketAddr>;
             type Error = std::io::Error;
-            type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+            type Future = std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+            >;
 
             fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
                 Poll::Ready(Ok(()))
             }
 
             fn call(&mut self, _name: Name) -> Self::Future {
-                std::future::ready(Ok(self.0.clone().into_iter()))
+                let addresses = self.0.clone().into_iter();
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok(addresses)
+                })
             }
         }
 
@@ -1468,9 +1547,17 @@ mod test {
         assert!(saturated, "could not establish a pending TCP candidate");
 
         let healthy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let connect_timeout = Duration::from_secs(1);
+        let connect_timeout = Duration::from_micros(871_153);
+        let components = RuntimeComponentsBuilder::for_tests()
+            .with_sleep_impl(Some(TokioSleep::new()))
+            .with_time_source(Some(SystemTimeSource::new()))
+            .build()
+            .unwrap();
+        let settings = HttpConnectorSettings::builder()
+            .connect_timeout(connect_timeout)
+            .build();
 
-        for healthy in [true, false] {
+        for (scoped, healthy) in [(true, true), (true, false), (false, false)] {
             // Recheck the first candidate immediately before each request. A
             // refused connection would not distinguish the missing inner timer.
             assert!(
@@ -1495,18 +1582,23 @@ mod test {
                 assert_eq!(refusal.kind(), std::io::ErrorKind::ConnectionRefused);
                 address
             };
-            let builder = Connector::builder()
-                .connector_settings(
-                    HttpConnectorSettings::builder()
-                        .connect_timeout(connect_timeout)
-                        .build(),
-                )
-                .sleep_impl(SharedAsyncSleep::new(TokioSleep::new()));
-            let tcp =
-                builder.base_connector_with_resolver(TestResolver(vec![stalled_addr, later_addr]));
-            let adapter = builder.wrap_connector(tcp).adapter;
+            let client = build_with_conn_fn(
+                None,
+                None,
+                None,
+                scoped,
+                move |builder, settings, runtime| {
+                    let mut builder = new_conn_builder(builder, settings, runtime);
+                    builder.use_scoped_connect_timeout = scoped;
+                    let tcp = builder
+                        .base_connector_with_resolver(TestResolver(vec![stalled_addr, later_addr]));
+                    builder.wrap_connector(tcp)
+                },
+            );
             // No explicit URI port: Hyper retains each resolver-supplied port.
-            let request = adapter.call(HttpRequest::get("http://candidate-fallback.test").unwrap());
+            let request = client
+                .http_connector(&settings, &components)
+                .call(HttpRequest::get("http://candidate-fallback.test").unwrap());
             tokio::time::timeout(Duration::from_secs(2), async {
                 if healthy {
                     let server = async {

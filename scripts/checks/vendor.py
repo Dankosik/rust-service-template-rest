@@ -84,7 +84,22 @@ TRANSPORT_TARGETS: tuple[TransportTarget, ...] = (
     TransportTarget(
         "aws-smithy-http-client",
         ("rustls-aws-lc", "hyper-rustls/aws-lc-rs"),
-        ("client::test::same_family_candidate_fallback_and_inner_timeout_classification",),
+        (
+            "client::request_connect_tests::varying_budgets_share_checkout_and_background_dial_keeps_its_timer",
+            "client::request_connect_tests::cold_tls_timeout_and_abandonment_close_the_socket",
+            "client::test::same_family_candidate_fallback_and_inner_timeout_classification",
+        ),
+    ),
+    TransportTarget(
+        "aws-runtime",
+        ("http-1x",),
+        (
+            "content_encoding::body::http_body_1_x::tests::test_poll_frame_with_default_chunk_size",
+            "content_encoding::body::http_body_1_x::tests::test_poll_frame_with_trailers",
+            "content_encoding::body::http_body_1_x::tests::test_poll_frame_with_fragmented_data_and_trailers",
+            "content_encoding::body::http_body_1_x::tests::test_aws_chunked_body_poll_frame_with_signer",
+            "content_encoding::body::http_body_1_x::tests::test_aws_chunked_body_poll_frame_with_signer_and_trailers",
+        ),
     ),
     TransportTarget(
         "hyper-util",

@@ -71,6 +71,18 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(s3_only["integration_cache"])
         self.assertFalse(s3_only["integration_messaging"])
 
+        aws_runtime_only = DETECT.classify(
+            ROOT, ["vendor/aws-runtime/src/content_encoding/body/http_body_1_x.rs"]
+        )
+        self.assertTrue(aws_runtime_only["rust"])
+        self.assertTrue(aws_runtime_only["deps"])
+        self.assertTrue(aws_runtime_only["vendor_transport"])
+        self.assertTrue(aws_runtime_only["integration"])
+        self.assertTrue(aws_runtime_only["integration_object_storage"])
+        self.assertFalse(aws_runtime_only["integration_db"])
+        self.assertFalse(aws_runtime_only["integration_cache"])
+        self.assertFalse(aws_runtime_only["integration_messaging"])
+
         pg_only = DETECT.classify(ROOT, ["crates/infra-postgres/src/pool.rs"])
         self.assertTrue(pg_only["integration"])
         self.assertTrue(pg_only["integration_db"])

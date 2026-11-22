@@ -15,6 +15,7 @@ exclude = [
     "vendor/async-nats",
 # template:end messaging:workspace-messaging-vendor-exclude
 # template:begin object-storage:workspace-object-storage-vendor-exclude
+    "vendor/aws-runtime",
     "vendor/aws-smithy-http-client",
 # template:end object-storage:workspace-object-storage-vendor-exclude
     "vendor/hyper-util",
@@ -425,7 +426,9 @@ sqlx-postgres = { path = "vendor/sqlx-postgres" }
 async-nats = { path = "vendor/async-nats" }
 # template:end messaging:workspace-messaging-patch
 # template:begin object-storage:workspace-object-storage-patch
-# Native TCP timeout propagation; provenance and retirement: vendor/aws-smithy-http-client/PATCHES.md.
+# Single-copy unsigned aws-chunked framing; provenance and retirement: vendor/aws-runtime/PATCHES.md.
+aws-runtime = { path = "vendor/aws-runtime" }
+# Native TCP timeout propagation and pooled request budgets; provenance and retirement: vendor/aws-smithy-http-client/PATCHES.md.
 aws-smithy-http-client = { path = "vendor/aws-smithy-http-client" }
 # template:end object-storage:workspace-object-storage-patch
 # Same-family TCP opportunity repair; provenance and retirement: vendor/hyper-util/PATCHES.md.

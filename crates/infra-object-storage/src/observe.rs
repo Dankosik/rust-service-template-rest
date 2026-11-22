@@ -1,5 +1,6 @@
 use std::mem::DropGuard;
-use std::sync::OnceLock;
+use std::ops::Deref;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use aws_sdk_s3::operation::{RequestId, RequestIdExt};
@@ -110,16 +111,40 @@ impl Histograms {
     }
 }
 
-struct OperationInner {
+#[derive(Clone, Copy, Default)]
+struct RequestIds<'a> {
+    request_id: Option<&'a str>,
+    extended_request_id: Option<&'a str>,
+}
+
+impl<'a> RequestIds<'a> {
+    fn from_reply(reply: &'a (impl RequestId + RequestIdExt)) -> Self {
+        Self {
+            request_id: reply.request_id().and_then(bounded_request_id),
+            extended_request_id: reply.extended_request_id().and_then(bounded_request_id),
+        }
+    }
+
+    fn record(self, span: &Span) {
+        if let Some(request_id) = self.request_id {
+            span.record("aws.request_id", request_id);
+        }
+        if let Some(extended_request_id) = self.extended_request_id {
+            span.record("aws.extended_request_id", extended_request_id);
+        }
+    }
+}
+
+struct OperationInner<H: Deref<Target = Histograms>> {
     started: Instant,
     operation: Operation,
     span: Span,
-    histograms: std::sync::Arc<Histograms>,
+    histograms: H,
     request_id: Option<CompactString>,
     extended_request_id: Option<CompactString>,
 }
 
-impl OperationInner {
+impl<H: Deref<Target = Histograms>> OperationInner<H> {
     fn abandon(self) {
         self.finish(Outcome::Cancelled);
     }
@@ -131,7 +156,19 @@ impl OperationInner {
             .record(self.started.elapsed());
     }
 
-    fn record_failure<E>(&self, outcome: FailureOutcome, failure: &Failure<E>) {
+    fn stored_request_ids(&self) -> RequestIds<'_> {
+        RequestIds {
+            request_id: self.request_id.as_deref(),
+            extended_request_id: self.extended_request_id.as_deref(),
+        }
+    }
+
+    fn record_failure<E>(
+        &self,
+        outcome: FailureOutcome,
+        failure: &Failure<E>,
+        ids: RequestIds<'_>,
+    ) {
         let error_type = failure.error_type.as_str();
         let timeout_source = failure.timeout_source;
         self.span.record("error.type", error_type);
@@ -150,8 +187,8 @@ impl OperationInner {
                         object_storage.outcome = outcome.label(),
                         object_storage.timeout_source = timeout_source,
                         error.type = error_type,
-                        aws.request_id = self.request_id.as_deref(),
-                        aws.extended_request_id = self.extended_request_id.as_deref(),
+                        aws.request_id = ids.request_id,
+                        aws.extended_request_id = ids.extended_request_id,
                         "object_storage_operation_failed"
                     )
                 };
@@ -171,14 +208,12 @@ impl OperationInner {
     }
 }
 
-pub(crate) struct OperationGuard(DropGuard<OperationInner, fn(OperationInner)>);
+pub(crate) struct OperationGuard<H: Deref<Target = Histograms> = Arc<Histograms>>(
+    DropGuard<OperationInner<H>, fn(OperationInner<H>)>,
+);
 
-impl OperationGuard {
-    pub(crate) fn start(
-        histograms: std::sync::Arc<Histograms>,
-        operation: Operation,
-        cloud_region: Option<&str>,
-    ) -> Self {
+impl<H: Deref<Target = Histograms>> OperationGuard<H> {
+    pub(crate) fn start(histograms: H, operation: Operation, cloud_region: Option<&str>) -> Self {
         let (span_name, rpc_method) = operation.span_and_rpc_method();
         let span = tracing::info_span!(
             "object_storage",
@@ -212,26 +247,40 @@ impl OperationGuard {
         ))
     }
 
-    pub(crate) fn record_request_ids(&mut self, response: &(impl RequestId + RequestIdExt)) {
+    pub(crate) fn retain_request_ids(&mut self, response: &(impl RequestId + RequestIdExt)) {
         let inner = &mut *self.0;
-        inner.request_id = response.request_id().and_then(bounded_request_id);
-        inner.extended_request_id = response.extended_request_id().and_then(bounded_request_id);
-        if let Some(request_id) = inner.request_id.as_deref() {
-            inner.span.record("aws.request_id", request_id);
-        }
-        if let Some(extended_request_id) = inner.extended_request_id.as_deref() {
-            inner
-                .span
-                .record("aws.extended_request_id", extended_request_id);
-        }
+        let ids = RequestIds::from_reply(response);
+        ids.record(&inner.span);
+        inner.request_id = ids.request_id.map(CompactString::from);
+        inner.extended_request_id = ids.extended_request_id.map(CompactString::from);
     }
 
     pub(crate) fn succeed(self) {
         DropGuard::dismiss(self.0).finish(Outcome::Ok);
     }
 
+    pub(crate) fn succeed_with_reply(self, reply: &(impl RequestId + RequestIdExt)) {
+        let inner = DropGuard::dismiss(self.0);
+        RequestIds::from_reply(reply).record(&inner.span);
+        inner.finish(Outcome::Ok);
+    }
+
     pub(crate) fn fail<E: OutcomeError>(self, failure: &Failure<E>) -> E {
-        DropGuard::dismiss(self.0).record_failure(failure.error.failure_outcome(), failure);
+        let inner = DropGuard::dismiss(self.0);
+        let ids = inner.stored_request_ids();
+        inner.record_failure(failure.error.failure_outcome(), failure, ids);
+        failure.error
+    }
+
+    pub(crate) fn fail_with_reply<E: OutcomeError>(
+        self,
+        failure: &Failure<E>,
+        reply: &(impl RequestId + RequestIdExt),
+    ) -> E {
+        let inner = DropGuard::dismiss(self.0);
+        let ids = RequestIds::from_reply(reply);
+        ids.record(&inner.span);
+        inner.record_failure(failure.error.failure_outcome(), failure, ids);
         failure.error
     }
 
@@ -244,15 +293,34 @@ impl OperationGuard {
             Err(failure) => Err(self.fail(&failure)),
         }
     }
+
+    pub(crate) fn finish_with_reply<T, E: OutcomeError>(
+        self,
+        result: Result<T, Failure<E>>,
+        reply: Option<&(impl RequestId + RequestIdExt)>,
+    ) -> Result<T, E> {
+        match (result, reply) {
+            (Ok(value), Some(reply)) => {
+                self.succeed_with_reply(reply);
+                Ok(value)
+            }
+            (Ok(value), None) => {
+                self.succeed();
+                Ok(value)
+            }
+            (Err(failure), Some(reply)) => Err(self.fail_with_reply(&failure, reply)),
+            (Err(failure), None) => Err(self.fail(&failure)),
+        }
+    }
 }
 
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
-fn bounded_request_id(value: &str) -> Option<CompactString> {
+fn bounded_request_id(value: &str) -> Option<&str> {
     let bounded = !value.is_empty()
         && value.len() <= MAX_REQUEST_ID_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic());
-    bounded.then(|| CompactString::from(value))
+    bounded.then_some(value)
 }
 
 pub(crate) fn describe() {

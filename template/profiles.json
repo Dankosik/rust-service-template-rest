@@ -594,6 +594,7 @@
     "object-storage": {
       "when": {"object_storage": "s3"},
       "remove_when_unselected": [
+        "vendor/aws-runtime/",
         "vendor/aws-smithy-http-client/",
         "crates/infra-object-storage/",
         "crates/infra-http/src/object_storage.rs",

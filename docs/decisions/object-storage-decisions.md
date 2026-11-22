@@ -3,8 +3,9 @@
 <!-- template:begin object-storage:docs-object-storage-decisions -->
 `crates/infra-object-storage`, `crates/config`, and `Cargo.toml` own the client
 API, failure mapping, timeouts, and exact SDK pins (moved together in one
-reviewed change with the pinned `BehaviorVersion` in code and
-[the HTTP client patch](../../vendor/aws-smithy-http-client/PATCHES.md)).
+reviewed change with the pinned `BehaviorVersion` in code,
+[the HTTP client patch](../../vendor/aws-smithy-http-client/PATCHES.md), and
+[the AWS runtime patch](../../vendor/aws-runtime/PATCHES.md)).
 This record keeps only rejected alternatives, provider divergences, and reopen
 conditions.
 
@@ -16,6 +17,24 @@ conditions.
 | Concrete `ObjectStorage` adapter (GET, PUT, DELETE, presigned GET) without a generic storage trait, multipart, listing, or presigned PUT | Business features own narrow domain traits; presigned PUT cannot enforce byte caps; neither startup nor readiness probes the bucket so a store outage never evicts all replicas. | A second storage backend or client-direct upload becomes an accepted requirement. |
 | Single-attempt mutations vs bounded read retries; final-chunk holdback on `Download` | SDK retries keep only the last reply, turning a retried create-only PUT after a lost 200 into `412 AlreadyExists`; Hyper stops polling at `Content-Length`, which would skip the SDK's EOF checksum verification and record `cancelled` unless empty/final chunks settle inside the adapter. | Upstream SDK exposes per-attempt mutation outcomes or native unpolled-body deadline release. |
 | Compose `versitygw` for integration tests over MinIO, Garage, S3Mock, or LocalStack | MinIO is archived upstream without official images; Garage lacks conditional writes; S3Mock skips presigned URL verification; LocalStack requires an account token. Live provider conformance stays manual (`OBJECT_STORAGE_CONFORMANCE_WRITES=allow`). | Compose `versitygw` drops a required S3 conditional or checksum behavior. |
+
+## SDK and buffer ownership
+
+The published S3 SDK remains the owner of response checksum selection. A
+local fork saved about one to five allocation calls per GET for header lookup.
+On a DigitalOcean c-4, the paired throughput and CPU ranges crossed zero for
+all seven checksum workloads. The fork added 15,945,084 bytes of source.
+Reopen when upstream adopts static header names or a representative workload
+shows a repeatable benefit worth carrying the patch.
+
+Keep the fallible reservation before collecting a download. Even a unique
+`Bytes` suffix can retain a backing allocation larger than its visible tail.
+Reopen when the buffer owner can prove exact retained capacity and preserve
+allocation failure before terminal success. Keep the SDK credential timer's
+original start point until its clock and sleep interfaces can preserve the
+same timeout across cache contention and delayed polling. Keep `ResponseLimit`
+unconditional without `#[doc(hidden)]` dispatch hints or `is_end_stream()`
+skips, and keep `ObjectKey` borrowed on operation entry points.
 
 ## Provider protocol divergences
 
