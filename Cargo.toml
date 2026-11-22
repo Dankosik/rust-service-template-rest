@@ -19,6 +19,9 @@ exclude = [
     "vendor/aws-smithy-http-client",
 # template:end object-storage:workspace-object-storage-vendor-exclude
     "vendor/hyper-util",
+# template:begin clickhouse:workspace-clickhouse-vendor-exclude
+    "vendor/clickhouse",
+# template:end clickhouse:workspace-clickhouse-vendor-exclude
 ]
 
 [workspace.package]
@@ -440,3 +443,7 @@ hyper-util = { path = "vendor/hyper-util" }
 # The client dispatcher reports decoded RPC outcomes. See vendor/tonic/PATCHES.md.
 tonic = { path = "vendor/tonic" }
 # template:end grpc:workspace-tonic-patch
+# template:begin clickhouse:workspace-clickhouse-patch
+# Abort detached InsertFormatted tasks and cap error bodies; see vendor/clickhouse/PATCHES.md.
+clickhouse = { path = "vendor/clickhouse" }
+# template:end clickhouse:workspace-clickhouse-patch

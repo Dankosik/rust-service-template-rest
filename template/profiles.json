@@ -591,7 +591,8 @@
         "crates/infra-clickhouse/",
         "crates/config/src/clickhouse.rs",
         "crates/config/src/clickhouse/",
-        "env/clickhouse/"
+        "env/clickhouse/",
+        "vendor/clickhouse/"
       ]
     },
     "cache": {

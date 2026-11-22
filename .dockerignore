@@ -29,6 +29,9 @@ vendor/*
 # template:begin grpc:dockerignore-tonic-vendor
 !vendor/tonic/
 # template:end grpc:dockerignore-tonic-vendor
+# template:begin clickhouse:dockerignore-clickhouse-vendor
+!vendor/clickhouse/
+# template:end clickhouse:dockerignore-clickhouse-vendor
 !crates/
 # `sqlx::query!` reads its statement metadata at compile time.
 !.sqlx/
