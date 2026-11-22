@@ -5,6 +5,7 @@ use futures_util::{TryFutureExt as _, future::Either};
 use infra_postgres::observed;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
+use sqlx::postgres::PgConnection;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tokio::time::Instant;
 
@@ -236,33 +237,7 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
         &group.lifecycle.cleanup,
         deadline,
         execute_before_deadline(group, "complete jobs batch", deadline, async |connection| {
-            let statement = match query {
-                CompletionQuery::Single(fence) => Either::Left(
-                    complete_query(fence)
-                        .execute(&mut *connection)
-                        .map_ok(CompletionWrite::Single),
-                ),
-                CompletionQuery::Multiple {
-                    ids,
-                    generations,
-                    tokens,
-                } => Either::Right(
-                    sqlx::query_scalar!(
-                        "UPDATE background_jobs AS job \
-                         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-                         FROM unnest($1::uuid[], $2::bigint[], $3::uuid[]) WITH ORDINALITY AS done (id, generation, token, position) \
-                         WHERE job.id = done.id AND job.claim_generation = done.generation AND job.claim_token = done.token \
-                           AND job.claim_expires_at IS NOT NULL \
-                         RETURNING done.position AS \"position!\"",
-                        ids,
-                        generations,
-                        tokens,
-                    )
-                    .fetch_all(&mut *connection)
-                    .map_ok(CompletionWrite::Multiple),
-                ),
-            };
-            observed!("complete jobs", statement).await
+            execute_completion(connection, query).await
         }),
     )
     .await;
@@ -276,12 +251,44 @@ async fn write_batch(group: &WorkerGroup, mut batch: CompletionBatch, deadline: 
         }
         Some(Err(error)) => {
             observe_failure(group, Operation::Record, &error);
-            drop(error);
             let results = std::iter::repeat_n(Err(Unacknowledged), batch.queued.len());
             batch.finish(results);
         }
         None => {}
     }
+}
+
+async fn execute_completion(
+    connection: &mut PgConnection,
+    query: CompletionQuery<'_>,
+) -> Result<CompletionWrite, sqlx::Error> {
+    let statement = match query {
+        CompletionQuery::Single(fence) => Either::Left(
+            complete_query(fence)
+                .execute(&mut *connection)
+                .map_ok(CompletionWrite::Single),
+        ),
+        CompletionQuery::Multiple {
+            ids,
+            generations,
+            tokens,
+        } => Either::Right(
+            sqlx::query_scalar!(
+                "UPDATE background_jobs AS job \
+                 SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+                 FROM unnest($1::uuid[], $2::bigint[], $3::uuid[]) WITH ORDINALITY AS done (id, generation, token, position) \
+                 WHERE job.id = done.id AND job.claim_generation = done.generation AND job.claim_token = done.token \
+                   AND job.claim_expires_at IS NOT NULL \
+                 RETURNING done.position AS \"position!\"",
+                ids,
+                generations,
+                tokens,
+            )
+            .fetch_all(&mut *connection)
+            .map_ok(CompletionWrite::Multiple),
+        ),
+    };
+    observed!("complete jobs", statement).await
 }
 
 enum CompletionQuery<'a> {

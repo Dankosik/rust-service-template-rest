@@ -5,10 +5,10 @@ use super::{
 use crate::outbox::KIND;
 use metrics::Unit;
 
-const OLDEST_UNCONFIRMED: &str = "jobs_outbox_oldest_unconfirmed_age_seconds";
-const OLDEST_BLOCKED: &str = "jobs_outbox_oldest_blocked_age_seconds";
-const OBSERVED_AT: &str = "jobs_outbox_observation_timestamp_seconds";
-const LAST_ATTEMPT_SUCCESS: &str = "jobs_outbox_last_attempt_success";
+const OLDEST_UNCONFIRMED_AGE_METRIC: &str = "jobs_outbox_oldest_unconfirmed_age_seconds";
+const OLDEST_BLOCKED_AGE_METRIC: &str = "jobs_outbox_oldest_blocked_age_seconds";
+const OUTBOX_OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_outbox_observation_timestamp_seconds";
+const LAST_ATTEMPT_SUCCESS_METRIC: &str = "jobs_outbox_last_attempt_success";
 const ORDERED_SAMPLE_CAP: i64 = 1_000;
 
 pub(super) struct OutboxGauges {
@@ -24,29 +24,29 @@ impl OutboxGauges {
             return None;
         }
         metrics::describe_gauge!(
-            OLDEST_UNCONFIRMED,
+            OLDEST_UNCONFIRMED_AGE_METRIC,
             Unit::Seconds,
             "Age since creation of the oldest retained outbox job without recorded completion."
         );
         metrics::describe_gauge!(
-            OLDEST_BLOCKED,
+            OLDEST_BLOCKED_AGE_METRIC,
             Unit::Seconds,
             "Age since creation of the oldest outbox event blocked by an unfinished predecessor. NaN indicates no blocker was found within a capped sample."
         );
         metrics::describe_gauge!(
-            OBSERVED_AT,
+            OUTBOX_OBSERVATION_TIMESTAMP_METRIC,
             Unit::Seconds,
             "Database Unix timestamp of the last successful outbox observation."
         );
         metrics::describe_gauge!(
-            LAST_ATTEMPT_SUCCESS,
+            LAST_ATTEMPT_SUCCESS_METRIC,
             "Whether the most recent outbox observation succeeded."
         );
         Some(Self {
-            oldest_unconfirmed: metrics::gauge!(OLDEST_UNCONFIRMED),
-            oldest_blocked: metrics::gauge!(OLDEST_BLOCKED),
-            observed_at: metrics::gauge!(OBSERVED_AT),
-            last_attempt_success: metrics::gauge!(LAST_ATTEMPT_SUCCESS),
+            oldest_unconfirmed: metrics::gauge!(OLDEST_UNCONFIRMED_AGE_METRIC),
+            oldest_blocked: metrics::gauge!(OLDEST_BLOCKED_AGE_METRIC),
+            observed_at: metrics::gauge!(OUTBOX_OBSERVATION_TIMESTAMP_METRIC),
+            last_attempt_success: metrics::gauge!(LAST_ATTEMPT_SUCCESS_METRIC),
         })
     }
 
@@ -58,7 +58,7 @@ impl OutboxGauges {
     }
 
     pub(super) async fn sample(&self, primary_group: &WorkerGroup) {
-        match read(primary_group).await {
+        match read_outbox_sample(primary_group).await {
             Ok(sample) => {
                 self.oldest_unconfirmed.set(sample.oldest_unconfirmed_age);
                 self.oldest_blocked.set(sample.oldest_blocked_age);
@@ -80,7 +80,7 @@ struct OutboxSample {
     observed_at: f64,
 }
 
-async fn read(primary_group: &WorkerGroup) -> Result<OutboxSample, OperationError> {
+async fn read_outbox_sample(primary_group: &WorkerGroup) -> Result<OutboxSample, OperationError> {
     in_maintenance_tx(primary_group, SAMPLE_STATEMENT_TIMEOUT, async |tx| {
         Ok(observed!(
             "sample outbox",

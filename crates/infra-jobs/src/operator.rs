@@ -366,13 +366,13 @@ macro_rules! snapshot_query {
 }
 
 async fn observe_time(tx: &mut Tx<'_>) -> Result<String, OperatorError> {
-    tx.set_statement_timeout(STATEMENT_TIMEOUT).await?;
     Ok(observed!("observe jobs time", sqlx::query_scalar!(
         r#"SELECT to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observed_at!""#
     ).fetch_one(&mut *tx)).await?)
 }
 
 pub async fn inspect_one(tx: &mut Tx<'_>, id: JobId) -> Result<OneInspection, OperatorError> {
+    tx.set_statement_timeout(STATEMENT_TIMEOUT).await?;
     let observed_at = observe_time(tx).await?;
     let row = observed!(
         "inspect jobs",
@@ -410,6 +410,7 @@ async fn inspect_page(
     page: PageQuery,
     filter: Filter<'_>,
 ) -> Result<PageInspection, OperatorError> {
+    tx.set_statement_timeout(STATEMENT_TIMEOUT).await?;
     let observed_at = observe_time(tx).await?;
     let after = page.after.map_or(uuid::Uuid::nil(), |cursor| cursor.0.0);
     let rows = observed!(
