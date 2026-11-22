@@ -8,7 +8,7 @@ use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 use sync_wrapper::SyncWrapper;
 
-use crate::byte_progress::ByteProgress;
+use crate::byte_progress::{BodyEndedEarly, ByteProgress};
 use crate::error::UploadFailure;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -139,22 +139,29 @@ impl From<Vec<u8>> for PutBody {
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
 
+#[derive(Default)]
+struct Drained {
+    held: Option<Bytes>,
+    trailers: Option<Frame<Bytes>>,
+}
+
 enum ExactLengthPhase {
     Streaming(ByteProgress),
-    Draining {
-        held: Option<Bytes>,
-        trailers: Option<Frame<Bytes>>,
-    },
+    Draining(Drained),
 }
 
 enum StreamStep {
     Continue,
     Yield(Result<Frame<Bytes>, BoxError>),
-    Drain {
-        held: Option<Bytes>,
-        trailers: Option<Frame<Bytes>>,
-    },
+    Drain(Drained),
     Mismatch,
+}
+
+fn drain(progress: &mut ByteProgress, trailers: Option<Frame<Bytes>>) -> StreamStep {
+    match progress.finish() {
+        Ok(held) => StreamStep::Drain(Drained { held, trailers }),
+        Err(BodyEndedEarly) => StreamStep::Mismatch,
+    }
 }
 
 fn advance_stream<E: Into<BoxError>>(
@@ -170,21 +177,9 @@ fn advance_stream<E: Into<BoxError>>(
                 Ok(None) => StreamStep::Continue,
                 Err(_rejected) => StreamStep::Mismatch,
             },
-            Err(trailers) => match progress.finish() {
-                Ok(held) => StreamStep::Drain {
-                    held,
-                    trailers: Some(trailers),
-                },
-                Err(()) => StreamStep::Mismatch,
-            },
+            Err(trailers) => drain(progress, Some(trailers)),
         },
-        None => match progress.finish() {
-            Ok(held) => StreamStep::Drain {
-                held,
-                trailers: None,
-            },
-            Err(()) => StreamStep::Mismatch,
-        },
+        None => drain(progress, None),
     }
 }
 
@@ -226,7 +221,7 @@ where
         let mut polls_remaining = SOURCE_POLLS_PER_YIELD;
         loop {
             let progress = match this.phase {
-                ExactLengthPhase::Draining { held, trailers } => {
+                ExactLengthPhase::Draining(Drained { held, trailers }) => {
                     if let Some(data) = held.take() {
                         return Poll::Ready(Some(Ok(Frame::data(data))));
                     }
@@ -243,15 +238,12 @@ where
             match advance_stream(progress, polled) {
                 StreamStep::Continue => {}
                 StreamStep::Yield(item) => return Poll::Ready(Some(item)),
-                StreamStep::Drain { held, trailers } => {
-                    *this.phase = ExactLengthPhase::Draining { held, trailers };
+                StreamStep::Drain(drained) => {
+                    *this.phase = ExactLengthPhase::Draining(drained);
                 }
                 StreamStep::Mismatch => {
                     this.mismatch.store(true, Ordering::Release);
-                    *this.phase = ExactLengthPhase::Draining {
-                        held: None,
-                        trailers: None,
-                    };
+                    *this.phase = ExactLengthPhase::Draining(Drained::default());
                     return Poll::Ready(Some(Err(Box::new(LengthMismatch))));
                 }
             }
@@ -261,17 +253,17 @@ where
     fn is_end_stream(&self) -> bool {
         matches!(
             self.phase,
-            ExactLengthPhase::Draining {
+            ExactLengthPhase::Draining(Drained {
                 held: None,
                 trailers: None,
-            }
+            })
         )
     }
 
     fn size_hint(&self) -> SizeHint {
         let exact = match &self.phase {
             ExactLengthPhase::Streaming(progress) => progress.remaining(),
-            ExactLengthPhase::Draining { held, .. } => {
+            ExactLengthPhase::Draining(Drained { held, .. }) => {
                 held.as_ref().map_or(0, |data| data.len() as u64)
             }
         };

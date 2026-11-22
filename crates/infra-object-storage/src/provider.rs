@@ -98,13 +98,16 @@ pub(crate) struct ResolvedProvider {
 
 impl ResolvedProvider {
     fn at_endpoint(
-        url: String,
+        origin: &Url,
         region: String,
         path_style: bool,
         checksum: UploadChecksum,
     ) -> Self {
         Self {
-            target: Target::Endpoint { url, path_style },
+            target: Target::Endpoint {
+                url: origin_without_path(origin),
+                path_style,
+            },
             region,
             checksum,
         }
@@ -125,16 +128,10 @@ pub(crate) fn resolve(
             ..
         } => {
             let region = validate_region(region)?;
-            if expected_bucket_owner.len() != 12
-                || !expected_bucket_owner
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-            {
-                return Err(ConfigErrorKind::ExpectedBucketOwner);
-            }
+            let expected_bucket_owner = validate_bucket_owner(expected_bucket_owner)?;
             Ok(ResolvedProvider {
                 target: Target::AmazonS3 {
-                    expected_bucket_owner: expected_bucket_owner.clone(),
+                    expected_bucket_owner,
                 },
                 region,
                 checksum: UploadChecksum::Always,
@@ -146,7 +143,7 @@ pub(crate) fn resolve(
                 return Err(ConfigErrorKind::Endpoint);
             }
             Ok(ResolvedProvider::at_endpoint(
-                origin_without_path(&origin),
+                &origin,
                 "auto".to_owned(),
                 false,
                 UploadChecksum::InMemoryOnly,
@@ -160,7 +157,7 @@ pub(crate) fn resolve(
                 return Err(ConfigErrorKind::Endpoint);
             }
             Ok(ResolvedProvider::at_endpoint(
-                origin_without_path(&origin),
+                &origin,
                 optional_region(region.as_deref(), "auto")?,
                 false,
                 UploadChecksum::Never,
@@ -172,7 +169,7 @@ pub(crate) fn resolve(
             path_style,
             ..
         } => Ok(ResolvedProvider::at_endpoint(
-            origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?),
+            &parse_endpoint_origin(endpoint, OriginScheme::HttpsOnly)?,
             optional_region(region.as_deref(), "us-east-1")?,
             *path_style,
             UploadChecksum::Never,
@@ -180,7 +177,7 @@ pub(crate) fn resolve(
         Provider::Local {
             endpoint, region, ..
         } => Ok(ResolvedProvider::at_endpoint(
-            origin_without_path(&parse_endpoint_origin(endpoint, OriginScheme::HttpOrHttps)?),
+            &parse_endpoint_origin(endpoint, OriginScheme::HttpOrHttps)?,
             optional_region(region.as_deref(), "us-east-1")?,
             true,
             UploadChecksum::Always,
@@ -224,6 +221,14 @@ fn origin_without_path(origin: &Url) -> String {
 
 fn optional_region(region: Option<&str>, default: &'static str) -> Result<String, ConfigErrorKind> {
     region.map_or_else(|| Ok(default.to_owned()), validate_region)
+}
+
+fn validate_bucket_owner(owner: &str) -> Result<String, ConfigErrorKind> {
+    if owner.len() == 12 && owner.bytes().all(|byte| byte.is_ascii_digit()) {
+        Ok(owner.to_owned())
+    } else {
+        Err(ConfigErrorKind::ExpectedBucketOwner)
+    }
 }
 
 fn validate_region(region: &str) -> Result<String, ConfigErrorKind> {

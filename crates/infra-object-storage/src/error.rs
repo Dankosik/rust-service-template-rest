@@ -152,15 +152,15 @@ impl OutcomeError for MutationError {
     fn failure_outcome(self) -> FailureOutcome {
         match self {
             Self::OutcomeUnknown(_) => FailureOutcome::Unknown,
-            Self::NotApplied(reason) => match reason {
-                MutationFailure::AlreadyExists => FailureOutcome::AlreadyExists,
-                MutationFailure::TooLarge => FailureOutcome::TooLarge,
-                MutationFailure::Busy => FailureOutcome::Busy,
+            Self::NotApplied(MutationFailure::AlreadyExists) => FailureOutcome::AlreadyExists,
+            Self::NotApplied(MutationFailure::TooLarge) => FailureOutcome::TooLarge,
+            Self::NotApplied(MutationFailure::Busy) => FailureOutcome::Busy,
+            Self::NotApplied(
                 MutationFailure::Conflict
                 | MutationFailure::Unavailable
-                | MutationFailure::Stopped(_) => FailureOutcome::Unavailable,
-                MutationFailure::Rejected => FailureOutcome::Rejected,
-            },
+                | MutationFailure::Stopped(_),
+            ) => FailureOutcome::Unavailable,
+            Self::NotApplied(MutationFailure::Rejected) => FailureOutcome::Rejected,
         }
     }
 
@@ -309,24 +309,17 @@ pub(crate) fn interpret_put_result(
     mode: MutationMode,
     mismatch: Option<&AtomicBool>,
 ) -> Result<(), Failure<MutationError>> {
+    let length_mismatch = mismatch.is_some_and(|flag| flag.load(Ordering::Acquire));
     match result {
         Ok((Ok(_), _)) => Ok(()),
-        Ok((Err(sdk_error), stopped_on_reply)) => {
-            let length_mismatch = mismatch.is_some_and(|flag| flag.load(Ordering::Acquire));
-            Err(from_sdk_mutation(
-                sdk_error,
-                mode,
-                length_mismatch,
-                *stopped_on_reply,
-            ))
-        }
-        Err(interrupted) => {
-            if mismatch.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                Err(UploadFailure::Length.into())
-            } else {
-                Err((*interrupted).into())
-            }
-        }
+        Ok((Err(sdk_error), stopped_on_reply)) => Err(from_sdk_mutation(
+            sdk_error,
+            mode,
+            length_mismatch,
+            *stopped_on_reply,
+        )),
+        Err(_) if length_mismatch => Err(UploadFailure::Length.into()),
+        Err(interrupted) => Err((*interrupted).into()),
     }
 }
 
@@ -430,10 +423,7 @@ fn is_safe_error_code(code: &str) -> bool {
 
 fn classify_read(kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
-    if let FailureKind::Status { status, code } = kind
-        && code != Some("NoSuchBucket")
-        && classification_status(status, code) == 404
-    {
+    if kind.object_status() == Some(404) {
         return E::NotFound;
     }
     match kind.classify_common() {
@@ -444,13 +434,10 @@ fn classify_read(kind: FailureKind<'_>) -> ObjectStorageError {
 
 fn classify_mutation(kind: FailureKind<'_>, mode: MutationMode) -> MutationError {
     use MutationFailure as F;
-    if mode == MutationMode::CreateOnly
-        && let FailureKind::Status { status, code } = kind
-        && code != Some("NoSuchBucket")
-    {
-        match classification_status(status, code) {
-            412 => return MutationError::NotApplied(F::AlreadyExists),
-            409 => return MutationError::NotApplied(F::Conflict),
+    if mode == MutationMode::CreateOnly {
+        match kind.object_status() {
+            Some(412) => return MutationError::NotApplied(F::AlreadyExists),
+            Some(409) => return MutationError::NotApplied(F::Conflict),
             _ => {}
         }
     }
@@ -468,12 +455,21 @@ enum CommonFailure {
 }
 
 impl FailureKind<'_> {
+    fn object_status(self) -> Option<u16> {
+        match self {
+            Self::Status { status, code } if code != Some("NoSuchBucket") => {
+                Some(effective_status(status, code))
+            }
+            _ => None,
+        }
+    }
+
     fn classify_common(self) -> CommonFailure {
         match self {
             Self::NotSent => CommonFailure::Rejected,
             Self::NoCredentials => CommonFailure::Unavailable,
             Self::Lost | Self::Timeout => CommonFailure::OutcomeUnknown,
-            Self::Status { status, code } => match (classification_status(status, code), code) {
+            Self::Status { status, code } => match (effective_status(status, code), code) {
                 (_, Some("NoSuchBucket")) => CommonFailure::Rejected,
                 (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => CommonFailure::Unavailable,
                 (501, _) => CommonFailure::Rejected,
@@ -484,7 +480,7 @@ impl FailureKind<'_> {
     }
 }
 
-fn classification_status(status: u16, code: Option<&str>) -> u16 {
+fn effective_status(status: u16, code: Option<&str>) -> u16 {
     if !(200..300).contains(&status) {
         return status;
     }

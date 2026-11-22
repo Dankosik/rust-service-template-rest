@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
-use crate::byte_progress::ByteProgress;
+use crate::byte_progress::{BodyEndedEarly, ByteProgress};
 use crate::call::check_active;
 use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
@@ -219,7 +219,7 @@ impl State {
                     Poll::Ready(Ok(ReadStep::Chunk(chunk))),
                     self.close(Outcome::Success, None),
                 ),
-                Err(()) => self.fail_poll(LocalFailure::ContentLength.into(), None),
+                Err(BodyEndedEarly) => self.fail_poll(LocalFailure::ContentLength.into(), None),
             },
         }
     }

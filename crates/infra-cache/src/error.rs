@@ -101,12 +101,12 @@ pub(crate) enum ErrorType {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum UnknownCause {
+pub(crate) enum FailureCause {
     Stopped(Stopped),
     Failed(ErrorType),
 }
 
-impl UnknownCause {
+impl FailureCause {
     fn operation_error(self) -> OperationError {
         match self {
             Self::Stopped(stopped) => OperationError::Stopped(stopped),
@@ -127,9 +127,13 @@ impl UnknownCause {
             Self::Failed(_) => UnknownOutcome::Unavailable,
         }
     }
+
+    pub(crate) fn of_reply(error: &redis::RedisError, stopped: Option<Self>) -> Self {
+        stopped.unwrap_or_else(|| Self::Failed(error_type(error)))
+    }
 }
 
-impl From<BoundedStop> for UnknownCause {
+impl From<BoundedStop> for FailureCause {
     fn from(stop: BoundedStop) -> Self {
         match stop {
             BoundedStop::Parent(stopped) => Self::Stopped(stopped),
@@ -140,17 +144,17 @@ impl From<BoundedStop> for UnknownCause {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ReadFailure {
-    Cause(UnknownCause),
+    Cause(FailureCause),
     PermissionDenied,
     ValueTooLarge,
 }
 
 impl ReadFailure {
-    pub(crate) fn from_reply(error: &redis::RedisError, stopped: Option<UnknownCause>) -> Self {
-        if error.code() == Some("NOPERM") {
+    pub(crate) fn from_reply(error: &redis::RedisError, stopped: Option<FailureCause>) -> Self {
+        if denies_permission(error) {
             return stopped.map_or(Self::PermissionDenied, Self::Cause);
         }
-        Self::Cause(stopped.unwrap_or_else(|| UnknownCause::Failed(error_type(error))))
+        Self::Cause(FailureCause::of_reply(error, stopped))
     }
 }
 
@@ -172,7 +176,7 @@ pub(crate) enum MutationKind {
 
 #[derive(Clone, Copy)]
 pub(crate) enum MutationRefusal {
-    Cause(UnknownCause),
+    Cause(FailureCause),
     PermissionDenied,
     InvalidTtl,
 }
@@ -187,8 +191,8 @@ impl MutationRefusal {
     }
 }
 
-impl From<UnknownCause> for MutationRefusal {
-    fn from(cause: UnknownCause) -> Self {
+impl From<FailureCause> for MutationRefusal {
+    fn from(cause: FailureCause) -> Self {
         Self::Cause(cause)
     }
 }
@@ -196,31 +200,25 @@ impl From<UnknownCause> for MutationRefusal {
 #[derive(Clone, Copy)]
 pub(crate) enum MutationCommandError {
     NotApplied(MutationRefusal),
-    OutcomeUnknown(UnknownCause),
+    OutcomeUnknown(FailureCause),
 }
 
 impl MutationCommandError {
     pub(crate) fn from_reply(
         error: &redis::RedisError,
         kind: MutationKind,
-        stopped: Option<UnknownCause>,
+        stopped: Option<FailureCause>,
     ) -> Self {
-        let code = error.code();
-        if matches!(kind, MutationKind::Set)
-            && code == Some("ERR")
-            && error.detail().is_some_and(|detail| {
-                detail.eq_ignore_ascii_case("invalid expire time in 'set' command")
-            })
-        {
+        if matches!(kind, MutationKind::Set) && rejects_set_expiry(error) {
             return Self::NotApplied(MutationRefusal::InvalidTtl);
         }
-        if code == Some("NOPERM") {
+        if denies_permission(error) {
             return Self::NotApplied(
                 stopped.map_or(MutationRefusal::PermissionDenied, MutationRefusal::from),
             );
         }
-        let cause = stopped.unwrap_or_else(|| UnknownCause::Failed(error_type(error)));
-        match code {
+        let cause = FailureCause::of_reply(error, stopped);
+        match error.code() {
             Some(
                 "READONLY" | "NOAUTH" | "OOM" | "LOADING" | "MOVED" | "ASK" | "CLUSTERDOWN"
                 | "MASTERDOWN" | "MISCONF" | "NOREPLICAS" | "BUSY" | "REDIRECT",
@@ -254,6 +252,17 @@ impl ErrorType {
             Self::Other => "other",
         }
     }
+}
+
+pub(crate) fn denies_permission(error: &redis::RedisError) -> bool {
+    error.code() == Some("NOPERM")
+}
+
+fn rejects_set_expiry(error: &redis::RedisError) -> bool {
+    error.code() == Some("ERR")
+        && error.detail().is_some_and(|detail| {
+            detail.eq_ignore_ascii_case("invalid expire time in 'set' command")
+        })
 }
 
 pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {

@@ -31,13 +31,13 @@ impl Intercept for ResponseLimit {
         };
         if limited {
             let body = response.take_body();
-            *response.body_mut() = bounded(body);
+            *response.body_mut() = limit_body(body);
         }
         Ok(())
     }
 }
 
-fn bounded(body: SdkBody) -> SdkBody {
+fn limit_body(body: SdkBody) -> SdkBody {
     let data = body.map_frame(|frame| Frame::data(frame.into_data().unwrap_or_default()));
     SdkBody::from_body_1_x(Limited::new(data, MAX_RESPONSE_BYTES))
 }
@@ -91,7 +91,7 @@ mod tests {
                     .into(),
                     advertised,
                 };
-                let result = bounded(SdkBody::from_body_1_x(frames)).collect().await;
+                let result = limit_body(SdkBody::from_body_1_x(frames)).collect().await;
                 if extra {
                     assert!(
                         result.unwrap_err().is::<http_body_util::LengthLimitError>(),
@@ -116,7 +116,7 @@ mod tests {
             trailers.insert("x-provider-metadata", "ignored".parse().unwrap());
             frames.push_back(Ok(Frame::trailers(trailers)));
         }
-        let collected = bounded(SdkBody::from_body_1_x(Frames {
+        let collected = limit_body(SdkBody::from_body_1_x(Frames {
             frames,
             advertised: None,
         }))
@@ -126,7 +126,7 @@ mod tests {
         assert!(collected.trailers().is_none());
         assert_eq!(collected.to_bytes(), "ok");
 
-        let failure = bounded(SdkBody::from_body_1_x(Frames {
+        let failure = limit_body(SdkBody::from_body_1_x(Frames {
             frames: [
                 Ok(Frame::data(Bytes::from(vec![b'x'; MAX_RESPONSE_BYTES]))),
                 Err(std::io::Error::other("lost EOF")),

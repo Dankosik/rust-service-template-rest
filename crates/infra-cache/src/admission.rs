@@ -56,16 +56,11 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartErrorKind> {
             root_ca_path,
             client_certificate,
         } => {
-            let roots = root_ca_path.as_deref().map(read_root_ca).transpose()?;
-            let identity = client_certificate
-                .as_ref()
-                .map(read_client_certificate)
-                .transpose()?;
-            let transport = Transport::Tls(Tls {
-                connector: tls_connector(roots, identity)?,
-                server_name: ServerName::try_from(server.host.clone())
-                    .map_err(|_| StartErrorKind::InvalidDsn)?,
-            });
+            let transport = tls_transport(
+                &server,
+                root_ca_path.as_deref(),
+                client_certificate.as_ref(),
+            )?;
             (server, transport)
         }
     };
@@ -87,42 +82,52 @@ fn admit_address(
     root_ca_path: Option<PathBuf>,
     client_certificate: Option<ClientCertificate>,
 ) -> Result<AdmittedAddress, StartErrorKind> {
-    match info.addr() {
-        redis::ConnectionAddr::Tcp(host, port) => {
-            if !allow_plaintext {
-                return Err(StartErrorKind::PlaintextRefused);
-            }
-            if root_ca_path.is_some() {
-                return Err(StartErrorKind::CaRequiresTls);
-            }
-            if client_certificate.is_some() {
-                return Err(StartErrorKind::ClientCertificateRequiresTls);
-            }
-            Ok(AdmittedAddress::Plaintext(ServerEndpoint {
-                host: host.clone(),
-                port: *port,
-                database_index: info.redis_settings().db(),
-            }))
-        }
+    let (host, port, tls) = match info.addr() {
+        redis::ConnectionAddr::Tcp(host, port) => (host, *port, false),
         redis::ConnectionAddr::TcpTls { insecure: true, .. } => {
-            Err(StartErrorKind::InsecureTlsRefused)
+            return Err(StartErrorKind::InsecureTlsRefused);
         }
-        redis::ConnectionAddr::TcpTls {
-            host,
-            port,
-            insecure: false,
-            ..
-        } => Ok(AdmittedAddress::Tls {
-            server: ServerEndpoint {
-                host: host.clone(),
-                port: *port,
-                database_index: info.redis_settings().db(),
-            },
+        redis::ConnectionAddr::TcpTls { host, port, .. } => (host, *port, true),
+        _ => return Err(StartErrorKind::UnsupportedAddress),
+    };
+    let server = ServerEndpoint {
+        host: host.clone(),
+        port,
+        database_index: info.redis_settings().db(),
+    };
+    if tls {
+        return Ok(AdmittedAddress::Tls {
+            server,
             root_ca_path,
             client_certificate,
-        }),
-        _ => Err(StartErrorKind::UnsupportedAddress),
+        });
     }
+    if !allow_plaintext {
+        return Err(StartErrorKind::PlaintextRefused);
+    }
+    if root_ca_path.is_some() {
+        return Err(StartErrorKind::CaRequiresTls);
+    }
+    if client_certificate.is_some() {
+        return Err(StartErrorKind::ClientCertificateRequiresTls);
+    }
+    Ok(AdmittedAddress::Plaintext(server))
+}
+
+fn tls_transport(
+    server: &ServerEndpoint,
+    root_ca_path: Option<&Path>,
+    client_certificate: Option<&ClientCertificate>,
+) -> Result<Transport, StartErrorKind> {
+    let roots = root_ca_path.map(read_root_ca).transpose()?;
+    let identity = client_certificate
+        .map(read_client_certificate)
+        .transpose()?;
+    Ok(Transport::Tls(Tls {
+        connector: tls_connector(roots, identity)?,
+        server_name: ServerName::try_from(server.host.clone())
+            .map_err(|_| StartErrorKind::InvalidDsn)?,
+    }))
 }
 
 fn admit_password(
