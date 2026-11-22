@@ -95,6 +95,7 @@ pub struct OtelConfig {
     // template:begin jobs:otel-jobs-worker-identity-doc
     /// The jobs worker derives its own identity from it: `{name}-jobs-worker`.
     // template:end jobs:otel-jobs-worker-identity-doc
+    /// The Temporal worker derives its own identity from it: `{name}-temporal-worker`.
     /// The initializer rewrites this default for a derived service.
     pub service_name: String,
     pub traces_sampler: TracesSampler,

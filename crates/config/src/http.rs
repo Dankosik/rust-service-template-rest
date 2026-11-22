@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use bytesize::ByteSize;
@@ -15,6 +16,8 @@ use crate::validate::{Rejected, ValidationError, Violations, duration_range, non
 
 const MAX_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024 * 1024;
+const GRACE_AND_DRAIN_RANGE: RangeInclusive<Duration> =
+    Duration::from_secs(1)..=Duration::from_mins(10);
 
 pub(crate) type HttpInput = HttpFields;
 
@@ -38,7 +41,11 @@ impl ShutdownTail {
 #[derive(Debug, Deserialize, educe::Educe)]
 #[educe(Default(bound = false))]
 #[serde(bound(deserialize = ""), deny_unknown_fields, default)]
-pub(crate) struct HttpFields<Propagation: Mode = Keep> {
+pub(crate) struct HttpFields<
+    Propagation: Mode = Keep,
+    const DEFAULT_GRACE_SECS: u64 = 45,
+    const DEFAULT_DRAIN_SECS: u64 = 25,
+> {
     /// Listen address as an IP `host:port`, or `:port` for IPv4
     /// all-interfaces (`0.0.0.0`). Hostnames are refused.
     #[serde_as(as = "crate::de::ListenAddr")]
@@ -47,12 +54,12 @@ pub(crate) struct HttpFields<Propagation: Mode = Keep> {
     /// Total time the platform allows between SIGTERM and SIGKILL.
     /// `drain_timeout` plus the process's [`ShutdownTail`] must fit inside it.
     #[serde_as(as = "StrictDuration")]
-    #[educe(Default(expression = Duration::from_secs(45)))]
+    #[educe(Default(expression = Duration::from_secs(DEFAULT_GRACE_SECS)))]
     grace_period: Duration,
     /// Bound for the HTTP drain. In the service this includes
     /// `readiness_propagation_delay`. The worker budgets its drain separately.
     #[serde_as(as = "StrictDuration")]
-    #[educe(Default(expression = Duration::from_secs(25)))]
+    #[educe(Default(expression = Duration::from_secs(DEFAULT_DRAIN_SECS)))]
     drain_timeout: Duration,
     /// Time the service keeps serving after readiness flips off so a load
     /// balancer observes `/health/ready` failing before the listener stops
@@ -162,13 +169,16 @@ fn validate_grace_and_drain(
     tail: ShutdownTail,
     v: &mut Violations,
 ) -> Result<(), Rejected> {
-    let range = Duration::from_secs(1)..=Duration::from_mins(10);
     let grace = v.record(duration_range(
         "http.grace_period",
         grace_period,
-        range.clone(),
+        GRACE_AND_DRAIN_RANGE,
     ));
-    let drain = v.record(duration_range("http.drain_timeout", drain_timeout, range));
+    let drain = v.record(duration_range(
+        "http.drain_timeout",
+        drain_timeout,
+        GRACE_AND_DRAIN_RANGE,
+    ));
     grace.and(drain)?;
     if drain_timeout > grace_period {
         return Err(v.reject(ValidationError::new(
@@ -195,7 +205,15 @@ fn validate_grace_and_drain(
     Ok(())
 }
 
-impl<Propagation: Mode> HttpFields<Propagation> {
+impl<Propagation: Mode, const DEFAULT_GRACE_SECS: u64, const DEFAULT_DRAIN_SECS: u64>
+    HttpFields<Propagation, DEFAULT_GRACE_SECS, DEFAULT_DRAIN_SECS>
+{
+    pub(crate) fn valid_drain_timeout(&self) -> Option<Duration> {
+        GRACE_AND_DRAIN_RANGE
+            .contains(&self.drain_timeout)
+            .then_some(self.drain_timeout)
+    }
+
     fn admit_listener(
         &self,
         drain_budget: Option<Duration>,
@@ -295,7 +313,9 @@ impl WorkerHttpConfig {
     }
 }
 
-impl WorkerHttpInput {
+impl<const DEFAULT_GRACE_SECS: u64, const DEFAULT_DRAIN_SECS: u64>
+    HttpFields<crate::de::Skip, DEFAULT_GRACE_SECS, DEFAULT_DRAIN_SECS>
+{
     pub(crate) fn admit(
         self,
         tail: ShutdownTail,
@@ -311,6 +331,8 @@ impl WorkerHttpInput {
     }
 }
 // template:end worker:worker-http-config
+
+pub(crate) type TemporalWorkerHttpInput = HttpFields<crate::de::Skip, 90, 60>;
 
 #[cfg(test)]
 mod tests {
@@ -484,4 +506,23 @@ mod tests {
         assert!(toml::from_str::<WorkerHttpInput>("bogus = 1\n").is_err());
     }
     // template:end worker:worker-http-config-tests
+
+    #[test]
+    fn temporal_worker_http_defaults_to_90s_and_60s_without_changing_service_or_worker_defaults() {
+        let service = admit(HttpInput::default()).unwrap();
+        assert_eq!(service.grace_period, Duration::from_secs(45));
+        assert_eq!(service.drain_timeout, Duration::from_secs(25));
+
+        let jobs_worker =
+            admit_with(|v| WorkerHttpInput::default().admit(super::NO_SHUTDOWN_TAIL, v)).unwrap();
+        assert_eq!(jobs_worker.grace_period, Duration::from_secs(45));
+        assert_eq!(jobs_worker.drain_timeout, Duration::from_secs(25));
+
+        let temporal_input: TemporalWorkerHttpInput =
+            toml::from_str("readiness_propagation_delay = { bad = 1 }\n").unwrap();
+        let temporal = admit_with(|v| temporal_input.admit(super::NO_SHUTDOWN_TAIL, v)).unwrap();
+        assert_eq!(temporal.grace_period, Duration::from_secs(90));
+        assert_eq!(temporal.drain_timeout, Duration::from_secs(60));
+        assert!(toml::from_str::<TemporalWorkerHttpInput>("bogus = 1\n").is_err());
+    }
 }
