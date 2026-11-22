@@ -50,10 +50,12 @@ pub(crate) async fn authenticate(
             .authenticate_presented(context, authorization, Transport::Grpc)
             .await
     };
-    check_open(context)?;
     let (principal, token) = match result {
         Ok(presentation) => presentation,
         Err(failure) => {
+            if failure == AuthFailure::Unavailable {
+                check_open(context)?;
+            }
             return Err(
                 reject_with_budget(context, request, authentication_status(failure))
                     .await
@@ -79,7 +81,6 @@ pub(crate) async fn authenticate(
             reject_with_budget(context, request, status).await,
         ));
     }
-    check_open(context)?;
     let delegation = requirement
         .delegate
         .then(|| token.into_delegation_credential());

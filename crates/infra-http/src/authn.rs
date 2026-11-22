@@ -159,12 +159,16 @@ fn authorize(
     required: &ProtectedAccess,
     request_id: Option<&RequestId>,
 ) -> Result<(Principal, Option<DelegationCredential>), Response> {
-    if let Some(stopped) = operation.stopped() {
-        return Err(Problem::from(stopped)
-            .with_request_id(request_id)
-            .into_response());
-    }
-    let (principal, token) = result.map_err(|failure| failure_response(failure, request_id))?;
+    let (principal, token) = result.map_err(|failure| {
+        if failure == Failure::Unavailable
+            && let Some(stopped) = operation.stopped()
+        {
+            return Problem::from(stopped)
+                .with_request_id(request_id)
+                .into_response();
+        }
+        failure_response(failure, request_id)
+    })?;
     if !required
         .scope_alternatives
         .iter()

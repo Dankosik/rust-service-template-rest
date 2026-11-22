@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use enum_map::EnumMap;
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 
 use crate::{
     Failure, PresentedToken, Principal, VerificationError, VerificationReason,
@@ -88,6 +88,12 @@ enum Engine {
     // template:end oidc-introspection:authn-introspection-engine
 }
 
+pub(crate) enum VerificationOutcome {
+    Verified(Principal),
+    Failed(Failure),
+    Stopped(Stopped),
+}
+
 impl Verifier {
     fn new(engine: Engine) -> Self {
         let mode = match &engine {
@@ -129,12 +135,27 @@ impl Verifier {
         .await
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn verify_with_context(
         &self,
         token: &PresentedToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
-        context.check().map_err(|_| Failure::Unavailable)?;
+        match self.verify_checked(token, context).await {
+            VerificationOutcome::Verified(principal) => Ok(principal),
+            VerificationOutcome::Failed(failure) => Err(failure),
+            VerificationOutcome::Stopped(_) => Err(Failure::Unavailable),
+        }
+    }
+
+    pub(crate) async fn verify_checked(
+        &self,
+        token: &PresentedToken<'_>,
+        context: &OperationContext,
+    ) -> VerificationOutcome {
+        if let Err(stopped) = context.check() {
+            return VerificationOutcome::Stopped(stopped);
+        }
         let verification = async {
             match &self.0.engine {
                 // template:begin oidc-jwt:authn-jwt-verify
@@ -148,9 +169,14 @@ impl Verifier {
         let result = tokio::select! {
             biased;
             result = verification => result,
-            _ = context.wait_stopped() => return Err(Failure::Unavailable),
+            stopped = context.wait_stopped() => return VerificationOutcome::Stopped(stopped),
         };
-        context.check().map_err(|_| Failure::Unavailable)?;
-        record_verification(&self.0.counters, result)
+        if let Err(stopped) = context.check() {
+            return VerificationOutcome::Stopped(stopped);
+        }
+        match record_verification(&self.0.counters, result) {
+            Ok(principal) => VerificationOutcome::Verified(principal),
+            Err(failure) => VerificationOutcome::Failed(failure),
+        }
     }
 }

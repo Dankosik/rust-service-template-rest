@@ -507,15 +507,19 @@ impl Scopes {
         match scope {
             None => Some(Self(Vec::new())),
             Some(StringOrStrings::One(value)) if value.is_empty() => Some(Self(Vec::new())),
-            Some(StringOrStrings::One(value)) => {
-                let mut values: SmallVec<[&str; 8]> = value
-                    .split(' ')
-                    .map(|part| shared_rules::rfc6749::is_scope_token(part).then_some(part))
-                    .collect::<Option<_>>()?;
-                values.sort_unstable();
-                values.dedup();
-                Some(Self(values.into_iter().map(str::to_owned).collect()))
-            }
+            Some(StringOrStrings::One(value)) => match value.split_once(' ') {
+                None => shared_rules::rfc6749::is_scope_token(&value)
+                    .then(|| Self(vec![value.into_owned()])),
+                Some((first, rest)) => {
+                    let mut values: SmallVec<[&str; 8]> = std::iter::once(first)
+                        .chain(rest.split(' '))
+                        .map(|part| shared_rules::rfc6749::is_scope_token(part).then_some(part))
+                        .collect::<Option<_>>()?;
+                    values.sort_unstable();
+                    values.dedup();
+                    Some(Self(values.into_iter().map(str::to_owned).collect()))
+                }
+            },
             Some(StringOrStrings::Many(mut values)) => {
                 if !values
                     .iter()
@@ -1179,6 +1183,40 @@ mod tests {
                 }
             }
             // template:end oidc-jwt:authn-claims-scope-jwt-assertion
+        }
+    }
+
+    #[test]
+    fn single_scope_strings_reuse_owned_buffers_and_preserve_space_splitting() {
+        use std::borrow::Cow;
+
+        let escaped: super::StringOrStrings<'_> =
+            serde_json::from_str(r#""read\u003awrite""#).unwrap();
+        let super::StringOrStrings::One(Cow::Owned(ref raw)) = escaped else {
+            panic!("escaped JSON string must deserialize as Cow::Owned");
+        };
+        let owned_ptr = raw.as_ptr();
+        let scopes = super::Scopes::from_claim(Some(escaped)).unwrap();
+        assert_eq!(scopes.as_slice(), ["read:write"]);
+        assert_eq!(scopes.as_slice()[0].as_ptr(), owned_ptr);
+
+        let escaped_list: super::StringOrStrings<'_> =
+            serde_json::from_str(r#""write\u0020read\u0020write""#).unwrap();
+        assert_eq!(
+            super::Scopes::from_claim(Some(escaped_list))
+                .unwrap()
+                .as_slice(),
+            ["read", "write"]
+        );
+
+        for invalid in [" ", " read", "read ", "read  write", "bad\x7fscope"] {
+            assert!(
+                super::Scopes::from_claim(Some(super::StringOrStrings::One(Cow::Borrowed(
+                    invalid
+                ))))
+                .is_none(),
+                "{invalid:?}"
+            );
         }
     }
 }
