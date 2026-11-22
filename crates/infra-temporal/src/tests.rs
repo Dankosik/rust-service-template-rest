@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use compact_str::CompactString;
@@ -9,9 +10,11 @@ use health::Probe as _;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKind;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use opentelemetry::global;
+use opentelemetry::baggage::BaggageExt as _;
+use opentelemetry::propagation::TextMapCompositePropagator;
 use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
-use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry::{Context as OtelContext, KeyValue, global};
+use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use operation_context::{OperationContext, Stopped};
 use prost::Message as _;
@@ -24,11 +27,11 @@ use temporalio_client::errors::{
     WorkflowGetResultError as SdkWorkflowGetResultError,
     WorkflowStartError as SdkWorkflowStartError, WorkflowUpdateError as SdkWorkflowUpdateError,
 };
-use temporalio_client::{Connection, ConnectionOptions, MESSAGE_TOO_LARGE_KEY, ResolvesClientCert};
+use temporalio_client::{MESSAGE_TOO_LARGE_KEY, ResolvesClientCert};
 use temporalio_common::WorkflowDefinition as _;
 use temporalio_common::data_converters::{
     GenericPayloadConverter as _, PayloadConversionError, SerializationContext,
-    SerializationContextData,
+    SerializationContextData, WorkflowSerializationContext,
 };
 use temporalio_common::protos::temporal::api::common::v1::{
     Payload, Payloads, WorkflowExecution, WorkflowType,
@@ -70,12 +73,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use url::Url;
 
-use crate::credentials::{
-    ApiKeyWatch, CredentialWatcher, MtlsWatch, RotatingClientCertResolver, load_api_key_file,
-    load_mtls_files,
-};
+use crate::connection::proxy_options_from_url;
+use crate::credentials::load_api_key_file;
 use crate::error::{map_result_error, map_start_error, map_start_status, map_update_error};
-use crate::payload::{build_data_converter, classify_payload_conversion};
+use crate::payload::{ClassifiedPayloadError, build_data_converter, classify_payload_error};
 use crate::trace::{
     TRACER_DATA_HEADER, extract_context_from_headers, inject_current_context_into_headers,
 };
@@ -134,6 +135,12 @@ impl FloatWorkflow {
     ) -> WorkflowResult<FloatPayload> {
         ctx.timer(Duration::from_millis(1)).await;
         Ok(input)
+    }
+
+    #[update]
+    async fn adjust(ctx: &mut WorkflowContext<Self>, input: FloatPayload) -> FloatPayload {
+        ctx.timer(Duration::from_millis(1)).await;
+        input
     }
 }
 
@@ -420,16 +427,16 @@ async fn finite_bounded_json_converter_enforces_nan_size_binary_null_and_codec()
             .to_payload(&ctx, &FloatPayload { amount: bad_float })
             .unwrap_err();
         assert_eq!(
-            classify_payload_conversion(&err, PayloadError::Decode),
-            (PayloadError::Serialize, false)
+            classify_payload_error(&err),
+            ClassifiedPayloadError::Encode(PayloadError::Serialize)
         );
     }
 
     let oversized = "x".repeat(40);
     let err = pc.to_payload(&ctx, &oversized).unwrap_err();
     assert_eq!(
-        classify_payload_conversion(&err, PayloadError::Serialize),
-        (PayloadError::TooLarge { bytes: 42 }, false)
+        classify_payload_error(&err),
+        ClassifiedPayloadError::Encode(PayloadError::TooLarge { bytes: 42 })
     );
 
     let null_payload = pc.to_payload(&ctx, &Option::<String>::None).unwrap();
@@ -457,8 +464,8 @@ async fn finite_bounded_json_converter_enforces_nan_size_binary_null_and_codec()
         .from_payload::<Option<String>>(&ctx, bad_null)
         .unwrap_err();
     assert_eq!(
-        classify_payload_conversion(&bad_null_err, PayloadError::Serialize),
-        (PayloadError::InvalidEncoding, true)
+        classify_payload_error(&bad_null_err),
+        ClassifiedPayloadError::Decode(PayloadError::InvalidEncoding)
     );
 
     let oversized_inbound = json_payload(&[b'"'; 40]);
@@ -466,16 +473,16 @@ async fn finite_bounded_json_converter_enforces_nan_size_binary_null_and_codec()
         .from_payload::<String>(&ctx, oversized_inbound)
         .unwrap_err();
     assert_eq!(
-        classify_payload_conversion(&decode_large, PayloadError::Serialize),
-        (PayloadError::TooLarge { bytes: 40 }, true)
+        classify_payload_error(&decode_large),
+        ClassifiedPayloadError::Decode(PayloadError::TooLarge { bytes: 40 })
     );
 
     let corrupt_json = pc
         .from_payload::<String>(&ctx, json_payload(b"{broken"))
         .unwrap_err();
     assert_eq!(
-        classify_payload_conversion(&corrupt_json, PayloadError::Serialize),
-        (PayloadError::Decode, true)
+        classify_payload_error(&corrupt_json),
+        ClassifiedPayloadError::Decode(PayloadError::Decode)
     );
 
     let codec_dc = build_data_converter(128, Some(Arc::new(XorCodec(0x5A))));
@@ -501,9 +508,19 @@ fn header_from_map(
     HashMap::from([(TRACER_DATA_HEADER.to_owned(), payload)])
 }
 
+fn install_test_propagator() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
+            Box::new(TraceContextPropagator::new()),
+            Box::new(BaggagePropagator::new()),
+        ]));
+    });
+}
+
 #[test]
 fn trace_context_injects_extracts_and_strips_baggage_controls_and_oversized_headers() {
-    global::set_text_map_propagator(TraceContextPropagator::new());
+    install_test_propagator();
     let provider = SdkTracerProvider::builder().build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
@@ -517,6 +534,16 @@ fn trace_context_injects_extracts_and_strips_baggage_controls_and_oversized_head
 
     tracing::subscriber::with_default(subscriber, || {
         let span = tracing::info_span!("outbound_op");
+        let parent_with_baggage =
+            OtelContext::new().with_baggage(vec![KeyValue::new("user_id", "secret-123")]);
+        assert!(span.set_parent(parent_with_baggage).is_ok());
+        assert_eq!(
+            span.context()
+                .baggage()
+                .get("user_id")
+                .map(opentelemetry::StringValue::as_str),
+            Some("secret-123")
+        );
         let expected_trace_id = span.context().span().span_context().trace_id();
         let expected_span_id = span.context().span().span_context().span_id();
         let mut headers = HashMap::new();
@@ -530,6 +557,7 @@ fn trace_context_injects_extracts_and_strips_baggage_controls_and_oversized_head
         assert!(remote.is_valid());
         assert_eq!(remote.trace_id(), expected_trace_id);
         assert_eq!(remote.span_id(), expected_span_id);
+        assert!(extracted.baggage().is_empty());
 
         let raw_map: HashMap<String, String> = pc
             .from_payload(
@@ -537,13 +565,24 @@ fn trace_context_injects_extracts_and_strips_baggage_controls_and_oversized_head
                 headers[TRACER_DATA_HEADER].clone(),
             )
             .unwrap();
+        assert!(raw_map.contains_key("traceparent"));
+        assert!(!raw_map.contains_key("baggage"), "{raw_map:?}");
         let valid_traceparent = raw_map["traceparent"].clone();
 
         let polluted = HashMap::from([
             ("traceparent".to_owned(), valid_traceparent.clone()),
             ("tracestate".to_owned(), "vendor=ok".to_owned()),
-            ("baggage".to_owned(), "user_id=secret-attacker".to_owned()),
+            ("baggage".to_owned(), "secret=1".to_owned()),
         ]);
+        let unsanitized =
+            global::get_text_map_propagator(|propagator| propagator.extract(&polluted));
+        assert_eq!(
+            unsanitized
+                .baggage()
+                .get("secret")
+                .map(opentelemetry::StringValue::as_str),
+            Some("1")
+        );
         let extracted_polluted = extract_context_from_headers(&header_from_map(pc, &polluted), pc);
         assert_eq!(
             extracted_polluted.span().span_context().trace_id(),
@@ -557,6 +596,8 @@ fn trace_context_injects_extracts_and_strips_baggage_controls_and_oversized_head
                 .get("vendor"),
             Some("ok")
         );
+        assert!(extracted_polluted.baggage().is_empty());
+        assert!(extracted_polluted.baggage().get("secret").is_none());
 
         let bad_cases = [
             HashMap::from([(
@@ -682,6 +723,94 @@ fn recording_describe_callback(
     })
 }
 
+fn reload_counter(scrape: &str, kind: &str, outcome: &str) -> u64 {
+    let prefix =
+        format!(r#"temporal_credential_reloads_total{{kind="{kind}",outcome="{outcome}"}} "#);
+    scrape
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+async fn wait_next_step(steps: &mut tokio::sync::watch::Receiver<u64>) {
+    let current = *steps.borrow_and_update();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        steps.wait_for(|count| *count > current),
+    )
+    .await
+    .expect("timed out waiting for credential watcher tick")
+    .expect("credential watcher exited unexpectedly");
+}
+
+async fn wait_for_watcher<F>(steps: &mut tokio::sync::watch::Receiver<u64>, mut condition: F)
+where
+    F: FnMut() -> bool,
+{
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition() {
+            steps
+                .changed()
+                .await
+                .expect("credential watcher exited before condition was satisfied");
+        }
+    })
+    .await
+    .expect("timed out waiting for credential watcher update");
+}
+
+async fn wait_watcher_closed(steps: &mut tokio::sync::watch::Receiver<u64>) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while steps.changed().await.is_ok() {}
+    })
+    .await
+    .expect("timed out waiting for background credential watcher to stop");
+}
+
+#[derive(Default)]
+struct CapturedEvent {
+    message: String,
+    fields: String,
+}
+
+#[derive(Clone, Default)]
+struct CaptureLayer {
+    events: Arc<Mutex<Vec<CapturedEvent>>>,
+}
+
+struct FieldRecorder<'a>(&'a mut CapturedEvent);
+
+impl tracing::field::Visit for FieldRecorder<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0.message = format!("{value:?}");
+        } else {
+            let _ = write!(self.0.fields, "{}={value:?} ", field.name());
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.message = value.to_owned();
+        } else {
+            let _ = write!(self.0.fields, "{}={value} ", field.name());
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut captured = CapturedEvent::default();
+        event.record(&mut FieldRecorder(&mut captured));
+        self.events.lock().unwrap().push(captured);
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::disallowed_methods,
@@ -699,13 +828,14 @@ async fn live_api_key_file_rotation_updates_headers_and_preserves_last_known_goo
     let mut options = base_options();
     options.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
     options.auth = TemporalAuth::ApiKeyFile(api_key_path.clone());
-    options.credential_refresh_interval = Duration::from_secs(60);
+    options.credential_refresh_interval = Duration::from_millis(5);
 
     let (startup, conn) = admit_with_callback(
         options,
         recording_describe_callback(Arc::clone(&captured_auth)),
     )
     .await;
+    let mut steps = startup.watcher_steps().expect("watcher spawned");
     let probe = conn.probe();
     probe.check().await.expect("initial api key succeeds");
     assert_eq!(
@@ -713,73 +843,69 @@ async fn live_api_key_file_rotation_updates_headers_and_preserves_last_known_goo
         Some("Bearer token-v1")
     );
 
-    let reader = Arc::new(Semaphore::new(1));
-    let (_, initial_digest) = load_api_key_file(api_key_path.clone(), &reader)
-        .await
-        .unwrap();
-    let direct_cb_auth = Arc::new(Mutex::new(Vec::new()));
-    let direct_conn = Connection::connect(
-        ConnectionOptions::new(Url::parse("http://127.0.0.1:7233").unwrap())
-            .dns_load_balancing(None)
-            .api_key("token-v1".to_owned())
-            .service_override(recording_describe_callback(Arc::clone(&direct_cb_auth)))
-            .build(),
-    )
-    .await
-    .unwrap();
+    wait_next_step(&mut steps).await;
+    let initial_scrape = recorder.handle().render();
+    assert_eq!(reload_counter(&initial_scrape, "api_key", "ok"), 0);
+    assert_eq!(reload_counter(&initial_scrape, "api_key", "failed"), 0);
 
-    let mut watcher = CredentialWatcher::new(
-        Some(ApiKeyWatch::new(
-            api_key_path.clone(),
-            initial_digest,
-            direct_conn.clone(),
-        )),
-        None,
-        Arc::clone(&reader),
-    );
-    watcher.step().await;
+    let failed_before_blank = reload_counter(&recorder.handle().render(), "api_key", "failed");
     std::fs::write(&api_key_path, "   \n").unwrap();
-    watcher.step().await;
-    std::fs::write(&api_key_path, "bad\x07key").unwrap();
-    watcher.step().await;
-    std::fs::remove_file(&api_key_path).unwrap();
-    watcher.step().await;
-
-    let raw_client = temporalio_client::Client::new(
-        direct_conn,
-        temporalio_client::ClientOptions::new("default").build(),
-    )
-    .unwrap();
-    let probe_before_rotate = TemporalProbe::new(
-        raw_client,
-        "default".to_owned(),
-        Duration::from_secs(1),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        None,
-    );
-    probe_before_rotate.check().await.unwrap();
+    wait_for_watcher(&mut steps, || {
+        reload_counter(&recorder.handle().render(), "api_key", "failed") > failed_before_blank
+    })
+    .await;
+    probe.check().await.unwrap();
     assert_eq!(
-        last_auth(&direct_cb_auth).as_deref(),
+        last_auth(&captured_auth).as_deref(),
         Some("Bearer token-v1")
     );
 
-    std::fs::write(&api_key_path, "token-v2\r\n").unwrap();
-    watcher.step().await;
-    probe_before_rotate.check().await.unwrap();
+    let failed_before_ctrl = reload_counter(&recorder.handle().render(), "api_key", "failed");
+    std::fs::write(&api_key_path, "bad\x07key").unwrap();
+    wait_for_watcher(&mut steps, || {
+        reload_counter(&recorder.handle().render(), "api_key", "failed") > failed_before_ctrl
+    })
+    .await;
+    probe.check().await.unwrap();
     assert_eq!(
-        last_auth(&direct_cb_auth).as_deref(),
+        last_auth(&captured_auth).as_deref(),
+        Some("Bearer token-v1")
+    );
+
+    let failed_before_remove = reload_counter(&recorder.handle().render(), "api_key", "failed");
+    std::fs::remove_file(&api_key_path).unwrap();
+    wait_for_watcher(&mut steps, || {
+        reload_counter(&recorder.handle().render(), "api_key", "failed") > failed_before_remove
+    })
+    .await;
+    probe.check().await.unwrap();
+    assert_eq!(
+        last_auth(&captured_auth).as_deref(),
+        Some("Bearer token-v1")
+    );
+    assert_eq!(
+        reload_counter(&recorder.handle().render(), "api_key", "ok"),
+        0
+    );
+
+    std::fs::write(&api_key_path, "token-v2\r\n").unwrap();
+    wait_for_watcher(&mut steps, || {
+        reload_counter(&recorder.handle().render(), "api_key", "ok") >= 1
+    })
+    .await;
+    probe.check().await.unwrap();
+    assert_eq!(
+        last_auth(&captured_auth).as_deref(),
         Some("Bearer token-v2")
     );
 
+    wait_next_step(&mut steps).await;
     let scrape = recorder.handle().render();
     assert!(
-        scrape.contains(r#"temporal_credential_reloads_total{kind="api_key",outcome="failed"} 3"#),
+        reload_counter(&scrape, "api_key", "failed") >= 3,
         "{scrape}"
     );
-    assert!(
-        scrape.contains(r#"temporal_credential_reloads_total{kind="api_key",outcome="ok"} 1"#),
-        "{scrape}"
-    );
+    assert_eq!(reload_counter(&scrape, "api_key", "ok"), 1, "{scrape}");
     for secret in ["token-v1", "token-v2", "sentinel-api-key.txt"] {
         assert!(!scrape.contains(secret), "leaked {secret} in {scrape}");
     }
@@ -787,6 +913,7 @@ async fn live_api_key_file_rotation_updates_headers_and_preserves_last_known_goo
         startup.close(Instant::now() + Duration::from_secs(2)).await,
         CloseOutcome::Complete
     );
+    wait_watcher_closed(&mut steps).await;
     assert!(probe.check().await.is_err());
 }
 
@@ -809,11 +936,30 @@ async fn live_dynamic_mtls_rotation_swaps_valid_keys_and_preserves_prior_on_malf
     std::fs::write(&cert_path, &cert1).unwrap();
     std::fs::write(&key_path, &key1).unwrap();
 
-    let reader = Arc::new(Semaphore::new(1));
-    let initial = load_mtls_files(cert_path.clone(), key_path.clone(), &reader)
-        .await
-        .expect("initial mTLS files load");
-    let resolver = Arc::new(RotatingClientCertResolver::new(initial.certified_key));
+    let mut options = base_options();
+    options.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
+    options.dns_load_balancing = false;
+    options.credential_refresh_interval = Duration::from_millis(5);
+    options.tls = Some(TemporalTlsOptions {
+        server_root_ca_path: None,
+        domain: None,
+        mtls: Some(TemporalMtlsOptions {
+            client_cert_path: cert_path.clone(),
+            client_key_path: key_path.clone(),
+            rotation: TlsRotationMode::Dynamic,
+        }),
+    });
+
+    let (startup, _conn) = admit_with_callback(
+        options,
+        simple_callback(|req: GrpcRequest| match req.rpc.as_str() {
+            "DescribeNamespace" => Ok(DescribeNamespaceResponse::default().encode_to_vec()),
+            _ => Err(Status::unimplemented("unexpected")),
+        }),
+    )
+    .await;
+    let mut steps = startup.watcher_steps().expect("watcher spawned");
+    let resolver = startup.mtls_resolver().expect("dynamic mTLS resolver");
     let cert1_der = resolver.current_cert_der();
     assert!(resolver.has_certs());
     assert!(
@@ -825,44 +971,110 @@ async fn live_dynamic_mtls_rotation_swaps_valid_keys_and_preserves_prior_on_malf
             .is_some()
     );
 
-    let mut watcher = CredentialWatcher::new(
-        None,
-        Some(MtlsWatch::new(
-            cert_path.clone(),
-            key_path.clone(),
-            initial.digest,
-            Arc::clone(&resolver),
-        )),
-        Arc::clone(&reader),
-    );
+    wait_next_step(&mut steps).await;
+    let initial_scrape = recorder.handle().render();
+    assert_eq!(reload_counter(&initial_scrape, "mtls", "ok"), 0);
+    assert_eq!(reload_counter(&initial_scrape, "mtls", "failed"), 0);
 
+    let failed_before_truncated = reload_counter(&recorder.handle().render(), "mtls", "failed");
     std::fs::write(&cert_path, "-----BEGIN CERTIFICATE-----\ntruncated").unwrap();
-    watcher.step().await;
+    wait_for_watcher(&mut steps, || {
+        reload_counter(&recorder.handle().render(), "mtls", "failed") > failed_before_truncated
+    })
+    .await;
     assert_eq!(resolver.current_cert_der(), cert1_der);
 
+    let failed_before_mismatch = reload_counter(&recorder.handle().render(), "mtls", "failed");
     std::fs::write(&cert_path, &cert2).unwrap();
     std::fs::write(&key_path, &mismatched_key).unwrap();
-    watcher.step().await;
+    wait_for_watcher(&mut steps, || {
+        reload_counter(&recorder.handle().render(), "mtls", "failed") > failed_before_mismatch
+    })
+    .await;
     assert_eq!(resolver.current_cert_der(), cert1_der);
+    assert_eq!(reload_counter(&recorder.handle().render(), "mtls", "ok"), 0);
 
     std::fs::write(&cert_path, &cert2).unwrap();
     std::fs::write(&key_path, &key2).unwrap();
-    watcher.step().await;
+    wait_for_watcher(&mut steps, || resolver.current_cert_der() != cert1_der).await;
     let cert2_der = resolver.current_cert_der();
     assert_ne!(cert2_der, cert1_der);
 
-    watcher.step().await;
-
+    wait_next_step(&mut steps).await;
     let scrape = recorder.handle().render();
-    assert!(
-        scrape.contains(r#"temporal_credential_reloads_total{kind="mtls",outcome="failed"} 2"#),
-        "{scrape}"
-    );
-    assert!(
-        scrape.contains(r#"temporal_credential_reloads_total{kind="mtls",outcome="ok"} 1"#),
-        "{scrape}"
-    );
+    assert!(reload_counter(&scrape, "mtls", "failed") >= 2, "{scrape}");
+    assert_eq!(reload_counter(&scrape, "mtls", "ok"), 1, "{scrape}");
     assert!(!scrape.contains("sentinel-client"));
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(2)).await,
+        CloseOutcome::Complete
+    );
+    wait_watcher_closed(&mut steps).await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary credential file verifies Drop cancellation and panic observation"
+)]
+async fn dropping_startup_cancels_background_watcher_and_close_observes_watcher_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let api_key_path = dir.path().join("drop-api-key.txt");
+    std::fs::write(&api_key_path, "token-drop-v1\n").unwrap();
+
+    let mut options = base_options();
+    options.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
+    options.auth = TemporalAuth::ApiKeyFile(api_key_path.clone());
+    options.credential_refresh_interval = Duration::from_secs(60);
+
+    let (startup, _conn) = admit_with_callback(
+        options.clone(),
+        simple_callback(|_| Ok(DescribeNamespaceResponse::default().encode_to_vec())),
+    )
+    .await;
+    let mut steps = startup.watcher_steps().expect("watcher spawned");
+    assert!(steps.has_changed().is_ok());
+
+    drop(startup);
+    wait_watcher_closed(&mut steps).await;
+
+    let capture = CaptureLayer::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _dispatch = tracing::subscriber::set_default(subscriber);
+
+    let (mut panic_startup, _conn) = admit_with_callback(
+        options,
+        simple_callback(|_| Ok(DescribeNamespaceResponse::default().encode_to_vec())),
+    )
+    .await;
+    let panic_task = tokio::spawn(async {
+        panic!("secret-watcher-panic-sentinel");
+    });
+    panic_startup.replace_watcher_task(panic_task);
+
+    assert_eq!(
+        panic_startup
+            .close(Instant::now() + Duration::from_secs(2))
+            .await,
+        CloseOutcome::Complete
+    );
+
+    let events = capture.events.lock().unwrap();
+    let panic_event = events
+        .iter()
+        .find(|event| event.message == "temporal_credential_watcher_failed")
+        .expect("expected sanitized watcher failure log event");
+    assert!(
+        panic_event.fields.contains("reason=panicked"),
+        "{}",
+        panic_event.fields
+    );
+    assert!(
+        !panic_event.fields.contains("secret-watcher-panic-sentinel")
+            && !panic_event
+                .message
+                .contains("secret-watcher-panic-sentinel")
+    );
 }
 
 #[cfg(unix)]
@@ -1313,7 +1525,7 @@ async fn probe_enforces_zero_retries_and_draining_short_circuit() {
 
 #[tokio::test]
 async fn client_propagates_trace_context_memo_update_query_and_describe() {
-    global::set_text_map_propagator(TraceContextPropagator::new());
+    install_test_propagator();
     let provider = SdkTracerProvider::builder().build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
@@ -1409,7 +1621,7 @@ async fn client_propagates_trace_context_memo_update_query_and_describe() {
 
 #[tokio::test]
 async fn client_update_with_start_injects_trace_headers_into_both_operations() {
-    global::set_text_map_propagator(TraceContextPropagator::new());
+    install_test_propagator();
     let provider = SdkTracerProvider::builder().build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
@@ -1786,6 +1998,676 @@ async fn startup_admit_classifies_cancelled_timed_out_missing_credential_and_bad
     let dump = format!("{err}; {err:?}");
     assert!(!dump.contains("sentinel-bad-ca.pem"));
     assert!(!dump.contains("temporal.example.invalid"));
+}
+
+struct StrictXorCodec(u8);
+
+impl StrictXorCodec {
+    const ENCODING: &'static [u8] = b"binary/xor";
+}
+
+impl PayloadCodec for StrictXorCodec {
+    fn encode(
+        &self,
+        _context: &SerializationContextData,
+        payloads: Vec<Payload>,
+    ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
+        let mask = self.0;
+        Box::pin(async move {
+            Ok(payloads
+                .into_iter()
+                .map(|payload| {
+                    let mut encoded_bytes = payload.encode_to_vec();
+                    for byte in &mut encoded_bytes {
+                        *byte ^= mask;
+                    }
+                    Payload {
+                        metadata: HashMap::from([(
+                            ENCODING_PAYLOAD_KEY.to_owned(),
+                            Self::ENCODING.to_vec(),
+                        )]),
+                        data: encoded_bytes,
+                        external_payloads: Vec::new(),
+                    }
+                })
+                .collect())
+        })
+    }
+
+    fn decode(
+        &self,
+        _context: &SerializationContextData,
+        payloads: Vec<Payload>,
+    ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
+        let mask = self.0;
+        Box::pin(async move {
+            payloads
+                .into_iter()
+                .map(|mut payload| {
+                    if payload
+                        .metadata
+                        .get(ENCODING_PAYLOAD_KEY)
+                        .map(Vec::as_slice)
+                        != Some(Self::ENCODING)
+                    {
+                        return Err(PayloadConversionError::WrongEncoding);
+                    }
+                    for byte in &mut payload.data {
+                        *byte ^= mask;
+                    }
+                    Payload::decode(payload.data.as_slice())
+                        .map_err(|err| PayloadConversionError::EncodingError(Box::new(err)))
+                })
+                .collect()
+        })
+    }
+}
+
+struct FaultyEncodeCodec {
+    return_count: Option<usize>,
+}
+
+impl PayloadCodec for FaultyEncodeCodec {
+    fn encode(
+        &self,
+        _context: &SerializationContextData,
+        payloads: Vec<Payload>,
+    ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
+        let return_count = self.return_count;
+        Box::pin(async move {
+            match return_count {
+                Some(0) => Ok(Vec::new()),
+                Some(count) => Ok(std::iter::repeat_n(
+                    payloads.into_iter().next().unwrap_or_default(),
+                    count,
+                )
+                .collect()),
+                None => Err(PayloadConversionError::EncodingError(
+                    std::io::Error::other("secret-kms-key-id-99").into(),
+                )),
+            }
+        })
+    }
+
+    fn decode(
+        &self,
+        _context: &SerializationContextData,
+        payloads: Vec<Payload>,
+    ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
+        Box::pin(async move { Ok(payloads) })
+    }
+}
+
+struct FailingDecodeCodec;
+
+impl PayloadCodec for FailingDecodeCodec {
+    fn encode(
+        &self,
+        _context: &SerializationContextData,
+        payloads: Vec<Payload>,
+    ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
+        Box::pin(async move { Ok(payloads) })
+    }
+
+    fn decode(
+        &self,
+        _context: &SerializationContextData,
+        _payloads: Vec<Payload>,
+    ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
+        Box::pin(async move {
+            Err(PayloadConversionError::EncodingError(
+                std::io::Error::other("secret-decrypt-error").into(),
+            ))
+        })
+    }
+}
+
+async fn assert_xor_encoded_trace_header(
+    mut fields: HashMap<String, Payload>,
+    dc: &temporalio_common::data_converters::DataConverter,
+    expected_trace_id: opentelemetry::trace::TraceId,
+) {
+    let wire_header = fields
+        .remove(TRACER_DATA_HEADER)
+        .expect("wire _tracer-data header present");
+    assert_eq!(
+        wire_header
+            .metadata
+            .get(ENCODING_PAYLOAD_KEY)
+            .map(Vec::as_slice),
+        Some(StrictXorCodec::ENCODING)
+    );
+    let wf_ctx = SerializationContextData::Workflow(WorkflowSerializationContext::new());
+    let mut decoded = dc.codec().decode(&wf_ctx, vec![wire_header]).await.unwrap();
+    assert_eq!(decoded.len(), 1);
+    let extracted = extract_context_from_headers(
+        &HashMap::from([(TRACER_DATA_HEADER.to_owned(), decoded.remove(0))]),
+        dc.payload_converter(),
+    );
+    assert_eq!(
+        extracted.span().span_context().trace_id(),
+        expected_trace_id
+    );
+}
+
+fn codec_trace_callback(
+    state: Arc<MockServerState>,
+    encoded_update_payload: Payload,
+) -> CallbackBasedGrpcService {
+    simple_callback(move |req: GrpcRequest| match req.rpc.as_str() {
+        "StartWorkflowExecution" => {
+            *state.start.lock().unwrap() =
+                Some(StartWorkflowExecutionRequest::decode(req.proto.as_ref()).unwrap());
+            Ok(StartWorkflowExecutionResponse {
+                run_id: "run-1".to_owned(),
+                ..Default::default()
+            }
+            .encode_to_vec())
+        }
+        "SignalWorkflowExecution" => {
+            *state.signal.lock().unwrap() =
+                Some(SignalWorkflowExecutionRequest::decode(req.proto.as_ref()).unwrap());
+            Ok(Vec::new())
+        }
+        "ExecuteMultiOperation" => {
+            *state.uws.lock().unwrap() =
+                Some(ExecuteMultiOperationRequest::decode(req.proto.as_ref()).unwrap());
+            Ok(multi_op_response_with_update(update_response_with_outcome(
+                Some(Outcome {
+                    value: Some(outcome::Value::Success(Payloads {
+                        payloads: vec![encoded_update_payload.clone()],
+                    })),
+                }),
+            )))
+        }
+        _ => Err(Status::unimplemented("unexpected")),
+    })
+}
+
+#[tokio::test]
+async fn client_trace_interceptor_encodes_tracer_data_header_with_payload_codec() {
+    install_test_propagator();
+    let provider = SdkTracerProvider::builder().build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+
+    let codec: Arc<dyn PayloadCodec + Send + Sync> = Arc::new(StrictXorCodec(0x5A));
+    let dc = build_data_converter(4096, Some(Arc::clone(&codec)));
+    let wf_ctx = SerializationContextData::Workflow(WorkflowSerializationContext::new());
+    let encoded_update_payload = dc
+        .to_payload(&wf_ctx, &"codec-updated".to_owned())
+        .await
+        .unwrap();
+    let state = Arc::new(MockServerState::default());
+
+    let mut opts = base_options();
+    opts.payload_codec = Some(Arc::clone(&codec));
+    let (startup, conn) = admit_with_callback(
+        opts,
+        codec_trace_callback(Arc::clone(&state), encoded_update_payload),
+    )
+    .await;
+    let client = conn.client();
+    let op = OperationContext::with_timeout(Duration::from_secs(5));
+
+    let _dispatch = tracing::subscriber::set_default(subscriber);
+    let parent_span = tracing::info_span!("codec_trace_req");
+    let parent_trace_id = parent_span.context().span().span_context().trace_id();
+    let handle = tracing::Instrument::instrument(
+        client.start_workflow(&op, contract_start_request("wf-codec-trace")),
+        parent_span.clone(),
+    )
+    .await
+    .unwrap();
+    tracing::Instrument::instrument(
+        handle.signal(
+            &op,
+            ClientContractWorkflow::notify,
+            "sig".to_owned(),
+            MutationDedupe::Unkeyed,
+        ),
+        parent_span.clone(),
+    )
+    .await
+    .unwrap();
+    let uws_out = tracing::Instrument::instrument(
+        client.execute_update_with_start(
+            &op,
+            UpdateWithStartRequest::new(
+                contract_start_request("wf-codec-uws"),
+                ClientContractWorkflow::apply,
+                UpdateId::try_from("upd-codec-1").unwrap(),
+                "arg".to_owned(),
+            ),
+        ),
+        parent_span,
+    )
+    .await
+    .unwrap();
+    assert_eq!(uws_out, "codec-updated");
+
+    let start_req = state.start.lock().unwrap().clone().unwrap();
+    assert_xor_encoded_trace_header(start_req.header.unwrap().fields, &dc, parent_trace_id).await;
+    let sig_req = state.signal.lock().unwrap().clone().unwrap();
+    assert_xor_encoded_trace_header(sig_req.header.unwrap().fields, &dc, parent_trace_id).await;
+
+    let uws_req = state.uws.lock().unwrap().clone().unwrap();
+    let Some(execute_multi_operation_request::operation::Operation::StartWorkflow(start_op)) =
+        uws_req.operations[0].operation.as_ref()
+    else {
+        panic!("expected StartWorkflow operation");
+    };
+    let Some(execute_multi_operation_request::operation::Operation::UpdateWorkflow(update_op)) =
+        uws_req.operations[1].operation.as_ref()
+    else {
+        panic!("expected UpdateWorkflow operation");
+    };
+    assert_xor_encoded_trace_header(
+        start_op.header.clone().unwrap().fields,
+        &dc,
+        parent_trace_id,
+    )
+    .await;
+    assert_xor_encoded_trace_header(
+        update_op
+            .request
+            .clone()
+            .unwrap()
+            .input
+            .unwrap()
+            .header
+            .unwrap()
+            .fields,
+        &dc,
+        parent_trace_id,
+    )
+    .await;
+
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test]
+async fn client_trace_interceptor_fails_closed_on_codec_encode_errors() {
+    install_test_propagator();
+    let provider = SdkTracerProvider::builder().build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let op = OperationContext::with_timeout(Duration::from_secs(5));
+    let _dispatch = tracing::subscriber::set_default(subscriber);
+    let parent_span = tracing::info_span!("codec_trace_err");
+
+    for return_count in [None, Some(0), Some(2)] {
+        let err_state = Arc::new(MockServerState::default());
+        let mut bad_opts = base_options();
+        bad_opts.payload_codec = Some(Arc::new(FaultyEncodeCodec { return_count }));
+        let (bad_startup, bad_conn) =
+            admit_with_callback(bad_opts, mock_server_callback(Arc::clone(&err_state))).await;
+        let err = tracing::Instrument::instrument(
+            bad_conn
+                .client()
+                .start_workflow(&op, contract_start_request("wf-bad-codec")),
+            parent_span.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            StartWorkflowError::NotApplied(StartFailure::Internal),
+            "return_count={return_count:?}"
+        );
+        let upd_err = tracing::Instrument::instrument(
+            bad_conn
+                .client()
+                .workflow_handle::<ClientContractWorkflow>(
+                    WorkflowId::try_from("wf-bad-codec").unwrap(),
+                    None,
+                )
+                .execute_update(
+                    &op,
+                    ClientContractWorkflow::apply,
+                    UpdateId::try_from("upd-bad-codec").unwrap(),
+                    "ok".to_owned(),
+                ),
+            parent_span.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            upd_err,
+            UpdateWorkflowError::NotApplied(UpdateFailure::Internal),
+            "return_count={return_count:?}"
+        );
+        assert!(err_state.call_counts.lock().unwrap().is_empty());
+        assert!(!format!("{err}; {err:?}").contains("secret-kms-key-id-99"));
+        assert!(!format!("{upd_err}; {upd_err:?}").contains("secret-kms-key-id-99"));
+        assert_eq!(
+            bad_startup
+                .close(Instant::now() + Duration::from_secs(1))
+                .await,
+            CloseOutcome::Complete
+        );
+    }
+}
+
+fn update_response_with_outcome(outcome: Option<Outcome>) -> UpdateWorkflowExecutionResponse {
+    UpdateWorkflowExecutionResponse {
+        update_ref: Some(UpdateRef {
+            workflow_execution: Some(WorkflowExecution {
+                workflow_id: "wf-1".to_owned(),
+                run_id: "run-1".to_owned(),
+            }),
+            update_id: "upd-1".to_owned(),
+        }),
+        outcome,
+        stage: UpdateWorkflowExecutionLifecycleStage::Completed as i32,
+        ..Default::default()
+    }
+}
+
+fn multi_op_response_with_update(update_response: UpdateWorkflowExecutionResponse) -> Vec<u8> {
+    ExecuteMultiOperationResponse {
+        responses: vec![
+            execute_multi_operation_response::Response {
+                response: Some(
+                    execute_multi_operation_response::response::Response::StartWorkflow(
+                        StartWorkflowExecutionResponse {
+                            run_id: "run-1".to_owned(),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            },
+            execute_multi_operation_response::Response {
+                response: Some(
+                    execute_multi_operation_response::response::Response::UpdateWorkflow(
+                        update_response,
+                    ),
+                ),
+            },
+        ],
+    }
+    .encode_to_vec()
+}
+
+#[tokio::test]
+async fn post_commit_update_decode_and_malformed_outcome_errors_classify_as_outcome_unknown() {
+    let op = OperationContext::with_timeout(Duration::from_secs(5));
+    let oversized_json = format!(r#""{}""#, "x".repeat(300));
+    let bad_outcomes: [(&str, Option<Outcome>); 5] = [
+        (
+            "type_mismatch_json",
+            Some(Outcome {
+                value: Some(outcome::Value::Success(Payloads {
+                    payloads: vec![json_payload(b"123")],
+                })),
+            }),
+        ),
+        (
+            "malformed_json",
+            Some(Outcome {
+                value: Some(outcome::Value::Success(Payloads {
+                    payloads: vec![json_payload(b"{broken")],
+                })),
+            }),
+        ),
+        (
+            "oversized_json",
+            Some(Outcome {
+                value: Some(outcome::Value::Success(Payloads {
+                    payloads: vec![json_payload(oversized_json.as_bytes())],
+                })),
+            }),
+        ),
+        (
+            "empty_payloads",
+            Some(Outcome {
+                value: Some(outcome::Value::Success(Payloads {
+                    payloads: Vec::new(),
+                })),
+            }),
+        ),
+        ("missing_outcome_value", Some(Outcome { value: None })),
+    ];
+
+    for (label, outcome) in bad_outcomes {
+        let outcome_for_cb = outcome.clone();
+        let callback = simple_callback(move |req: GrpcRequest| match req.rpc.as_str() {
+            "UpdateWorkflowExecution" => {
+                Ok(update_response_with_outcome(outcome_for_cb.clone()).encode_to_vec())
+            }
+            "ExecuteMultiOperation" => Ok(multi_op_response_with_update(
+                update_response_with_outcome(outcome_for_cb.clone()),
+            )),
+            _ => Err(Status::unimplemented("unexpected")),
+        });
+        let mut opts = base_options();
+        opts.max_payload_bytes = 256;
+        let (startup, conn) = admit_with_callback(opts, callback).await;
+        let client = conn.client();
+        let handle = client.workflow_handle::<ClientContractWorkflow>(
+            WorkflowId::try_from("wf-1").unwrap(),
+            Some(RunId::try_from("run-1").unwrap()),
+        );
+
+        let upd_err = handle
+            .execute_update(
+                &op,
+                ClientContractWorkflow::apply,
+                UpdateId::try_from("upd-1").unwrap(),
+                "ok".to_owned(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            upd_err,
+            UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable),
+            "execute_update case={label}"
+        );
+
+        let uws_err = client
+            .execute_update_with_start(
+                &op,
+                UpdateWithStartRequest::new(
+                    contract_start_request("wf-1"),
+                    ClientContractWorkflow::apply,
+                    UpdateId::try_from("upd-1").unwrap(),
+                    "ok".to_owned(),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            uws_err,
+            UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable),
+            "execute_update_with_start case={label}"
+        );
+
+        assert_eq!(
+            startup.close(Instant::now() + Duration::from_secs(1)).await,
+            CloseOutcome::Complete
+        );
+    }
+}
+
+#[tokio::test]
+async fn post_commit_update_codec_and_malformed_multi_op_classify_as_outcome_unknown() {
+    let op = OperationContext::with_timeout(Duration::from_secs(5));
+    let codec_cb = simple_callback(|req: GrpcRequest| match req.rpc.as_str() {
+        "UpdateWorkflowExecution" => Ok(mock_update_response()),
+        "ExecuteMultiOperation" => Ok(mock_multi_op_response()),
+        _ => Err(Status::unimplemented("unexpected")),
+    });
+    let mut codec_opts = base_options();
+    codec_opts.payload_codec = Some(Arc::new(FailingDecodeCodec));
+    let (startup, conn) = admit_with_callback(codec_opts, codec_cb).await;
+    let client = conn.client();
+    let handle = client
+        .workflow_handle::<ClientContractWorkflow>(WorkflowId::try_from("wf-1").unwrap(), None);
+    assert_eq!(
+        handle
+            .execute_update(
+                &op,
+                ClientContractWorkflow::apply,
+                UpdateId::try_from("upd-codec").unwrap(),
+                "ok".to_owned(),
+            )
+            .await
+            .unwrap_err(),
+        UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable)
+    );
+    assert_eq!(
+        client
+            .execute_update_with_start(
+                &op,
+                UpdateWithStartRequest::new(
+                    contract_start_request("wf-1"),
+                    ClientContractWorkflow::apply,
+                    UpdateId::try_from("upd-codec-uws").unwrap(),
+                    "ok".to_owned(),
+                ),
+            )
+            .await
+            .unwrap_err(),
+        UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable)
+    );
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+
+    let malformed_multi_cb = simple_callback(|req: GrpcRequest| match req.rpc.as_str() {
+        "ExecuteMultiOperation" => Ok(ExecuteMultiOperationResponse {
+            responses: Vec::new(),
+        }
+        .encode_to_vec()),
+        _ => Err(Status::unimplemented("unexpected")),
+    });
+    let (startup, conn) = admit_with_callback(base_options(), malformed_multi_cb).await;
+    assert_eq!(
+        conn.client()
+            .execute_update_with_start(
+                &op,
+                UpdateWithStartRequest::new(
+                    contract_start_request("wf-1"),
+                    ClientContractWorkflow::apply,
+                    UpdateId::try_from("upd-malformed-multi").unwrap(),
+                    "ok".to_owned(),
+                ),
+            )
+            .await
+            .unwrap_err(),
+        UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable)
+    );
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test]
+async fn pre_dispatch_update_payload_errors_remain_not_applied() {
+    let op = OperationContext::with_timeout(Duration::from_secs(5));
+    let pre_state = Arc::new(MockServerState::default());
+    let mut pre_opts = base_options();
+    pre_opts.max_payload_bytes = 256;
+    let (startup, conn) =
+        admit_with_callback(pre_opts, mock_server_callback(Arc::clone(&pre_state))).await;
+    let client = conn.client();
+    let float_handle =
+        client.workflow_handle::<FloatWorkflow>(WorkflowId::try_from("wf-float").unwrap(), None);
+    assert_eq!(
+        float_handle
+            .execute_update(
+                &op,
+                FloatWorkflow::adjust,
+                UpdateId::try_from("upd-nan").unwrap(),
+                FloatPayload { amount: f64::NAN },
+            )
+            .await
+            .unwrap_err(),
+        UpdateWorkflowError::NotApplied(UpdateFailure::InvalidInput)
+    );
+    let str_handle = client
+        .workflow_handle::<ClientContractWorkflow>(WorkflowId::try_from("wf-big").unwrap(), None);
+    assert_eq!(
+        str_handle
+            .execute_update(
+                &op,
+                ClientContractWorkflow::apply,
+                UpdateId::try_from("upd-big").unwrap(),
+                "z".repeat(300),
+            )
+            .await
+            .unwrap_err(),
+        UpdateWorkflowError::NotApplied(UpdateFailure::TooLarge)
+    );
+    assert_eq!(
+        client
+            .execute_update_with_start(
+                &op,
+                UpdateWithStartRequest::new(
+                    contract_start_request("wf-big-uws"),
+                    ClientContractWorkflow::apply,
+                    UpdateId::try_from("upd-big-uws").unwrap(),
+                    "z".repeat(300),
+                ),
+            )
+            .await
+            .unwrap_err(),
+        UpdateWorkflowError::NotApplied(UpdateFailure::TooLarge)
+    );
+    assert!(pre_state.call_counts.lock().unwrap().is_empty());
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test]
+async fn proxy_url_validation_admits_only_plaintext_http_without_userinfo() {
+    for bad_proxy in [
+        "https://proxy.internal:8443",
+        "http://user:secret@proxy.internal:8080",
+        "http://user@proxy.internal:8080",
+        "http://proxy.internal:8080?q=1",
+        "http://proxy.internal:8080#frag",
+        "socks5://proxy.internal:1080",
+    ] {
+        let parsed = Url::parse(bad_proxy).unwrap();
+        let mut opts = base_options();
+        opts.dns_load_balancing = false;
+        opts.http_proxy_url = Some(parsed.clone());
+        let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded());
+        let err = startup.admit(CancellationToken::new()).await.unwrap_err();
+        assert!(
+            matches!(err, ConnectError::InvalidConfig(_)),
+            "{bad_proxy}: {err:?}"
+        );
+        if matches!(parsed.scheme(), "https" | "socks5")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            assert!(
+                matches!(
+                    proxy_options_from_url(&parsed),
+                    Err(ConnectError::InvalidConfig(_))
+                ),
+                "{bad_proxy}"
+            );
+        }
+    }
+
+    let valid_url = Url::parse("http://proxy.internal:8080").unwrap();
+    let mut valid_opts = base_options();
+    valid_opts.dns_load_balancing = false;
+    valid_opts.http_proxy_url = Some(valid_url.clone());
+    assert!(valid_opts.validate().is_ok());
+    let proxy_opts = proxy_options_from_url(&valid_url).unwrap();
+    assert_eq!(proxy_opts.target_addr, "proxy.internal:8080");
+    assert_eq!(proxy_opts.basic_auth, None);
 }
 
 #[cfg(feature = "worker")]

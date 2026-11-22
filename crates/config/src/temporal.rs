@@ -269,7 +269,7 @@ impl TemporalInput {
         let has_proxy_input = self.http_proxy_url.is_some();
         let http_proxy_url = match self.http_proxy_url.take() {
             Some(raw) => v
-                .record(validate_http_url("temporal.http_proxy_url", &raw))
+                .record(validate_url("temporal.http_proxy_url", &raw, false))
                 .map(Some),
             None => Ok(None),
         };
@@ -331,7 +331,7 @@ impl TemporalInput {
                 self.endpoint.take(),
                 "temporal.enabled = true",
             )
-            .and_then(|value| validate_http_url("temporal.endpoint", &value)),
+            .and_then(|value| validate_url("temporal.endpoint", &value, true)),
         );
         if let Ok(ref url) = endpoint
             && url.scheme() == "http"
@@ -509,7 +509,7 @@ fn validate_api_key(raw: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_http_url(key: &str, raw: &str) -> Result<Url, ValidationError> {
+fn validate_url(key: &str, raw: &str, allow_https: bool) -> Result<Url, ValidationError> {
     if shared_rules::uri::has_whitespace_or_control(raw) {
         return Err(ValidationError::new(
             key,
@@ -526,16 +526,22 @@ fn validate_http_url(key: &str, raw: &str) -> Result<Url, ValidationError> {
             "must not include a query, fragment, or backslash",
         ));
     }
+    let expected = if allow_https {
+        "http:// or https://"
+    } else {
+        "http://"
+    };
     let Ok(url) = Url::parse(raw) else {
         return Err(ValidationError::new(
             key,
-            "must be a valid http:// or https:// URL",
+            format!("must be a valid {expected} URL"),
         ));
     };
-    if !matches!(url.scheme(), "http" | "https") {
+    let valid_scheme = url.scheme() == "http" || (allow_https && url.scheme() == "https");
+    if !valid_scheme {
         return Err(ValidationError::new(
             key,
-            "must use an http:// or https:// scheme",
+            format!("must use an {expected} scheme"),
         ));
     }
     if url.host_str().is_none_or(str::is_empty) {

@@ -618,9 +618,12 @@ fn proxy_url_mutual_exclusion_and_blank_path_clearing() {
     assert!(conflict.names("temporal.http_proxy_url"), "{conflict}");
 
     for bad_proxy in [
+        "https://proxy.internal:8443",
         "http://proxy.internal:8080#frag",
         "http://proxy.internal:8080?q=1",
-        "http://user:pass@proxy.internal:8080",
+        "http://user:secret-proxy-pass@proxy.internal:8080",
+        "http://user@proxy.internal:8080",
+        "http://@proxy.internal:8080",
         " http://proxy.internal:8080",
         "socks5://proxy.internal:1080",
     ] {
@@ -635,6 +638,10 @@ fn proxy_url_mutual_exclusion_and_blank_path_clearing() {
         .unwrap_err();
         assert!(
             errors.names("temporal.http_proxy_url"),
+            "{bad_proxy:?}: {errors}"
+        );
+        assert!(
+            !errors.to_string().contains("secret-proxy-pass"),
             "{bad_proxy:?}: {errors}"
         );
     }

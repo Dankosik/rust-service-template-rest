@@ -39,6 +39,30 @@ impl std::error::Error for DecodePayloadError {
     }
 }
 
+#[derive(Debug)]
+struct EncodeCodecError;
+
+impl fmt::Display for EncodeCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("payload codec encode failed")
+    }
+}
+
+impl std::error::Error for EncodeCodecError {}
+
+#[must_use]
+pub(crate) fn encode_codec_error() -> PayloadConversionError {
+    PayloadConversionError::EncodingError(Box::new(EncodeCodecError))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClassifiedPayloadError {
+    Encode(PayloadError),
+    EncodeCodec,
+    Decode(PayloadError),
+    Unknown,
+}
+
 pub(crate) struct FiniteBoundedJsonConverter {
     max_payload_bytes: usize,
 }
@@ -135,7 +159,19 @@ impl PayloadCodec for SharedPayloadCodec {
         context: &SerializationContextData,
         payloads: Vec<Payload>,
     ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
-        self.0.encode(context, payloads)
+        let future = self.0.encode(context, payloads);
+        Box::pin(async move {
+            future
+                .await
+                .map_err(|error| match classify_payload_error(&error) {
+                    ClassifiedPayloadError::Encode(PayloadError::TooLarge { bytes }) => {
+                        PayloadConversionError::EncodingError(Box::new(PayloadError::TooLarge {
+                            bytes,
+                        }))
+                    }
+                    _ => encode_codec_error(),
+                })
+        })
     }
 
     fn decode(
@@ -143,7 +179,14 @@ impl PayloadCodec for SharedPayloadCodec {
         context: &SerializationContextData,
         payloads: Vec<Payload>,
     ) -> BoxFuture<'static, Result<Vec<Payload>, PayloadConversionError>> {
-        self.0.decode(context, payloads)
+        let future = self.0.decode(context, payloads);
+        Box::pin(async move {
+            future.await.map_err(|_| {
+                PayloadConversionError::EncodingError(Box::new(DecodePayloadError(
+                    PayloadError::Decode,
+                )))
+            })
+        })
     }
 }
 
@@ -167,29 +210,31 @@ pub(crate) fn build_data_converter(
     }
 }
 
-pub(crate) fn classify_payload_conversion(
-    error: &PayloadConversionError,
-    fallback: PayloadError,
-) -> (PayloadError, bool) {
+pub(crate) fn classify_payload_error(error: &PayloadConversionError) -> ClassifiedPayloadError {
     match error {
-        PayloadConversionError::WrongEncoding => (PayloadError::InvalidEncoding, true),
         PayloadConversionError::EncodingError(inner) => {
             if let Some(decoded) = inner.downcast_ref::<DecodePayloadError>() {
-                return (decoded.0, true);
+                return ClassifiedPayloadError::Decode(decoded.0);
+            }
+            if inner.is::<EncodeCodecError>() {
+                return ClassifiedPayloadError::EncodeCodec;
             }
             if let Some(payload_error) = inner.downcast_ref::<PayloadError>() {
-                return (*payload_error, false);
+                return ClassifiedPayloadError::Encode(*payload_error);
             }
             for cause in shared_rules::error_chain::causes(inner.as_ref()) {
                 if let Some(decoded) = cause.downcast_ref::<DecodePayloadError>() {
-                    return (decoded.0, true);
+                    return ClassifiedPayloadError::Decode(decoded.0);
+                }
+                if cause.is::<EncodeCodecError>() {
+                    return ClassifiedPayloadError::EncodeCodec;
                 }
                 if let Some(payload_error) = cause.downcast_ref::<PayloadError>() {
-                    return (*payload_error, false);
+                    return ClassifiedPayloadError::Encode(*payload_error);
                 }
             }
-            (fallback, false)
+            ClassifiedPayloadError::Unknown
         }
-        _ => (fallback, false),
+        _ => ClassifiedPayloadError::Unknown,
     }
 }

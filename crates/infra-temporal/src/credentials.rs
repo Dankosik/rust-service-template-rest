@@ -300,6 +300,8 @@ pub(crate) struct CredentialWatcher {
     api_key: Option<ApiKeyWatch>,
     mtls: Option<MtlsWatch>,
     reader: Arc<Semaphore>,
+    #[cfg(test)]
+    step_tx: Option<tokio::sync::watch::Sender<u64>>,
 }
 
 impl CredentialWatcher {
@@ -312,7 +314,16 @@ impl CredentialWatcher {
             api_key,
             mtls,
             reader,
+            #[cfg(test)]
+            step_tx: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_step_observer(mut self) -> (Self, tokio::sync::watch::Receiver<u64>) {
+        let (tx, rx) = tokio::sync::watch::channel(0_u64);
+        self.step_tx = Some(tx);
+        (self, rx)
     }
 
     pub(crate) const fn is_active(&self) -> bool {
@@ -372,6 +383,10 @@ impl CredentialWatcher {
                 loop {
                     ticker.tick().await;
                     self.step().await;
+                    #[cfg(test)]
+                    if let Some(step_tx) = &self.step_tx {
+                        step_tx.send_modify(|count| *count += 1);
+                    }
                 }
             })
             .await;

@@ -57,6 +57,14 @@ pub enum ConnectError {
 struct WatcherHandle {
     cancel: CancellationToken,
     task: JoinHandle<()>,
+    #[cfg(test)]
+    steps: tokio::sync::watch::Receiver<u64>,
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 enum StartupState {
@@ -64,6 +72,8 @@ enum StartupState {
     Admitted {
         connection: TemporalConnection,
         watcher: Option<WatcherHandle>,
+        #[cfg(test)]
+        mtls_resolver: Option<Arc<RotatingClientCertResolver>>,
     },
 }
 
@@ -246,6 +256,38 @@ impl TemporalStartup {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn watcher_steps(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        match &self.state {
+            StartupState::Admitted {
+                watcher: Some(handle),
+                ..
+            } => Some(handle.steps.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mtls_resolver(&self) -> Option<Arc<RotatingClientCertResolver>> {
+        match &self.state {
+            StartupState::Admitted { mtls_resolver, .. } => mtls_resolver.clone(),
+            StartupState::Prepared(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_watcher_task(&mut self, task: JoinHandle<()>) {
+        if let StartupState::Admitted {
+            watcher: Some(handle),
+            ..
+        } = &mut self.state
+        {
+            handle.cancel.cancel();
+            handle.task.abort();
+            handle.task = task;
+        }
+    }
+
     pub async fn admit(
         &mut self,
         cancel: CancellationToken,
@@ -317,48 +359,16 @@ impl TemporalStartup {
         )
         .await??;
 
-        let data_converter =
-            build_data_converter(options.max_payload_bytes, options.payload_codec.clone());
-        let trace_interceptor =
-            TraceClientInterceptor::new(data_converter.payload_converter().clone());
-        #[cfg(feature = "worker")]
-        let worker_data_converter = data_converter.clone();
-        let client_options = ClientOptions::new(options.namespace.clone())
-            .data_converter(data_converter)
-            .client_interceptors(vec![Arc::new(trace_interceptor)])
-            .build();
-        let raw_client = Client::new(connection.clone(), client_options)
-            .map_err(|_| ConnectError::InvalidConfig("failed to construct temporal client"))?;
-
-        let api_key_watch = initial_api_key.and_then(|key| {
-            key.watch
-                .map(|(path, digest)| ApiKeyWatch::new(path, digest, connection.clone()))
-        });
-        let mtls_watch = mtls_watch_seed
-            .map(|seed| MtlsWatch::new(seed.cert_path, seed.key_path, seed.digest, seed.resolver));
-        let watcher = spawn_credential_watcher(
-            CredentialWatcher::new(api_key_watch, mtls_watch, reader),
-            options.credential_refresh_interval,
-        );
-
-        let temporal_connection = TemporalConnection {
-            inner: Arc::new(ConnectionShared {
-                raw_client,
-                #[cfg(feature = "worker")]
-                meter,
-                #[cfg(feature = "worker")]
-                data_converter: worker_data_converter,
-                namespace: options.namespace,
-                rpc_timeout: options.rpc_timeout,
-                probe_budget: options.probe_budget,
-                draining: Arc::new(AtomicBool::new(false)),
-            }),
-        };
-
-        self.state = StartupState::Admitted {
-            connection: temporal_connection.clone(),
-            watcher,
-        };
+        let (temporal_connection, state) = build_admitted_state(
+            options,
+            &connection,
+            #[cfg(feature = "worker")]
+            meter,
+            initial_api_key,
+            mtls_watch_seed,
+            reader,
+        )?;
+        self.state = state;
         Ok(temporal_connection)
     }
 
@@ -366,6 +376,7 @@ impl TemporalStartup {
         let StartupState::Admitted {
             connection,
             watcher,
+            ..
         } = self.state
         else {
             return CloseOutcome::Complete;
@@ -375,16 +386,82 @@ impl TemporalStartup {
             return CloseOutcome::Complete;
         };
         watcher.cancel.cancel();
-        if tokio::time::timeout_at(deadline, &mut watcher.task)
-            .await
-            .is_ok()
-        {
-            CloseOutcome::Complete
-        } else {
-            watcher.task.abort();
-            CloseOutcome::TimedOut
+        match tokio::time::timeout_at(deadline, &mut watcher.task).await {
+            Ok(Ok(())) => CloseOutcome::Complete,
+            Ok(Err(error)) => {
+                let reason = if error.is_panic() {
+                    "panicked"
+                } else if error.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "join_error"
+                };
+                tracing::error!(reason, "temporal_credential_watcher_failed");
+                CloseOutcome::Complete
+            }
+            Err(_) => {
+                watcher.task.abort();
+                CloseOutcome::TimedOut
+            }
         }
     }
+}
+
+fn build_admitted_state(
+    options: TemporalOptions,
+    connection: &Connection,
+    #[cfg(feature = "worker")] meter: WorkspaceMetricsMeter,
+    initial_api_key: Option<InitialApiKey>,
+    mtls_watch_seed: Option<MtlsWatchSeed>,
+    reader: Arc<Semaphore>,
+) -> Result<(TemporalConnection, StartupState), ConnectError> {
+    let data_converter =
+        build_data_converter(options.max_payload_bytes, options.payload_codec.clone());
+    let trace_interceptor = TraceClientInterceptor::new(data_converter.clone());
+    #[cfg(feature = "worker")]
+    let worker_data_converter = data_converter.clone();
+    let client_options = ClientOptions::new(options.namespace.clone())
+        .data_converter(data_converter)
+        .client_interceptors(vec![Arc::new(trace_interceptor)])
+        .build();
+    let raw_client = Client::new(connection.clone(), client_options)
+        .map_err(|_| ConnectError::InvalidConfig("failed to construct temporal client"))?;
+
+    let api_key_watch = initial_api_key.and_then(|key| {
+        key.watch
+            .map(|(path, digest)| ApiKeyWatch::new(path, digest, connection.clone()))
+    });
+    #[cfg(test)]
+    let mtls_resolver = mtls_watch_seed
+        .as_ref()
+        .map(|seed| Arc::clone(&seed.resolver));
+    let mtls_watch = mtls_watch_seed
+        .map(|seed| MtlsWatch::new(seed.cert_path, seed.key_path, seed.digest, seed.resolver));
+    let watcher = spawn_credential_watcher(
+        CredentialWatcher::new(api_key_watch, mtls_watch, reader),
+        options.credential_refresh_interval,
+    );
+
+    let temporal_connection = TemporalConnection {
+        inner: Arc::new(ConnectionShared {
+            raw_client,
+            #[cfg(feature = "worker")]
+            meter,
+            #[cfg(feature = "worker")]
+            data_converter: worker_data_converter,
+            namespace: options.namespace,
+            rpc_timeout: options.rpc_timeout,
+            probe_budget: options.probe_budget,
+            draining: Arc::new(AtomicBool::new(false)),
+        }),
+    };
+    let state = StartupState::Admitted {
+        connection: temporal_connection.clone(),
+        watcher,
+        #[cfg(test)]
+        mtls_resolver,
+    };
+    Ok((temporal_connection, state))
 }
 
 fn spawn_credential_watcher(
@@ -395,8 +472,15 @@ fn spawn_credential_watcher(
         return None;
     }
     let cancel = CancellationToken::new();
+    #[cfg(test)]
+    let (watcher, steps) = watcher.with_step_observer();
     let task = tokio::spawn(watcher.run(interval, cancel.clone()));
-    Some(WatcherHandle { cancel, task })
+    Some(WatcherHandle {
+        cancel,
+        task,
+        #[cfg(test)]
+        steps,
+    })
 }
 
 struct ConnectionShared {
@@ -545,23 +629,27 @@ async fn run_connect_stage<F: Future>(
     }
 }
 
-fn proxy_options_from_url(url: &Url) -> Result<HttpConnectProxyOptions, ConnectError> {
+pub(crate) fn proxy_options_from_url(url: &Url) -> Result<HttpConnectProxyOptions, ConnectError> {
+    if url.scheme() != "http" {
+        return Err(ConnectError::InvalidConfig(
+            "http_proxy_url scheme must be http",
+        ));
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || shared_rules::uri::authority_has_userinfo(url.as_str())
+    {
+        return Err(ConnectError::InvalidConfig(
+            "http_proxy_url must not contain userinfo",
+        ));
+    }
     let host = url
         .host_str()
         .ok_or(ConnectError::InvalidConfig("http_proxy_url missing host"))?;
     let port = url
         .port_or_known_default()
         .ok_or(ConnectError::InvalidConfig("http_proxy_url missing port"))?;
-    let target_addr = format!("{host}:{port}");
-    let basic_auth = (!url.username().is_empty() || url.password().is_some()).then(|| {
-        (
-            url.username().to_owned(),
-            url.password().unwrap_or("").to_owned(),
-        )
-    });
-    Ok(HttpConnectProxyOptions::new(target_addr)
-        .maybe_basic_auth(basic_auth)
-        .build())
+    Ok(HttpConnectProxyOptions::new(format!("{host}:{port}")).build())
 }
 
 fn map_client_connect_error(error: ClientConnectError) -> ConnectError {

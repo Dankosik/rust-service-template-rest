@@ -241,7 +241,10 @@ fn validate_endpoint(url: &Url) -> Result<(), ConnectError> {
     if !url.has_host() {
         return Err(ConnectError::InvalidConfig("endpoint must include a host"));
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || shared_rules::uri::authority_has_userinfo(url.as_str())
+    {
         return Err(ConnectError::InvalidConfig(
             "endpoint must not contain userinfo",
         ));
@@ -264,9 +267,9 @@ fn validate_endpoint(url: &Url) -> Result<(), ConnectError> {
 }
 
 fn validate_proxy_url(url: &Url) -> Result<(), ConnectError> {
-    if !matches!(url.scheme(), "http" | "https") {
+    if url.scheme() != "http" {
         return Err(ConnectError::InvalidConfig(
-            "http_proxy_url scheme must be http or https",
+            "http_proxy_url scheme must be http",
         ));
     }
     if !url.has_host() || url.port_or_known_default().is_none() {
@@ -274,14 +277,23 @@ fn validate_proxy_url(url: &Url) -> Result<(), ConnectError> {
             "http_proxy_url must include a host and port",
         ));
     }
-    if url.fragment().is_some()
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || shared_rules::uri::authority_has_userinfo(url.as_str())
+    {
+        return Err(ConnectError::InvalidConfig(
+            "http_proxy_url must not contain userinfo",
+        ));
+    }
+    if url.query().is_some()
+        || url.fragment().is_some()
         || url
             .as_str()
             .chars()
             .any(|ch| ch.is_whitespace() || ch.is_control())
     {
         return Err(ConnectError::InvalidConfig(
-            "http_proxy_url contains invalid fragment, whitespace, or control characters",
+            "http_proxy_url contains invalid query, fragment, whitespace, or control characters",
         ));
     }
     Ok(())

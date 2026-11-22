@@ -7,7 +7,7 @@ use temporalio_client::errors::{
 use temporalio_common::data_converters::PayloadConversionError;
 use tonic::{Code, Status};
 
-use crate::payload::{PayloadError, classify_payload_conversion};
+use crate::payload::{ClassifiedPayloadError, PayloadError, classify_payload_error};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ReadError {
@@ -223,12 +223,17 @@ pub(crate) fn map_start_status(status: &Status) -> StartWorkflowError {
 }
 
 pub(crate) fn map_start_payload_error(error: &PayloadConversionError) -> StartWorkflowError {
-    match classify_payload_conversion(error, PayloadError::Serialize).0 {
-        PayloadError::TooLarge { .. } => StartWorkflowError::NotApplied(StartFailure::TooLarge),
-        PayloadError::Serialize | PayloadError::InvalidEncoding => {
+    match classify_payload_error(error) {
+        ClassifiedPayloadError::Encode(PayloadError::TooLarge { .. }) => {
+            StartWorkflowError::NotApplied(StartFailure::TooLarge)
+        }
+        ClassifiedPayloadError::Encode(PayloadError::Serialize | PayloadError::InvalidEncoding) => {
             StartWorkflowError::NotApplied(StartFailure::InvalidInput)
         }
-        PayloadError::Decode => StartWorkflowError::NotApplied(StartFailure::Internal),
+        ClassifiedPayloadError::EncodeCodec
+        | ClassifiedPayloadError::Encode(PayloadError::Decode)
+        | ClassifiedPayloadError::Decode(_)
+        | ClassifiedPayloadError::Unknown => StartWorkflowError::NotApplied(StartFailure::Internal),
     }
 }
 
@@ -239,7 +244,7 @@ pub(crate) fn map_start_error(error: &WorkflowStartError) -> StartWorkflowError 
         }
         WorkflowStartError::PayloadConversion(err) => map_start_payload_error(err),
         WorkflowStartError::Rpc(status) => map_start_status(status),
-        _ => StartWorkflowError::NotApplied(StartFailure::Internal),
+        _ => StartWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable),
     }
 }
 
@@ -273,19 +278,22 @@ pub(crate) fn map_mutation_error(error: &WorkflowInteractionError) -> MutationEr
         WorkflowInteractionError::NotFound(_) => {
             MutationError::NotApplied(MutationFailure::NotFound)
         }
-        WorkflowInteractionError::PayloadConversion(err) => {
-            match classify_payload_conversion(err, PayloadError::Serialize).0 {
-                PayloadError::TooLarge { .. } => {
-                    MutationError::NotApplied(MutationFailure::TooLarge)
-                }
-                PayloadError::Serialize | PayloadError::InvalidEncoding => {
-                    MutationError::NotApplied(MutationFailure::InvalidInput)
-                }
-                PayloadError::Decode => MutationError::NotApplied(MutationFailure::Internal),
+        WorkflowInteractionError::PayloadConversion(err) => match classify_payload_error(err) {
+            ClassifiedPayloadError::Encode(PayloadError::TooLarge { .. }) => {
+                MutationError::NotApplied(MutationFailure::TooLarge)
             }
-        }
+            ClassifiedPayloadError::Encode(
+                PayloadError::Serialize | PayloadError::InvalidEncoding,
+            ) => MutationError::NotApplied(MutationFailure::InvalidInput),
+            ClassifiedPayloadError::EncodeCodec
+            | ClassifiedPayloadError::Encode(PayloadError::Decode)
+            | ClassifiedPayloadError::Decode(_)
+            | ClassifiedPayloadError::Unknown => {
+                MutationError::NotApplied(MutationFailure::Internal)
+            }
+        },
         WorkflowInteractionError::Rpc(status) => map_mutation_status(status),
-        _ => MutationError::NotApplied(MutationFailure::Internal),
+        _ => MutationError::OutcomeUnknown(UnknownOutcome::Unavailable),
     }
 }
 
@@ -319,15 +327,20 @@ pub(crate) fn map_update_status(status: &Status) -> UpdateWorkflowError {
 }
 
 fn map_update_payload_error(error: &PayloadConversionError) -> UpdateWorkflowError {
-    match classify_payload_conversion(error, PayloadError::Serialize) {
-        (PayloadError::TooLarge { .. }, false) => {
+    match classify_payload_error(error) {
+        ClassifiedPayloadError::Encode(PayloadError::TooLarge { .. }) => {
             UpdateWorkflowError::NotApplied(UpdateFailure::TooLarge)
         }
-        (PayloadError::Serialize | PayloadError::InvalidEncoding, false) => {
+        ClassifiedPayloadError::Encode(PayloadError::Serialize | PayloadError::InvalidEncoding) => {
             UpdateWorkflowError::NotApplied(UpdateFailure::InvalidInput)
         }
-        (_, true) | (PayloadError::Decode, false) => {
+        ClassifiedPayloadError::EncodeCodec => {
             UpdateWorkflowError::NotApplied(UpdateFailure::Internal)
+        }
+        ClassifiedPayloadError::Encode(PayloadError::Decode)
+        | ClassifiedPayloadError::Decode(_)
+        | ClassifiedPayloadError::Unknown => {
+            UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable)
         }
     }
 }
@@ -342,7 +355,7 @@ pub(crate) fn map_update_error(error: &WorkflowUpdateError) -> UpdateWorkflowErr
         }
         WorkflowUpdateError::PayloadConversion(err) => map_update_payload_error(err),
         WorkflowUpdateError::Rpc(status) => map_update_status(status),
-        _ => UpdateWorkflowError::NotApplied(UpdateFailure::Internal),
+        _ => UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable),
     }
 }
 
@@ -372,7 +385,7 @@ pub(crate) fn map_update_with_start_error(
         WorkflowUpdateWithStartError::Update(update) => map_update_error(update),
         WorkflowUpdateWithStartError::PayloadConversion(err) => map_update_payload_error(err),
         WorkflowUpdateWithStartError::Rpc(status) => map_update_status(status),
-        _ => UpdateWorkflowError::NotApplied(UpdateFailure::Internal),
+        _ => UpdateWorkflowError::OutcomeUnknown(UnknownOutcome::Unavailable),
     }
 }
 
@@ -396,16 +409,17 @@ pub(crate) fn map_query_error(error: &WorkflowQueryError) -> ReadError {
     match error {
         WorkflowQueryError::NotFound(_) => ReadError::NotFound,
         WorkflowQueryError::Rejected { .. } => ReadError::QueryRejected,
-        WorkflowQueryError::PayloadConversion(err) => {
-            match classify_payload_conversion(err, PayloadError::Decode) {
-                (PayloadError::Serialize | PayloadError::TooLarge { .. }, false) => {
-                    ReadError::InvalidInput
-                }
-                (_, true) | (PayloadError::Decode | PayloadError::InvalidEncoding, false) => {
-                    ReadError::PayloadDecode
-                }
-            }
-        }
+        WorkflowQueryError::PayloadConversion(err) => match classify_payload_error(err) {
+            ClassifiedPayloadError::Encode(
+                PayloadError::Serialize | PayloadError::TooLarge { .. },
+            ) => ReadError::InvalidInput,
+            ClassifiedPayloadError::EncodeCodec => ReadError::Internal,
+            ClassifiedPayloadError::Encode(
+                PayloadError::Decode | PayloadError::InvalidEncoding,
+            )
+            | ClassifiedPayloadError::Decode(_)
+            | ClassifiedPayloadError::Unknown => ReadError::PayloadDecode,
+        },
         WorkflowQueryError::Rpc(status) => map_read_status(status),
         _ => ReadError::Internal,
     }

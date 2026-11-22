@@ -17,14 +17,16 @@ use temporalio_client::{
     UpdateWithStartWorkflowInput, UpdateWithStartWorkflowOutput,
 };
 use temporalio_common::data_converters::{
-    GenericPayloadConverter as _, PayloadConversionError, PayloadConverter, SerializationContext,
-    SerializationContextData,
+    DataConverter, GenericPayloadConverter as _, PayloadConversionError, PayloadConverter,
+    SerializationContext, SerializationContextData, WorkflowSerializationContext,
 };
 use temporalio_common::protos::temporal::api::common::v1::{Header, Payload};
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-use crate::payload::{PayloadError, classify_payload_conversion};
+use crate::payload::{
+    ClassifiedPayloadError, PayloadError, classify_payload_error, encode_codec_error,
+};
 
 pub(crate) const TRACER_DATA_HEADER: &str = "_tracer-data";
 
@@ -100,7 +102,12 @@ pub(crate) fn inject_current_context_into_headers(
             &SerializationContext::new(&context_data, converter),
             &carrier.0,
         )
-        .map_err(|error| classify_payload_conversion(&error, PayloadError::Serialize).0)?;
+        .map_err(|error| match classify_payload_error(&error) {
+            ClassifiedPayloadError::Encode(err) | ClassifiedPayloadError::Decode(err) => err,
+            ClassifiedPayloadError::EncodeCodec | ClassifiedPayloadError::Unknown => {
+                PayloadError::Serialize
+            }
+        })?;
     headers.insert(TRACER_DATA_HEADER.to_owned(), payload);
     Ok(())
 }
@@ -140,30 +147,40 @@ pub(crate) fn extract_context_from_headers(
     }
 }
 
-fn inject_into_optional_header(
+async fn inject_into_optional_header(
     header: &mut Option<Header>,
-    converter: &PayloadConverter,
+    data_converter: &DataConverter,
 ) -> Result<(), PayloadConversionError> {
-    let mut fields = match header.take() {
-        Some(existing) => existing.fields,
-        None => HashMap::new(),
-    };
-    inject_current_context_into_headers(&mut fields, converter)
+    let mut tracing_fields = HashMap::new();
+    inject_current_context_into_headers(&mut tracing_fields, data_converter.payload_converter())
         .map_err(|error| PayloadConversionError::EncodingError(Box::new(error)))?;
-    if !fields.is_empty() {
-        *header = Some(Header { fields });
+    let Some(payload) = tracing_fields.remove(TRACER_DATA_HEADER) else {
+        return Ok(());
+    };
+    let context = SerializationContextData::Workflow(WorkflowSerializationContext::new());
+    let mut encoded = data_converter
+        .codec()
+        .encode(&context, vec![payload])
+        .await
+        .map_err(|_| encode_codec_error())?;
+    if encoded.len() != 1 {
+        return Err(encode_codec_error());
     }
+    header
+        .get_or_insert_default()
+        .fields
+        .insert(TRACER_DATA_HEADER.to_owned(), encoded.remove(0));
     Ok(())
 }
 
 pub(crate) struct TraceClientInterceptor {
-    converter: PayloadConverter,
+    data_converter: DataConverter,
 }
 
 impl TraceClientInterceptor {
     #[must_use]
-    pub(crate) fn new(converter: PayloadConverter) -> Self {
-        Self { converter }
+    pub(crate) const fn new(data_converter: DataConverter) -> Self {
+        Self { data_converter }
     }
 }
 
@@ -185,7 +202,8 @@ impl ClientInterceptor for TraceClientInterceptor {
         );
         Box::pin(
             async move {
-                inject_into_optional_header(&mut input.options.header, &self.converter)?;
+                inject_into_optional_header(&mut input.options.header, &self.data_converter)
+                    .await?;
                 next.run(input).await
             }
             .instrument(span),
@@ -210,7 +228,8 @@ impl ClientInterceptor for TraceClientInterceptor {
         );
         Box::pin(
             async move {
-                inject_into_optional_header(&mut input.options.header, &self.converter)?;
+                inject_into_optional_header(&mut input.options.header, &self.data_converter)
+                    .await?;
                 next.run(input).await
             }
             .instrument(span),
@@ -235,8 +254,10 @@ impl ClientInterceptor for TraceClientInterceptor {
         );
         Box::pin(
             async move {
-                inject_into_optional_header(&mut input.options.start_header, &self.converter)?;
-                inject_into_optional_header(&mut input.options.update_header, &self.converter)?;
+                inject_into_optional_header(&mut input.options.start_header, &self.data_converter)
+                    .await?;
+                inject_into_optional_header(&mut input.options.update_header, &self.data_converter)
+                    .await?;
                 next.run(input).await
             }
             .instrument(span),
@@ -256,7 +277,8 @@ impl ClientInterceptor for TraceClientInterceptor {
         );
         Box::pin(
             async move {
-                inject_into_optional_header(&mut input.options.header, &self.converter)?;
+                inject_into_optional_header(&mut input.options.header, &self.data_converter)
+                    .await?;
                 next.run(input).await
             }
             .instrument(span),
@@ -280,7 +302,8 @@ impl ClientInterceptor for TraceClientInterceptor {
         );
         Box::pin(
             async move {
-                inject_into_optional_header(&mut input.options.header, &self.converter)?;
+                inject_into_optional_header(&mut input.options.header, &self.data_converter)
+                    .await?;
                 next.run(input).await
             }
             .instrument(span),
@@ -304,7 +327,8 @@ impl ClientInterceptor for TraceClientInterceptor {
         );
         Box::pin(
             async move {
-                inject_into_optional_header(&mut input.options.header, &self.converter)?;
+                inject_into_optional_header(&mut input.options.header, &self.data_converter)
+                    .await?;
                 next.run(input).await
             }
             .instrument(span),
