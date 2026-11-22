@@ -64,49 +64,49 @@ pub fn to_vec_bounded_with_capacity<T: Serialize + ?Sized>(
 ) -> Result<Vec<u8>, EncodeError> {
     let mut writer = BoundedWriter::with_capacity(max_bytes, capacity);
     to_writer(&mut writer, value).map_err(EncodeError::Serialize)?;
-    if writer.total_bytes > max_bytes {
+    if writer.serialized_bytes > max_bytes {
         return Err(EncodeError::TooLarge {
-            bytes: writer.total_bytes,
+            bytes: writer.serialized_bytes,
         });
     }
-    Ok(writer.bytes)
+    Ok(writer.buffer)
 }
 
 struct BoundedWriter {
-    bytes: Vec<u8>,
-    total_bytes: usize,
-    limit: usize,
+    buffer: Vec<u8>,
+    serialized_bytes: usize,
+    max_bytes: usize,
 }
 
 impl BoundedWriter {
-    fn with_capacity(limit: usize, capacity: usize) -> Self {
+    fn with_capacity(max_bytes: usize, capacity: usize) -> Self {
         Self {
-            bytes: Vec::with_capacity(capacity.min(limit)),
-            total_bytes: 0,
-            limit,
+            buffer: Vec::with_capacity(capacity.min(max_bytes)),
+            serialized_bytes: 0,
+            max_bytes,
         }
     }
 }
 
 impl Write for BoundedWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.total_bytes = self
-            .total_bytes
+        self.serialized_bytes = self
+            .serialized_bytes
             .checked_add(buf.len())
             .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
-        let retained = buf.len().min(self.limit - self.bytes.len());
-        let needed = self.bytes.len() + retained;
-        if needed > self.bytes.capacity() {
+        let retained = buf.len().min(self.max_bytes - self.buffer.len());
+        let needed = self.buffer.len() + retained;
+        if needed > self.buffer.capacity() {
             let capacity = self
-                .bytes
+                .buffer
                 .capacity()
                 .saturating_mul(2)
                 .max(MIN_BOUNDED_CAPACITY)
                 .max(needed)
-                .min(self.limit);
-            self.bytes.reserve_exact(capacity - self.bytes.len());
+                .min(self.max_bytes);
+            self.buffer.reserve_exact(capacity - self.buffer.len());
         }
-        self.bytes.extend_from_slice(&buf[..retained]);
+        self.buffer.extend_from_slice(&buf[..retained]);
         Ok(buf.len())
     }
 
@@ -134,9 +134,38 @@ impl<T: Serialize + ?Sized> Serialize for FiniteValue<'_, T> {
     }
 }
 
+impl<'a, T: ?Sized> FiniteValue<'a, T> {
+    const fn new(inner: &'a T, saw_non_finite_float: &'a Cell<bool>) -> Self {
+        Self {
+            inner,
+            saw_non_finite_float,
+        }
+    }
+}
+
 struct Compound<'a, C> {
     inner: C,
     saw_non_finite_float: &'a Cell<bool>,
+}
+
+impl<'a, C> Compound<'a, C> {
+    const fn new(inner: C, saw_non_finite_float: &'a Cell<bool>) -> Self {
+        Self {
+            inner,
+            saw_non_finite_float,
+        }
+    }
+}
+
+fn refuse_non_finite<E: ser::Error>(
+    saw_non_finite_float: &Cell<bool>,
+    finite: bool,
+) -> Result<(), E> {
+    if finite {
+        return Ok(());
+    }
+    saw_non_finite_float.set(true);
+    Err(E::custom(NON_FINITE))
 }
 
 macro_rules! forward_scalar {
@@ -168,18 +197,12 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
     }
 
     fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
-        if !value.is_finite() {
-            self.saw_non_finite_float.set(true);
-            return Err(ser::Error::custom(NON_FINITE));
-        }
+        refuse_non_finite(self.saw_non_finite_float, value.is_finite())?;
         self.inner.serialize_f32(value)
     }
 
     fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
-        if !value.is_finite() {
-            self.saw_non_finite_float.set(true);
-            return Err(ser::Error::custom(NON_FINITE));
-        }
+        refuse_non_finite(self.saw_non_finite_float, value.is_finite())?;
         self.inner.serialize_f64(value)
     }
 
@@ -188,10 +211,8 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
     }
 
     fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_some(&FiniteValue {
-            inner: value,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        self.inner
+            .serialize_some(&FiniteValue::new(value, self.saw_non_finite_float))
     }
 
     fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
@@ -217,13 +238,8 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
         name: &'static str,
         value: &T,
     ) -> Result<Self::Ok, Self::Error> {
-        self.inner.serialize_newtype_struct(
-            name,
-            &FiniteValue {
-                inner: value,
-                saw_non_finite_float: self.saw_non_finite_float,
-            },
-        )
+        self.inner
+            .serialize_newtype_struct(name, &FiniteValue::new(value, self.saw_non_finite_float))
     }
 
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
@@ -237,25 +253,22 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
             name,
             variant_index,
             variant,
-            &FiniteValue {
-                inner: value,
-                saw_non_finite_float: self.saw_non_finite_float,
-            },
+            &FiniteValue::new(value, self.saw_non_finite_float),
         )
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
-        Ok(Compound {
-            inner: self.inner.serialize_seq(len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        Ok(Compound::new(
+            self.inner.serialize_seq(len)?,
+            self.saw_non_finite_float,
+        ))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
-        Ok(Compound {
-            inner: self.inner.serialize_tuple(len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        Ok(Compound::new(
+            self.inner.serialize_tuple(len)?,
+            self.saw_non_finite_float,
+        ))
     }
 
     fn serialize_tuple_struct(
@@ -263,10 +276,10 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
         name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
-        Ok(Compound {
-            inner: self.inner.serialize_tuple_struct(name, len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        Ok(Compound::new(
+            self.inner.serialize_tuple_struct(name, len)?,
+            self.saw_non_finite_float,
+        ))
     }
 
     fn serialize_tuple_variant(
@@ -276,19 +289,18 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        Ok(Compound {
-            inner: self
-                .inner
+        Ok(Compound::new(
+            self.inner
                 .serialize_tuple_variant(name, variant_index, variant, len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+            self.saw_non_finite_float,
+        ))
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-        Ok(Compound {
-            inner: self.inner.serialize_map(len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        Ok(Compound::new(
+            self.inner.serialize_map(len)?,
+            self.saw_non_finite_float,
+        ))
     }
 
     fn serialize_struct(
@@ -296,10 +308,10 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
         name: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
-        Ok(Compound {
-            inner: self.inner.serialize_struct(name, len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        Ok(Compound::new(
+            self.inner.serialize_struct(name, len)?,
+            self.saw_non_finite_float,
+        ))
     }
 
     fn serialize_struct_variant(
@@ -309,12 +321,11 @@ impl<'a, S: Serializer> Serializer for FiniteSerializer<'a, S> {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        Ok(Compound {
-            inner: self
-                .inner
+        Ok(Compound::new(
+            self.inner
                 .serialize_struct_variant(name, variant_index, variant, len)?,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+            self.saw_non_finite_float,
+        ))
     }
 
     fn collect_str<T: Display + ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error> {
@@ -333,10 +344,8 @@ macro_rules! sequence_compound {
             type Error = C::Error;
 
             fn $method<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-                self.inner.$method(&FiniteValue {
-                    inner: value,
-                    saw_non_finite_float: self.saw_non_finite_float,
-                })
+                self.inner
+                    .$method(&FiniteValue::new(value, self.saw_non_finite_float))
             }
 
             fn end(self) -> Result<Self::Ok, Self::Error> {
@@ -356,17 +365,13 @@ impl<C: ser::SerializeMap> ser::SerializeMap for Compound<'_, C> {
     type Error = C::Error;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
-        self.inner.serialize_key(&FiniteValue {
-            inner: key,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        self.inner
+            .serialize_key(&FiniteValue::new(key, self.saw_non_finite_float))
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-        self.inner.serialize_value(&FiniteValue {
-            inner: value,
-            saw_non_finite_float: self.saw_non_finite_float,
-        })
+        self.inner
+            .serialize_value(&FiniteValue::new(value, self.saw_non_finite_float))
     }
 
     fn serialize_entry<K: Serialize + ?Sized, V: Serialize + ?Sized>(
@@ -375,14 +380,8 @@ impl<C: ser::SerializeMap> ser::SerializeMap for Compound<'_, C> {
         value: &V,
     ) -> Result<(), Self::Error> {
         self.inner.serialize_entry(
-            &FiniteValue {
-                inner: key,
-                saw_non_finite_float: self.saw_non_finite_float,
-            },
-            &FiniteValue {
-                inner: value,
-                saw_non_finite_float: self.saw_non_finite_float,
-            },
+            &FiniteValue::new(key, self.saw_non_finite_float),
+            &FiniteValue::new(value, self.saw_non_finite_float),
         )
     }
 
@@ -402,13 +401,8 @@ macro_rules! struct_compound {
                 key: &'static str,
                 value: &T,
             ) -> Result<(), Self::Error> {
-                self.inner.serialize_field(
-                    key,
-                    &FiniteValue {
-                        inner: value,
-                        saw_non_finite_float: self.saw_non_finite_float,
-                    },
-                )
+                self.inner
+                    .serialize_field(key, &FiniteValue::new(value, self.saw_non_finite_float))
             }
 
             fn skip_field(&mut self, key: &'static str) -> Result<(), Self::Error> {
@@ -737,28 +731,28 @@ mod tests {
         };
         for limit in [0, 1, 31, 256] {
             let mut writer = BoundedWriter::with_capacity(limit, 0);
-            assert_eq!(writer.bytes.capacity(), 0);
+            assert_eq!(writer.buffer.capacity(), 0);
             to_writer(&mut writer, &payload).expect("streamed zeros serialize");
-            assert_eq!(writer.total_bytes, 32_769);
-            assert_eq!(writer.bytes.len(), limit);
-            assert!(writer.bytes.capacity() <= limit);
+            assert_eq!(writer.serialized_bytes, 32_769);
+            assert_eq!(writer.buffer.len(), limit);
+            assert!(writer.buffer.capacity() <= limit);
         }
 
         let mut writer = BoundedWriter::with_capacity(1_024, 0);
         to_writer(&mut writer, "x").expect("small string serializes");
-        assert_eq!(writer.bytes, br#""x""#);
-        assert!(writer.bytes.capacity() < 1_024);
+        assert_eq!(writer.buffer, br#""x""#);
+        assert!(writer.buffer.capacity() < 1_024);
 
         let chunk = vec![b'x'; 65_536];
         writer
             .write_all(&chunk)
             .expect("oversized chunk is counted without retaining");
-        assert_eq!(writer.total_bytes, 65_539);
-        assert_eq!(writer.bytes.len(), 1_024);
-        assert!(writer.bytes.capacity() <= 1_024);
+        assert_eq!(writer.serialized_bytes, 65_539);
+        assert_eq!(writer.buffer.len(), 1_024);
+        assert!(writer.buffer.capacity() <= 1_024);
 
         let mut overflow = BoundedWriter::with_capacity(8, 0);
-        overflow.total_bytes = usize::MAX;
+        overflow.serialized_bytes = usize::MAX;
         assert!(overflow.write(&[0]).is_err());
     }
 

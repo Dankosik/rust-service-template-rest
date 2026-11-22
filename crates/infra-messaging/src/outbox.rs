@@ -228,12 +228,13 @@ impl OutboxText<'static> {
 
 impl<'a> OutboxText<'a> {
     const fn fields(self) -> [&'a str; 4] {
-        [
-            self.subject,
-            self.message_id,
-            self.publication_id,
-            self.event_type,
-        ]
+        let Self {
+            subject,
+            message_id,
+            publication_id,
+            event_type,
+        } = self;
+        [subject, message_id, publication_id, event_type]
     }
 
     fn raw_bytes(self) -> usize {
@@ -296,7 +297,8 @@ impl PreparedEvent {
             });
         }
         let sizer = self.outbox_metadata_sizer().await?;
-        let max_bytes = raw_payload_capacity(sizer.total_bytes());
+        let metadata_bytes = sizer.total_bytes();
+        let max_bytes = raw_payload_capacity(metadata_bytes);
         if self.payload().len() > max_bytes {
             return Err(OutboxEnqueueError::PayloadTooLarge {
                 bytes: self.payload().len(),
@@ -304,7 +306,7 @@ impl PreparedEvent {
             });
         }
         sizer.check_limit()?;
-        let encoded_bytes = sizer.total_bytes() + wire_payload::encoded_len(self.payload().len());
+        let encoded_bytes = metadata_bytes + wire_payload::encoded_len(self.payload().len());
         Ok(PreparedIntent {
             envelope: EnqueueIntent::from(self),
             encoded_bytes,
@@ -339,7 +341,7 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
         let Self(producer) = self;
         let stored = job.payload();
         let (created_at, payload) = stored.validate().map_err(JobError::permanent)?;
-        let event = Publication {
+        let publication = Publication {
             subject: &stored.subject,
             message_id: &stored.message_id,
             publication_id: &stored.publication_id,
@@ -353,7 +355,7 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
         let budget = BrokerBudget::new(deadline, job.cancellation());
         let admission = crate::topology::recheck_outbox_source(&producer.shared, budget);
         producer
-            .publish_after_admission(&event, budget, admission)
+            .publish_after_admission(&publication, budget, admission)
             .await
             .map(|_| ())
             .map_err(publication_job_error)
@@ -363,16 +365,24 @@ impl Handler<PublishDomainEvent> for OutboxProducer {
 fn publication_job_error(error: PublishError) -> JobError {
     match error {
         PublishError::Ambiguous => JobError::retryable("publication_ack_unknown"),
-        PublishError::Rejected(reason) => match reason {
-            PublishRejection::InvalidEnvelope(_) => JobError::permanent("outbox_envelope_invalid"),
-            PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed => {
-                JobError::retryable("broker_refused")
-            }
-            PublishRejection::BrokerSizeLimit => JobError::retryable("broker_size_limit"),
-            PublishRejection::WindowFull => JobError::retryable("publish_window_full"),
-            PublishRejection::Unavailable => JobError::retryable("publisher_unavailable"),
-            PublishRejection::ContextStopped => JobError::retryable("publish_context_stopped"),
-        },
+        PublishError::Rejected(PublishRejection::InvalidEnvelope(_)) => {
+            JobError::permanent("outbox_envelope_invalid")
+        }
+        PublishError::Rejected(
+            PublishRejection::BrokerRefused | PublishRejection::BrokerStreamSealed,
+        ) => JobError::retryable("broker_refused"),
+        PublishError::Rejected(PublishRejection::BrokerSizeLimit) => {
+            JobError::retryable("broker_size_limit")
+        }
+        PublishError::Rejected(PublishRejection::WindowFull) => {
+            JobError::retryable("publish_window_full")
+        }
+        PublishError::Rejected(PublishRejection::Unavailable) => {
+            JobError::retryable("publisher_unavailable")
+        }
+        PublishError::Rejected(PublishRejection::ContextStopped) => {
+            JobError::retryable("publish_context_stopped")
+        }
     }
 }
 

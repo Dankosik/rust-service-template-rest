@@ -48,7 +48,7 @@ impl NativeConnection {
         let connect_budget = BrokerBudget::from_context(context);
         let connect_remaining = connect_budget.remaining();
         let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-        let mut connect = connect_options(options.credentials.as_ref(), context)
+        let mut builder = connect_options(options.credentials.as_ref(), context)
             .await?
             .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
@@ -63,18 +63,18 @@ impl NativeConnection {
                 std::future::ready(())
             });
         if let Some(instant) = connect_budget.deadline().instant() {
-            connect = connect.initial_connect_deadline(instant);
+            builder = builder.initial_connect_deadline(instant);
         }
         if tls_first {
-            connect = connect.tls_first();
+            builder = builder.tls_first();
         } else if any_tls {
-            connect = connect.ignore_discovered_servers();
+            builder = builder.ignore_discovered_servers();
         }
         if let Some(root_ca) = options.root_ca_path.clone() {
-            connect = connect.add_root_certificates(root_ca);
+            builder = builder.add_root_certificates(root_ca);
         }
         let client = bounded_with(connect_budget, async {
-            connect
+            builder
                 .connect(servers)
                 .await
                 .map_err(|error| connect_failure(&error, connect_remaining))

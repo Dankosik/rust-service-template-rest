@@ -240,18 +240,20 @@ impl MessagingStartup {
 
     async fn admit_inner(&mut self) -> Result<Messaging, MessagingError> {
         crate::observe::describe_metrics();
-        let StartupPhase::Starting { config, connection } = &mut self.phase else {
+        let StartupPhase::Starting {
+            config,
+            connection: cached_connection,
+        } = &mut self.phase
+        else {
             return Err(MessagingError::Configuration(
                 "messaging is already admitted",
             ));
         };
-        let connection = match connection {
+        let connection = match cached_connection {
             Some(existing) => existing.clone(),
-            slot @ None => {
-                let opened = NativeConnection::open(&config.options, &config.context).await?;
-                *slot = Some(opened.clone());
-                opened
-            }
+            None => cached_connection
+                .insert(NativeConnection::open(&config.options, &config.context).await?)
+                .clone(),
         };
         let client = &connection.client;
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()

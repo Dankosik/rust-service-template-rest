@@ -86,12 +86,12 @@ impl Producer {
 
     pub(crate) async fn publish_after_admission(
         &self,
-        event: &Publication<'_>,
+        publication: &Publication<'_>,
         budget: BrokerBudget<'_>,
         admission: impl Future<Output = Result<(), PublishError>>,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
-        let subject = event.subject.as_str();
+        let subject = publication.subject.as_str();
         let span = tracing::info_span!(
             "messaging_publish",
             otel.name = compact_str::format_compact!("publish {subject}").as_str(),
@@ -105,7 +105,7 @@ impl Producer {
             otel.status_code = tracing::field::Empty,
         );
         let result = self
-            .send(event, &span, budget, admission)
+            .send(publication, &span, budget, admission)
             .instrument(span.clone())
             .await;
         let outcome = match &result {
@@ -134,7 +134,7 @@ impl Producer {
 
     async fn send(
         &self,
-        event: &Publication<'_>,
+        publication: &Publication<'_>,
         span: &tracing::Span,
         budget: BrokerBudget<'_>,
         admission: impl Future<Output = Result<(), PublishError>>,
@@ -142,27 +142,27 @@ impl Producer {
         if self.shared.refuses_work() {
             return Err(PublishRejection::Unavailable.into());
         }
-        let message = publish_message(
-            event,
+        let message = build_publish_message(
+            publication,
             span,
             &self.shared.source_stream,
             self.shared.max_payload_bytes,
         )?;
         admission.await?;
-        send_publication(&self.shared, event.subject, message, budget).await
+        send_publication(&self.shared, publication.subject, message, budget).await
     }
 }
 
-fn publish_message(
-    event: &Publication<'_>,
+fn build_publish_message(
+    publication: &Publication<'_>,
     span: &tracing::Span,
     expected_stream: &HeaderValue,
     max_payload_bytes: usize,
 ) -> Result<PublishMessage, PublishRejection> {
-    if event.payload.len() > max_payload_bytes {
+    if publication.payload.len() > max_payload_bytes {
         return Err(PublishEnvelopeError::PayloadTooLarge.into());
     }
-    let mut headers = encode_publication(event);
+    let mut headers = encode_publication(publication);
     crate::trace::inject(span, &mut headers);
     headers.insert(
         async_nats::header::NATS_EXPECTED_STREAM,
@@ -171,7 +171,7 @@ fn publish_message(
     validate_header_bytes(&headers)?;
     Ok(PublishMessage::build()
         .headers(headers)
-        .payload(event.payload.clone()))
+        .payload(publication.payload.clone()))
 }
 
 pub(crate) async fn send_publication(
@@ -340,7 +340,7 @@ mod tests {
         );
         let stream = "s".repeat(8192 - fixed.len());
         assert!(
-            publish_message(
+            build_publish_message(
                 &publication,
                 &tracing::Span::none(),
                 &HeaderValue::from(stream.as_str()),
@@ -349,7 +349,7 @@ mod tests {
             .is_ok()
         );
         std::assert_matches!(
-            publish_message(
+            build_publish_message(
                 &publication,
                 &tracing::Span::none(),
                 &HeaderValue::from(stream + "s"),
