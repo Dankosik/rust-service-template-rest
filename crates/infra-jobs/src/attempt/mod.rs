@@ -99,8 +99,8 @@ impl Persistence {
     }
 }
 
-fn attempts_counter(kind: &'static str, outcome: &'static str) -> metrics::Counter {
-    metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => outcome)
+fn attempts_counter(kind: &'static str, outcome_label: &'static str) -> metrics::Counter {
+    metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => outcome_label)
 }
 
 fn persistence_counter(kind: &'static str, persistence: Persistence) -> metrics::Counter {
@@ -215,11 +215,9 @@ fn observe_attempt(kind_metrics: &KindMetrics, attempt: &AttemptId, transition: 
             tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, error = error_field(summary), "job_attempt_finished");
+            log_attempt_finished(attempt, label, error_field(summary));
         }
-        Transition::Release => {
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, "job_attempt_finished");
-        }
+        Transition::Release => log_attempt_finished(attempt, label, None),
         Transition::Retry { summary, .. } => {
             log_attempt_failed(attempt, label, summary);
         }
@@ -233,7 +231,7 @@ fn observe_terminal_failure(
     reason: FailureReason,
     summary: &str,
 ) {
-    let outcome = reason.as_str();
+    let outcome_label = reason.as_str();
     kind_metrics
         .attempt(AttemptOutcome::of_failure(reason))
         .increment(1);
@@ -246,21 +244,32 @@ fn observe_terminal_failure(
         job.id = %attempt.job_id,
         job.kind = attempt.kind,
         job.attempt = attempt.number,
-        outcome,
-        job.failure_reason = outcome,
+        outcome = outcome_label,
+        job.failure_reason = outcome_label,
         error = summary,
         "job_failed"
     );
 }
 
-fn log_attempt_failed(attempt: &AttemptId, outcome: &'static str, summary: &str) {
+fn log_attempt_failed(attempt: &AttemptId, outcome_label: &'static str, summary: &str) {
     tracing::info!(
         job.id = %attempt.job_id,
         job.kind = attempt.kind,
         job.attempt = attempt.number,
-        outcome,
+        outcome = outcome_label,
         error = error_field(summary),
         "job_attempt_failed"
+    );
+}
+
+fn log_attempt_finished(attempt: &AttemptId, outcome_label: &'static str, error: Option<&str>) {
+    tracing::info!(
+        job.id = %attempt.job_id,
+        job.kind = attempt.kind,
+        job.attempt = attempt.number,
+        outcome = outcome_label,
+        error,
+        "job_attempt_finished"
     );
 }
 
@@ -354,17 +363,14 @@ impl AttemptRun<'_> {
             return;
         };
         let written = self.persist(plan).await;
-        self.finish_persistence(kind_metrics, &transition, plan.operation(), written);
+        self.observe_persistence(kind_metrics, &transition, plan.operation(), written);
     }
 
     async fn execute_handler(
         &self,
         payload: Result<Vec<u8>, JobError>,
     ) -> Option<(HandlerOutcome, Option<Duration>)> {
-        if deadline_reached_or_cleanup_ended(
-            &self.group.lifecycle.cleanup,
-            self.supervisor_deadline,
-        ) {
+        if self.supervision_ended() {
             return None;
         }
         let attempt_deadline = clamped_deadline(
@@ -387,26 +393,38 @@ impl AttemptRun<'_> {
                 &bytes,
             )
         });
-        match prepared {
-            Err(handler_outcome) => Some((handler_outcome, None)),
-            Ok(future) => {
-                let started = Instant::now();
-                let handler_outcome = drive(
-                    &self.group.lifecycle.cleanup,
-                    future,
-                    cancel,
-                    attempt_deadline,
-                    self.supervisor_deadline,
-                )
-                .await?;
-                Some((handler_outcome, Some(started.elapsed())))
-            }
-        }
+        let future = match prepared {
+            Ok(future) => future,
+            Err(handler_outcome) => return Some((handler_outcome, None)),
+        };
+        let started = Instant::now();
+        let handler_outcome = drive_handler(
+            &self.group.lifecycle.cleanup,
+            future,
+            cancel,
+            attempt_deadline,
+            self.supervisor_deadline,
+        )
+        .await?;
+        Some((handler_outcome, Some(started.elapsed())))
+    }
+
+    fn supervision_ended(&self) -> bool {
+        deadline_reached_or_cleanup_ended(&self.group.lifecycle.cleanup, self.supervisor_deadline)
+    }
+
+    async fn supervised<T>(&self, future: impl Future<Output = T>) -> Option<T> {
+        within(
+            &self.group.lifecycle.cleanup,
+            self.supervisor_deadline,
+            future,
+        )
+        .await
     }
 
     async fn persist(&self, plan: WritePlan<'_>) -> Option<Written> {
         loop {
-            let record_once = async {
+            let write_once = async {
                 match plan {
                     WritePlan::CompleteBatched => {
                         complete_batched(
@@ -422,13 +440,7 @@ impl AttemptRun<'_> {
                     }
                 }
             };
-            if let Ok(written) = within(
-                &self.group.lifecycle.cleanup,
-                self.supervisor_deadline,
-                record_once,
-            )
-            .await?
-            {
+            if let Ok(written) = self.supervised(write_once).await? {
                 return Some(written);
             }
             let until = clamped_deadline(
@@ -436,12 +448,7 @@ impl AttemptRun<'_> {
                 RECORD_RETRY_INTERVAL,
                 self.supervisor_deadline,
             );
-            within(
-                &self.group.lifecycle.cleanup,
-                self.supervisor_deadline,
-                tokio::time::sleep_until(until),
-            )
-            .await?;
+            self.supervised(tokio::time::sleep_until(until)).await?;
         }
     }
 
@@ -451,19 +458,13 @@ impl AttemptRun<'_> {
         transition: &Transition,
         handler_duration: Option<Duration>,
     ) {
-        if matches!(transition, Transition::Release) {
-            self.group
-                .lifecycle
-                .counters
-                .cancelled
-                .fetch_add(1, Ordering::Relaxed);
+        let counters = &self.group.lifecycle.counters;
+        let counter = if matches!(transition, Transition::Release) {
+            &counters.cancelled
         } else {
-            self.group
-                .lifecycle
-                .counters
-                .known_results
-                .fetch_add(1, Ordering::Relaxed);
-        }
+            &counters.known_results
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         record_on_span(&tracing::Span::current(), transition);
         if let Some(duration) = handler_duration {
             kind_metrics.duration.record(duration);
@@ -471,7 +472,7 @@ impl AttemptRun<'_> {
         observe_attempt(kind_metrics, &self.attempt, transition);
     }
 
-    fn finish_persistence(
+    fn observe_persistence(
         &self,
         kind_metrics: &KindMetrics,
         transition: &Transition,
@@ -597,7 +598,7 @@ fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
     base.checked_add(wait).unwrap_or(limit).min(limit)
 }
 
-async fn drive(
+async fn drive_handler(
     cleanup: &ForcedCleanup,
     future: HandlerFuture<'_>,
     cancel: CancellationToken,
@@ -632,7 +633,7 @@ async fn drive(
             }
             run.as_mut()
                 .poll(cx)
-                .map(|result| Some(outcome_from(result)))
+                .map(|result| Some(handler_outcome_from(result)))
         });
         tokio::select! {
             biased;
@@ -657,7 +658,7 @@ async fn drive(
 }
 
 fn outcome_after_cancel(
-    result: &Result<Result<Completion, JobError>, Panicked>,
+    result: &Result<Result<Completion, JobError>, PanicPayload>,
     reason: HandlerOutcome,
 ) -> HandlerOutcome {
     match result {
@@ -666,9 +667,11 @@ fn outcome_after_cancel(
     }
 }
 
-type Panicked = Box<dyn std::any::Any + Send>;
+type PanicPayload = Box<dyn std::any::Any + Send>;
 
-fn outcome_from(result: Result<Result<Completion, JobError>, Panicked>) -> HandlerOutcome {
+fn handler_outcome_from(
+    result: Result<Result<Completion, JobError>, PanicPayload>,
+) -> HandlerOutcome {
     match result {
         Ok(Ok(completion)) => HandlerOutcome::Success(completion),
         Ok(Err(error)) => HandlerOutcome::Error(error),
@@ -782,7 +785,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         tokio::time::advance(Duration::from_secs(1)).await;
 
-        let handler_outcome = drive(
+        let handler_outcome = drive_handler(
             &ForcedCleanup::default(),
             Box::pin(async move {
                 let _ = ran.send(());
@@ -807,7 +810,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (resume, suspended) = tokio::sync::oneshot::channel();
         let (ran, observed) = tokio::sync::oneshot::channel();
-        let mut attempt = std::pin::pin!(drive(
+        let mut attempt = std::pin::pin!(drive_handler(
             &cleanup,
             Box::pin(async move {
                 suspended.await.unwrap();
@@ -833,7 +836,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (resume, suspended) = tokio::sync::oneshot::channel();
         let (ran, observed) = tokio::sync::oneshot::channel();
-        let mut attempt = std::pin::pin!(drive(
+        let mut attempt = std::pin::pin!(drive_handler(
             &cleanup,
             Box::pin(async move {
                 suspended.await.unwrap();
@@ -875,7 +878,7 @@ mod tests {
             let token = CancellationToken::new();
             let child = token.child_token();
             let until = Instant::now() + Duration::from_secs(10);
-            let result = drive(
+            let result = drive_handler(
                 &ForcedCleanup::default(),
                 Box::pin(async move {
                     match exit {

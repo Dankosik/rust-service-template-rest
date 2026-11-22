@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -493,7 +494,7 @@ pub(crate) struct WorkerGroup {
     pub(crate) pool: Pool,
     pub(crate) registry: Kinds,
     max_workers: NonZeroU32,
-    pub(crate) slots: Arc<Semaphore>,
+    pub(crate) admission_slots: Arc<Semaphore>,
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) lifecycle: Arc<AttemptLifecycle>,
     failing: EnumMap<Operation, AtomicBool>,
@@ -526,7 +527,7 @@ impl WorkerGroup {
             registry,
             max_workers,
             lifecycle,
-            slots: Arc::new(claim::admission_slots(max_workers)),
+            admission_slots: Arc::new(claim::admission_slots(max_workers)),
             statement_turn: tokio::sync::Mutex::new(()),
             failing: EnumMap::default(),
             completions: crate::attempt::Completions::default(),
@@ -635,18 +636,16 @@ pub(crate) fn observe_failure(group: &WorkerGroup, operation: Operation, error: 
 }
 
 fn log_operation_failure(operation: Operation, error: &OperationError) {
-    let (sqlstate, cause) = match error {
-        OperationError::TimedOut => (None, Some("timeout")),
-        OperationError::Acquire(err) | OperationError::Statement(err) => {
-            match infra_postgres::sqlstate(err) {
-                Some(code) => (Some(code), None),
-                None => (None, Some(infra_postgres::failure_cause(err))),
-            }
+    let (sqlstate, cause, decode_reason) = match error {
+        OperationError::TimedOut => (None, Some("timeout"), None),
+        OperationError::Acquire(driver) => {
+            let (sqlstate, cause) = driver_failure(driver);
+            (sqlstate, cause, None)
         }
-    };
-    let decode_reason = match error {
-        OperationError::Statement(error) => claim::decode_reason(error),
-        _ => None,
+        OperationError::Statement(driver) => {
+            let (sqlstate, cause) = driver_failure(driver);
+            (sqlstate, cause, claim::decode_reason(driver))
+        }
     };
     tracing::warn!(
         operation = operation.as_str(),
@@ -656,6 +655,30 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
         decode_reason,
         "jobs_operation_failed"
     );
+}
+
+fn driver_failure(error: &sqlx::Error) -> (Option<Cow<'_, str>>, Option<&'static str>) {
+    match infra_postgres::sqlstate(error) {
+        Some(code) => (Some(code), None),
+        None => (None, Some(infra_postgres::failure_cause(error))),
+    }
+}
+
+pub(crate) fn observe_operation<T>(
+    group: &WorkerGroup,
+    operation: Operation,
+    result: Result<T, OperationError>,
+) -> Option<T> {
+    match result {
+        Ok(value) => {
+            observe_recovery(group, operation);
+            Some(value)
+        }
+        Err(error) => {
+            observe_failure(group, operation, &error);
+            None
+        }
+    }
 }
 
 pub(crate) fn observe_recovery(group: &WorkerGroup, operation: Operation) {
@@ -759,7 +782,9 @@ mod tests {
                     payload: Ok(b"null".to_vec()),
                     trace: crate::trace_context::Carrier::default(),
                 },
-                slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
+                slot: Arc::clone(&shared.admission_slots)
+                    .try_acquire_owned()
+                    .unwrap(),
                 kind_slot: None,
             };
             let mut supervisor = std::pin::pin!(crate::attempt::supervise(
@@ -975,7 +1000,7 @@ mod tests {
                         payload: Ok(b"null".to_vec()),
                         trace: crate::trace_context::Carrier::default(),
                     },
-                    slot: Arc::clone(&engine.primary_group.slots)
+                    slot: Arc::clone(&engine.primary_group.admission_slots)
                         .try_acquire_owned()
                         .unwrap(),
                     kind_slot: None,
@@ -1016,7 +1041,8 @@ mod tests {
             assert_eq!(signals.failure.is_cancelled(), case != "expired", "{case}");
             assert_eq!(signals.stop.is_cancelled(), case != "expired", "{case}");
             assert_eq!(drain.in_flight(), 0, "{case}");
-            assert_eq!(engine.primary_group.slots.available_permits(), 1, "{case}");
+            let free_slots = engine.primary_group.admission_slots.available_permits();
+            assert_eq!(free_slots, 1, "{case}");
             assert_eq!(gauges.get("jobs_owned_attempts", None), 0.0, "{case}");
         }
         assert_eq!(
