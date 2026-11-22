@@ -392,7 +392,6 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
 }
 
 const CONTENT_TYPE_INLINE_BYTES: usize = 32;
-const CONTENT_TYPE_DECODE_SCRATCH_BYTES: usize = CONTENT_TYPE_INLINE_BYTES.next_multiple_of(3);
 
 #[derive(Clone, Deserialize, Serialize)]
 struct ContentType(
@@ -412,10 +411,12 @@ fn deserialize_content_type<'de, D: serde::Deserializer<'de>>(
 fn decode_content_type(
     encoded: &str,
 ) -> Result<SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>, base64::DecodeError> {
-    if base64::decoded_len_estimate(encoded.len()) <= CONTENT_TYPE_DECODE_SCRATCH_BYTES {
-        let mut scratch = [0; CONTENT_TYPE_DECODE_SCRATCH_BYTES];
-        match crate::base64_bytes::decode_slice(encoded, &mut scratch) {
-            Ok(len) => return Ok(SmallVec::from_slice(&scratch[..len])),
+    if crate::base64_bytes::exact_decoded_len(encoded.as_bytes())
+        .is_some_and(|len| len <= CONTENT_TYPE_INLINE_BYTES)
+    {
+        let mut decoded = [0; CONTENT_TYPE_INLINE_BYTES];
+        match crate::base64_bytes::decode_slice(encoded, &mut decoded) {
+            Ok(len) => return Ok(SmallVec::from_buf_and_len(decoded, len)),
             Err(base64::DecodeSliceError::DecodeError(error)) => return Err(error),
             Err(base64::DecodeSliceError::OutputSliceTooSmall) => {}
         }
@@ -616,7 +617,12 @@ mod tests {
             (&[b'd'; 64], true),
         ];
         for &(raw, expect_spilled) in cases {
-            for encoded in [STANDARD.encode(raw), STANDARD_NO_PAD.encode(raw)] {
+            let padded = STANDARD.encode(raw);
+            let partial = padded.strip_suffix('=').filter(|s| s.ends_with('='));
+            for encoded in [padded.as_str(), STANDARD_NO_PAD.encode(raw).as_str()]
+                .into_iter()
+                .chain(partial)
+            {
                 let json = format!(
                     r#"{{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":"{encoded}","body":""}}"#
                 );
@@ -631,8 +637,20 @@ mod tests {
             }
         }
 
+        let boundary_overflow = format!("{}AAA==", "AAAA".repeat(10));
+        let boundary_pad = format!("{}A===", "AAAA".repeat(10));
+        let boundary_trailing_bits = format!("{}AAB=", "AAAA".repeat(10));
         let long_bad = format!("{}!", "AAAA".repeat(12));
-        for bad in ["!", "A", "AA=A", "AAAA====", long_bad.as_str()] {
+        for bad in [
+            "!",
+            "A",
+            "AA=A",
+            "AAAA====",
+            boundary_overflow.as_str(),
+            boundary_pad.as_str(),
+            boundary_trailing_bits.as_str(),
+            long_bad.as_str(),
+        ] {
             let expected = STANDARD_PAD_INDIFFERENT
                 .decode(bad)
                 .unwrap_err()

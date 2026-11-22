@@ -396,12 +396,8 @@ fn decode_v1_tag(token: &[u8]) -> Option<[u8; TAG_BYTES]> {
     if encoded.len() != ENCODED_TAG_BYTES {
         return None;
     }
-    let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
-    (STANDARD.decode_slice(encoded, &mut scratch) == Ok(TAG_BYTES)).then(|| {
-        let mut decoded = [0; TAG_BYTES];
-        decoded.copy_from_slice(&scratch[..TAG_BYTES]);
-        decoded
-    })
+    let mut decoded = [0; TAG_BYTES];
+    (STANDARD.decode_slice(encoded, &mut decoded) == Ok(TAG_BYTES)).then_some(decoded)
 }
 
 fn matches_v1_signature(
@@ -787,8 +783,13 @@ mod tests {
     #[test]
     fn rejects_incomplete_and_extended_tags_even_after_decoding_another_candidate() {
         let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
-        let encoded = ARBITRARY_BYTES_SIGNATURE.strip_prefix("v1,").unwrap();
+        let message_id = "msg_213";
+        let signature = keys
+            .signatures(message_id.as_bytes(), 1_700_000_000, ARBITRARY_BYTES_BODY)
+            .unwrap();
+        let encoded = signature.strip_prefix("v1,").unwrap();
         let tag = STANDARD.decode(encoded).unwrap();
+        assert_eq!(tag[super::TAG_BYTES - 1], 0);
         let mut wrong = tag.clone();
         wrong[0] ^= 1;
         let first = STANDARD.encode(wrong);
@@ -799,19 +800,20 @@ mod tests {
             STANDARD.encode(extended),
             format!("{}!", encoded.strip_suffix('=').unwrap()),
         ] {
-            let fields = headers(
-                "msg_test",
-                "1700000000",
-                &format!("v1,{first} v1,{candidate}"),
-            );
-            assert_eq!(
-                keys.verify(
-                    &fields,
-                    ARBITRARY_BYTES_BODY,
-                    UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-                ),
-                Err(ProtocolError::InvalidSignature)
-            );
+            for signature in [
+                format!("v1,{candidate}"),
+                format!("v1,{first} v1,{candidate}"),
+            ] {
+                let fields = headers(message_id, "1700000000", &signature);
+                assert_eq!(
+                    keys.verify(
+                        &fields,
+                        ARBITRARY_BYTES_BODY,
+                        UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                    ),
+                    Err(ProtocolError::InvalidSignature)
+                );
+            }
         }
     }
 
@@ -846,7 +848,13 @@ mod tests {
     #[test]
     fn malformed_candidates_do_not_compute_an_expected_tag() {
         let malformed_base64 = "!".repeat(super::ENCODED_TAG_BYTES - 1);
-        let headers = headers("msg_1", "1", &format!("v1, v1,{malformed_base64}="));
+        let short_tag = STANDARD.encode([0x11; super::TAG_BYTES - 1]);
+        let extended_tag = STANDARD.encode([0x11; super::TAG_BYTES + 1]);
+        let headers = headers(
+            "msg_1",
+            "1",
+            &format!("v1, v1,{malformed_base64}= v1,{short_tag} v1,{extended_tag}"),
+        );
         assert_eq!(
             super::matches_v1_signature(&headers.get_all(&super::WEBHOOK_SIGNATURE), || {
                 panic!("malformed candidates should be rejected before the HMAC")

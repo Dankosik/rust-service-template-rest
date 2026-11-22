@@ -81,7 +81,7 @@ pub(crate) mod base64_bytes {
         }
     }
 
-    fn exact_decoded_len(encoded: &[u8]) -> Option<usize> {
+    pub(crate) fn exact_decoded_len(encoded: &[u8]) -> Option<usize> {
         let unpadded = match encoded {
             [.., b'=', b'='] => encoded.len() - 2,
             [.., b'='] => encoded.len() - 1,
