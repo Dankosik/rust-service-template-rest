@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, TryFutureExt as _, TryStreamExt as _};
 use smallvec::SmallVec;
-use sqlx::pool::PoolConnection;
+use sqlx::pool::{CloseEvent, PoolConnection};
 use sqlx::postgres::{
     PgArguments, PgConnection, PgQueryResult, PgRow, PgStatement, PgTypeInfo, Postgres,
 };
@@ -210,13 +210,38 @@ impl OperationDeadline {
         })
         .fetch_one(conn)
         .await;
-        let deadline_controls_statement_timeout = self.observe_cancellation(result).await?;
+        let deadline_controls_statement_timeout = self.check_deadline_cancel(result).await?;
         self.armed_timeout_ms = deadline_controls_statement_timeout.then_some(remaining_ms);
         self.remaining_ms_or_elapsed().await?;
         Ok(())
     }
 
-    fn observe_error<T>(
+    async fn run_armed<'c, T, F>(
+        &mut self,
+        conn: &'c mut PgConnection,
+        statement: impl FnOnce(&'c mut PgConnection) -> F,
+    ) -> Result<T, sqlx::Error>
+    where
+        F: Future<Output = Result<T, sqlx::Error>>,
+    {
+        self.arm(&mut *conn).await?;
+        let result = statement(conn).await;
+        self.check_deadline_cancel(result).await
+    }
+
+    async fn run_before_deadline<T>(
+        &mut self,
+        operation: impl Future<Output = Result<T, sqlx::Error>>,
+    ) -> Result<T, sqlx::Error> {
+        self.remaining_ms_or_elapsed().await?;
+        let Ok(result) = tokio::time::timeout_at(self.at, operation).await else {
+            self.expired = true;
+            return Err(deadline_elapsed_error());
+        };
+        self.check_deadline_cancel(result).await
+    }
+
+    fn fail_after_deadline_cancel<T>(
         &mut self,
         error: sqlx::Error,
     ) -> impl Future<Output = Result<T, sqlx::Error>> + use<T> {
@@ -233,13 +258,13 @@ impl OperationDeadline {
         }
     }
 
-    async fn observe_cancellation<T>(
+    async fn check_deadline_cancel<T>(
         &mut self,
         result: Result<T, sqlx::Error>,
     ) -> Result<T, sqlx::Error> {
         match result {
             Ok(value) => Ok(value),
-            Err(error) => self.observe_error(error).await,
+            Err(error) => self.fail_after_deadline_cancel(error).await,
         }
     }
 }
@@ -314,11 +339,7 @@ impl<M: TxMode> Tx<'_, M> {
         let Some(budget) = self.mode.operation_deadline(sealed::Private) else {
             return call(conn);
         };
-        Box::pin(async move {
-            budget.arm(conn).await?;
-            let result = call(conn).await;
-            budget.observe_cancellation(result).await
-        })
+        Box::pin(budget.run_armed(conn, call))
     }
 
     pub async fn with_savepoint<T, A, F>(&mut self, f: F) -> Result<T, SavepointError<A>>
@@ -354,18 +375,10 @@ impl<M: TxMode> Tx<'_, M> {
     ) -> Result<(), sqlx::Error> {
         self.proven_alive = false;
         let rollback = collect_query_result(self.conn.fetch_many(rollback_to_savepoint_sql(id)));
-        if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
-            budget.remaining_ms_or_elapsed().await?;
-            let response = tokio::time::timeout_at(budget.at, rollback)
-                .await
-                .map_err(|_| {
-                    budget.expired = true;
-                    deadline_elapsed_error()
-                })?;
-            budget.observe_cancellation(response).await?;
-        } else {
-            rollback.await?;
-        }
+        match self.mode.operation_deadline(sealed::Private) {
+            Some(deadline) => deadline.run_before_deadline(rollback).await?,
+            None => rollback.await?,
+        };
         self.proven_alive = true;
         self.notifications.truncate(saved_notifications);
         Ok(())
@@ -428,7 +441,7 @@ fn retain_due(notifications: &mut SmallVec<[Notification; 1]>, now: Instant) {
 
 fn dispatch_notifications(
     pool: &Pool,
-    mut guard: DiscardOnDrop,
+    guard: DiscardOnDrop,
     mut notifications: SmallVec<[Notification; 1]>,
 ) {
     const SEND_BUDGET: Duration = Duration::from_millis(100);
@@ -441,41 +454,52 @@ fn dispatch_notifications(
     if notifications.is_empty() {
         return;
     }
-    let closing = pool.close_event();
-    let return_in_task = pool.options().get_min_connections() == 0;
-    tokio::spawn(async move {
-        guard.discard = true;
-        let send = async {
-            for notification in notifications {
-                let NotificationKey { channel, payload } = notification.key;
-                let query = sqlx::query!("SELECT pg_notify($1, $2)", channel, payload);
-                observed!(
-                    "post-commit notification",
-                    collect_query_result((&mut *guard.connection).fetch_many(query)),
-                )
-                .await?;
-            }
-            Ok::<(), sqlx::Error>(())
-        };
-        tokio::select! {
-            biased;
-            () = closing => {}
-            result = tokio::time::timeout_at(now + SEND_BUDGET, send) => match result {
-                Ok(Ok(())) => {
-                    guard.discard = false;
-                    if return_in_task {
-                        guard.connection.return_to_pool().await;
-                    }
-                }
-                Ok(Err(error)) => {
-                    guard.discard = !matches!(error, sqlx::Error::Database(_));
-                    tracing::warn!(error.type = crate::failure_cause(&error), "postgres_notification_failed");
-                }
-                Err(_) => tracing::warn!("postgres_notification_timed_out"),
-            }
+    tokio::spawn(send_notifications(
+        guard,
+        notifications,
+        pool.close_event(),
+        pool.options().get_min_connections() == 0,
+        now + SEND_BUDGET,
+    ));
+}
+
+async fn send_notifications(
+    mut guard: DiscardOnDrop,
+    notifications: SmallVec<[Notification; 1]>,
+    closing: CloseEvent,
+    return_in_task: bool,
+    send_deadline: Instant,
+) {
+    guard.discard = true;
+    let send = async {
+        for notification in notifications {
+            let NotificationKey { channel, payload } = notification.key;
+            let query = sqlx::query!("SELECT pg_notify($1, $2)", channel, payload);
+            observed!(
+                "post-commit notification",
+                collect_query_result((&mut *guard.connection).fetch_many(query)),
+            )
+            .await?;
         }
-        drop(guard);
-    });
+        Ok::<(), sqlx::Error>(())
+    };
+    tokio::select! {
+        biased;
+        () = closing => {}
+        result = tokio::time::timeout_at(send_deadline, send) => match result {
+            Ok(Ok(())) => {
+                guard.discard = false;
+                if return_in_task {
+                    guard.connection.return_to_pool().await;
+                }
+            }
+            Ok(Err(error)) => {
+                guard.discard = !matches!(error, sqlx::Error::Database(_));
+                tracing::warn!(error.type = crate::failure_cause(&error), "postgres_notification_failed");
+            }
+            Err(_) => tracing::warn!("postgres_notification_timed_out"),
+        }
+    }
 }
 
 type DriverFuture<'e, T> = BoxFuture<'e, Result<T, sqlx::Error>>;
@@ -494,9 +518,11 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
         let conn = &mut *self.conn;
         if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
             Box::pin(async move {
-                budget.arm(conn).await?;
-                let result = collect_query_result(conn.fetch_many(SingleStatement(query))).await;
-                let result = budget.observe_cancellation(result).await?;
+                let result = budget
+                    .run_armed(conn, |conn| {
+                        collect_query_result(conn.fetch_many(SingleStatement(query)))
+                    })
+                    .await?;
                 *proven_alive = true;
                 Ok(result)
             })
@@ -526,7 +552,7 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
                         statement: conn.fetch_many(SingleStatement(query)),
                         proof_to_restore,
                     };
-                    Ok(statement.or_else(move |error| budget.observe_error(error)))
+                    Ok(statement.or_else(move |error| budget.fail_after_deadline_cancel(error)))
                 }
                 .try_flatten_stream(),
             );
@@ -547,9 +573,8 @@ impl<'c, M: TxMode> Executor<'c> for &'c mut Tx<'_, M> {
         let conn = &mut *self.conn;
         if let Some(budget) = self.mode.operation_deadline(sealed::Private) {
             Box::pin(async move {
-                budget.arm(conn).await?;
                 let row = budget
-                    .observe_cancellation(conn.fetch_optional(SingleStatement(query)).await)
+                    .run_armed(conn, |conn| conn.fetch_optional(SingleStatement(query)))
                     .await?;
                 *proven_alive = true;
                 Ok(row)
@@ -744,6 +769,25 @@ impl<E> From<TxError> for StepFailure<E> {
     }
 }
 
+async fn settle_before_commit<M: TxModeExt<E>, T, E: From<TxError>>(
+    tx: &mut Tx<'_, M>,
+    read_only: bool,
+    result: Result<T, E>,
+) -> Result<T, StepFailure<E>> {
+    tx.mode.check_expiry().map_err(StepFailure::RolledBack)?;
+    let value = result.map_err(StepFailure::RolledBack)?;
+    if !(read_only || tx.proven_alive) {
+        let proof = (&mut *tx).execute("SELECT 1").await;
+        tx.mode.check_expiry().map_err(StepFailure::RolledBack)?;
+        proof.map_err(TxError::CommitFailed)?;
+    }
+    tx.mode
+        .check_before_commit()
+        .await
+        .map_err(StepFailure::RolledBack)?;
+    Ok(value)
+}
+
 async fn transaction<M: TxModeExt<E>, T, E, F>(
     pool: &Pool,
     options: TxOptions,
@@ -787,17 +831,7 @@ where
             next_savepoint: 0,
         };
         let result = f(&mut tx).await;
-        tx.mode.check_expiry().map_err(StepFailure::RolledBack)?;
-        let value = result.map_err(StepFailure::RolledBack)?;
-        if !(options.read_only || tx.proven_alive) {
-            let proof = (&mut tx).execute("SELECT 1").await;
-            tx.mode.check_expiry().map_err(StepFailure::RolledBack)?;
-            proof.map_err(TxError::CommitFailed)?;
-        }
-        tx.mode
-            .check_before_commit()
-            .await
-            .map_err(StepFailure::RolledBack)?;
+        let value = settle_before_commit(&mut tx, options.read_only, result).await?;
         let notifications = tx.notifications;
         observation.begin_commit();
         sqlx_tx.commit().await.map_err(classify_commit)?;
@@ -942,7 +976,7 @@ mod tests {
                 expired: false,
             };
             let original = crate::error::tests::database(sqlstate);
-            let result = budget.observe_cancellation(Err::<(), _>(original)).await;
+            let result = budget.check_deadline_cancel(Err::<(), _>(original)).await;
             assert_eq!(
                 crate::sqlstate(&result.unwrap_err()).as_deref(),
                 Some(sqlstate)

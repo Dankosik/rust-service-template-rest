@@ -207,22 +207,7 @@ pub async fn observed_statement<T>(
     success_key: &'static metrics::Key,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, sqlx::Error> {
-    let has_parent =
-        tracing::dispatcher::get_default(|dispatch| dispatch.current_span().id().is_some());
-    let span = if has_parent {
-        tracing::info_span!(
-            "postgres_statement",
-            otel.name = summary,
-            otel.kind = "client",
-            db.system.name = "postgresql",
-            db.query.summary = summary,
-            db.response.status_code = tracing::field::Empty,
-            error.type = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-        )
-    } else {
-        Span::none()
-    };
+    let span = statement_span(summary);
     let guard = DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
         record_statement_error(started, &span, summary, SharedString::const_str(CANCELLED));
     });
@@ -247,6 +232,24 @@ pub async fn observed_statement<T>(
         }
     }
     result
+}
+
+fn statement_span(summary: &'static str) -> Span {
+    let has_parent =
+        tracing::dispatcher::get_default(|dispatch| dispatch.current_span().id().is_some());
+    if !has_parent {
+        return Span::none();
+    }
+    tracing::info_span!(
+        "postgres_statement",
+        otel.name = summary,
+        otel.kind = "client",
+        db.system.name = "postgresql",
+        db.query.summary = summary,
+        db.response.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    )
 }
 
 fn record_statement_error(
