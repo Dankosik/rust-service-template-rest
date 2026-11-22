@@ -295,8 +295,8 @@ impl RefreshDriver {
             algorithms,
             jwks_max_age,
         } = self;
-        let next_period = move || refresh_period().min(jwks_max_age / 2);
-        let mut next_refresh = Instant::now() + next_period();
+        let next_refresh_delay = move || jittered_refresh_interval().min(jwks_max_age / 2);
+        let mut next_refresh = Instant::now() + next_refresh_delay();
         let mut state_changes = store.state.subscribe();
         let mut shutdown = std::pin::pin!(shutdown);
         'worker: loop {
@@ -306,7 +306,7 @@ impl RefreshDriver {
                 _ = state_changes.wait_for(|state| state.pending().is_some()) => {}
                 () = tokio::time::sleep_until(next_refresh) => {
                     store.request_periodic();
-                    next_refresh = Instant::now() + next_period();
+                    next_refresh = Instant::now() + next_refresh_delay();
                 }
             }
             while let Some(ticket) = store.pending() {
@@ -322,13 +322,15 @@ impl RefreshDriver {
     }
 }
 
-fn refresh_period() -> Duration {
+fn jittered_refresh_interval() -> Duration {
     let mut bytes = [0_u8; 2];
     let sample = aws_lc_rs::rand::fill(&mut bytes).map(|()| u16::from_be_bytes(bytes));
-    refresh_period_for_sample(sample)
+    jittered_refresh_interval_for_sample(sample)
 }
 
-fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
+fn jittered_refresh_interval_for_sample(
+    sample: Result<u16, aws_lc_rs::error::Unspecified>,
+) -> Duration {
     let spread = sample.map_or(Duration::ZERO, |sample| {
         shared_rules::jitter::share_of_window(MAX_REFRESH_SPREAD, sample)
     });
@@ -486,7 +488,10 @@ mod tests {
             (Ok(u16::MAX), Duration::from_secs(810)),
             (Err(aws_lc_rs::error::Unspecified), Duration::from_mins(15)),
         ] {
-            assert_eq!(super::refresh_period_for_sample(sample), expected);
+            assert_eq!(
+                super::jittered_refresh_interval_for_sample(sample),
+                expected
+            );
         }
     }
 

@@ -127,19 +127,9 @@ impl Verifier {
                 .map_or(Refusal::Cancelled, Refusal::from_stopped);
             counters.record_refusal(transport, refusal);
         });
-        let outcome = match parse_bearer(authorization) {
-            Ok(token) => match self.verify_checked(&token, context).await {
-                VerificationOutcome::Verified(principal) => Ok((principal, token)),
-                VerificationOutcome::Failed(failure) => Err(Refusal::Failure(failure)),
-                VerificationOutcome::Stopped(stopped) => Err(Refusal::from_stopped(stopped)),
-            },
-            Err(failure) => match context.check() {
-                Ok(()) => Err(Refusal::Failure(failure)),
-                Err(stopped) => Err(Refusal::from_stopped(stopped)),
-            },
-        };
+        let admission = self.admit(context, authorization).await;
         DropGuard::dismiss(refusal_guard);
-        match outcome {
+        match admission {
             Ok(admitted) => {
                 counters.record_success(transport);
                 Ok(admitted)
@@ -148,6 +138,27 @@ impl Verifier {
                 counters.record_refusal(transport, refusal);
                 Err(refusal.failure())
             }
+        }
+    }
+
+    async fn admit<'a>(
+        &self,
+        context: &OperationContext,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<(Principal, PresentedToken<'a>), Refusal> {
+        let token = match parse_bearer(authorization) {
+            Ok(token) => token,
+            Err(failure) => {
+                return Err(match context.check() {
+                    Ok(()) => Refusal::Failure(failure),
+                    Err(stopped) => Refusal::from_stopped(stopped),
+                });
+            }
+        };
+        match self.verify_checked(&token, context).await {
+            VerificationOutcome::Verified(principal) => Ok((principal, token)),
+            VerificationOutcome::Failed(failure) => Err(Refusal::Failure(failure)),
+            VerificationOutcome::Stopped(stopped) => Err(Refusal::from_stopped(stopped)),
         }
     }
 }

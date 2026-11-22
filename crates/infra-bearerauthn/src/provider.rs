@@ -19,6 +19,7 @@ use crate::{ClientBuildError, InvalidUrl};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(
@@ -314,20 +315,16 @@ impl ProviderClient {
         &self,
         url: &Url,
         document: Document,
-        deadline: Option<tokio::time::Instant>,
+        deadline: tokio::time::Instant,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let request = self.client.get(url.clone());
         self.exchange(document.operation(), "GET", url)
             .run(
                 || Outcome::Cancelled,
                 async move |span| {
-                    let response_body = receive(request, false, span);
-                    match deadline {
-                        None => response_body.await,
-                        Some(deadline) => tokio::time::timeout_at(deadline, response_body)
-                            .await
-                            .unwrap_or(Err(ProviderFailure::Timeout)),
-                    }
+                    tokio::time::timeout_at(deadline, receive(request, false, span))
+                        .await
+                        .unwrap_or(Err(ProviderFailure::Timeout))
                 },
             )
             .await
@@ -344,11 +341,11 @@ impl ProviderClient {
         caller_stop: StopProbe<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let request = {
-            let client_id = form_encode(client_id);
-            let client_secret = zeroize::Zeroizing::new(form_encode(client_secret));
+            let encoded_client_id = form_encode(client_id);
+            let encoded_client_secret = zeroize::Zeroizing::new(form_encode(client_secret));
             self.client
                 .post(url.clone())
-                .basic_auth(&client_id, Some(client_secret.as_str()))
+                .basic_auth(&encoded_client_id, Some(encoded_client_secret.as_str()))
                 .form(form)
         };
         self.exchange(Operation::Introspection, "POST", url)
@@ -523,7 +520,7 @@ fn client_builder() -> reqwest::ClientBuilder {
         .retry(reqwest::retry::never())
         .no_proxy()
         .referer(false)
-        .connect_timeout(Duration::from_secs(2))
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
         .timeout(PROVIDER_TIMEOUT)
 }
 
@@ -931,6 +928,10 @@ mod tests {
     }
 
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(60)
+    }
+
     #[tokio::test]
     async fn jwt_fixture_transport_uses_trusted_private_tls_and_enforces_body_and_time_bounds() {
         for content_type in ["", "text/plain", "application/json"] {
@@ -942,7 +943,7 @@ mod tests {
             ))
             .unwrap();
             let body = fixture_client(address, &root)
-                .get_document(endpoint.url(), Document::Jwks, None)
+                .get_document(endpoint.url(), Document::Jwks, far_deadline())
                 .await
                 .unwrap();
             assert_eq!(
@@ -962,7 +963,7 @@ mod tests {
         let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks, None)
+                .get_document(&fixture_url(address), Document::Jwks, far_deadline())
                 .await,
             Err(ProviderFailure::TooLarge)
         );
@@ -972,7 +973,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks, None)
+                .get_document(&fixture_url(address), Document::Jwks, far_deadline())
                 .await,
             Err(ProviderFailure::Status(404))
         );
@@ -982,7 +983,7 @@ mod tests {
         let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks, None)
+                .get_document(&fixture_url(address), Document::Jwks, far_deadline())
                 .await,
             Err(ProviderFailure::Timeout),
         );

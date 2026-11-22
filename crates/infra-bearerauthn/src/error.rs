@@ -163,7 +163,7 @@ impl VerificationReason {
             Self::RefreshWorkerLost => "refresh_worker_lost",
             // template:end oidc-jwt:authn-jwt-reason-labels
             // template:begin oidc-introspection:authn-introspection-reason-labels
-            Self::Provider(failure) => failure.label(),
+            Self::Provider(reason) => reason.label(),
             Self::Inactive => "inactive",
             Self::Capacity => "capacity",
             // template:end oidc-introspection:authn-introspection-reason-labels

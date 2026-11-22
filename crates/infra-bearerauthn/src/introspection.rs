@@ -181,6 +181,17 @@ fn token_digest(token: &PresentedToken<'_>) -> TokenDigest {
     key
 }
 
+fn reusable_claims(
+    retained: &Cache<TokenDigest, VerifiedClaims, foldhash::quality::RandomState>,
+    key: &TokenDigest,
+    unix_now: &impl Fn() -> Result<Duration, VerificationError>,
+) -> Result<Option<VerifiedClaims>, VerificationError> {
+    let Some(claims) = retained.get(key) else {
+        return Ok(None);
+    };
+    Ok(claims.is_reusable_at(unix_now()?).then_some(claims))
+}
+
 #[derive(Clone)]
 enum Fill {
     Fresh(VerifiedClaims),
@@ -228,37 +239,34 @@ impl IntrospectionVerifier {
         };
         let key = token_digest(token);
         loop {
-            if let Some(value) = cache.retained.get(&key)
-                && value.is_reusable_at(unix_now()?)
-            {
-                return Ok(value.principal);
+            if let Some(claims) = reusable_claims(&cache.retained, &key, &unix_now)? {
+                return Ok(claims.principal);
             }
-            let filled = cache
+            let fill = cache
                 .join_fill(key, context, |last_waiter_stop| {
                     let verifier = Arc::clone(self);
                     let retained = cache.retained.clone();
                     let unix_now = unix_now.clone();
                     let secret_token = secrecy::SecretString::from(token.as_str());
                     async move {
-                        if let Some(value) = retained.get(&key)
-                            && value.is_reusable_at(unix_now()?)
-                        {
+                        if reusable_claims(&retained, &key, &unix_now)?.is_some() {
                             return Ok(Fill::RecheckCache);
                         }
-                        let value = verifier
+                        let claims = verifier
                             .introspect(
                                 secret_token.expose_secret(),
                                 StopProbe::Waiter(&last_waiter_stop),
                                 &unix_now,
                             )
                             .await?;
-                        retained.insert(key, value.clone());
-                        Ok(Fill::Fresh(value))
+                        retained.insert(key, claims.clone());
+                        Ok(Fill::Fresh(claims))
                     }
                 })
                 .await?;
-            if let Fill::Fresh(value) = filled {
-                return value.into_principal_checked_at(unix_now()?);
+            match fill {
+                Fill::Fresh(claims) => return claims.into_principal_checked_at(unix_now()?),
+                Fill::RecheckCache => {}
             }
         }
     }
@@ -314,13 +322,16 @@ impl Expiry<TokenDigest, VerifiedClaims> for Retention {
 }
 
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
-    match now.duration_since(UNIX_EPOCH) {
-        Ok(now_from_epoch) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => principal
-            .expiry_from_epoch()
-            .saturating_sub(now_from_epoch)
-            .min(ttl),
-        _ => Duration::ZERO,
+    if principal.payload_len() > MAX_RETAINED_PAYLOAD_BYTES {
+        return Duration::ZERO;
     }
+    let Ok(now_from_epoch) = now.duration_since(UNIX_EPOCH) else {
+        return Duration::ZERO;
+    };
+    principal
+        .expiry_from_epoch()
+        .saturating_sub(now_from_epoch)
+        .min(ttl)
 }
 
 #[cfg(test)]
