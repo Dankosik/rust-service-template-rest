@@ -14,7 +14,7 @@ use shared_rules::clickhouse::{
 use shared_rules::rfc9110::has_ascii_control;
 use url::Url;
 
-use crate::app::local_development_only;
+use crate::app::insecure_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, int_range, missing, nonzero_usize_range,
@@ -150,12 +150,12 @@ impl ClickHouseInput {
         local_development: bool,
         v: &mut Violations,
     ) -> Result<Option<ClickHouseConfig>, Rejected> {
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "clickhouse.allow_plaintext",
             self.allow_plaintext,
             local_development,
         ));
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "clickhouse.allow_unauthenticated",
             self.allow_unauthenticated,
             local_development,
