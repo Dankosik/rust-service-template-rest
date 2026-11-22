@@ -27,7 +27,7 @@ pub(crate) struct PasswordFile {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum ReadFailure {
+pub(crate) enum PasswordFileReadFailure {
     #[error("cache password file could not be read ({0})")]
     Io(ErrorKind),
     #[error("cache password file is empty")]
@@ -55,12 +55,15 @@ impl PasswordFile {
         })
     }
 
-    pub(crate) async fn read(&self, tasks: &TaskTracker) -> Result<Zeroizing<String>, ReadFailure> {
+    pub(crate) async fn read(
+        &self,
+        tasks: &TaskTracker,
+    ) -> Result<Zeroizing<String>, PasswordFileReadFailure> {
         let permit = self
             .reading
             .clone()
             .try_acquire_owned()
-            .map_err(|_| ReadFailure::Busy)?;
+            .map_err(|_| PasswordFileReadFailure::Busy)?;
         let path = self.path.clone();
         let content = tasks
             .spawn_blocking(move || {
@@ -68,9 +71,9 @@ impl PasswordFile {
                 read_password_file(&path)
             })
             .await
-            .map_err(|_| ReadFailure::Panicked)?
-            .map_err(ReadFailure::Io)?;
-        password_from(content).ok_or(ReadFailure::Empty)
+            .map_err(|_| PasswordFileReadFailure::Panicked)?
+            .map_err(PasswordFileReadFailure::Io)?;
+        password_from(content).ok_or(PasswordFileReadFailure::Empty)
     }
 
     pub(crate) async fn connect_settings<'a>(
@@ -105,7 +108,7 @@ enum RefreshWarning {
 }
 
 enum RefreshOutcome {
-    ReadFailed(ReadFailure),
+    ReadFailed(PasswordFileReadFailure),
     Unchanged,
     AuthAccepted,
     AuthRefused,
@@ -119,6 +122,14 @@ impl RefreshOutcome {
             Self::Unchanged => "unchanged",
             Self::AuthAccepted => "auth_accepted",
             Self::AuthRefused | Self::Failed(_) => "refresh_failed",
+        }
+    }
+
+    fn warning(&self) -> Option<RefreshWarning> {
+        match self {
+            Self::ReadFailed(_) => Some(RefreshWarning::Unreadable),
+            Self::AuthRefused => Some(RefreshWarning::AuthRefused),
+            Self::Unchanged | Self::AuthAccepted | Self::Failed(_) => None,
         }
     }
 
@@ -183,7 +194,7 @@ impl<'a> Rotation<'a> {
         let password = match timeout(PASSWORD_READ_TIMEOUT, self.file.read(self.tasks)).await {
             Ok(Ok(password)) => password,
             Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
-            Err(_elapsed) => return RefreshOutcome::ReadFailed(ReadFailure::TimedOut),
+            Err(_elapsed) => return RefreshOutcome::ReadFailed(PasswordFileReadFailure::TimedOut),
         };
         if password.as_str() == self.authenticated_password.as_str() {
             return RefreshOutcome::Unchanged;
@@ -211,13 +222,7 @@ impl<'a> Rotation<'a> {
             "reason" => reason,
         )
         .increment(1);
-        let warning = match outcome {
-            RefreshOutcome::ReadFailed(_) => Some(RefreshWarning::Unreadable),
-            RefreshOutcome::AuthRefused => Some(RefreshWarning::AuthRefused),
-            RefreshOutcome::Unchanged
-            | RefreshOutcome::AuthAccepted
-            | RefreshOutcome::Failed(_) => None,
-        };
+        let warning = outcome.warning();
         let previous = std::mem::replace(&mut self.last_warning, warning);
         if warning.is_some() && warning == previous {
             return;
@@ -236,7 +241,7 @@ impl<'a> Rotation<'a> {
     }
 }
 
-fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
+fn warn_password_file_unreadable(server: &ServerEndpoint, error: PasswordFileReadFailure) {
     tracing::warn!(
         server.address = %server.host,
         server.port = server.port,
@@ -309,5 +314,5 @@ fn read_password_file(path: &Path) -> Result<Zeroizing<String>, ErrorKind> {
 
 fn password_from(mut content: Zeroizing<String>) -> Option<Zeroizing<String>> {
     let trimmed = shared_rules::secret_file::value(std::mem::take(&mut *content));
-    Some(Zeroizing::new(trimmed)).filter(|password| !password.is_empty())
+    (!trimmed.is_empty()).then(|| Zeroizing::new(trimmed))
 }

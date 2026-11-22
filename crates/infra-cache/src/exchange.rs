@@ -140,3 +140,16 @@ pub(crate) fn reply_data(mut reply: redis::Value) -> redis::RedisResult<redis::V
         data => Ok(data),
     }
 }
+
+pub(crate) async fn send_accepted(
+    connection: &mut redis::aio::MultiplexedConnection,
+    command: &redis::Cmd,
+    accepts: fn(redis::Value) -> bool,
+) -> redis::RedisResult<()> {
+    let reply = tokio::task::unconstrained(connection.send_packed_command(command)).await;
+    if accepts(reply.and_then(reply_data)?) {
+        Ok(())
+    } else {
+        Err((redis::ErrorKind::Parse, "unexpected cache reply").into())
+    }
+}

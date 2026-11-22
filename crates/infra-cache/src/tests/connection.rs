@@ -701,7 +701,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     assert!(matches!(
         write.await,
         Err(crate::connection::DispatchError::NotApplied(
-            crate::error::UnknownCause::Stopped(Stopped::Cancelled)
+            crate::error::FailureCause::Stopped(Stopped::Cancelled)
         ))
     ));
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
@@ -938,7 +938,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     use std::task::Poll;
 
     use crate::connection::{AfterReply, DispatchError};
-    use crate::error::{ErrorType, UnknownCause};
+    use crate::error::{ErrorType, FailureCause};
 
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
@@ -983,7 +983,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(DispatchError::NotApplied(UnknownCause::Failed(
+        Poll::Ready(Err(DispatchError::NotApplied(FailureCause::Failed(
             ErrorType::Other
         ))))
     ));
@@ -1984,7 +1984,7 @@ fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() 
         }
         std::assert_matches!(
             futures_util::poll!(std::pin::pin!(file.read(&tasks))),
-            std::task::Poll::Ready(Err(crate::credentials::ReadFailure::Busy))
+            std::task::Poll::Ready(Err(crate::credentials::PasswordFileReadFailure::Busy))
         );
         tasks.close();
         assert!(futures_util::poll!(std::pin::pin!(tasks.wait())).is_pending());

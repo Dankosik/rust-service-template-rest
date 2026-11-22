@@ -16,7 +16,7 @@ const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-const USER_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) enum Transport {
     Plaintext,
@@ -87,6 +87,6 @@ async fn connect_address(address: SocketAddr) -> io::Result<TcpStream> {
             .with_retries(KEEPALIVE_RETRIES),
     )?;
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-    socket.set_tcp_user_timeout(Some(USER_TIMEOUT))?;
+    socket.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
     Ok(stream)
 }

@@ -218,7 +218,7 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
     };
     first.retired.retire();
 
-    let mut waiting = pin!(shared.acquire());
+    let mut waiting = pin!(shared.wait_settled());
     let wake = Arc::new(DriverWake::default());
     let waker = Waker::from(wake.clone());
     assert!(
@@ -251,7 +251,7 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
     assert!(Arc::ptr_eq(&acquired, &second));
 
     second.retired.retire();
-    let mut waiting_failure = pin!(shared.acquire());
+    let mut waiting_failure = pin!(shared.wait_settled());
     let failure_wake = Arc::new(DriverWake::default());
     let failure_waker = Waker::from(failure_wake.clone());
     assert!(
@@ -269,7 +269,7 @@ async fn retiring_past_cooldown_into_connecting_does_not_wake_waiters() {
     let (third, _server3) = duplex_generation(Instant::now()).await;
     assert!(shared.publish(third.clone()));
     third.retired.retire();
-    let mut waiting_close = pin!(shared.acquire());
+    let mut waiting_close = pin!(shared.wait_settled());
     let close_wake = Arc::new(DriverWake::default());
     let close_waker = Waker::from(close_wake.clone());
     assert!(

@@ -13,14 +13,19 @@ mod response_limit;
 #[cfg(test)]
 mod tests;
 
+use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
+use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::config::{
     BehaviorVersion, Region, RequestChecksumCalculation, ResponseChecksumValidation,
     SharedCredentialsProvider, SharedHttpClient, SharedInterceptor, StalledStreamProtectionConfig,
 };
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use aws_sdk_s3::operation::{RequestId, RequestIdExt};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
@@ -39,12 +44,12 @@ pub use self::download::Download;
 pub use self::error::{
     ConfigError, MutationError, MutationFailure, ObjectStorageError, UnknownOutcome,
 };
-use self::error::{ConfigErrorKind, Failure, LocalFailure, MutationMode};
+use self::error::{ConfigErrorKind, Failure, LocalFailure, MutationMode, PutCallResult};
 pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
-use self::put_body::Payload;
+use self::put_body::{DispatchedPut, Payload};
 pub use self::put_body::{PutBody, PutOutcomes};
 use self::response_limit::ResponseLimit;
 
@@ -76,6 +81,12 @@ pub struct ObjectStorage {
 struct AmazonS3Target {
     cloud_region: String,
     expected_bucket_owner: String,
+}
+
+struct SentPut<'a> {
+    result: PutCallResult,
+    mismatch: Option<Arc<AtomicBool>>,
+    inflight: Option<DispatchedPut<'a>>,
 }
 
 struct Inner {
@@ -198,7 +209,7 @@ impl ObjectStorage {
             max_concurrency,
             operation_timeout,
         } = options;
-        let mut config = aws_sdk_s3::Config::builder()
+        let mut base = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
             .credentials_provider(credentials)
             .http_client(http_client)
@@ -215,23 +226,22 @@ impl ObjectStorage {
                     .grace_period(STALL_GRACE)
                     .build(),
             );
-        config.push_interceptor(SharedInterceptor::permanent(ResponseLimit::ErrorBody));
-        let amazon_s3 = match resolved.target {
+        base.push_interceptor(SharedInterceptor::permanent(ResponseLimit::ErrorBody));
+        let (config, amazon_s3) = match resolved.target {
             provider::Target::AmazonS3 {
                 expected_bucket_owner,
-            } => {
-                config = config.force_path_style(false);
+            } => (
+                base.force_path_style(false),
                 Some(AmazonS3Target {
                     cloud_region: resolved.region.clone(),
                     expected_bucket_owner,
-                })
-            }
+                }),
+            ),
             provider::Target::Endpoint { url, path_style } => {
-                config = config.endpoint_url(url).force_path_style(path_style);
-                None
+                (base.endpoint_url(url).force_path_style(path_style), None)
             }
         };
-        config = config.region(Region::new(resolved.region));
+        let config = config.region(Region::new(resolved.region));
         observe::describe();
         Self {
             inner: Arc::new(Inner {
@@ -264,75 +274,92 @@ impl ObjectStorage {
         let context = parent.bounded(self.inner.operation_timeout);
         let guard = self.start_borrowed_observation(Operation::Put);
         let PutBody { payload, outcomes } = body;
-        let (result, mismatch, inflight) = match async {
-            check_active(&context)?;
-            if payload.len() > self.inner.max_object_bytes {
-                return Err(Failure::too_large());
-            }
-            let _permit = self.try_admit().ok_or_else(Failure::busy)?;
-            let payload = match payload {
-                Payload::Streamed {
-                    len: 0,
-                    stream,
-                    mismatch,
-                } => within(&context, Payload::verify_empty_stream(stream, mismatch))
-                    .await
-                    .map_err(|interrupted| Failure::not_applied_stop(interrupted.stopped))??,
-                payload => payload,
-            };
-            let checksum = self
-                .inner
-                .checksum
-                .applies_to(&payload)
-                .then_some(ChecksumAlgorithm::Crc64Nvme);
-            let (len, stream, mismatch) = payload.into_stream();
-            let mut call_config =
-                self.bounded_operation_config(&context, RetryPolicy::SingleAttempt);
-            if checksum.is_some() {
-                call_config = call_config
-                    .request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
-            }
-            let request = self
-                .inner
-                .client
-                .put_object()
-                .bucket(&self.inner.bucket)
-                .key(key.as_str())
-                .content_length(i64::try_from(len).unwrap_or(i64::MAX))
-                .body(stream)
-                .set_content_type(options.content_type.map(ContentType::into_string))
-                .set_checksum_algorithm(checksum)
-                .set_if_none_match(options.mode.if_none_match())
-                .set_expected_bucket_owner(self.inner.expected_bucket_owner())
-                .customize()
-                .config_override(call_config)
-                .send();
-            let mut inflight = None;
-            let result = within_mutation(&context, async {
-                inflight = outcomes.as_ref().map(PutOutcomes::begin_dispatch);
-                request.await
-            })
-            .await;
-            Ok::<_, Failure<MutationError>>((result, mismatch, inflight))
-        }
-        .await
+        let mode = options.mode;
+        let sent = match self
+            .send_put(&context, key, payload, options, outcomes.as_ref())
+            .await
         {
-            Ok(completed) => completed,
+            Ok(sent) => sent,
             Err(failure) => return Err(guard.fail(&failure)),
         };
-        let outcome = error::interpret_put_result(&result, options.mode, mismatch.as_deref());
-        if !matches!(
+        let outcome = error::interpret_put_result(&sent.result, mode, sent.mismatch.as_deref());
+        let outcome_unknown = matches!(
             outcome,
             Err(Failure {
                 error: MutationError::OutcomeUnknown(_),
                 ..
             })
-        ) && let Some(inflight) = inflight
+        );
+        if let Some(inflight) = sent.inflight
+            && !outcome_unknown
         {
             inflight.settle();
         }
-        let reply = result.as_ref().ok().map(|(reply, _)| reply);
-        guard.finish_with_reply(outcome, reply)
+        guard.finish_with_reply(outcome, sent.result.as_ref().ok().map(|(reply, _)| reply))
+    }
+
+    async fn send_put<'a>(
+        &self,
+        context: &BoundedContext,
+        key: &ObjectKey,
+        payload: Payload,
+        options: PutOptions,
+        outcomes: Option<&'a PutOutcomes>,
+    ) -> Result<SentPut<'a>, Failure<MutationError>> {
+        check_active(context)?;
+        if payload.len() > self.inner.max_object_bytes {
+            return Err(Failure::too_large());
+        }
+        let _permit = self.try_admit().ok_or_else(Failure::busy)?;
+        let payload = match payload {
+            Payload::Streamed {
+                len: 0,
+                stream,
+                mismatch,
+            } => within(context, Payload::verify_empty_stream(stream, mismatch))
+                .await
+                .map_err(|interrupted| Failure::not_applied_stop(interrupted.stopped))?
+                .map_err(Failure::from)?,
+            payload => payload,
+        };
+        let checksum = self
+            .inner
+            .checksum
+            .applies_to(&payload)
+            .then_some(ChecksumAlgorithm::Crc64Nvme);
+        let (len, stream, mismatch) = payload.into_stream();
+        let config = self.operation_config_with_success_limit(context, RetryPolicy::SingleAttempt);
+        let call_config = if checksum.is_some() {
+            config.request_checksum_calculation(RequestChecksumCalculation::WhenSupported)
+        } else {
+            config
+        };
+        let request = self
+            .inner
+            .client
+            .put_object()
+            .bucket(&self.inner.bucket)
+            .key(key.as_str())
+            .content_length(i64::try_from(len).unwrap_or(i64::MAX))
+            .body(stream)
+            .set_content_type(options.content_type.map(ContentType::into_string))
+            .set_checksum_algorithm(checksum)
+            .set_if_none_match(options.mode.if_none_match())
+            .set_expected_bucket_owner(self.inner.expected_bucket_owner())
+            .customize()
+            .config_override(call_config)
+            .send();
+        let mut inflight = None;
+        let result = within_mutation(context, async {
+            inflight = outcomes.map(PutOutcomes::begin_dispatch);
+            request.await
+        })
+        .await;
+        Ok(SentPut {
+            result,
+            mismatch,
+            inflight,
+        })
     }
 
     pub async fn get(
@@ -341,7 +368,7 @@ impl ObjectStorage {
         key: &ObjectKey,
     ) -> Result<Download, ObjectStorageError> {
         let context = parent.bounded(self.inner.operation_timeout);
-        let mut guard = self.start_owned_observation(Operation::Get);
+        let guard = self.start_owned_observation(Operation::Get);
         let (reply, permit) = match async {
             check_active(&context)?;
             let permit = self.try_admit_owned().ok_or_else(Failure::busy)?;
@@ -365,15 +392,7 @@ impl ObjectStorage {
             Ok(received) => received,
             Err(failure) => return Err(guard.fail(&failure)),
         };
-        if let Err(failure) = check_active(&context) {
-            return Err(guard.fail_with_reply(&failure, &reply));
-        }
-        let output = match reply {
-            Ok(output) => output,
-            Err(sdk_error) => {
-                return Err(guard.fail_with_reply(&error::from_sdk(&sdk_error), &sdk_error));
-            }
-        };
+        let (mut guard, output) = accept_reply(guard, &context, reply)?;
         let size = match validate_download_headers(&output, self.inner.max_object_bytes) {
             Ok(size) => size,
             Err(failure) => return Err(guard.fail_with_reply(&failure, &output)),
@@ -386,7 +405,7 @@ impl ObjectStorage {
             output.e_tag,
         );
         let mut download = Download::open(metadata, output.body, guard, permit, context);
-        if download.metadata().size == 0 {
+        if size == 0 {
             download.next_chunk().await?;
         }
         Ok(download)
@@ -410,24 +429,18 @@ impl ObjectStorage {
                 .key(key.as_str())
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
-                .config_override(self.bounded_operation_config(&context, RetryPolicy::Read))
+                .config_override(
+                    self.operation_config_with_success_limit(&context, RetryPolicy::Read),
+                )
                 .send();
-            within(&context, request).await.map_err(Failure::from)
+            Ok::<_, Failure>(within(&context, request).await?)
         }
         .await
         {
             Ok(reply) => reply,
             Err(failure) => return Err(guard.fail(&failure)),
         };
-        if let Err(failure) = check_active(&context) {
-            return Err(guard.fail_with_reply(&failure, &reply));
-        }
-        let output = match reply {
-            Ok(output) => output,
-            Err(sdk_error) => {
-                return Err(guard.fail_with_reply(&error::from_sdk(&sdk_error), &sdk_error));
-            }
-        };
+        let (guard, output) = accept_reply(guard, &context, reply)?;
         let size = match response_size(output.content_length) {
             Ok(size) => size,
             Err(failure) => return Err(guard.fail_with_reply(&failure, &output)),
@@ -460,7 +473,7 @@ impl ObjectStorage {
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner())
                 .customize()
                 .config_override(
-                    self.bounded_operation_config(&context, RetryPolicy::SingleAttempt),
+                    self.operation_config_with_success_limit(&context, RetryPolicy::SingleAttempt),
                 )
                 .send();
             Ok::<_, Failure<MutationError>>(within_mutation(&context, request).await?)
@@ -552,7 +565,7 @@ impl ObjectStorage {
         }
     }
 
-    fn bounded_operation_config(
+    fn operation_config_with_success_limit(
         &self,
         context: &BoundedContext,
         policy: RetryPolicy,
@@ -560,6 +573,25 @@ impl ObjectStorage {
         let mut config = self.operation_config(context, policy);
         config.push_interceptor(self.inner.success_limit.clone());
         config
+    }
+}
+
+fn accept_reply<H, T, E>(
+    guard: OperationGuard<H>,
+    context: &BoundedContext,
+    reply: Result<T, SdkError<E, HttpResponse>>,
+) -> Result<(OperationGuard<H>, T), ObjectStorageError>
+where
+    H: Deref<Target = Histograms>,
+    T: RequestId + RequestIdExt,
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    if let Err(failure) = check_active(context) {
+        return Err(guard.fail_with_reply(&failure, &reply));
+    }
+    match reply {
+        Ok(output) => Ok((guard, output)),
+        Err(sdk_error) => Err(guard.fail_with_reply(&error::from_sdk(&sdk_error), &sdk_error)),
     }
 }
 

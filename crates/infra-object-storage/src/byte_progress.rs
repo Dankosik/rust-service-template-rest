@@ -2,6 +2,8 @@ use std::num::NonZeroU64;
 
 use bytes::Bytes;
 
+pub(crate) struct BodyEndedEarly;
+
 pub(crate) enum ByteProgress {
     Reading(NonZeroU64),
     AwaitingEof(Option<Bytes>),
@@ -35,10 +37,10 @@ impl ByteProgress {
         }
     }
 
-    pub(crate) fn finish(&mut self) -> Result<Option<Bytes>, ()> {
+    pub(crate) fn finish(&mut self) -> Result<Option<Bytes>, BodyEndedEarly> {
         match self {
             Self::AwaitingEof(held) => Ok(held.take()),
-            Self::Reading(_) => Err(()),
+            Self::Reading(_) => Err(BodyEndedEarly),
         }
     }
 }

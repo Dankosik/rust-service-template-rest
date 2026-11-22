@@ -7,7 +7,7 @@ use redis::{SetExpiry, SetOptions};
 
 use crate::connection::AfterReply;
 use crate::error::{MutationKind, ReadFailure};
-use crate::exchange::reply_data;
+use crate::exchange::{reply_data, send_accepted};
 use crate::observe::{
     LocalSizeRefusal, NamespaceMetrics, Operation, OperationGuard, SuccessOutcome,
 };
@@ -111,15 +111,12 @@ impl CacheLookup {
         let Some(namespace) = &self.namespace else {
             return Ok(None);
         };
-        let wait_ceiling = if let Some(deadline) = parent.deadline() {
-            let budget = deadline.remaining().saturating_sub(self.source_reserve);
-            if budget.is_zero() {
-                return parent.check().map(|()| None);
-            }
-            Some(budget)
-        } else {
-            None
-        };
+        let wait_ceiling = parent
+            .deadline()
+            .map(|deadline| deadline.remaining().saturating_sub(self.source_reserve));
+        if wait_ceiling.is_some_and(|ceiling| ceiling.is_zero()) {
+            return parent.check().map(|()| None);
+        }
 
         let result = namespace.get_with_ceiling(parent, key, wait_ceiling).await;
         parent.check()?;
@@ -162,15 +159,9 @@ impl CacheNamespace {
             )
             .await
             .map_err(ReadFailure::from)
-            .and_then(|value| {
-                if value
-                    .as_ref()
-                    .is_some_and(|bytes| bytes.len() > max_value_bytes)
-                {
-                    Err(ReadFailure::ValueTooLarge)
-                } else {
-                    Ok(value)
-                }
+            .and_then(|value| match value {
+                Some(bytes) if bytes.len() > max_value_bytes => Err(ReadFailure::ValueTooLarge),
+                value => Ok(value),
             });
         match result {
             Ok(value) => {
@@ -210,7 +201,7 @@ impl CacheNamespace {
             query_mutation(
                 key.set_command(value, milliseconds.cast_unsigned()),
                 connection,
-                |value| matches!(value, redis::Value::Okay),
+                |reply| matches!(reply, redis::Value::Okay),
             )
         })
         .await
@@ -221,8 +212,8 @@ impl CacheNamespace {
             .admit_key(key)
             .ok_or(MutationError::NotApplied(MutationFailure::KeyTooLarge))?;
         self.run_mutation(parent, MutationKind::Delete, |connection| {
-            query_mutation(key.delete_command(), connection, |value| {
-                matches!(value, redis::Value::Int(0 | 1))
+            query_mutation(key.delete_command(), connection, |reply| {
+                matches!(reply, redis::Value::Int(0 | 1))
             })
         })
         .await
@@ -276,12 +267,7 @@ pub(super) async fn query_mutation(
     mut connection: MultiplexedConnection,
     accepts: fn(redis::Value) -> bool,
 ) -> redis::RedisResult<()> {
-    let reply = tokio::task::unconstrained(connection.send_packed_command(&command)).await?;
-    if accepts(reply_data(reply)?) {
-        Ok(())
-    } else {
-        Err((redis::ErrorKind::Parse, "unexpected cache command reply").into())
-    }
+    send_accepted(&mut connection, &command, accepts).await
 }
 
 const READ_TRANSACTION_COMMANDS: usize = 2;
@@ -299,6 +285,10 @@ async fn query_read(
     ))
     .await?;
     decode_read_transaction(replies, max_value_bytes)
+}
+
+const fn getrange_reply_limit(max_value_bytes: usize) -> usize {
+    max_value_bytes + 1
 }
 
 fn decode_read_transaction(
@@ -326,7 +316,9 @@ fn decode_read_transaction(
         <[_; READ_TRANSACTION_COMMANDS]>::try_from(results).map_err(|_| unexpected())?;
     match (reply_data(exists)?, reply_data(value)?) {
         (Value::Int(0), Value::BulkString(bytes)) if bytes.is_empty() => Ok(None),
-        (Value::Int(1), Value::BulkString(bytes)) if bytes.len() <= max_value_bytes + 1 => {
+        (Value::Int(1), Value::BulkString(bytes))
+            if bytes.len() <= getrange_reply_limit(max_value_bytes) =>
+        {
             Ok(Some(bytes))
         }
         _ => Err(unexpected()),
@@ -380,20 +372,18 @@ impl NamespacedKey<'_> {
         const PX_OPTION_BYTES: usize = "PX".len();
         const MAX_U64_DECIMAL_BYTES: usize = 20;
 
-        let command_name = Operation::Set.redis_name();
         let options = SetOptions::default().with_expiration(SetExpiry::PX(ttl_ms));
         let mut command = redis::Cmd::with_capacity(
             2 + SET_PX_EXTRA_ARGS,
-            command_name.len() + self.len() + value.len() + PX_OPTION_BYTES + MAX_U64_DECIMAL_BYTES,
+            "SET".len() + self.len() + value.len() + PX_OPTION_BYTES + MAX_U64_DECIMAL_BYTES,
         );
-        command.arg(command_name).arg(self).arg(value).arg(options);
+        command.arg("SET").arg(self).arg(value).arg(options);
         command
     }
 
     fn delete_command(self) -> redis::Cmd {
-        let command_name = Operation::Delete.redis_name();
-        let mut command = redis::Cmd::with_capacity(2, command_name.len() + self.len());
-        command.arg(command_name).arg(self);
+        let mut command = redis::Cmd::with_capacity(2, "DEL".len() + self.len());
+        command.arg("DEL").arg(self);
         command
     }
 }

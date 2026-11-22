@@ -12,7 +12,7 @@ pub struct InvalidContentType;
 impl ContentType {
     pub fn try_new(value: impl AsRef<str> + Into<String>) -> Result<Self, InvalidContentType> {
         let bytes = value.as_ref().as_bytes();
-        if bytes.len() <= MAX_CONTENT_TYPE_BYTES && media_type(bytes).is_some() {
+        if bytes.len() <= MAX_CONTENT_TYPE_BYTES && validate_media_type(bytes).is_some() {
             Ok(Self(value.into()))
         } else {
             Err(InvalidContentType)
@@ -72,7 +72,7 @@ impl TryFrom<&str> for ContentType {
 }
 
 // RFC 9110 §§5.5, 5.6.5–5.6.6 and 8.3.1
-fn media_type(value: &[u8]) -> Option<()> {
+fn validate_media_type(value: &[u8]) -> Option<()> {
     if matches!(value.last(), Some(b' ' | b'\t')) {
         return None;
     }

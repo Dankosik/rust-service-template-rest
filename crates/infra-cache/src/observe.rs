@@ -8,7 +8,7 @@ use operation_context::Stopped;
 use tracing::Span;
 use tracing::field::Field;
 
-use crate::error::{ErrorType, MutationCommandError, MutationRefusal, ReadFailure, UnknownCause};
+use crate::error::{ErrorType, FailureCause, MutationCommandError, MutationRefusal, ReadFailure};
 use crate::{Namespace, ServerEndpoint};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
@@ -49,7 +49,7 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
-    pub(crate) const fn redis_name(self) -> &'static str {
+    const fn db_operation_name(self) -> &'static str {
         match self {
             Self::Get => "MULTI",
             Self::Set => "SET",
@@ -57,7 +57,7 @@ impl Operation {
         }
     }
 
-    const fn redis_batch_size(self) -> Option<i64> {
+    const fn db_operation_batch_size(self) -> Option<i64> {
         match self {
             Self::Get => Some(2),
             Self::Set | Self::Delete => None,
@@ -251,12 +251,12 @@ impl<'a> OperationGuard<'a> {
     ) -> Self {
         let span = tracing::info_span!(
             "cache",
-            otel.name = operation.redis_name(),
+            otel.name = operation.db_operation_name(),
             otel.kind = "client",
             db.system.name = "redis",
             db.namespace = %server.database_index,
-            db.operation.name = operation.redis_name(),
-            db.operation.batch.size = operation.redis_batch_size(),
+            db.operation.name = operation.db_operation_name(),
+            db.operation.batch.size = operation.db_operation_batch_size(),
             cache.name = metrics.namespace().as_str(),
             server.address = server.host.as_str(),
             server.port = server.port,
@@ -294,12 +294,14 @@ impl<'a> OperationGuard<'a> {
     }
 
     pub(crate) fn fail_mutation(self, error: MutationCommandError) {
-        let effect = match error {
+        let mutation_outcome = match error {
             MutationCommandError::NotApplied(_) => "not_applied",
             MutationCommandError::OutcomeUnknown(_) => "outcome_unknown",
         };
         if let Some(fields) = SpanFields::for_span(&self.0.span) {
-            self.0.span.record(&fields.mutation_outcome, effect);
+            self.0
+                .span
+                .record(&fields.mutation_outcome, mutation_outcome);
         }
         match error {
             MutationCommandError::OutcomeUnknown(cause)
@@ -315,15 +317,15 @@ impl<'a> OperationGuard<'a> {
         }
     }
 
-    fn record_cause(self, cause: UnknownCause) {
+    fn record_cause(self, cause: FailureCause) {
         match cause {
-            UnknownCause::Stopped(Stopped::Cancelled) => {
+            FailureCause::Stopped(Stopped::Cancelled) => {
                 DropGuard::dismiss(self.0).finish(Outcome::Cancelled);
             }
-            UnknownCause::Stopped(Stopped::Deadline) => {
+            FailureCause::Stopped(Stopped::Deadline) => {
                 self.record_error(ErrorType::Timeout, None);
             }
-            UnknownCause::Failed(error) => self.record_error(error, None),
+            FailureCause::Failed(error) => self.record_error(error, None),
         }
     }
 

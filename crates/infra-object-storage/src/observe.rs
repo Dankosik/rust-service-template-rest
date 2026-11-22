@@ -120,8 +120,8 @@ struct RequestIds<'a> {
 impl<'a> RequestIds<'a> {
     fn from_reply(reply: &'a (impl RequestId + RequestIdExt)) -> Self {
         Self {
-            request_id: reply.request_id().and_then(bounded_request_id),
-            extended_request_id: reply.extended_request_id().and_then(bounded_request_id),
+            request_id: reply.request_id().and_then(safe_request_id),
+            extended_request_id: reply.extended_request_id().and_then(safe_request_id),
         }
     }
 
@@ -146,10 +146,10 @@ struct OperationInner<H: Deref<Target = Histograms>> {
 
 impl<H: Deref<Target = Histograms>> OperationInner<H> {
     fn abandon(self) {
-        self.finish(Outcome::Cancelled);
+        self.record_outcome(Outcome::Cancelled);
     }
 
-    fn finish(&self, outcome: Outcome) {
+    fn record_outcome(&self, outcome: Outcome) {
         self.span.record("object_storage.outcome", outcome.label());
         self.histograms
             .get(self.operation, outcome)
@@ -176,7 +176,7 @@ impl<H: Deref<Target = Histograms>> OperationInner<H> {
             self.span.record("object_storage.timeout_source", source);
         }
         self.span.record("otel.status_code", "ERROR");
-        self.finish(Outcome::Failed(outcome));
+        self.record_outcome(Outcome::Failed(outcome));
         let operation = self.operation.label();
         self.span.in_scope(|| {
             macro_rules! emit_failure {
@@ -256,13 +256,13 @@ impl<H: Deref<Target = Histograms>> OperationGuard<H> {
     }
 
     pub(crate) fn succeed(self) {
-        DropGuard::dismiss(self.0).finish(Outcome::Ok);
+        DropGuard::dismiss(self.0).record_outcome(Outcome::Ok);
     }
 
     pub(crate) fn succeed_with_reply(self, reply: &(impl RequestId + RequestIdExt)) {
         let inner = DropGuard::dismiss(self.0);
         RequestIds::from_reply(reply).record(&inner.span);
-        inner.finish(Outcome::Ok);
+        inner.record_outcome(Outcome::Ok);
     }
 
     pub(crate) fn fail<E: OutcomeError>(self, failure: &Failure<E>) -> E {
@@ -316,7 +316,7 @@ impl<H: Deref<Target = Histograms>> OperationGuard<H> {
 
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
-fn bounded_request_id(value: &str) -> Option<&str> {
+fn safe_request_id(value: &str) -> Option<&str> {
     let bounded = !value.is_empty()
         && value.len() <= MAX_REQUEST_ID_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic());
