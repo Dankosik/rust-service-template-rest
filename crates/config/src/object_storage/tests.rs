@@ -287,7 +287,7 @@ fn limits_are_bounded_even_when_inert() {
             "object_storage.max_object_bytes",
         ),
         (
-            |input| input.max_object_bytes = ByteSize::b(MAX_OBJECT_BYTES_CEILING + 1),
+            |input| input.max_object_bytes = ByteSize::b(SINGLE_PUT_MAX_BYTES + 1),
             "object_storage.max_object_bytes",
         ),
         (
@@ -311,7 +311,7 @@ fn limits_are_bounded_even_when_inert() {
         mutate(&mut input);
         assert_eq!(key_of(input, false), key);
     }
-    assert_eq!(MAX_OBJECT_BYTES_CEILING, 5_363_466_240);
+    assert_eq!(SINGLE_PUT_MAX_BYTES, 5_363_466_240);
 }
 
 #[test]

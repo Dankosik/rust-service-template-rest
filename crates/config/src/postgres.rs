@@ -56,7 +56,8 @@ pub(crate) struct PostgresFields<Session: Mode, Pool: Mode, Migration: Mode> {
     session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
-    /// the database, not from the service's concurrency.
+    /// the database, not from the service's concurrency. Missing uses 4;
+    /// between 1 and 500.
     #[serde_as(as = "When<Pool, Option<StrictCount>>")]
     max_connections: Option<NonZeroU32>,
     /// Enables PostgreSQL LISTEN/NOTIFY for job wakeups. Set to false on producers

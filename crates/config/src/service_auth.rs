@@ -110,24 +110,20 @@ impl ServiceAuthInput {
                     self.trust,
                     condition,
                 ));
-                let signing_key = v
-                    .record(optional_pair(
-                        "service_auth.key_id",
-                        self.key_id,
-                        "service_auth.private_key",
-                        self.private_key,
-                    ))
-                    .map(|pair| {
-                        pair.map(|(key_id, private_key)| ServiceSigningKey {
-                            key_id,
-                            private_key,
-                        })
-                    });
+                let signing_key = v.record(optional_pair(
+                    "service_auth.key_id",
+                    self.key_id,
+                    "service_auth.private_key",
+                    self.private_key,
+                ));
                 Ok(ServiceAuthConfig::Jwt {
                     name: name?,
                     jwt_type: jwt_type?,
                     trust: trust?,
-                    signing_key: signing_key?,
+                    signing_key: signing_key?.map(|(key_id, private_key)| ServiceSigningKey {
+                        key_id,
+                        private_key,
+                    }),
                 })
             }
         }

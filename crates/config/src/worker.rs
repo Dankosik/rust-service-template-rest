@@ -36,7 +36,7 @@ impl WorkerInput {
     pub(crate) fn admit(
         self,
         build: BuildInfo,
-        shutdown_tail: Option<ShutdownTail>,
+        shutdown_tail: ShutdownTail,
     ) -> Result<WorkerConfig, ValidationErrors> {
         admit_with(|v| {
             let app = self.app.admit(build, v);

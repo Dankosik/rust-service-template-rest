@@ -359,8 +359,8 @@ fn a_replaced_file_does_not_change_the_admitted_source() {
     let source = scan_file(&path).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
-    let merged: ConfigInput = merge_inputs(vec![source], BTreeMap::new()).unwrap();
-    let cfg = merged.admit(BUILD, None).unwrap();
+    let merged: ConfigInput = merge_inputs(vec![source], variables::Variables::new()).unwrap();
+    let cfg = merged.admit(BUILD, crate::http::NO_SHUTDOWN_TAIL).unwrap();
     assert_eq!(cfg.log().level, "debug");
 }
 
@@ -1222,10 +1222,7 @@ fn shutdown_tail_aggregates_grace_budget_with_other_violations() {
     let err = load_with_tail_from(
         &LoadOptions::default(),
         BUILD,
-        Some(crate::ShutdownTail::new(
-            Duration::from_millis(18_500),
-            "teardown tail",
-        )),
+        crate::ShutdownTail::new(Duration::from_millis(18_500), "teardown tail"),
         env(&[("APP__HTTP__GRACE_PERIOD", "40s"), ("APP__APP__ENV", " ")]),
     )
     .unwrap_err();

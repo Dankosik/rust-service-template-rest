@@ -10,7 +10,7 @@ pub fn service(
     crate::load::load_with_tail_from(
         &LoadOptions::default(),
         build,
-        Some(tail),
+        tail,
         environment
             .iter()
             .map(|&(key, value)| (key.into(), value.into())),
@@ -27,7 +27,7 @@ pub fn worker(
     crate::load::load_worker_with_tail_from(
         &LoadOptions::default(),
         build,
-        Some(tail),
+        tail,
         environment
             .iter()
             .map(|&(key, value)| (key.into(), value.into())),

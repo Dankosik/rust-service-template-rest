@@ -56,32 +56,11 @@ impl InboundWebhooksInput {
         violations: &mut Violations,
     ) -> BTreeMap<String, InboundWebhookEndpointConfig> {
         validate_endpoints(&self.endpoints, postgres_enabled, violations);
-        let mut keys = BTreeMap::new();
-        for (reference, secret) in self.secrets {
-            violations.check(validate_key_ref(
-                &format!("inbound_webhooks.secrets.{reference}"),
-                &reference,
-            ));
-            if !secret.expose_secret().trim().is_empty() {
-                keys.insert(
-                    reference.clone(),
-                    Arc::new(InboundWebhookKey { reference, secret }),
-                );
-            }
-        }
+        let keys = admit_keys(self.secrets, violations);
         let mut bindings = BTreeMap::new();
         for (endpoint_id, endpoint) in self.endpoints {
             let active = resolve_key(&keys, &endpoint_id, "active_key", &endpoint.active_key);
-            let previous = match endpoint.previous_key {
-                Some(reference) if reference == endpoint.active_key => Err(ValidationError::new(
-                    format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key"),
-                    "must differ from active_key when present",
-                )),
-                Some(reference) => {
-                    resolve_key(&keys, &endpoint_id, "previous_key", &reference).map(Some)
-                }
-                None => Ok(None),
-            };
+            let previous = resolve_previous_key(&keys, &endpoint_id, &endpoint);
             if let (Ok(active_key), Ok(previous_key)) =
                 (violations.record(active), violations.record(previous))
             {
@@ -95,6 +74,41 @@ impl InboundWebhooksInput {
             }
         }
         bindings
+    }
+}
+
+fn admit_keys(
+    secrets: BTreeMap<String, SecretString>,
+    violations: &mut Violations,
+) -> BTreeMap<String, Arc<InboundWebhookKey>> {
+    let mut keys = BTreeMap::new();
+    for (reference, secret) in secrets {
+        violations.check(validate_key_ref(
+            &format!("inbound_webhooks.secrets.{reference}"),
+            &reference,
+        ));
+        if !secret.expose_secret().trim().is_empty() {
+            keys.insert(
+                reference.clone(),
+                Arc::new(InboundWebhookKey { reference, secret }),
+            );
+        }
+    }
+    keys
+}
+
+fn resolve_previous_key(
+    keys: &BTreeMap<String, Arc<InboundWebhookKey>>,
+    endpoint_id: &str,
+    endpoint: &InboundWebhookEndpointInput,
+) -> Result<Option<Arc<InboundWebhookKey>>, ValidationError> {
+    match &endpoint.previous_key {
+        Some(reference) if *reference == endpoint.active_key => Err(ValidationError::new(
+            format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key"),
+            "must differ from active_key when present",
+        )),
+        Some(reference) => resolve_key(keys, endpoint_id, "previous_key", reference).map(Some),
+        None => Ok(None),
     }
 }
 

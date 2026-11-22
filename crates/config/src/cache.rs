@@ -93,19 +93,12 @@ impl CacheInput {
             self.allow_unauthenticated,
             local_development,
         ));
-        let client_certificate = v
-            .record(optional_pair(
-                "cache.client_cert_path",
-                self.client_cert_path,
-                "cache.client_key_path",
-                self.client_key_path,
-            ))
-            .map(|pair| {
-                pair.map(|(cert_path, key_path)| CacheClientCertificate {
-                    cert_path,
-                    key_path,
-                })
-            });
+        let client_certificate = v.record(optional_pair(
+            "cache.client_cert_path",
+            self.client_cert_path,
+            "cache.client_key_path",
+            self.client_key_path,
+        ));
         v.check(duration_range(
             "cache.command_timeout",
             self.command_timeout,
@@ -126,7 +119,11 @@ impl CacheInput {
             self.max_value_bytes.as_u64(),
             1..=shared_rules::cache::MAX_ENTRY_BYTES,
         ));
-        let client_certificate = client_certificate?;
+        let client_certificate =
+            client_certificate?.map(|(cert_path, key_path)| CacheClientCertificate {
+                cert_path,
+                key_path,
+            });
         let max_concurrency = max_concurrency?;
         let max_key_bytes = max_key_bytes?;
         let max_value_bytes = max_value_bytes?;
