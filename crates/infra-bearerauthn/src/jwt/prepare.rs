@@ -161,20 +161,19 @@ async fn fetch_discovery(
     deadline: Instant,
 ) -> Result<Discovery, DiscoveryError> {
     let path = issuer.url().path().trim_suffix('/');
-    let mut openid = issuer.url().clone();
-    openid.set_path(&format!("{path}/.well-known/openid-configuration"));
-    match fetch_metadata(provider, &openid, deadline).await {
+    let mut openid_url = issuer.url().clone();
+    openid_url.set_path(&format!("{path}/.well-known/openid-configuration"));
+    let first = match fetch_metadata(provider, &openid_url, deadline).await {
         Err(
             first @ (DiscoveryError::Fetch(ProviderFailure::Status(_)) | DiscoveryError::Parse),
-        ) => {
-            let mut rfc8414 = issuer.url().clone();
-            rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            match fetch_metadata(provider, &rfc8414, deadline).await {
-                // RFC 8414 §3
-                Err(DiscoveryError::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
-                result => result,
-            }
-        }
+        ) => first,
+        result => return result,
+    };
+    let mut rfc8414_url = issuer.url().clone();
+    rfc8414_url.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
+    match fetch_metadata(provider, &rfc8414_url, deadline).await {
+        // RFC 8414 §3
+        Err(DiscoveryError::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
         result => result,
     }
 }

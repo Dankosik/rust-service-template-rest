@@ -411,13 +411,13 @@ impl VerifiedClaims {
 
 /// RFC 7662 §2.2
 pub(crate) fn validate_introspection_claims(
-    bytes: &[u8],
+    response_body: &[u8],
     policy: &ClaimPolicy,
     now: Duration,
 ) -> Result<VerifiedClaims, VerificationError> {
     let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
-    let payload = std::str::from_utf8(bytes)
+    let payload = std::str::from_utf8(response_body)
         .map_err(|_| malformed())?
         .trim_matches([' ', '\t', '\r', '\n']);
     let JsonObject(envelope) =

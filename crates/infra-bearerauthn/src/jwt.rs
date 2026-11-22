@@ -127,6 +127,20 @@ pub enum TokenProfile {
     Rfc9068,
 }
 
+impl TokenProfile {
+    fn admits_typ(self, typ: Option<&str>) -> bool {
+        match self {
+            Self::Rfc9068 => typ.is_some_and(|typ| rfc7515::typ_is(typ, "at+jwt")),
+            // RFC 8725 §3.11
+            Self::ResourceServer => typ.is_none_or(|typ| {
+                rfc7515::typ_subtype(typ).is_some_and(|subtype| {
+                    subtype.eq_ignore_ascii_case("jwt") || subtype.eq_ignore_ascii_case("at+jwt")
+                })
+            }),
+        }
+    }
+}
+
 #[derive(Eq, PartialEq)]
 struct TokenKey(Zeroizing<Box<[u8]>>);
 
@@ -179,16 +193,16 @@ fn verify_encoded_signature(
     encoded_signature: &[u8],
     admitted: &AdmittedHeader,
 ) -> SignatureAttempt {
-    let mut bytes = SmallVec::<[u8; MAX_SIGNATURE_BYTES]>::from_elem(
+    let mut decoded = SmallVec::<[u8; MAX_SIGNATURE_BYTES]>::from_elem(
         0_u8,
         base64::decoded_len_estimate(encoded_signature.len()).min(MAX_SIGNATURE_BYTES),
     );
-    let Ok(length) = URL_SAFE_NO_PAD.decode_slice(encoded_signature, &mut bytes) else {
+    let Ok(length) = URL_SAFE_NO_PAD.decode_slice(encoded_signature, &mut decoded) else {
         return SignatureAttempt::Malformed;
     };
     match keys.verify(&SignatureInput {
         message,
-        signature: &bytes[..length],
+        signature: &decoded[..length],
         kid: admitted.kid.as_deref(),
         algorithm: admitted.algorithm,
     }) {
@@ -273,25 +287,25 @@ impl JwtVerifier {
         let rfc7515::Compact {
             signing_input: message,
             header,
-            payload,
-            signature,
+            payload: encoded_payload,
+            signature: encoded_signature,
         } = rfc7515::compact(token.as_bytes())
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
         let admitted = self.admit_header(header)?;
         let decode_payload = || {
             URL_SAFE_NO_PAD
-                .decode(payload)
+                .decode(encoded_payload)
                 .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))
         };
         let validate_claims = |payload: Vec<u8>, now: Duration| {
             validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
         };
+        let sample_clocks = || Ok::<_, VerificationError>((MonotonicInstant::now(), unix_now()?));
         let (signing_keys, verified, sampled_at, now) =
-            match verify_encoded_signature(&keys, message, signature, &admitted) {
+            match verify_encoded_signature(&keys, message, encoded_signature, &admitted) {
                 SignatureAttempt::Verified => {
                     let payload = decode_payload()?;
-                    let sampled_at = MonotonicInstant::now();
-                    let now = unix_now()?;
+                    let (sampled_at, now) = sample_clocks()?;
                     (keys, validate_claims(payload, now)?, sampled_at, now)
                 }
                 SignatureAttempt::Malformed => {
@@ -304,10 +318,15 @@ impl JwtVerifier {
                         return Err(miss.into());
                     };
                     let signing_keys = self
-                        .verify_after_signature_miss(&keys, message, signature, &admitted, miss)
+                        .verify_after_signature_miss(
+                            &keys,
+                            message,
+                            encoded_signature,
+                            &admitted,
+                            miss,
+                        )
                         .await?;
-                    let sampled_at = MonotonicInstant::now();
-                    let now = unix_now()?;
+                    let (sampled_at, now) = sample_clocks()?;
                     preflight.check_at(now)?;
                     (signing_keys, preflight, sampled_at, now)
                 }
@@ -337,17 +356,7 @@ impl JwtVerifier {
         let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
             .filter(|&algorithm| self.algorithms[algorithm])
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
-        let typ = header.typ.as_deref();
-        let admitted_type = match self.token_profile {
-            TokenProfile::Rfc9068 => typ.is_some_and(|typ| rfc7515::typ_is(typ, "at+jwt")),
-            // RFC 8725 §3.11
-            TokenProfile::ResourceServer => typ.is_none_or(|typ| {
-                rfc7515::typ_subtype(typ).is_some_and(|subtype| {
-                    subtype.eq_ignore_ascii_case("jwt") || subtype.eq_ignore_ascii_case("at+jwt")
-                })
-            }),
-        };
-        if !admitted_type {
+        if !self.token_profile.admits_typ(header.typ.as_deref()) {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
         Ok(AdmittedHeader {

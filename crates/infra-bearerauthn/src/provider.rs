@@ -455,13 +455,10 @@ impl<'a> Exchange<'a> {
     ) -> Result<Vec<u8>, ProviderFailure> {
         let guard = std::mem::DropGuard::new(self, |exchange| exchange.record(on_abandon()));
         let result = work(&guard.span).await;
-        let outcome = result
-            .as_ref()
-            .err()
-            .copied()
-            .map_or(Outcome::Success, |failure| {
-                Outcome::Failure(failure.reason())
-            });
+        let outcome = match &result {
+            Ok(_) => Outcome::Success,
+            Err(failure) => Outcome::Failure(failure.reason()),
+        };
         std::mem::DropGuard::dismiss(guard).record(outcome);
         result
     }
@@ -489,8 +486,8 @@ async fn receive(
     span: &tracing::Span,
 ) -> Result<Vec<u8>, ProviderFailure> {
     async {
-        let transport = |error| ProviderFailure::from_transport(&error);
-        let mut response = request.send().await.map_err(transport)?;
+        let transport_failure = |error| ProviderFailure::from_transport(&error);
+        let mut response = request.send().await.map_err(transport_failure)?;
         let status = response.status();
         span.record("http.response.status_code", status.as_u16());
         if status != reqwest::StatusCode::OK {
@@ -506,7 +503,7 @@ async fn receive(
             return Err(ProviderFailure::TooLarge);
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(transport)? {
+        while let Some(chunk) = response.chunk().await.map_err(transport_failure)? {
             if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
                 return Err(ProviderFailure::TooLarge);
             }

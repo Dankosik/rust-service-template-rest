@@ -181,32 +181,11 @@ impl KeyStore {
     }
 
     pub(crate) fn finish(&self, ticket: u64, replacement: Result<Arc<KeySet>, KeySetFailure>) {
-        let (result, reason) = match &replacement {
+        let (result_label, reason_label) = match &replacement {
             Ok(_) => ("success", "success"),
             Err(failure) => {
-                let reason = failure.label();
-                match failure {
-                    KeySetFailure::Discovery(DiscoveryError::Fetch(cause)) => {
-                        warn!(reason, ?cause, "authn_jwks_refresh_failed");
-                    }
-                    KeySetFailure::Discovery(error) => {
-                        warn!(
-                            reason,
-                            cause = error.reason_label(),
-                            "authn_jwks_refresh_failed"
-                        );
-                    }
-                    KeySetFailure::DiscoveryTimeout => {
-                        warn!(reason, cause = "timeout", "authn_jwks_refresh_failed");
-                    }
-                    KeySetFailure::Jwks(JwksError::Fetch(cause)) => {
-                        warn!(reason, ?cause, "authn_jwks_refresh_failed");
-                    }
-                    KeySetFailure::Jwks(JwksError::Parse | JwksError::NoUsableKeys) => {
-                        warn!(reason, "authn_jwks_refresh_failed");
-                    }
-                }
-                ("failure", reason)
+                warn_refresh_failure(failure);
+                ("failure", failure.label())
             }
         };
         let mut previous = None;
@@ -219,7 +198,8 @@ impl KeyStore {
             state.finished_ticket = ticket;
         });
         drop(previous);
-        metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
+        metrics::counter!(REFRESH_METRIC, "result" => result_label, "reason" => reason_label)
+            .increment(1);
     }
 
     fn stop(&self) {
@@ -246,6 +226,29 @@ impl KeyStore {
         self.state.send_modify(|state| {
             state.cooldown_started_at = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
         });
+    }
+}
+
+fn warn_refresh_failure(failure: &KeySetFailure) {
+    let reason = failure.label();
+    match failure {
+        KeySetFailure::Discovery(DiscoveryError::Fetch(cause))
+        | KeySetFailure::Jwks(JwksError::Fetch(cause)) => {
+            warn!(reason, ?cause, "authn_jwks_refresh_failed");
+        }
+        KeySetFailure::Discovery(error) => {
+            warn!(
+                reason,
+                cause = error.reason_label(),
+                "authn_jwks_refresh_failed"
+            );
+        }
+        KeySetFailure::DiscoveryTimeout => {
+            warn!(reason, cause = "timeout", "authn_jwks_refresh_failed");
+        }
+        KeySetFailure::Jwks(JwksError::Parse | JwksError::NoUsableKeys) => {
+            warn!(reason, "authn_jwks_refresh_failed");
+        }
     }
 }
 

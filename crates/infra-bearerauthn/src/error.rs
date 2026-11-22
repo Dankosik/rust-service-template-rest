@@ -87,7 +87,7 @@ pub enum PreparationPhase {
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreparationError {
-    #[error("authentication preparation failed during Client: ClientBuild")]
+    #[error("{}", ClientBuildError)]
     ClientBuild,
     #[error("authentication preparation failed during Discovery: {0}")]
     Discovery(#[from] DiscoveryError),
