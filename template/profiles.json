@@ -521,7 +521,7 @@
       ]
     },
     "service-test-tempfile": {
-      "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
+      "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"clickhouse": "http"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "integration": {
@@ -591,6 +591,7 @@
         "crates/infra-clickhouse/",
         "crates/config/src/clickhouse.rs",
         "crates/config/src/clickhouse/",
+        "crates/service/src/bootstrap/clickhouse.rs",
         "env/clickhouse/",
         "vendor/clickhouse/"
       ]

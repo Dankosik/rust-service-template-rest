@@ -88,6 +88,9 @@ infra-cache = { path = "crates/infra-cache" }
 # template:begin object-storage:workspace-object-storage-crate
 infra-object-storage = { path = "crates/infra-object-storage" }
 # template:end object-storage:workspace-object-storage-crate
+# template:begin clickhouse:workspace-clickhouse-crate
+infra-clickhouse = { path = "crates/infra-clickhouse" }
+# template:end clickhouse:workspace-clickhouse-crate
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate

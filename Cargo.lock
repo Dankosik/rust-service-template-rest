@@ -5408,6 +5408,7 @@ dependencies = [
  "hotpath",
  "infra-bearerauthn",
  "infra-cache",
+ "infra-clickhouse",
  "infra-grpc",
  "infra-http",
  "infra-http-transport",
