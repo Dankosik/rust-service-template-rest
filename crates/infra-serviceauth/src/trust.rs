@@ -4,8 +4,8 @@ use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, ParsedPublicKey};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use foldhash::HashSet;
 use jsonwebtoken::jwk::{
-    AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
-    ThumbprintHash,
+    AlgorithmParameters, CommonParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations,
+    PublicKeyUse, ThumbprintHash,
 };
 use serde::{Deserialize, Deserializer, de};
 
@@ -39,8 +39,11 @@ enum Place {
     Json { line: usize, column: usize },
     #[display("caller {_0}: ")]
     Caller(ServiceName),
-    #[display("caller {_0} key {_1}: ")]
-    Key(ServiceName, usize),
+    #[display("caller {caller} key {position}: ")]
+    Key {
+        caller: ServiceName,
+        position: usize,
+    },
 }
 
 impl TrustError {
@@ -53,22 +56,41 @@ impl TrustError {
     }
 }
 
+fn reject_repeated_key_material(callers: &CallerKeys) -> Result<(), TrustError> {
+    let mut seen = HashSet::default();
+    for (caller, keys) in callers {
+        for (index, key) in keys.iter().enumerate() {
+            if !seen.insert(key.thumbprint.as_str()) {
+                return Err(TrustError::new(
+                    Place::Key {
+                        caller: caller.clone(),
+                        position: index + 1,
+                    },
+                    "repeats public key material in the trust registry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn registry_json_error(error: &serde_json::Error) -> TrustError {
+    let line = error.line();
+    let column = error.column();
+    if (error.is_syntax() || error.is_eof()) && line > 0 {
+        TrustError::new(
+            Place::Json { line, column },
+            "invalid JSON in the trust registry",
+        )
+    } else {
+        TrustError::document("the trust registry is not one JSON object of JWK Sets")
+    }
+}
+
 impl TrustRegistry {
     pub fn parse(document: &str) -> Result<Self, TrustError> {
         let mut callers = Self::parse_caller_keys(document)?;
-        {
-            let mut seen = HashSet::default();
-            for (caller, keys) in &callers {
-                for (index, key) in keys.iter().enumerate() {
-                    if !seen.insert(key.thumbprint.as_str()) {
-                        return Err(TrustError::new(
-                            Place::Key(caller.clone(), index + 1),
-                            "repeats public key material in the trust registry",
-                        ));
-                    }
-                }
-            }
-        }
+        reject_repeated_key_material(&callers)?;
         callers.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         let callers = callers
             .into_iter()
@@ -81,21 +103,11 @@ impl TrustRegistry {
     }
 
     fn parse_caller_keys(document: &str) -> Result<CallerKeys, TrustError> {
-        let entries: Entries = serde_json::from_str(document).map_err(|error| {
-            let line = error.line();
-            let column = error.column();
-            if (error.is_syntax() || error.is_eof()) && line > 0 {
-                TrustError::new(
-                    Place::Json { line, column },
-                    "invalid JSON in the trust registry",
-                )
-            } else {
-                TrustError::document("the trust registry is not one JSON object of JWK Sets")
-            }
-        })?;
-        let entries = match entries {
-            Entries::Unique(entries) => entries,
-            Entries::RepeatedCaller(repeated) => {
+        let caller_sets = match serde_json::from_str(document)
+            .map_err(|error| registry_json_error(&error))?
+        {
+            CallerSets::Unique(caller_sets) => caller_sets,
+            CallerSets::RepeatedCaller(repeated) => {
                 return Err(match ServiceName::parse(&repeated) {
                     Ok(caller) => {
                         TrustError::new(Place::Caller(caller), "is repeated in the trust registry")
@@ -104,14 +116,13 @@ impl TrustRegistry {
                 });
             }
         };
-        if entries.is_empty() {
+        if caller_sets.is_empty() {
             return Err(TrustError::document("the trust registry names no caller"));
         }
-        let mut callers = Vec::with_capacity(entries.len());
-        for (name, set) in entries {
-            callers.push(parse_caller(&name, set)?);
-        }
-        Ok(callers)
+        caller_sets
+            .into_iter()
+            .map(|(name, set)| parse_caller(&name, set))
+            .collect()
     }
 
     pub fn check_key_withdrawal(
@@ -202,16 +213,16 @@ fn drain_seq<'de, A: de::SeqAccess<'de>>(seq: &mut A) -> Result<(), A::Error> {
     Ok(())
 }
 
-enum Entries {
+enum CallerSets {
     Unique(Vec<(String, DuplicateCheckedJson)>),
     RepeatedCaller(String),
 }
 
-impl<'de> Deserialize<'de> for Entries {
+impl<'de> Deserialize<'de> for CallerSets {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
         impl<'de> de::Visitor<'de> for Visitor {
-            type Value = Entries;
+            type Value = CallerSets;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("an object of JWK Sets")
             }
@@ -221,11 +232,11 @@ impl<'de> Deserialize<'de> for Entries {
                 while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
                     if !seen.insert(name.clone()) {
                         drain_map(&mut map)?;
-                        return Ok(Entries::RepeatedCaller(name));
+                        return Ok(CallerSets::RepeatedCaller(name));
                     }
                     entries.push((name, value));
                 }
-                Ok(Entries::Unique(entries))
+                Ok(CallerSets::Unique(entries))
             }
         }
         deserializer.deserialize_map(Visitor)
@@ -301,21 +312,31 @@ fn parse_caller(
     let caller =
         ServiceName::parse(name).map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
     let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
-    let DuplicateCheckedJson::Value(mut set) = set else {
+    let DuplicateCheckedJson::Value(mut jwk_set) = set else {
         return Err(caller_error("repeats a member name within its JWK Set"));
     };
     // RFC 7517 §5
-    let Some(serde_json::Value::Array(entries)) =
-        set.as_object_mut().and_then(|set| set.remove("keys"))
+    let Some(serde_json::Value::Array(jwks)) = jwk_set
+        .as_object_mut()
+        .and_then(|members| members.remove("keys"))
     else {
         return Err(caller_error("is not a JWK Set with a keys array"));
     };
-    if entries.is_empty() {
+    if jwks.is_empty() {
         return Err(caller_error("has no key"));
     }
-    let mut keys: Vec<TrustedKey> = Vec::with_capacity(entries.len());
-    for (index, value) in entries.into_iter().enumerate() {
-        let key_error = |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
+    let mut keys: Vec<TrustedKey> = Vec::with_capacity(jwks.len());
+    for (index, value) in jwks.into_iter().enumerate() {
+        let position = index + 1;
+        let key_error = |reason| {
+            TrustError::new(
+                Place::Key {
+                    caller: caller.clone(),
+                    position,
+                },
+                reason,
+            )
+        };
         let key = admit_key(value).map_err(key_error)?;
         if keys.iter().any(|known| known.kid == key.kid) {
             return Err(key_error("repeats a kid of this caller"));
@@ -325,19 +346,7 @@ fn parse_caller(
     Ok((caller, keys))
 }
 
-fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
-    let object = value.as_object().ok_or("is not a JSON object")?;
-    if object.contains_key("d") || object.contains_key("k") {
-        return Err("contains private key material");
-    }
-    let jwk: Jwk = serde_json::from_value(value).map_err(|_| "is not a valid JWK")?;
-    let AlgorithmParameters::EllipticCurve(parameters) = &jwk.algorithm else {
-        return Err("is not an EC P-256 key");
-    };
-    if parameters.curve != EllipticCurve::P256 {
-        return Err("is not an EC P-256 key");
-    }
-    let common = &jwk.common;
+fn require_verify_only_es256(common: &CommonParameters) -> Result<(), &'static str> {
     if common
         .key_algorithm
         .is_some_and(|algorithm| algorithm != KeyAlgorithm::ES256)
@@ -362,13 +371,31 @@ fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
             return Err("allows operations other than verify");
         }
     }
-    let kid = common.key_id.as_deref().ok_or("has no kid")?;
+    Ok(())
+}
+
+fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
+    let object = value.as_object().ok_or("is not a JSON object")?;
+    if object.contains_key("d") || object.contains_key("k") {
+        return Err("contains private key material");
+    }
+    let jwk: Jwk = serde_json::from_value(value).map_err(|_| "is not a valid JWK")?;
+    let parameters = match &jwk.algorithm {
+        AlgorithmParameters::EllipticCurve(parameters)
+            if parameters.curve == EllipticCurve::P256 =>
+        {
+            parameters
+        }
+        _ => return Err("is not an EC P-256 key"),
+    };
+    require_verify_only_es256(&jwk.common)?;
+    let kid = jwk.common.key_id.as_deref().ok_or("has no kid")?;
     let kid = KeyId::parse(kid).map_err(|_| InvalidKeyId::MESSAGE)?;
     let coordinate = |encoded: &str| URL_SAFE_NO_PAD.decode(encoded).ok();
-    let (Some(x), Some(y)) = (coordinate(&parameters.x), coordinate(&parameters.y)) else {
-        return Err("has malformed coordinates");
-    };
-    let point = shared_rules::rfc7518::p256_point(&x, &y).ok_or("has malformed coordinates")?;
+    let point = coordinate(&parameters.x)
+        .zip(coordinate(&parameters.y))
+        .and_then(|(x, y)| shared_rules::rfc7518::p256_point(&x, &y))
+        .ok_or("has malformed coordinates")?;
     let public_key = ParsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point)
         .map_err(|_| "is not a point on P-256")?;
     let thumbprint = jwk

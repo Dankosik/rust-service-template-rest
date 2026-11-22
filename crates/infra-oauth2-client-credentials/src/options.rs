@@ -305,15 +305,14 @@ fn parse_provider_url(
         return error("must not include userinfo");
     }
     let syntax_valid = Cell::new(true);
-    let Ok(url) = Url::options()
+    let Some(url) = Url::options()
         .syntax_violation_callback(Some(&|_| syntax_valid.set(false)))
         .parse(raw)
+        .ok()
+        .filter(|_| syntax_valid.get())
     else {
         return error("must be a valid HTTPS URL");
     };
-    if !syntax_valid.get() {
-        return error("must be a valid HTTPS URL");
-    }
     if let Some((expected, reason)) = required_scheme
         && url.scheme() != expected
     {
@@ -363,6 +362,16 @@ pub(crate) fn validate_options(
     )
 }
 
+fn require_nonblank(value: &str, key: &'static str) -> Result<(), ConfigurationError> {
+    if value.trim().is_empty() {
+        return Err(ConfigurationError {
+            key,
+            reason: "must be nonempty",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_registration(
     token_url: Url,
     client_id: String,
@@ -370,19 +379,15 @@ pub(crate) fn validate_registration(
     provider_concurrency: NonZeroU32,
 ) -> Result<ValidatedRegistration, ConfigurationError> {
     let permits = validate_provider_concurrency(provider_concurrency)?;
-    let error = |key, reason| Err(ConfigurationError { key, reason });
-    if client_id.trim().is_empty() {
-        return error("client_id", "must be nonempty");
-    }
-    if auth.key_id.trim().is_empty() {
-        return error("key_id", "must be nonempty");
-    }
-    if auth.private_key.expose_secret().trim().is_empty() {
-        return error("private_key", "must be nonempty");
-    }
+    require_nonblank(&client_id, "client_id")?;
+    require_nonblank(&auth.key_id, "key_id")?;
+    require_nonblank(auth.private_key.expose_secret(), "private_key")?;
     let (audience, audience_url) = auth.audience.into_parts();
     if audience_url == token_url {
-        return error("assertion_audience", "must differ from the token endpoint");
+        return Err(ConfigurationError {
+            key: "assertion_audience",
+            reason: "must differ from the token endpoint",
+        });
     }
     Ok(ValidatedRegistration {
         token_url,

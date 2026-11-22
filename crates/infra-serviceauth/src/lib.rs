@@ -41,11 +41,12 @@ impl InvalidServiceName {
 impl ServiceName {
     pub fn parse(value: &str) -> Result<Self, InvalidServiceName> {
         let bytes = value.as_bytes();
-        let label = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-';
+        let is_label_byte =
+            |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-';
         if (1..=63).contains(&bytes.len())
-            && bytes.iter().all(label)
-            && bytes.first() != Some(&b'-')
-            && bytes.last() != Some(&b'-')
+            && bytes.iter().all(is_label_byte)
+            && !value.starts_with('-')
+            && !value.ends_with('-')
         {
             Ok(Self(Arc::from(value)))
         } else {

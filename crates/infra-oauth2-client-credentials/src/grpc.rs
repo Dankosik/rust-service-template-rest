@@ -12,8 +12,7 @@ use tower::Service;
 
 use crate::{
     AcquisitionError, ConfigurationError, ExchangeTokens, OnBehalfOf, ServiceTokens,
-    credentials::{AcquisitionDeadline, acquisition_deadline},
-    token::Token,
+    credentials::acquisition_deadline, http_client::TokenSource,
 };
 
 #[derive(Clone)]
@@ -23,22 +22,10 @@ enum BoundTokens {
 }
 
 impl BoundTokens {
-    fn check_active(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
+    fn source(&self) -> TokenSource<'_> {
         match self {
-            Self::Service(service) => service.check_active(deadline),
-            Self::Exchange(exchange, _) => exchange.check_active(deadline),
-        }
-    }
-
-    async fn acquire_for_request(
-        &self,
-        deadline: AcquisitionDeadline<'_>,
-    ) -> Result<Arc<Token>, AcquisitionError> {
-        match self {
-            Self::Service(service) => service.acquire_for_request(deadline).await,
-            Self::Exchange(exchange, subject) => {
-                exchange.acquire_for_request(subject, deadline).await
-            }
+            Self::Service(tokens) => TokenSource::Service(tokens),
+            Self::Exchange(tokens, subject) => TokenSource::Exchange(tokens, subject),
         }
     }
 }
@@ -95,7 +82,7 @@ fn validate_resource(resource: &Client, origin: &http::Uri) -> Result<(), Config
         });
     }
     if !resource.matches_origin(origin) {
-        return Err(ConfigurationError::resource_origin());
+        return Err(ConfigurationError::resource_origin_mismatch());
     }
     Ok(())
 }
@@ -108,13 +95,10 @@ impl AuthenticatedClient {
 
     fn prepare(&self, request: Request<Body>) -> Result<PreparedCall, Status> {
         PreparedCall::prepare(&self.resource, request)
-            .map_err(|status| match status.code() {
-                Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
-                Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
-                _ => status,
-            })?
+            .map_err(status_at_prepare)?
             .try_step(|opening, headers| {
                 self.tokens
+                    .source()
                     .check_active(acquisition_deadline(opening))
                     .map_err(acquisition_status)?;
                 if headers.contains_key(AUTHORIZATION) {
@@ -127,6 +111,14 @@ impl AuthenticatedClient {
     }
 }
 
+fn status_at_prepare(status: Status) -> Status {
+    match status.code() {
+        Code::Cancelled => acquisition_status(AcquisitionError::Cancelled),
+        Code::DeadlineExceeded => acquisition_status(AcquisitionError::Timeout),
+        _ => status,
+    }
+}
+
 async fn send_admitted(
     prepared: PreparedCall,
     tokens: BoundTokens,
@@ -134,6 +126,7 @@ async fn send_admitted(
     let (prepared, token) = prepared
         .try_await(async move |opening| {
             tokens
+                .source()
                 .acquire_for_request(acquisition_deadline(opening))
                 .await
                 .map_err(acquisition_status)
