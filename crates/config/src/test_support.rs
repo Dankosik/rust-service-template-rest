@@ -35,6 +35,24 @@ pub fn worker(
 }
 // template:end worker:config-worker-fixture
 
+// template:begin temporal:config-temporal-worker-fixture
+#[cfg(feature = "test-support")]
+pub fn temporal_worker(
+    environment: &[(&str, &str)],
+    build: BuildInfo,
+    tail: ShutdownTail,
+) -> Result<crate::TemporalWorkerConfig, Error> {
+    crate::load::load_temporal_worker_with_tail_from(
+        &LoadOptions::default(),
+        build,
+        tail,
+        environment
+            .iter()
+            .map(|&(key, value)| (key.into(), value.into())),
+    )
+}
+// template:end temporal:config-temporal-worker-fixture
+
 #[cfg(test)]
 pub(crate) use unit::*;
 
@@ -81,6 +99,13 @@ mod unit {
         crate::load::load_worker_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
     }
     // template:end worker:test-support-worker
+
+    // template:begin temporal:test-support-temporal-worker
+    #[track_caller]
+    pub(crate) fn load_temporal_worker_env(pairs: &[(&str, &str)]) -> crate::TemporalWorkerConfig {
+        crate::load::load_temporal_worker_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
+    }
+    // template:end temporal:test-support-temporal-worker
 
     #[track_caller]
     #[allow(

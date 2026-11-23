@@ -827,6 +827,127 @@ fn a_clickhouse_password_fifo_is_rejected_before_binding_the_listener() {
 }
 // template:end clickhouse:service-clickhouse-lifecycle-admission
 
+// template:begin temporal:service-temporal-lifecycle-tests
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the inert Temporal fixture binds a non-blocking loopback socket to assert zero dials"
+)]
+fn inert_temporal_disabled_becomes_ready_without_dialing_endpoint() {
+    let canary = std::net::TcpListener::bind("127.0.0.1:0").expect("canary listener");
+    canary.set_nonblocking(true).expect("nonblocking canary");
+    let endpoint = format!("http://{}", canary.local_addr().expect("canary addr"));
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+        ("APP__TEMPORAL__ENABLED", "false"),
+        ("APP__TEMPORAL__ENDPOINT", &endpoint),
+        ("APP__TEMPORAL__ALLOW_PLAINTEXT", "true"),
+        ("APP__TEMPORAL__READINESS_CRITICAL", "true"),
+    ]);
+    let starting = service.await_record("service_starting");
+    assert_eq!(starting["temporal.enabled"], false, "{starting}");
+    let api = service.await_addr("http listener bound");
+    service.await_record("service_ready");
+    assert!(
+        poll_until(
+            &format!("http://{api}/health/ready"),
+            200,
+            Duration::from_secs(5)
+        )
+        .is_some(),
+        "inert Temporal configuration must reach ready 200"
+    );
+    assert!(
+        matches!(
+            canary.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "inert Temporal configuration must never dial its endpoint"
+    );
+    service.terminate();
+    let (code, stderr) = service.wait();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the startup cancellation fixture holds a silent Temporal loopback connection until child teardown"
+)]
+fn a_stop_signal_during_temporal_startup_ends_cleanly_before_binding_listeners() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("silent listener");
+    silent.set_nonblocking(true).expect("nonblocking listener");
+    let endpoint = format!("http://{}", silent.local_addr().expect("silent addr"));
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "local"),
+        ("APP__APP__ALLOW_INSECURE_DEVELOPMENT", "true"),
+        ("APP__TEMPORAL__ENABLED", "true"),
+        ("APP__TEMPORAL__ENDPOINT", &endpoint),
+        ("APP__TEMPORAL__ALLOW_PLAINTEXT", "true"),
+        ("APP__TEMPORAL__CONNECT_TIMEOUT", "10s"),
+    ]);
+    let starting = service.await_record("service_starting");
+    assert_eq!(starting["temporal.enabled"], true, "{starting}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let peer = loop {
+        match silent.accept() {
+            Ok((peer, _)) => break peer,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "Temporal setup did not connect");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept Temporal setup: {error}"),
+        }
+    };
+    service.terminate();
+    let mut messages = Vec::new();
+    while let Ok(line) = service.lines.recv_timeout(Duration::from_secs(20)) {
+        let record: serde_json::Value = serde_json::from_str(&line).expect("JSON log record");
+        messages.push(record["message"].as_str().unwrap_or_default().to_owned());
+    }
+    let (code, stderr) = service.wait();
+    drop(peer);
+    drop(silent);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "shutdown_finishing"),
+        "{messages:?}"
+    );
+    for skipped in ["http listener bound", "service_ready", "readiness_disabled"] {
+        assert!(
+            !messages.iter().any(|message| message == skipped),
+            "a stopped Temporal startup must not reach {skipped:?}: {messages:?}"
+        );
+    }
+}
+
+#[test]
+fn production_plaintext_temporal_endpoint_exits_one_before_logging_and_redacts_api_key() {
+    let (code, stdout, stderr) = Service::spawn(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__TEMPORAL__ENABLED", "true"),
+        ("APP__TEMPORAL__ENDPOINT", "http://127.0.0.1:7233"),
+        ("APP__TEMPORAL__API_KEY", "temporal-secret-sentinel"),
+    ])
+    .wait_output();
+    assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(stderr.contains("temporal.endpoint"), "stderr: {stderr}");
+    assert!(stdout.is_empty(), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("temporal-secret-sentinel")
+            && !stderr.contains("temporal-secret-sentinel"),
+        "Temporal api_key must not leak in diagnostics"
+    );
+}
+// template:end temporal:service-temporal-lifecycle-tests
+
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 #[ignore = "the database integration runner supplies a migrated PostgreSQL test database"]

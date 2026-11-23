@@ -40,6 +40,8 @@ outputs:
     value: ${{ steps.classify.outputs.integration_messaging }}
   integration_clickhouse:
     value: ${{ steps.classify.outputs.integration_clickhouse }}
+  integration_temporal:
+    value: ${{ steps.classify.outputs.integration_temporal }}
   oauth:
     value: ${{ steps.classify.outputs.oauth }}
   docker:

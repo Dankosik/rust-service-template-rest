@@ -41,6 +41,9 @@ _EPHEMERAL_COMPOSE_PORTS = {
     "VERSITYGW_PORT": "127.0.0.1:0",
     "KEYCLOAK_PORT": "127.0.0.1:0",
     "CLICKHOUSE_PORT": "127.0.0.1:0",
+    # template:begin temporal:lib-temporal-port
+    "TEMPORAL_PORT": "127.0.0.1:0",
+    # template:end temporal:lib-temporal-port
 }
 
 

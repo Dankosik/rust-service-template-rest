@@ -180,6 +180,12 @@ deleted; selected ones stay inert until configured.
   explicit batched and async writes, `password_file` rotation, and
   [decision and rollout guidance](docs/decisions/clickhouse-decisions.md).
 <!-- template:end clickhouse:docs-readme-clickhouse-profile -->
+<!-- template:begin temporal:docs-readme-temporal-profile -->
+- `TEMPORAL=sdk`: durable workflows and heartbeating activities over Temporal
+  gRPC ([`infra-temporal`](crates/infra-temporal)), with a dedicated
+  [`temporal-worker`](crates/temporal-worker) binary and
+  [Temporal decisions](docs/decisions/temporal-decisions.md).
+<!-- template:end temporal:docs-readme-temporal-profile -->
 
 ## Run it
 

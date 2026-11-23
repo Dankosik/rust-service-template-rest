@@ -3,29 +3,56 @@
 # the objectives, thresholds and how a derived service tunes them.
 # Selectors name the scrape jobs `service` and `jobs-worker`; replace them with
 # yours. Rule proof uses Prometheus 3.5.5.
+# template:begin temporal:monitoring-header-temporal
+# With the Temporal profile retained, shared selectors also cover `temporal-worker`.
+# template:end temporal:monitoring-header-temporal
 groups:
   - name: service-http-slo
     rules:
       - record: instance:slo_http_process:count_values
         expr: |
-          count_values by(job,instance) ("process_start", process_start_time_seconds{job=~"service|jobs-worker"})
+          count_values by(job,instance) ("process_start",
+            process_start_time_seconds{job=~"service|jobs-worker"}
+            # template:begin temporal:monitoring-http-process-temporal
+            or process_start_time_seconds{job="temporal-worker"}
+            # template:end temporal:monitoring-http-process-temporal
+          )
       - record: instance:slo_http_requests:sum
         expr: |
-          sum by(job,instance) (http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"})
+          sum by(job,instance) (
+            http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready"}
+            # template:begin temporal:monitoring-http-requests-temporal
+            or http_server_request_duration_seconds_count{job="temporal-worker",http_route!~"/health/live|/health/ready"}
+            # template:end temporal:monitoring-http-requests-temporal
+          )
           * on(job,instance) group_left(process_start) instance:slo_http_process:count_values
       - record: instance:slo_http_errors:sum
         expr: |
           sum by(job,instance) (
             http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}
             or http_server_request_duration_seconds_count{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",error_type=~"server_shutdown|response_body_error"}
+            # template:begin temporal:monitoring-http-errors-temporal
+            or http_server_request_duration_seconds_count{job="temporal-worker",http_route!~"/health/live|/health/ready",http_response_status_code=~"5.."}
+            or http_server_request_duration_seconds_count{job="temporal-worker",http_route!~"/health/live|/health/ready",error_type=~"server_shutdown|response_body_error"}
+            # template:end temporal:monitoring-http-errors-temporal
           )
           * on(job,instance) group_left(process_start) instance:slo_http_process:count_values
           or on(job,instance,process_start) (0 * instance:slo_http_requests:sum)
       - record: instance:slo_http_fast_responses:sum
         expr: |
           (
-            sum by(job,instance) (http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5",error_type!~"server_shutdown|response_body_error|client_closed"})
-            or on(job,instance) (0 * sum by(job,instance) (http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}))
+            sum by(job,instance) (
+              http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5",error_type!~"server_shutdown|response_body_error|client_closed"}
+              # template:begin temporal:monitoring-http-fast-temporal
+              or http_server_request_duration_seconds_bucket{job="temporal-worker",http_route!~"/health/live|/health/ready",le="0.5",error_type!~"server_shutdown|response_body_error|client_closed"}
+              # template:end temporal:monitoring-http-fast-temporal
+            )
+            or on(job,instance) (0 * sum by(job,instance) (
+              http_server_request_duration_seconds_bucket{job=~"service|jobs-worker",http_route!~"/health/live|/health/ready",le="0.5"}
+              # template:begin temporal:monitoring-http-fast-zero-temporal
+              or http_server_request_duration_seconds_bucket{job="temporal-worker",http_route!~"/health/live|/health/ready",le="0.5"}
+              # template:end temporal:monitoring-http-fast-zero-temporal
+            ))
           )
           * on(job,instance) group_left(process_start) instance:slo_http_process:count_values
       - record: job:slo_http_errors:ratio_rate5m
@@ -204,7 +231,12 @@ groups:
     rules:
       - alert: ServiceDown
         expr: |
-          sum by(job) (up{job=~"service|jobs-worker"}) == 0
+          sum by(job) (
+            up{job=~"service|jobs-worker"}
+            # template:begin temporal:monitoring-service-down-temporal
+            or up{job="temporal-worker"}
+            # template:end temporal:monitoring-service-down-temporal
+          ) == 0
           or
           absent(up{job="service"})
         for: 5m
@@ -226,7 +258,11 @@ groups:
           description: '{{ $labels.job }} has no ready scrape target to receive routed traffic.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicenoreadytargets
       - alert: ServiceTargetDown
-        expr: up{job=~"service|jobs-worker"} == 0
+        expr: |
+          up{job=~"service|jobs-worker"} == 0
+          # template:begin temporal:monitoring-target-down-temporal
+          or up{job="temporal-worker"} == 0
+          # template:end temporal:monitoring-target-down-temporal
         for: 15m
         labels: {severity: ticket}
         annotations:
@@ -234,14 +270,22 @@ groups:
           description: '{{ $labels.instance }} of {{ $labels.job }} has not answered a scrape for 15 minutes.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicetargetdown
       - alert: ServiceRestarting
-        expr: changes(process_start_time_seconds{job=~"service|jobs-worker"}[30m]) >= 3
+        expr: |
+          changes(process_start_time_seconds{job=~"service|jobs-worker"}[30m]) >= 3
+          # template:begin temporal:monitoring-restarting-temporal
+          or changes(process_start_time_seconds{job="temporal-worker"}[30m]) >= 3
+          # template:end temporal:monitoring-restarting-temporal
         labels: {severity: ticket}
         annotations:
           summary: A process restarted at least three times in 30 minutes
           description: '{{ $labels.instance }} of {{ $labels.job }} restarted {{ $value }} times in 30 minutes.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicerestarting
       - alert: ServiceNotReady
-        expr: readiness_ready{job=~"service|jobs-worker"} == 0
+        expr: |
+          readiness_ready{job=~"service|jobs-worker"} == 0
+          # template:begin temporal:monitoring-not-ready-temporal
+          or readiness_ready{job="temporal-worker"} == 0
+          # template:end temporal:monitoring-not-ready-temporal
         for: 15m
         labels: {severity: ticket}
         annotations:
@@ -249,7 +293,11 @@ groups:
           description: '{{ $labels.instance }} of {{ $labels.job }} is unready. Check for drain, stale checks, or a failing dependency.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicenotready
       - alert: ServiceReadinessFlapping
-        expr: changes(readiness_ready{job=~"service|jobs-worker"}[30m]) >= 4
+        expr: |
+          changes(readiness_ready{job=~"service|jobs-worker"}[30m]) >= 4
+          # template:begin temporal:monitoring-readiness-flapping-temporal
+          or changes(readiness_ready{job="temporal-worker"}[30m]) >= 4
+          # template:end temporal:monitoring-readiness-flapping-temporal
         labels: {severity: ticket}
         annotations:
           summary: Readiness flipped at least four times in 30 minutes
@@ -260,9 +308,19 @@ groups:
       - alert: RuntimeSchedulerLagging
         expr: |
           1 - (
-            sum by(job,instance) (rate(runtime_scheduler_lag_seconds_bucket{job=~"service|jobs-worker",le="0.1"}[5m]))
+            sum by(job,instance) (
+              rate(runtime_scheduler_lag_seconds_bucket{job=~"service|jobs-worker",le="0.1"}[5m])
+              # template:begin temporal:monitoring-scheduler-lag-bucket-temporal
+              or rate(runtime_scheduler_lag_seconds_bucket{job="temporal-worker",le="0.1"}[5m])
+              # template:end temporal:monitoring-scheduler-lag-bucket-temporal
+            )
             /
-            sum by(job,instance) (rate(runtime_scheduler_lag_seconds_count{job=~"service|jobs-worker"}[5m]))
+            sum by(job,instance) (
+              rate(runtime_scheduler_lag_seconds_count{job=~"service|jobs-worker"}[5m])
+              # template:begin temporal:monitoring-scheduler-lag-count-temporal
+              or rate(runtime_scheduler_lag_seconds_count{job="temporal-worker"}[5m])
+              # template:end temporal:monitoring-scheduler-lag-count-temporal
+            )
           ) > 0.01
         for: 15m
         labels: {severity: ticket}
@@ -272,8 +330,16 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#runtimeschedulerlagging
       - alert: RuntimeSchedulerSampleStale
         expr: |
-          runtime_scheduler_sample_age_seconds{job=~"service|jobs-worker"}
-          > on(job,instance) runtime_scheduler_freshness_limit_seconds{job=~"service|jobs-worker"}
+          (
+            runtime_scheduler_sample_age_seconds{job=~"service|jobs-worker"}
+            > on(job,instance) runtime_scheduler_freshness_limit_seconds{job=~"service|jobs-worker"}
+          )
+          # template:begin temporal:monitoring-scheduler-stale-temporal
+          or (
+            runtime_scheduler_sample_age_seconds{job="temporal-worker"}
+            > on(job,instance) runtime_scheduler_freshness_limit_seconds{job="temporal-worker"}
+          )
+          # template:end temporal:monitoring-scheduler-stale-temporal
         for: 5m
         labels: {severity: ticket}
         annotations:
@@ -282,15 +348,45 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#runtimeschedulersamplestale
       - alert: TelemetryRecordsLost
         expr: |
-          sum by(job,instance) (rate(telemetry_log_records_dropped_total{job=~"service|jobs-worker"}[5m])) > 0
-          or sum by(job,instance) (rate(telemetry_log_sink_errors_total{job=~"service|jobs-worker"}[5m])) > 0
+          sum by(job,instance) (
+            rate(telemetry_log_records_dropped_total{job=~"service|jobs-worker"}[5m])
+            # template:begin temporal:monitoring-telemetry-log-dropped-temporal
+            or rate(telemetry_log_records_dropped_total{job="temporal-worker"}[5m])
+            # template:end temporal:monitoring-telemetry-log-dropped-temporal
+          ) > 0
+          or sum by(job,instance) (
+            rate(telemetry_log_sink_errors_total{job=~"service|jobs-worker"}[5m])
+            # template:begin temporal:monitoring-telemetry-log-sink-temporal
+            or rate(telemetry_log_sink_errors_total{job="temporal-worker"}[5m])
+            # template:end temporal:monitoring-telemetry-log-sink-temporal
+          ) > 0
           or (
             (
-              sum by(job,instance) (rate(telemetry_trace_exporter_sdk_result_spans_total{job=~"service|jobs-worker",outcome="error"}[5m])) > 0
-              or sum by(job,instance) (rate(telemetry_sdk_reported_rejected_spans_total{job=~"service|jobs-worker"}[5m])) > 0
-              or sum by(job,instance) (rate(telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="response_parse_error"}[5m])) > 0
+              sum by(job,instance) (
+                rate(telemetry_trace_exporter_sdk_result_spans_total{job=~"service|jobs-worker",outcome="error"}[5m])
+                # template:begin temporal:monitoring-telemetry-trace-err-temporal
+                or rate(telemetry_trace_exporter_sdk_result_spans_total{job="temporal-worker",outcome="error"}[5m])
+                # template:end temporal:monitoring-telemetry-trace-err-temporal
+              ) > 0
+              or sum by(job,instance) (
+                rate(telemetry_sdk_reported_rejected_spans_total{job=~"service|jobs-worker"}[5m])
+                # template:begin temporal:monitoring-telemetry-trace-rej-temporal
+                or rate(telemetry_sdk_reported_rejected_spans_total{job="temporal-worker"}[5m])
+                # template:end temporal:monitoring-telemetry-trace-rej-temporal
+              ) > 0
+              or sum by(job,instance) (
+                rate(telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="response_parse_error"}[5m])
+                # template:begin temporal:monitoring-telemetry-trace-parse-temporal
+                or rate(telemetry_sdk_diagnostics_total{job="temporal-worker",event="response_parse_error"}[5m])
+                # template:end temporal:monitoring-telemetry-trace-parse-temporal
+              ) > 0
             )
-            and on(job,instance) (service_startup_trace_exporter_active{job=~"service|jobs-worker"} == 1)
+            and on(job,instance) (
+              service_startup_trace_exporter_active{job=~"service|jobs-worker"} == 1
+              # template:begin temporal:monitoring-telemetry-exporter-active-temporal
+              or service_startup_trace_exporter_active{job="temporal-worker"} == 1
+              # template:end temporal:monitoring-telemetry-exporter-active-temporal
+            )
           )
         for: 10m
         labels: {severity: ticket}
@@ -300,11 +396,27 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#telemetryrecordslost
       - alert: TelemetrySpanQueueOverflow
         expr: |
-          max by(job,instance) (telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="queue_dropping_started"}) > 0
-          and on(job,instance) (service_startup_trace_exporter_active{job=~"service|jobs-worker"} == 1)
+          max by(job,instance) (
+            telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="queue_dropping_started"}
+            # template:begin temporal:monitoring-span-overflow-diag-temporal
+            or telemetry_sdk_diagnostics_total{job="temporal-worker",event="queue_dropping_started"}
+            # template:end temporal:monitoring-span-overflow-diag-temporal
+          ) > 0
+          and on(job,instance) (
+            service_startup_trace_exporter_active{job=~"service|jobs-worker"} == 1
+            # template:begin temporal:monitoring-span-overflow-active-temporal
+            or service_startup_trace_exporter_active{job="temporal-worker"} == 1
+            # template:end temporal:monitoring-span-overflow-active-temporal
+          )
           and on(job,instance) (
             increase(telemetry_sdk_diagnostics_total{job=~"service|jobs-worker",event="queue_dropping_started"}[5m]) > 0
+            # template:begin temporal:monitoring-span-overflow-inc-temporal
+            or increase(telemetry_sdk_diagnostics_total{job="temporal-worker",event="queue_dropping_started"}[5m]) > 0
+            # template:end temporal:monitoring-span-overflow-inc-temporal
             or on(job,instance) (time() - process_start_time_seconds{job=~"service|jobs-worker"} < 300)
+            # template:begin temporal:monitoring-span-overflow-start-temporal
+            or on(job,instance) (time() - process_start_time_seconds{job="temporal-worker"} < 300)
+            # template:end temporal:monitoring-span-overflow-start-temporal
           )
         labels: {severity: ticket}
         annotations:
@@ -313,10 +425,20 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#telemetryspanqueueoverflow
       - alert: RuntimeThreadsElevated
         expr: |
-          process_threads{job=~"service|jobs-worker"}
-          - on(job,instance)
-          tokio_workers_count{job=~"service|jobs-worker"}
-          > 64
+          (
+            process_threads{job=~"service|jobs-worker"}
+            - on(job,instance)
+            tokio_workers_count{job=~"service|jobs-worker"}
+            > 64
+          )
+          # template:begin temporal:monitoring-runtime-threads-temporal
+          or (
+            process_threads{job="temporal-worker"}
+            - on(job,instance)
+            tokio_workers_count{job="temporal-worker"}
+            > 64
+          )
+          # template:end temporal:monitoring-runtime-threads-temporal
         for: 15m
         labels: {severity: ticket}
         annotations:
@@ -325,10 +447,20 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#runtimethreadselevated
       - alert: OpenFilesNearLimit
         expr: |
-          process_open_fds{job=~"service|jobs-worker"}
-          / on(job,instance)
-          process_max_fds{job=~"service|jobs-worker"}
-          > 0.8
+          (
+            process_open_fds{job=~"service|jobs-worker"}
+            / on(job,instance)
+            process_max_fds{job=~"service|jobs-worker"}
+            > 0.8
+          )
+          # template:begin temporal:monitoring-open-fds-temporal
+          or (
+            process_open_fds{job="temporal-worker"}
+            / on(job,instance)
+            process_max_fds{job="temporal-worker"}
+            > 0.8
+          )
+          # template:end temporal:monitoring-open-fds-temporal
         for: 15m
         labels: {severity: ticket}
         annotations:
@@ -337,10 +469,20 @@ groups:
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#openfilesnearlimit
       - alert: MemoryNearLimit
         expr: |
-          process_resident_memory_bytes{job=~"service|jobs-worker"}
-          / on(job,instance)
-          process_memory_limit_bytes{job=~"service|jobs-worker"}
-          > 0.85
+          (
+            process_resident_memory_bytes{job=~"service|jobs-worker"}
+            / on(job,instance)
+            process_memory_limit_bytes{job=~"service|jobs-worker"}
+            > 0.85
+          )
+          # template:begin temporal:monitoring-memory-limit-temporal
+          or (
+            process_resident_memory_bytes{job="temporal-worker"}
+            / on(job,instance)
+            process_memory_limit_bytes{job="temporal-worker"}
+            > 0.85
+          )
+          # template:end temporal:monitoring-memory-limit-temporal
         for: 15m
         labels: {severity: ticket}
         annotations:
@@ -543,15 +685,29 @@ groups:
           description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of unary grpc calls slower than 500 ms over 3d, against a budget of 0.01.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
   # template:end grpc:monitoring-grpc-slo
-  # template:begin postgres:monitoring-postgres-pool
+  # template:begin postgres:monitoring-postgres-pool-head
   - name: service-postgres
     rules:
       - record: instance:db_client_connection_wait_slow:ratio_rate10m
         expr: |
           1 - (
-            sum by(job,instance) (rate(db_client_connection_wait_time_seconds_bucket{job=~"service|jobs-worker",le="0.1"}[10m]))
+            sum by(job,instance) (
+              rate(db_client_connection_wait_time_seconds_bucket{job=~"service|jobs-worker",le="0.1"}[10m])
+              # template:end postgres:monitoring-postgres-pool-head
+              # template:begin postgres-temporal:monitoring-postgres-temporal-bucket
+              or rate(db_client_connection_wait_time_seconds_bucket{job="temporal-worker",le="0.1"}[10m])
+              # template:end postgres-temporal:monitoring-postgres-temporal-bucket
+              # template:begin postgres:monitoring-postgres-pool-mid
+            )
             /
-            sum by(job,instance) (rate(db_client_connection_wait_time_seconds_count{job=~"service|jobs-worker"}[10m]))
+            sum by(job,instance) (
+              rate(db_client_connection_wait_time_seconds_count{job=~"service|jobs-worker"}[10m])
+              # template:end postgres:monitoring-postgres-pool-mid
+              # template:begin postgres-temporal:monitoring-postgres-temporal-count
+              or rate(db_client_connection_wait_time_seconds_count{job="temporal-worker"}[10m])
+              # template:end postgres-temporal:monitoring-postgres-temporal-count
+              # template:begin postgres:monitoring-postgres-pool-tail
+            )
           )
       - alert: PostgresPoolSaturated
         expr: instance:db_client_connection_wait_slow:ratio_rate10m > 0.05
@@ -561,7 +717,7 @@ groups:
           summary: More than 5% of transactions wait over 100 ms for a pooled connection
           description: '{{ $labels.instance }} of {{ $labels.job }}: {{ $value | humanizePercentage }} of connection acquisitions waited over 100 ms.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#postgrespoolsaturated
-  # template:end postgres:monitoring-postgres-pool
+  # template:end postgres:monitoring-postgres-pool-tail
   # template:begin jobs:monitoring-jobs
   - name: service-jobs
     rules:
@@ -606,3 +762,82 @@ groups:
           description: 'A dead-letter publication for {{ $labels.event_type }} with reason {{ $labels.reason }} in the last 15 minutes had outcome {{ $labels.outcome }}.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#messagingdeadlettered
   # template:end messaging:monitoring-messaging
+  # template:begin temporal:monitoring-temporal
+  - name: service-temporal
+    rules:
+      - alert: TemporalWorkerUnavailable
+        expr: |
+          sum by(job) (up{job="temporal-worker"}) == 0
+          or
+          absent(up{job="temporal-worker"})
+          or
+          (
+            count by(job) (
+              (readiness_ready{job="temporal-worker"} == 0)
+              and on(job,instance) (up{job="temporal-worker"} == 1)
+            ) == on(job) sum by(job) (up{job="temporal-worker"})
+          )
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: No ready Temporal worker replica is available to poll task queues
+          description: '{{ $labels.job }} has no reachable and ready scrape target for five minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#temporalworkerunavailable
+      - alert: TemporalTaskQueueScheduleToStartHigh
+        expr: |
+          (
+            1 - (
+              sum by(job,namespace,task_queue) (rate(temporal_workflow_task_schedule_to_start_latency_bucket{job="temporal-worker",le="1"}[5m]))
+              /
+              sum by(job,namespace,task_queue) (rate(temporal_workflow_task_schedule_to_start_latency_count{job="temporal-worker"}[5m]))
+            )
+          ) > 0.05
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: More than 5% of Temporal workflow tasks waited over 1 s before a worker started them
+          description: '{{ $labels.job }} ({{ $labels.namespace }}/{{ $labels.task_queue }}): {{ $value | humanizePercentage }} of workflow tasks waited over 1 s to start.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#temporaltaskqueuescheduletostarthigh
+      - alert: TemporalWorkflowTaskFailures
+        expr: |
+          sum by(job,namespace,task_queue) (rate(temporal_workflow_task_execution_failed{job="temporal-worker"}[5m])) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: Temporal workflow tasks are failing execution or replay
+          description: '{{ $labels.job }} ({{ $labels.namespace }}/{{ $labels.task_queue }}) reported sustained workflow task failures for five minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#temporalworkflowtaskfailures
+      - alert: TemporalDrainForced
+        expr: |
+          sum by(job,instance) (increase(temporal_drain_forced_total{job="temporal-worker"}[15m])) > 0
+          or
+          (
+            max by(job,instance) (temporal_drain_forced_total{job="temporal-worker"}) > 0
+            and on(job,instance) (time() - process_start_time_seconds{job="temporal-worker"} < 900)
+          )
+        labels: {severity: ticket}
+        annotations:
+          summary: A Temporal worker forced shutdown drain and preempted active activities
+          description: '{{ $labels.instance }} of {{ $labels.job }} forced shutdown drain within the last 15 minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#temporaldrainforced
+      - alert: TemporalClientRpcErrors
+        expr: |
+          sum by(job,namespace,operation,status_code) (
+            rate({__name__=~"temporal_request_failure|temporal_long_request_failure",job=~"service|temporal-worker",status_code=~"UNKNOWN|DEADLINE_EXCEEDED|RESOURCE_EXHAUSTED|INTERNAL|UNAVAILABLE|DATA_LOSS|UNAUTHENTICATED|PERMISSION_DENIED|TRANSPORT_ERROR"}[5m])
+          ) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: Temporal gRPC client requests are persistently failing
+          description: '{{ $labels.job }} ({{ $labels.namespace }} {{ $labels.operation }}) encountered sustained {{ $labels.status_code }} RPC failures for five minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#temporalclientrpcerrors
+      - alert: TemporalCredentialReloadFailed
+        expr: |
+          sum by(job,instance,kind) (rate(temporal_credential_reloads_total{job=~"service|temporal-worker",outcome="failed"}[5m])) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: Temporal live credential reload is failing while retaining the previous credential
+          description: '{{ $labels.instance }} of {{ $labels.job }} failed to reload its Temporal {{ $labels.kind }} credential for five minutes.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#temporalcredentialreloadfailed
+  # template:end temporal:monitoring-temporal

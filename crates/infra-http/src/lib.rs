@@ -8,6 +8,9 @@ pub mod object_storage;
 pub mod clickhouse;
 // template:end clickhouse:http-clickhouse-module
 pub mod problem;
+// template:begin temporal:http-temporal-module
+pub mod temporal;
+// template:end temporal:http-temporal-module
 // template:begin authn:infra-http-authn-module
 pub mod authn;
 // template:end authn:infra-http-authn-module

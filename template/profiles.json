@@ -78,6 +78,13 @@
       "encoding": "rust_string"
     },
     {
+      "path": "crates/config/src/temporal_worker/tests.rs",
+      "old": "deployment_name: \"service\".to_owned(),",
+      "template": "deployment_name: \"{service_name}\".to_owned(),",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
       "path": "crates/infra-grpc/src/status.rs",
       "old": "pub const ERROR_DOMAIN: &str = \"service\";",
       "template": "pub const ERROR_DOMAIN: &str = \"{service_name}\";",
@@ -286,7 +293,7 @@
       ]
     },
     "service-secrets": {
-      "when": {"database": "postgres"},
+      "when": {"any": [{"database": "postgres"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     },
     "authn": {
@@ -339,7 +346,12 @@
         "crates/shared-rules/src/grpc.rs",
         "docs/decisions/grpc-decisions.md",
         "scripts/grpc.py",
-        "tools/grpc-codegen/",
+        "tools/grpc-codegen/"
+      ]
+    },
+    "tonic": {
+      "when": {"any": [{"grpc": "enabled"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": [
         "vendor/tonic/"
       ]
     },
@@ -373,11 +385,11 @@
       ]
     },
     "config-url": {
-      "when": {"any": [{"messaging": "nats-jetstream"}, {"clickhouse": "http"}]},
+      "when": {"any": [{"messaging": "nats-jetstream"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     },
     "config-unknown-env-test": {
-      "when": {"any": [{"cache": "redis"}, {"clickhouse": "http"}]},
+      "when": {"any": [{"cache": "redis"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     },
     "outbound-auth": {
@@ -462,7 +474,7 @@
         "migrations/20261118120000_add_background_job_claim_token.sql",
         "migrations/20261118120010_create_outbox_event_receipts.sql",
         "test/src/jobs.rs",
-        "test/src/bin/",
+        "test/src/bin/jobs_worker_fixture.rs",
         "test/tests/jobs/"
       ]
     },
@@ -471,11 +483,23 @@
       "remove_when_unselected": []
     },
     "test-operation-context": {
-      "when": {"any": [{"outbound_http": "bounded"}, {"outbox": "postgres"}]},
+      "when": {"any": [{"outbound_http": "bounded"}, {"outbox": "postgres"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     },
     "test-runtime": {
-      "when": {"any": [{"database": "postgres"}, {"outbound_http": "bounded"}]},
+      "when": {"any": [{"database": "postgres"}, {"outbound_http": "bounded"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "test-signal": {
+      "when": {"any": [{"jobs": "postgres"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "test-temporal-or-postgres": {
+      "when": {"any": [{"database": "postgres"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "temporal-only": {
+      "when": {"all": [{"temporal": "sdk"}, {"database": "none"}]},
       "remove_when_unselected": []
     },
     "test-metrics": {
@@ -516,16 +540,25 @@
       "when": {"any": [{"jobs": "postgres"}, {"messaging": "nats-jetstream"}]},
       "remove_when_unselected": [
         "crates/config/src/worker.rs",
-        "crates/json-payload/",
         "crates/jobs-worker/"
       ]
+    },
+    "json-payload": {
+      "when": {"any": [{"jobs": "postgres"}, {"messaging": "nats-jetstream"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": [
+        "crates/json-payload/"
+      ]
+    },
+    "worker-http": {
+      "when": {"any": [{"jobs": "postgres"}, {"messaging": "nats-jetstream"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
     },
     "service-test-tempfile": {
       "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"clickhouse": "http"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "integration": {
-      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}, {"clickhouse": "http"}]},
+      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": [
         "env/docker-compose.yml",
         "scripts/integration.py",
@@ -582,7 +615,7 @@
       ]
     },
     "rustls": {
-      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}, {"clickhouse": "http"}]},
+      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     },
     "clickhouse": {
@@ -641,6 +674,42 @@
         "crates/service/examples/service_auth_rotation.rs",
         "docs/decisions/service-authentication-decisions.md"
       ]
+    },
+    "temporal": {
+      "when": {"temporal": "sdk"},
+      "remove_when_unselected": [
+        "crates/infra-temporal/",
+        "crates/temporal-worker/",
+        "crates/config/src/temporal.rs",
+        "crates/config/src/temporal/",
+        "crates/config/src/temporal_worker.rs",
+        "crates/config/src/temporal_worker/",
+        "crates/infra-http/src/temporal.rs",
+        "crates/service/src/bootstrap/temporal.rs",
+        "test/src/bin/temporal_worker_fixture.rs",
+        "test/tests/temporal.rs",
+        "docs/decisions/temporal-decisions.md"
+      ]
+    },
+    "worker-temporal": {
+      "when": {"all": [{"any": [{"jobs": "postgres"}, {"messaging": "nats-jetstream"}]}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "grpc-temporal": {
+      "when": {"all": [{"grpc": "enabled"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "postgres-temporal": {
+      "when": {"all": [{"database": "postgres"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "jobs-temporal": {
+      "when": {"all": [{"jobs": "postgres"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "object-storage-temporal": {
+      "when": {"all": [{"object_storage": "s3"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
     }
   }
 }

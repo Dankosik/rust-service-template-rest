@@ -24,7 +24,12 @@ for concrete modules, types, and commands.
    exists only with its first real artifact. `crates/shared-rules` stays pure and
    `std`-only under its crate-level membership test; `crates/json-payload`
    separately owns the `serde`-dependent finite-float payload check shared only
-   by `infra-messaging` and `infra-jobs`; `crates/operation-context` owns the
+   by the `allow_dependents` adapters listed in `quality/architecture.json`
+   (`infra-messaging` and `infra-jobs`,
+   <!-- template:begin temporal:docs-arch-json-payload-temporal -->
+   plus `infra-temporal`,
+   <!-- template:end temporal:docs-arch-json-payload-temporal -->
+   when retained); `crates/operation-context` owns the
    deadline and cancellation lineage its listed operation owners propagate.
    Production code that several crates need but that requires an external
    type narrows its inputs to `std` types and joins `crates/shared-rules`;
@@ -51,8 +56,11 @@ behavior, authority, or proof; task-local terms stay in their specification.
 
 | Term | Means here | Does not mean | Semantic owner |
 | --- | --- | --- | --- |
+<!-- template:begin temporal:docs-arch-temporal-vocabulary -->
+| Temporal Worker | Dedicated `/temporal-worker` process polling Temporal task queues and executing workflows and activities | `jobs-worker`, NATS consumer, or `/service` API server | `crates/temporal-worker` and `crates/infra-temporal` |
+<!-- template:end temporal:docs-arch-temporal-vocabulary -->
 
-The template scaffold defines no domain terms.
+The minimal scaffold defines no domain terms.
 
 ## Policy Owners
 

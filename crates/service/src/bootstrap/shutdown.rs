@@ -18,6 +18,9 @@ use infra_postgres::{CloseOutcome, PoolStartup};
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
+// template:begin temporal:service-shutdown-temporal-imports
+use infra_temporal::TemporalStartup;
+// template:end temporal:service-shutdown-temporal-imports
 use service_config::{HttpConfig, ShutdownTail};
 use tokio::time::Instant;
 
@@ -112,6 +115,9 @@ pub(crate) struct Dependencies {
     // template:begin clickhouse:service-shutdown-dependencies-clickhouse-field
     pub(crate) clickhouse: Option<ClickHouse>,
     // template:end clickhouse:service-shutdown-dependencies-clickhouse-field
+    // template:begin temporal:service-shutdown-dependencies-temporal-field
+    pub(crate) temporal: Option<TemporalStartup>,
+    // template:end temporal:service-shutdown-dependencies-temporal-field
 }
 
 impl Dependencies {
@@ -133,6 +139,9 @@ impl Dependencies {
             // template:begin clickhouse:service-shutdown-dependencies-clickhouse-destructure
             clickhouse,
             // template:end clickhouse:service-shutdown-dependencies-clickhouse-destructure
+            // template:begin temporal:service-shutdown-dependencies-temporal-destructure
+            temporal,
+            // template:end temporal:service-shutdown-dependencies-temporal-destructure
         } = self;
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
@@ -197,9 +206,33 @@ impl Dependencies {
             // template:end clickhouse:service-shutdown-dependencies-clickhouse-close
             Outcome::Graceful
         };
-        let (cache_outcome, postgres_outcome, clickhouse_outcome) =
-            tokio::join!(cache_close, postgres_close, clickhouse_close);
-        cache_outcome.max(postgres_outcome).max(clickhouse_outcome)
+        let temporal_close = async {
+            // template:begin temporal:service-shutdown-dependencies-temporal-close
+            if let Some(temporal) = temporal {
+                return match temporal.close(deadline).await {
+                    infra_temporal::CloseOutcome::Complete => {
+                        tracing::info!("temporal_closed");
+                        Outcome::Graceful
+                    }
+                    infra_temporal::CloseOutcome::TimedOut => {
+                        tracing::warn!("temporal outlived its close budget");
+                        Outcome::Degraded
+                    }
+                };
+            }
+            // template:end temporal:service-shutdown-dependencies-temporal-close
+            Outcome::Graceful
+        };
+        let (cache_outcome, postgres_outcome, clickhouse_outcome, temporal_outcome) = tokio::join!(
+            cache_close,
+            postgres_close,
+            clickhouse_close,
+            temporal_close
+        );
+        cache_outcome
+            .max(postgres_outcome)
+            .max(clickhouse_outcome)
+            .max(temporal_outcome)
     }
 }
 

@@ -36,6 +36,9 @@ infra-object-storage = { workspace = true }
 # template:begin clickhouse:http-clickhouse-dependencies
 infra-clickhouse = { workspace = true }
 # template:end clickhouse:http-clickhouse-dependencies
+# template:begin temporal:http-temporal-dependencies
+infra-temporal = { workspace = true }
+# template:end temporal:http-temporal-dependencies
 # template:begin http-idempotency:http-idempotency-dependencies
 const_format = { workspace = true }
 const-hex = { workspace = true }

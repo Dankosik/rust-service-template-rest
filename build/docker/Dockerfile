@@ -102,10 +102,10 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# The three binaries build in parallel stages over one cooked layer: each is
-# one fat-LTO link on one codegen unit, so serial builds left three of four
-# cores idle. Separate cargo invocations keep each binary's own feature
-# resolution, as the separate cooks do.
+# The binaries build in parallel stages over one cooked layer: each is
+# one fat-LTO link on one codegen unit, so serial builds left cores idle.
+# Separate cargo invocations keep each binary's own feature resolution,
+# as the separate cooks do.
 FROM chef AS cooked
 ENV CARGO_INCREMENTAL=0
 ENV JEMALLOC_SYS_WITH_MALLOC_CONF=thp:never
@@ -128,9 +128,9 @@ COPY --from=planner /src/vendor/aws-smithy-http-client /src/vendor/aws-smithy-ht
 # template:end object-storage:docker-object-storage-vendor
 # Shared HTTP clients, including telemetry, use the same native connector.
 COPY --from=planner /src/vendor/hyper-util /src/vendor/hyper-util
-# template:begin grpc:docker-tonic-vendor
+# template:begin tonic:docker-tonic-vendor
 COPY --from=planner /src/vendor/tonic /src/vendor/tonic
-# template:end grpc:docker-tonic-vendor
+# template:end tonic:docker-tonic-vendor
 # template:begin clickhouse:docker-clickhouse-vendor
 COPY --from=planner /src/vendor/clickhouse /src/vendor/clickhouse
 # template:end clickhouse:docker-clickhouse-vendor
@@ -142,6 +142,9 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json -p migrate
 # template:begin worker:docker-jobs-worker-build
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p jobs-worker
 # template:end worker:docker-jobs-worker-build
+# template:begin temporal:docker-temporal-worker-build
+RUN cargo chef cook --release --locked --recipe-path recipe.json -p temporal-worker
+# template:end temporal:docker-temporal-worker-build
 
 # IMAGE_TESTS=unit runs the workspace's unit tests, which need no database
 # or network beyond loopback, in their own debug build. Dynamic stage
@@ -223,6 +226,14 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
  && mkdir -p /out && cp target/release/jobs-worker /out/jobs-worker \
  && touch -d "@${SOURCE_DATE_EPOCH}" /out/jobs-worker
 # template:end worker:docker-jobs-worker-output
+# template:begin temporal:docker-temporal-worker-output
+
+FROM source AS temporal-worker-build
+ARG SOURCE_DATE_EPOCH=0
+RUN cargo auditable build --release --locked -p temporal-worker --bin temporal-worker \
+ && mkdir -p /out && cp target/release/temporal-worker /out/temporal-worker \
+ && touch -d "@${SOURCE_DATE_EPOCH}" /out/temporal-worker
+# template:end temporal:docker-temporal-worker-output
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 # Empty: the dependency alone makes the selected unit-test gate part of the build.
@@ -247,6 +258,9 @@ COPY --from=migrate-build /out/migrate /migrate
 # template:begin worker:docker-jobs-worker-runtime
 COPY --from=jobs-worker-build /out/jobs-worker /jobs-worker
 # template:end worker:docker-jobs-worker-runtime
+# template:begin temporal:docker-temporal-worker-runtime
+COPY --from=temporal-worker-build /out/temporal-worker /temporal-worker
+# template:end temporal:docker-temporal-worker-runtime
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 USER nonroot:nonroot

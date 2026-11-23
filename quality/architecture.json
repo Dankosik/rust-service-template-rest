@@ -12,7 +12,8 @@
         "authority": "docs/repo-architecture.md#global-invariants",
         "members": [
           "crates/infra-jobs/Cargo.toml",
-          "crates/infra-messaging/Cargo.toml"
+          "crates/infra-messaging/Cargo.toml",
+          "crates/infra-temporal/Cargo.toml"
         ]
       }
     },
@@ -32,7 +33,8 @@
           "crates/infra-oauth2-client-credentials/Cargo.toml",
           "crates/infra-object-storage/Cargo.toml",
           "crates/infra-outbound-grpc/Cargo.toml",
-          "crates/infra-outbound-http/Cargo.toml"
+          "crates/infra-outbound-http/Cargo.toml",
+          "crates/infra-temporal/Cargo.toml"
         ]
       }
     },
@@ -53,12 +55,14 @@
     "crates/infra-outbound-grpc/Cargo.toml": {"role": "outbound-grpc"},
     "crates/infra-outbound-http/Cargo.toml": {"role": "outbound-http"},
     "crates/infra-postgres/Cargo.toml": {"role": "health-provider"},
+    "crates/infra-temporal/Cargo.toml": {"role": "health-provider"},
     "crates/infra-telemetry/Cargo.toml": {"role": "telemetry"},
     "crates/infra-webhooks/Cargo.toml": {"role": "webhooks"},
     "crates/jobs-worker/Cargo.toml": {"role": "root"},
     "crates/migrate/Cargo.toml": {"role": "migrator"},
     "crates/service/Cargo.toml": {"role": "root"},
     "crates/service-failure/Cargo.toml": {"role": "contract"},
+    "crates/temporal-worker/Cargo.toml": {"role": "root"},
     "crates/nats-test-support/Cargo.toml": {"role": "test-support"},
     "crates/observe-test-support/Cargo.toml": {"role": "test-support"},
     "crates/tls-test-support/Cargo.toml": {"role": "test-support"},
@@ -123,6 +127,10 @@
         "crates/infra-clickhouse/Cargo.toml": {
           "reason": "Features own analytical queries, row schemas, and batch/async insert calls.",
           "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-temporal/Cargo.toml": {
+          "reason": "Features invoke typed Temporal client workflow operations through the adapter seam.",
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -150,6 +158,10 @@
         },
         "crates/infra-postgres/Cargo.toml": {
           "reason": "The idempotency inbound contract re-exports PostgreSQL Tx.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-temporal/Cargo.toml": {
+          "reason": "HTTP routes project Temporal client failures into RFC 9457 Problem responses.",
           "authority": "docs/repo-architecture.md#global-invariants"
         }
       }

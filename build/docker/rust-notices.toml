@@ -27,3 +27,37 @@ git = [
     { path = "LICENSE-APACHE", checksum = "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a" },
 ]
 # template:end clickhouse:docker-rust-notices-clickhouse
+
+# template:begin temporal:docker-rust-notices-temporal
+[temporalio-client.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-common.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-common-wasm.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-macros.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-protos.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-sdk.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-sdk-core.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+
+[temporalio-workflow.clarify]
+license = "MIT"
+files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+# template:end temporal:docker-rust-notices-temporal

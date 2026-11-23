@@ -30,6 +30,9 @@ mod service_auth;
 mod shutdown;
 mod signals;
 mod telemetry;
+// template:begin temporal:bootstrap-temporal-module
+pub(crate) mod temporal;
+// template:end temporal:bootstrap-temporal-module
 // template:begin inbound-webhooks:bootstrap-webhooks-module
 mod inbound_webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
@@ -96,6 +99,10 @@ pub(crate) enum BootstrapError {
     #[error("clickhouse startup: {0}")]
     ClickHouse(#[from] infra_clickhouse::StartError),
     // template:end clickhouse:service-bootstrap-clickhouse-errors
+    // template:begin temporal:service-bootstrap-temporal-errors
+    #[error("temporal startup: {0}")]
+    Temporal(#[from] infra_temporal::ConnectError),
+    // template:end temporal:service-bootstrap-temporal-errors
     #[error("startup admission: {0}")]
     Admission(#[from] health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -489,6 +496,18 @@ async fn start(
         dependencies.clickhouse = Some(clickhouse::open(settings).await?);
     }
     // template:end clickhouse:service-bootstrap-clickhouse-startup
+    // template:begin temporal:service-bootstrap-temporal-startup
+    let temporal = if let Some(settings) = config.temporal() {
+        let connection =
+            temporal::open(settings, config, background, &mut dependencies.temporal).await?;
+        if settings.readiness_critical() {
+            probes.push(BoxedProbe::new(connection.probe()));
+        }
+        Some(connection.client())
+    } else {
+        None
+    };
+    // template:end temporal:service-bootstrap-temporal-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
     let webhook_state = inbound_webhooks::prepare(config, postgres_pool.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
@@ -518,6 +537,9 @@ async fn start(
         // template:begin service-auth:bootstrap-service-auth-route-state
         service_tokens: service_auth.tokens,
         // template:end service-auth:bootstrap-service-auth-route-state
+        // template:begin temporal:bootstrap-temporal-route-state
+        temporal,
+        // template:end temporal:bootstrap-temporal-route-state
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start

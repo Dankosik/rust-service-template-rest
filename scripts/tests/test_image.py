@@ -22,6 +22,20 @@ class ImageTests(unittest.TestCase):
             with self.assertRaises(lib.ScriptError):
                 image.check_dockerfile_toolchain(root)
 
+    # template:begin temporal:test-image-temporal
+    def test_retained_and_pruned_binaries_tracks_temporal_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            retained, pruned = image._retained_and_pruned_binaries(root)
+            self.assertEqual(retained, ["/service"])
+            self.assertEqual(pruned, ["/migrate", "/jobs-worker", "/temporal-worker"])
+
+            (root / "crates/temporal-worker").mkdir(parents=True)
+            retained, pruned = image._retained_and_pruned_binaries(root)
+            self.assertEqual(retained, ["/service", "/temporal-worker"])
+            self.assertEqual(pruned, ["/migrate", "/jobs-worker"])
+    # template:end temporal:test-image-temporal
+
 
 if __name__ == "__main__":
     unittest.main()

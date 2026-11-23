@@ -52,6 +52,10 @@ Consult this index before hand-rolling a non-domain helper, parser, encoder, ret
 <!-- template:begin webhooks:skill-workspace-crates-webhooks -->
 - **HTTP-date parsing and formatting (RFC 9110)** — `httpdate`: `parse_http_date` / `fmt_http_date` for `Date` or `Retry-After` HTTP-date values.
 <!-- template:end webhooks:skill-workspace-crates-webhooks -->
+<!-- template:begin temporal:skill-workspace-crates-temporal -->
+- **Durable workflow orchestration and worker execution** — `infra-temporal`, `temporalio-sdk`, `temporalio-common`, `temporalio-workflow`, `temporalio-macros`: keep client RPCs behind `infra-temporal` (`default-features = false`; never enable `opentelemetry`, `otel`, `prometheus`, `envconfig`, or `testing`), author workflows/activities with upstream macros, and keep worker dependencies out of `/service`.
+- **Type-erased serde values for Temporal payload converters** — `erased-serde`: used by `infra-temporal` finite-float bounded JSON conversion under `default-features = false`.
+<!-- template:end temporal:skill-workspace-crates-temporal -->
 - **Timestamps, friendly durations, and byte sizes** — `jiff`, `time`, `bytesize`: `jiff` for friendly durations and structured-log `Timestamp`, `time` for `OffsetDateTime` / RFC 3339 wire formatting (with `large-dates` for Go parity), `bytesize` for size configs.
 - **CIDRs, SemVer, UUID v4/v7, exact decimals, UTF-8 paths, JSON Patch, CSV, validation** — `ipnet`, `semver`, `uuid`, `rust_decimal`, `camino`, `json-patch`, `csv`, `validator`: prefer over hand-rolled parsers.
 - **Unicode normalization, graphemes, case conversion, edit distance, diffs, regex** — `unicode-normalization`, `unicode-segmentation`, `heck`, `strsim`, `similar`, `regex`: avoid `regex` on hot paths or small fixed HTTP/gRPC grammars where a byte parser or `bstr`/`memchr` suffices.

@@ -608,3 +608,54 @@ endpoint. Allow for the polling interval when setting a pickup latency target.
 Use a direct or session-pooled connection when the target requires prompt
 notification after commit.
 <!-- template:end jobs:production-contract-jobs-rollout -->
+<!-- template:begin temporal:production-contract-temporal -->
+### Temporal workflows, credentials, shutdown budgets, and rollout
+
+See [Temporal decisions](decisions/temporal-decisions.md) for the SDK, worker
+isolation, and wire-policy reasons behind these rules.
+
+- **Workflow determinism and schema compatibility:** Preserve replay determinism
+  for every in-flight workflow run across rolling updates by guarding logic
+  changes with `ctx.patched(...)` / `deprecate_patch` or enabling
+  `WorkerDeploymentOptions` (`temporal_worker.deployment.use_worker_versioning = true`
+  with a distinct `build_id = "{app.version}-{app.commit}"` per release). Keep
+  JSON workflow, signal, query, update, and activity payloads additive
+  (`#[serde(default)]` for new optional fields; never rename or drop live wire
+  fields while executions remain open). Verify candidate workflow code against
+  recorded production histories with `infra_temporal::test_support::ReplaySuite`
+  before release.
+- **Client mutations and `OutcomeUnknown`:** Pass explicit `StartIdPolicy`,
+  `MutationDedupe`, and caller-supplied `UpdateId` values under caller
+  `OperationContext` budgets. Treat `OutcomeUnknown` (`504`/`503`) as
+  unconfirmed rather than failed and reconcile via deterministic `WorkflowId`
+  (`describe` or `execute_update_with_start`) instead of issuing unkeyed
+  retries. Keep `temporal.readiness_critical = false` on `/service` unless a
+  Temporal outage renders API replicas unable to serve.
+- **Secret isolation and live credential rotation:** Supply `temporal.api_key`
+  strictly through `APP__TEMPORAL__API_KEY`, `--secrets-dir`, or
+  `temporal.api_key_file` (never in TOML files), and provision separate
+  credentials for `/service` and `/temporal-worker` where least privilege
+  applies. Replace `api_key_file` atomically; the background watcher polls on
+  `temporal.credential_refresh_interval`, preserves the previous valid key on
+  malformed replacement bytes, and reports failures through
+  `temporal_credential_reloads_total{kind,outcome}`. Use
+  `temporal.mtls_rotation = "static"` with rolling restarts by default, or opt
+  in to `"dynamic"` only with `temporal.dns_load_balancing = false` and no
+  `temporal.http_proxy_url`.
+- **Worker shutdown budgets and platform grace:** `/temporal-worker` admits
+  `temporal_worker.graceful_shutdown_period (45s) + activity_cancel_cleanup (10s) + finalize_budget (5s) <= http.drain_timeout (60s)`
+  and `http.drain_timeout (60s) + TEMPORAL_SHUTDOWN_TAIL (16.5s) <= http.grace_period (90s)`.
+  Set the deployment platform's termination grace (`drainingSeconds` /
+  `terminationGracePeriodSeconds`) to at least `http.grace_period + 5s`
+  (`>= 95s` with defaults) so graceful drain finishes cleanly (`exit 0`). A
+  second `SIGTERM` or `http.drain_timeout` expiry forces immediate local
+  preemption via `ActivityError::WillCompleteAsync` (`exit 3`,
+  `temporal_drain_forced_total`) so Temporal Server retries in-flight activities
+  instead of canceling them.
+- **Ordered rollout gates:** Deploy and verify `/temporal-worker` first
+  (`/health/ready == 200`, new `build_id` active, polling metrics advancing,
+  `TemporalWorkflowTaskFailures` silent) before deploying `/service` handlers
+  that start new workflows or send new signals or updates. When rolling back,
+  roll back `/service` first and keep `ctx.patched(...)` branches or prior
+  `build_id` workers available until in-flight executions drain.
+<!-- template:end temporal:production-contract-temporal -->

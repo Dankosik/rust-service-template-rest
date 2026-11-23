@@ -38,6 +38,7 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "object_storage": ("none", "s3"),
     "clickhouse": ("none", "http"),
     "service_auth": ("none", "jwt"),
+    "temporal": ("none", "sdk"),
     "agent_harness": harness.HARNESS_CHOICES,
 }
 
@@ -92,6 +93,7 @@ class InitInputs:
     object_storage: str = "none"
     clickhouse: str = "none"
     service_auth: str = "none"
+    temporal: str = "none"
     agent_harness: str = "all"
 
 

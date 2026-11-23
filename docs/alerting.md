@@ -31,6 +31,17 @@ the last change to that database's writers for the population.
    sd -F 'job="service"' 'job="orders-api"' env/monitoring/service.rules.yml env/monitoring/tests/service-rules.yml
    sd -F 'job="jobs-worker"' 'job="orders-worker"' env/monitoring/tests/service-rules.yml
    ```
+   <!-- template:begin temporal:docs-alerting-temporal-install -->
+
+   When the Temporal profile is retained, also replace the Temporal worker job
+   selector (`temporal-worker`) and the combined client selector
+   (`service|temporal-worker`), for example with `orders-temporal-worker`:
+
+   ```sh
+   sd -F 'job="temporal-worker"' 'job="orders-temporal-worker"' env/monitoring/service.rules.yml env/monitoring/tests/service-rules.yml
+   sd -F 'job=~"service|temporal-worker"' 'job=~"orders-api|orders-temporal-worker"' env/monitoring/service.rules.yml
+   ```
+   <!-- template:end temporal:docs-alerting-temporal-install -->
 
    For an API-only installation, use `job=~"orders-api"` as the first
    replacement. If the worker must always be in service discovery, add
@@ -211,6 +222,12 @@ affected instances during the same period.
   through `HTTPErrorBudgetBurn` and `HTTPLatencyBudgetBurn`
   (`clickhouse_operation_duration_seconds_bucket`).
 <!-- template:end clickhouse:docs-alerting-http-clickhouse -->
+<!-- template:begin temporal:docs-alerting-http-temporal -->
+- For Temporal, break down `temporal_request_failure` and
+  `temporal_long_request_failure` by `namespace`, `operation`, and
+  `status_code`, and inspect `readiness_probe_checks_total{probe="temporal"}`
+  when `temporal.readiness_critical` is enabled.
+<!-- template:end temporal:docs-alerting-http-temporal -->
 
 ### HTTPLatencyBudgetBurn
 
@@ -557,3 +574,68 @@ transfers for the broker's default `max_control_line` and any longer
 registered subjects selected by the filter. Use a concrete filter when
 consuming longer subjects outside that registry.
 <!-- template:end messaging:docs-alerting-messaging-runbooks -->
+
+<!-- template:begin temporal:docs-alerting-temporal-runbooks -->
+### TemporalWorkerUnavailable
+
+No reachable and ready `/temporal-worker` target answered Prometheus for five
+minutes (targets are absent from service discovery, unreachable on scrape, or
+every reachable replica reports `readiness_ready == 0`). Check deployment
+status, recent rollout logs for startup refusal (invalid config, unmatched
+`[temporal_worker.queues.<name>]`, or `temporal.enabled = false`), and
+`readiness_probe_checks_total{probe="temporal"}` for Temporal Server
+connectivity or authentication failures. Restore at least one ready worker
+replica before task-queue backlog breaches workflow or activity timeouts.
+
+### TemporalTaskQueueScheduleToStartHigh
+
+More than 5% of workflow tasks on the reported `namespace` and `task_queue`
+waited over 1 s before a worker started them for ten minutes. Check worker
+replica count, CPU throttling, `RuntimeSchedulerLagging`, and
+`temporal_worker.tuner` utilization (`target_memory`, `target_cpu`, or fixed
+slot ceilings) alongside `temporal_workflow_task_execution_latency` to
+distinguish insufficient worker capacity from slow replays or blocked threads.
+Scale worker replicas or tune task-queue concurrency.
+
+### TemporalWorkflowTaskFailures
+
+Workflow tasks on the reported `namespace` and `task_queue` are failing
+execution or replay for five minutes. Inspect `/temporal-worker` logs for
+nondeterminism or panic errors, check recent worker deployments (`build_id`)
+for unpatched workflow code changes (`ctx.patched(...)`), and reproduce failing
+histories offline with `infra_temporal::test_support::ReplaySuite`. Roll back
+the offending worker build or deploy a patched release while keeping prior
+history compatibility intact.
+
+### TemporalDrainForced
+
+A `/temporal-worker` replica exhausted `http.drain_timeout` or received a
+second `SIGTERM` during shutdown and preempted active activities via
+`WillCompleteAsync` (`exit 3`) rather than canceling them on Temporal Server.
+Check whether the platform sent a rapid double signal, whether
+`drainingSeconds` is shorter than `http.grace_period + 5s`, or whether an
+activity ignored cooperative `ActivityContext` cancellation and heartbeats
+longer than `graceful_shutdown_period + activity_cancel_cleanup`. Verify that
+healthy replicas retried and completed the preempted activities.
+
+### TemporalClientRpcErrors
+
+`/service` or `/temporal-worker` encountered sustained Temporal gRPC failures
+(`temporal_request_failure` or `temporal_long_request_failure`, excluding
+`CANCELLED` and normal domain outcomes such as `ALREADY_EXISTS` / `NOT_FOUND`)
+for five minutes. Break down by `job`, `namespace`, `operation`, and
+`status_code`: `UNAUTHENTICATED`/`PERMISSION_DENIED` points to expired or
+revoked API keys or mTLS certificates (check `TemporalCredentialReloadFailed`);
+`RESOURCE_EXHAUSTED` indicates Temporal Cloud/Server rate limits;
+`DEADLINE_EXCEEDED`/`UNAVAILABLE`/`TRANSPORT_ERROR` indicates network, proxy,
+or Temporal cluster degradation.
+
+### TemporalCredentialReloadFailed
+
+Live rotation of `temporal.api_key_file` or `mtls_rotation = "dynamic"` PEM
+files has failed for five minutes while keeping the last valid credential
+active. Inspect secret-manager sync or file permissions/atomic swap
+mechanics on the affected replica (the watcher requires regular files
+`<= 1 MiB` with valid ASCII keys or verified `aws-lc-rs` key/cert pairs) and
+fix the file before the previously loaded credential expires.
+<!-- template:end temporal:docs-alerting-temporal-runbooks -->

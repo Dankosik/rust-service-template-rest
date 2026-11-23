@@ -35,6 +35,7 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
     "messaging-outbox": {"database": "postgres", "jobs": "postgres", "messaging": "nats-jetstream", "outbox": "postgres"},
     "cache-s3": {"cache": "redis", "object_storage": "s3"},
     "clickhouse": {"clickhouse": "http"},
+    "temporal": {"temporal": "sdk"},
     "full": {
         "database": "postgres",
         "authn": "oidc-jwt",
@@ -51,6 +52,7 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
         "object_storage": "s3",
         "clickhouse": "http",
         "service_auth": "jwt",
+        "temporal": "sdk",
     },
 }
 
