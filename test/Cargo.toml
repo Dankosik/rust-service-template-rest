@@ -58,6 +58,23 @@ workspace = true
 features = ["std"]
 # template:end jobs-reference:test-reading-counter-dependencies
 
+[dependencies.infra-temporal]
+workspace = true
+features = ["worker"]
+[dependencies.temporal-worker]
+workspace = true
+[dependencies.temporalio-sdk]
+workspace = true
+[dependencies.temporalio-common]
+workspace = true
+[dependencies.temporalio-workflow]
+workspace = true
+[dependencies.temporalio-macros]
+workspace = true
+[dependencies.futures]
+workspace = true
+features = ["alloc", "std"]
+
 # template:begin webhooks-common:test-webhooks-dependencies
 [dev-dependencies.infra-webhooks]
 workspace = true
@@ -154,6 +171,12 @@ required-features = ["integration"]
 test = false
 # template:end jobs-reference:test-reading-counter-fixture
 
+[[bin]]
+name = "temporal-worker-fixture"
+path = "src/bin/temporal_worker_fixture.rs"
+required-features = ["integration"]
+test = false
+
 # template:begin postgres:test-postgres-integration-target
 [[test]]
 name = "postgres"
@@ -193,3 +216,8 @@ name = "messaging_recovery"
 path = "tests/messaging_recovery.rs"
 required-features = ["integration"]
 # template:end outbox:test-outbox-integration-targets
+
+[[test]]
+name = "temporal"
+path = "tests/temporal.rs"
+required-features = ["integration"]

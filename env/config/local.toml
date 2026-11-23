@@ -134,3 +134,27 @@ session_budgets = "startup"
 # trust = '{"example-caller": {"keys": [{"kty": "EC", "crv": "P-256", "kid": "example-caller/1", "x": "...", "y": "..."}]}}'
 # key_id = "example/1"
 # template:end service-auth:local-config
+
+[temporal]
+# Temporal is inert until enabled. With local Compose:
+#   docker compose -f env/docker-compose.yml up -d --wait temporal
+#   APP__TEMPORAL__ENABLED=true APP__TEMPORAL__ENDPOINT=http://127.0.0.1:7233 \
+#   APP__TEMPORAL__ALLOW_PLAINTEXT=true APP__TEMPORAL__ALLOW_UNAUTHENTICATED=true just run
+# API keys are environment-only (`APP__TEMPORAL__API_KEY`) or file-backed (`api_key_file`).
+enabled = false
+# endpoint = "http://127.0.0.1:7233"
+# namespace = "default"
+# allow_plaintext = true
+# allow_unauthenticated = true
+# max_payload_bytes = "512 KiB"
+# readiness_critical = false
+# api_key_file = "/run/secrets/temporal-api-key"
+
+# The temporal worker reads this section; a worker beside `just run` needs its own
+# APP__HTTP__ADDR and APP__OBSERVABILITY__METRICS__ADDR.
+# [temporal_worker]
+# task_queue = "default"
+# max_cached_workflows = 1000
+# graceful_shutdown_period = "45s"
+# activity_cancel_cleanup = "10s"
+# finalize_budget = "5s"

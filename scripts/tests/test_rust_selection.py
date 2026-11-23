@@ -86,6 +86,25 @@ class RustSelectionTests(unittest.TestCase):
             self.assertEqual(plan.provenance["infra-cache"], ("owner:crates/infra-cache/src/namespace.rs",))
             self.assertEqual(plan.provenance["service-app"], ("reverse-dep:infra-cache",))
 
+    def test_temporal_adapter_change_selects_temporal_integration_lint_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta = _synthetic_workspace(root)
+            meta["workspace_members"].append("infra-temporal")
+            meta["packages"].append(
+                {
+                    "id": "infra-temporal",
+                    "name": "infra-temporal",
+                    "manifest_path": str(root / "crates/infra-temporal/Cargo.toml"),
+                    "features": {"integration": ["worker"], "worker": []},
+                    "dependencies": [{"name": "health"}],
+                }
+            )
+            plan = rust_selection.plan_selection(root, ["crates/infra-temporal/src/client.rs"], metadata=meta)
+            self.assertEqual(plan.mode, "selected")
+            self.assertEqual(plan.packages, ("infra-temporal",))
+            self.assertEqual(plan.lint_features, ("infra-temporal/integration",))
+
     def test_explicit_non_import_owners_select_affected_crates_including_renamed_service(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -99,6 +99,15 @@ SURFACES: dict[str, tuple[str, ...]] = {
         "env/nats/**", "vendor/async-nats/**",
         *_INTEGRATION_SHARED,
     ),
+    "integration_temporal": (
+        "crates/infra-temporal/**", "crates/temporal-worker/**",
+        "crates/health/**", "crates/operation-context/**", "crates/shared-rules/**",
+        "crates/json-payload/**", "crates/infra-http/**", "crates/infra-http-transport/**",
+        "crates/infra-telemetry/**", "crates/observe-test-support/**", "crates/tls-test-support/**",
+        "test/Cargo.toml", "test/src/bin/temporal_worker_fixture.rs", "test/tests/temporal.rs",
+        "vendor/hyper-util/**", "vendor/tonic/**",
+        *_INTEGRATION_SHARED,
+    ),
     "oauth": (
         "crates/infra-oauth2-client-credentials/**", "crates/infra-outbound-http/**",
         "crates/observe-test-support/**", "crates/tls-test-support/**",
@@ -150,10 +159,11 @@ def _applicable(repo: Path) -> dict[str, bool]:
     has_cache = (repo / "crates/infra-cache").is_dir()
     has_object_storage = (repo / "crates/infra-object-storage").is_dir()
     has_messaging = (repo / "crates/infra-messaging").is_dir()
+    has_temporal = (repo / "crates/infra-temporal").is_dir()
     has_grpc = (repo / "crates/grpc-contracts").is_dir()
     has_oauth = (repo / "crates/infra-oauth2-client-credentials").is_dir()
     has_rt = (repo / "template/runtime_progress.py").is_file()
-    has_int = has_postgres or has_cache or has_object_storage or has_messaging
+    has_int = has_postgres or has_cache or has_object_storage or has_messaging or has_temporal
     has_tpl = (repo / "template/init.py").is_file()
     return {
         "rust": True,
@@ -169,6 +179,7 @@ def _applicable(repo: Path) -> dict[str, bool]:
         "integration_cache": has_cache,
         "integration_object_storage": has_object_storage,
         "integration_messaging": has_messaging,
+        "integration_temporal": has_temporal,
         "oauth": has_oauth,
         "docker": True,
         "runtime_progress": has_rt,
@@ -185,6 +196,7 @@ _INTEGRATION_SUBSURFACES: tuple[str, ...] = (
     "integration_cache",
     "integration_object_storage",
     "integration_messaging",
+    "integration_temporal",
 )
 
 

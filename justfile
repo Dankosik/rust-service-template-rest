@@ -84,6 +84,7 @@ lint:
     # template:begin outbound-auth:just-lint-outbound-auth
     features+=(--features infra-oauth2-client-credentials/integration)
     # template:end outbound-auth:just-lint-outbound-auth
+    features+=(--features infra-temporal/integration)
     cargo clippy --workspace --all-targets --keep-going ${features[@]+"${features[@]}"} --locked -- -D warnings
     RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" \
         cargo doc --keep-going --workspace --no-deps --document-private-items ${features[@]+"${features[@]}"} --locked
@@ -383,6 +384,11 @@ test-object-storage-conformance provider:
 test-integration-oauth *args:
     python3 -m scripts.integration oauth -- "$@"
 # template:end outbound-auth:just-outbound-auth-profile
+
+# Run Temporal integration suite against throwaway Compose
+[positional-arguments]
+test-integration-temporal *args:
+    python3 -m scripts.integration temporal -- "$@"
 
 # template:begin source-template:just-template-targets
 # Materialize selected agent harness files from .agents/

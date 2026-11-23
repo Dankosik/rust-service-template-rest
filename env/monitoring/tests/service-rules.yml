@@ -8,6 +8,9 @@ tests:
       - &service_up
         series: 'up{job="service",instance="a"}'
         values: "1x300"
+      - &temporal_worker_up
+        series: 'up{job="temporal-worker",instance="tw"}'
+        values: "1x300"
       - &api_start
         series: 'process_start_time_seconds{job="service",instance="a"}'
         values: "100x300"
@@ -44,6 +47,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="POST",http_route="/v1/items",http_response_status_code="201"}'
         values: "0+199x150"
@@ -60,6 +64,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+50x60"
@@ -78,6 +83,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+100x30"
@@ -99,6 +105,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
         values: "0+10x12"
@@ -139,6 +146,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'process_start_time_seconds{job="service",instance="a"}'
         values: "100x9 700x10"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
@@ -156,6 +164,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'up{job="service",instance="b"}'
         values: "1x30"
       - series: 'readiness_ready{job="service",instance="a"}'
@@ -182,6 +191,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'telemetry_log_records_dropped_total{job="service",instance="log",reason="queue_full"}'
         values: "0+1x20"
       - series: 'telemetry_log_sink_errors_total{job="service",instance="brief",operation="write"}'
@@ -219,6 +229,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'service_startup_trace_exporter_active{job="service",instance="a"}'
         values: "1x15"
       - series: 'process_start_time_seconds{job="service",instance="a"}'
@@ -275,6 +286,7 @@ tests:
   - name: "A job with no reachable target pages; the lost replica becomes a ticket"
     interval: 1m
     input_series:
+      - *temporal_worker_up
       - series: 'up{job="service",instance="a"}'
         values: "0x30"
       - series: 'up{job="jobs-worker",instance="w"}'
@@ -291,6 +303,7 @@ tests:
   - name: "A service missing from discovery pages as down"
     interval: 1m
     input_series:
+      - *temporal_worker_up
       - series: 'up{job="jobs-worker",instance="w"}'
         values: "1x10"
     promql_expr_test:
@@ -303,6 +316,7 @@ tests:
   - name: "Crash loops, withheld and flapping readiness open tickets; one restart does not"
     interval: 1m
     input_series:
+      - *temporal_worker_up
       - series: 'up{job="service",instance="a"}'
         values: "1x20"
       - series: 'up{job="service",instance="b"}'
@@ -335,6 +349,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'runtime_scheduler_lag_seconds_count{job="service",instance="a"}'
         values: "0+600x30"
       - series: 'runtime_scheduler_lag_seconds_bucket{job="service",instance="a",le="0.1"}'
@@ -386,6 +401,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - *api_start
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_type="unary",grpc_service="example.v1.Example",grpc_method="Get",grpc_code="OK"}'
         values: "0+90x30"
@@ -429,6 +445,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - *api_start
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_service="example.API",grpc_code="OK"}'
         values: "0+10x12"
@@ -452,6 +469,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'db_client_connection_wait_time_seconds_count{job="service",instance="a",db_client_connection_pool_name="postgres"}'
         values: "0+100x40"
       - series: 'db_client_connection_wait_time_seconds_bucket{job="service",instance="a",db_client_connection_pool_name="postgres",le="0.1"}'
@@ -473,6 +491,7 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      - *temporal_worker_up
       - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w1"}'
         values: "0+60x20"
       - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w2"}'
@@ -584,3 +603,184 @@ tests:
           - labels: 'ALERTS{alertname="MessagingDeadLettered",alertstate="firing",event_type="order.cancelled",outcome="ambiguous",reason="exhausted",severity="ticket"}'
             value: 1
   # template:end messaging:monitoring-messaging-fixture
+
+  - name: "TemporalWorkerUnavailable pages when temporal-worker targets are absent, unreachable, or all unready"
+    interval: 1m
+    input_series:
+      - *service_up
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing"}'
+        eval_time: 4m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing",job="temporal-worker",severity="page"}'
+            value: 1
+
+  - name: "TemporalWorkerUnavailable pages when every reachable temporal-worker target is unready and clears once one recovers"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'up{job="temporal-worker",instance="tw1"}'
+        values: "1x30"
+      - series: 'up{job="temporal-worker",instance="tw2"}'
+        values: "1x30"
+      - series: 'readiness_ready{job="temporal-worker",instance="tw1"}'
+        values: "0x30"
+      - series: 'readiness_ready{job="temporal-worker",instance="tw2"}'
+        values: "1x6 0x9 1x14"
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing"}'
+        eval_time: 6m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing"}'
+        eval_time: 12m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing",job="temporal-worker",severity="page"}'
+            value: 1
+      - expr: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing"}'
+        eval_time: 18m
+        exp_samples: []
+
+  - name: "TemporalWorkerUnavailable pages when all temporal-worker targets are unreachable"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'up{job="temporal-worker",instance="tw1"}'
+        values: "0x20"
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TemporalWorkerUnavailable",alertstate="firing",job="temporal-worker",severity="page"}'
+            value: 1
+
+  - name: "Temporal schedule-to-start backlog, workflow task failures, RPC faults, and credential reload errors open tickets; normal client errors stay quiet"
+    interval: 1m
+    input_series:
+      - *service_up
+      - *temporal_worker_up
+      - series: 'temporal_workflow_task_schedule_to_start_latency_count{job="temporal-worker",instance="tw",namespace="default",task_queue="orders"}'
+        values: "0+100x30"
+      - series: 'temporal_workflow_task_schedule_to_start_latency_bucket{job="temporal-worker",instance="tw",namespace="default",task_queue="orders",le="1"}'
+        values: "0+80x30"
+      - series: 'temporal_workflow_task_schedule_to_start_latency_count{job="temporal-worker",instance="tw",namespace="default",task_queue="fast"}'
+        values: "0+100x30"
+      - series: 'temporal_workflow_task_schedule_to_start_latency_bucket{job="temporal-worker",instance="tw",namespace="default",task_queue="fast",le="1"}'
+        values: "0+99x30"
+      - series: 'temporal_workflow_task_execution_failed{job="temporal-worker",instance="tw",namespace="default",task_queue="orders"}'
+        values: "0+2x30"
+      - series: 'temporal_request_failure{job="service",instance="a",namespace="default",operation="StartWorkflowExecution",status_code="UNAVAILABLE"}'
+        values: "0+3x30"
+      - series: 'temporal_request_failure{job="temporal-worker",instance="tw",namespace="default",operation="PollWorkflowTaskQueue",status_code="TRANSPORT_ERROR"}'
+        values: "0+2x30"
+      - series: 'temporal_request_failure{job="service",instance="a",namespace="default",operation="StartWorkflowExecution",status_code="ALREADY_EXISTS"}'
+        values: "0+50x30"
+      - series: 'temporal_request_failure{job="service",instance="a",namespace="default",operation="DescribeWorkflowExecution",status_code="NOT_FOUND"}'
+        values: "0+50x30"
+      - series: 'temporal_credential_reloads_total{job="service",instance="a",kind="api_key",outcome="failed"}'
+        values: "0+1x30"
+      - series: 'temporal_credential_reloads_total{job="temporal-worker",instance="tw",kind="mtls",outcome="failed"}'
+        values: "0+1x30"
+      - series: 'temporal_credential_reloads_total{job="service",instance="a",kind="api_key",outcome="ok"}'
+        values: "0+5x30"
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 18m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TemporalTaskQueueScheduleToStartHigh",alertstate="firing",job="temporal-worker",namespace="default",severity="ticket",task_queue="orders"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TemporalWorkflowTaskFailures",alertstate="firing",job="temporal-worker",namespace="default",severity="ticket",task_queue="orders"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TemporalClientRpcErrors",alertstate="firing",job="service",namespace="default",operation="StartWorkflowExecution",severity="ticket",status_code="UNAVAILABLE"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TemporalClientRpcErrors",alertstate="firing",job="temporal-worker",namespace="default",operation="PollWorkflowTaskQueue",severity="ticket",status_code="TRANSPORT_ERROR"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TemporalCredentialReloadFailed",alertstate="firing",instance="a",job="service",kind="api_key",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TemporalCredentialReloadFailed",alertstate="firing",instance="tw",job="temporal-worker",kind="mtls",severity="ticket"}'
+            value: 1
+
+  - name: "TemporalDrainForced fires on forced drain increments or early startup drains and expires after 15 minutes"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'up{job="temporal-worker",instance="tw1"}'
+        values: "1x30"
+      - series: 'process_start_time_seconds{job="temporal-worker",instance="tw1"}'
+        values: "0x30"
+      - series: 'temporal_drain_forced_total{job="temporal-worker",instance="tw1"}'
+        values: "0x4 1x25"
+      - series: 'up{job="temporal-worker",instance="tw2"}'
+        values: "1x30"
+      - series: 'process_start_time_seconds{job="temporal-worker",instance="tw2"}'
+        values: "0x30"
+      - series: 'temporal_drain_forced_total{job="temporal-worker",instance="tw2"}'
+        values: "0x30"
+      - series: 'up{job="temporal-worker",instance="tw3"}'
+        values: "_ 1x28"
+      - series: 'process_start_time_seconds{job="temporal-worker",instance="tw3"}'
+        values: "_ 0x28"
+      - series: 'temporal_drain_forced_total{job="temporal-worker",instance="tw3"}'
+        values: "_ 1x28"
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing"}'
+        eval_time: 0m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing",instance="tw3",job="temporal-worker",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing",instance="tw1",job="temporal-worker",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing",instance="tw3",job="temporal-worker",severity="ticket"}'
+            value: 1
+      - expr: 'ALERTS{alertname="TemporalDrainForced",alertstate="firing"}'
+        eval_time: 22m
+        exp_samples: []
+
+  - name: "Shared health and runtime alerts cover temporal-worker without jobs-worker present"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'up{job="temporal-worker",instance="tw"}'
+        values: "1x30"
+      - series: 'up{job="temporal-worker",instance="tw_ok"}'
+        values: "1x30"
+      - series: 'readiness_ready{job="temporal-worker",instance="tw"}'
+        values: "0x30"
+      - series: 'readiness_ready{job="temporal-worker",instance="tw_ok"}'
+        values: "1x30"
+      - series: 'process_start_time_seconds{job="temporal-worker",instance="tw"}'
+        values: "100 100 200 200 300 300 400 400x22"
+      - series: 'runtime_scheduler_lag_seconds_count{job="temporal-worker",instance="tw"}'
+        values: "0+600x30"
+      - series: 'runtime_scheduler_lag_seconds_bucket{job="temporal-worker",instance="tw",le="0.1"}'
+        values: "0+580x30"
+      - series: 'process_open_fds{job="temporal-worker",instance="tw"}'
+        values: "900x30"
+      - series: 'process_max_fds{job="temporal-worker",instance="tw"}'
+        values: "1024x30"
+      - series: 'process_resident_memory_bytes{job="temporal-worker",instance="tw"}'
+        values: "483183820x30"
+      - series: 'process_memory_limit_bytes{job="temporal-worker",instance="tw"}'
+        values: "536870912x30"
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 22m
+        exp_samples:
+          - labels: 'ALERTS{alertname="ServiceRestarting",alertstate="firing",instance="tw",job="temporal-worker",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="ServiceNotReady",alertstate="firing",instance="tw",job="temporal-worker",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RuntimeSchedulerLagging",alertstate="firing",instance="tw",job="temporal-worker",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="OpenFilesNearLimit",alertstate="firing",instance="tw",job="temporal-worker",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="MemoryNearLimit",alertstate="firing",instance="tw",job="temporal-worker",severity="ticket"}'
+            value: 1

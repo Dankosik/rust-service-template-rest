@@ -28,7 +28,7 @@ def _db_test_args(root: Path = lib.ROOT) -> list[str]:
     manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     args: list[str] = []
     for target in manifest.get("test", ()):
-        if "integration" in target.get("required-features", ()):
+        if "integration" in target.get("required-features", ()) and target["name"] != "temporal":
             args.extend(["--test", target["name"]])
     return args
 
@@ -99,6 +99,16 @@ def cmd_compile(suite: str) -> None:
                 "tests::keycloak", "--no-run",
             ],
             env=lib.clean_pg_env({"OAUTH_TEST_KEYCLOAK_URL": "compile-only"}),
+        )
+    if (lib.ROOT / "crates/infra-temporal").is_dir():
+        temporal_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": "compile-only"})
+        lib.run(
+            ["cargo", "test", "--locked", "-p", "infra-temporal", "--features", "integration", "--test", "temporal", "--no-run"],
+            env=temporal_env,
+        )
+        lib.run(
+            ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", "--test", "temporal", "--no-run"],
+            env=temporal_env,
         )
 
 
@@ -362,6 +372,35 @@ def cmd_oauth(extra: Sequence[str]) -> None:
         lib.run(cmd, env=env)
 
 
+def cmd_temporal(extra: Sequence[str]) -> None:
+    if not (lib.ROOT / "crates/infra-temporal").is_dir():
+        raise lib.ScriptError("temporal profile not present", exit_code=2)
+    adapter_base = ["cargo", "test", "--locked", "-p", "infra-temporal", "--features", "integration", "--test", "temporal"]
+    fixture_base = ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", "--test", "temporal"]
+    adapter_cmd = [*adapter_base, *extra]
+    fixture_cmd = [*fixture_base, *extra]
+    if _is_no_run(extra):
+        compile_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": os.environ.get("TEMPORAL_ADDRESS") or "compile-only"})
+        lib.run(adapter_cmd, env=compile_env)
+        lib.run(fixture_cmd, env=compile_env)
+        return
+    if existing := os.environ.get("TEMPORAL_ADDRESS"):
+        run_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": existing})
+        lib.run(adapter_cmd, env=run_env)
+        lib.run(fixture_cmd, env=run_env)
+        return
+    lib.require_docker(allow_refusal=True)
+    with lib.ComposeStack("service-temporal") as stack:
+        port = stack.start("temporal", 7233)
+        compile_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": "compile-only"})
+        lib.run([*adapter_base, "--no-run"], env=compile_env)
+        lib.run([*fixture_base, "--no-run"], env=compile_env)
+        stack.wait("temporal", port, timeout_s=60)
+        run_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": f"127.0.0.1:{port}"})
+        lib.run(adapter_cmd, env=run_env)
+        lib.run(fixture_cmd, env=run_env)
+
+
 def _verify_sqlx_cli() -> None:
     if shutil.which("cargo-sqlx") is None or shutil.which("sqlx") is None:
         raise lib.ScriptError("sqlx-cli is required; run `mise install cargo:sqlx-cli`", exit_code=2)
@@ -401,7 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     db_p = sub.add_parser("db")
     db_p.add_argument("--with-sqlx-check", action="store_true")
     db_p.add_argument("cargo_args", nargs=argparse.REMAINDER)
-    for name in ("cache", "object-storage", "messaging", "oauth"):
+    for name in ("cache", "object-storage", "messaging", "oauth", "temporal"):
         p = sub.add_parser(name)
         p.add_argument("cargo_args", nargs=argparse.REMAINDER)
     sqlx_p = sub.add_parser("sqlx-prepare")
@@ -426,6 +465,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "object-storage": cmd_object_storage,
                     "messaging": cmd_messaging,
                     "oauth": cmd_oauth,
+                    "temporal": cmd_temporal,
                 }[args.command](extra)
 
     return lib.run_cli(_dispatch)

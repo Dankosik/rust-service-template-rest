@@ -51,6 +51,11 @@ class IntegrationRunnerTests(unittest.TestCase):
                 required-features = ["integration"]
 
                 [[test]]
+                name = "temporal"
+                path = "tests/temporal.rs"
+                required-features = ["integration"]
+
+                [[test]]
                 name = "outbound_http"
                 path = "tests/outbound_http.rs"
                 """,
@@ -109,6 +114,56 @@ class IntegrationRunnerTests(unittest.TestCase):
             integration.cmd_oauth([])
 
         self.assertEqual(events, ["start:keycloak", "compile", "wait:keycloak", "test", "stack:down"])
+
+    def test_cmd_temporal_overlaps_startup_with_compilation_and_runs_both_targets(self) -> None:
+        if not (lib.ROOT / "crates/infra-temporal").is_dir():
+            self.skipTest("temporal profile not present")
+        events: list[str] = []
+        commands: list[tuple[list[str], dict[str, str]]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> mock.MagicMock:
+            env = kwargs.get("env")
+            commands.append((list(cmd), dict(env) if isinstance(env, dict) else {}))
+            events.append("compile" if "--no-run" in cmd else "test")
+            return mock.MagicMock(returncode=0)
+
+        with (
+            mock.patch.object(lib, "require_docker"),
+            mock.patch.object(lib, "ComposeStack", return_value=_FakeStack(events)),
+            mock.patch.object(lib, "run", side_effect=fake_run),
+            mock.patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("TEMPORAL_ADDRESS", None)
+            integration.cmd_temporal([])
+
+        self.assertEqual(
+            events,
+            ["start:temporal", "compile", "compile", "wait:temporal", "test", "test", "stack:down"],
+        )
+        self.assertEqual(commands[2][1]["TEMPORAL_ADDRESS"], "127.0.0.1:17233")
+        self.assertIn("infra-temporal", commands[2][0])
+        self.assertIn("integration-tests", commands[3][0])
+
+    def test_cmd_compile_includes_both_temporal_targets(self) -> None:
+        if not (lib.ROOT / "crates/infra-temporal").is_dir():
+            self.skipTest("temporal profile not present")
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> mock.MagicMock:
+            commands.append(list(cmd))
+            return mock.MagicMock(returncode=0)
+
+        with mock.patch.object(lib, "run", side_effect=fake_run):
+            integration.cmd_compile("services")
+
+        self.assertIn(
+            ["cargo", "test", "--locked", "-p", "infra-temporal", "--features", "integration", "--test", "temporal", "--no-run"],
+            commands,
+        )
+        self.assertIn(
+            ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", "--test", "temporal", "--no-run"],
+            commands,
+        )
 
 
 if __name__ == "__main__":

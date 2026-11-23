@@ -22,6 +22,11 @@ worker = [
 test-support = ["worker"]
 integration = ["worker"]
 
+[[test]]
+name = "temporal"
+path = "tests/temporal.rs"
+required-features = ["integration"]
+
 [dependencies]
 arc-swap = { workspace = true }
 compact_str = { workspace = true }
@@ -56,12 +61,13 @@ nix = { workspace = true, features = ["fs"] }
 futures = { workspace = true, features = ["alloc", "std"] }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util = { workspace = true, features = ["debugging"] }
-opentelemetry_sdk = { workspace = true, features = ["testing"] }
+observe-test-support = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 prost = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 serde = { workspace = true, features = ["std", "derive"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 temporalio-macros = { workspace = true }
 temporalio-workflow = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "fs"] }
 tracing-subscriber = { workspace = true, features = ["registry"] }

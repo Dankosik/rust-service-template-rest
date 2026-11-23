@@ -89,6 +89,7 @@ infra-object-storage = { path = "crates/infra-object-storage" }
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
 infra-temporal = { path = "crates/infra-temporal" }
+temporal-worker = { path = "crates/temporal-worker" }
 
 # template:begin postgres:workspace-postgres-dependencies
 sqlx = { version = "0.9.0", default-features = false }
