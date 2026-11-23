@@ -717,6 +717,58 @@ fn deployment_defaults_and_worker_versioning_requirements_are_enforced() {
     );
 }
 
+#[rstest::rstest]
+#[case::unversioned_explicit_unspecified(
+    Some("false"),
+    "unspecified",
+    Some(TemporalVersioningBehavior::Unspecified)
+)]
+#[case::unversioned_default_pinned(None, "pinned", None)]
+#[case::unversioned_explicit_pinned(Some("false"), "pinned", None)]
+#[case::unversioned_default_auto_upgrade(None, "auto_upgrade", None)]
+#[case::unversioned_explicit_auto_upgrade(Some("false"), "auto_upgrade", None)]
+#[case::versioned_unspecified(Some("true"), "unspecified", None)]
+#[case::versioned_pinned(Some("true"), "pinned", Some(TemporalVersioningBehavior::Pinned))]
+#[case::versioned_auto_upgrade(
+    Some("true"),
+    "auto_upgrade",
+    Some(TemporalVersioningBehavior::AutoUpgrade)
+)]
+fn deployment_versioning_behavior_matches_use_worker_versioning(
+    #[case] use_worker_versioning: Option<&str>,
+    #[case] behavior: &str,
+    #[case] expected: Option<TemporalVersioningBehavior>,
+) {
+    let mut pairs = vec![(
+        "APP__TEMPORAL_WORKER__DEPLOYMENT__DEFAULT_VERSIONING_BEHAVIOR",
+        behavior,
+    )];
+    if let Some(enabled) = use_worker_versioning {
+        pairs.push((
+            "APP__TEMPORAL_WORKER__DEPLOYMENT__USE_WORKER_VERSIONING",
+            enabled,
+        ));
+    }
+    let result = load_with_tail(&pairs);
+    if let Some(expected_behavior) = expected {
+        let cfg = result.unwrap();
+        let deployment = cfg.temporal_worker().deployment();
+        assert_eq!(
+            deployment.use_worker_versioning,
+            use_worker_versioning == Some("true")
+        );
+        assert_eq!(deployment.default_versioning_behavior, expected_behavior);
+    } else {
+        let err = result.unwrap_err();
+        assert!(
+            err.validation_errors().is_some_and(|e| {
+                e.names("temporal_worker.deployment.default_versioning_behavior")
+            }),
+            "{pairs:?}: {err}"
+        );
+    }
+}
+
 #[cfg(feature = "test-support")]
 #[test]
 fn test_support_temporal_worker_fixture_loads_with_tail() {

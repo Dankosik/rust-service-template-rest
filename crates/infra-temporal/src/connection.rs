@@ -528,59 +528,35 @@ impl TemporalConnection {
     }
 
     #[cfg(feature = "worker")]
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker bridge consumed by the worker module"
-    )]
     #[must_use]
     pub(crate) fn raw_client(&self) -> Client {
         self.inner.raw_client.clone()
     }
 
     #[cfg(feature = "worker")]
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker bridge consumed by the worker module"
-    )]
     #[must_use]
     pub(crate) fn meter(&self) -> &WorkspaceMetricsMeter {
         &self.inner.meter
     }
 
     #[cfg(feature = "worker")]
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker bridge consumed by the worker module"
-    )]
     #[must_use]
     pub(crate) fn data_converter(&self) -> &DataConverter {
         &self.inner.data_converter
     }
 
     #[cfg(feature = "worker")]
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker bridge consumed by the worker module"
-    )]
     #[must_use]
     pub(crate) fn namespace(&self) -> &str {
         &self.inner.namespace
     }
 
     #[cfg(feature = "worker")]
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker bridge consumed by the worker module"
-    )]
     pub(crate) fn mark_draining(&self) {
         self.inner.draining.store(true, Ordering::Release);
     }
 
     #[cfg(feature = "worker")]
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker bridge consumed by the worker module"
-    )]
     #[must_use]
     pub(crate) fn probe_with_failure(&self, failed: Arc<AtomicBool>) -> TemporalProbe {
         TemporalProbe::new(

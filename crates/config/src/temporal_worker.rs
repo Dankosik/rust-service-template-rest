@@ -167,13 +167,27 @@ impl TemporalDeploymentInput {
         );
         let build_id =
             validate_non_blank_no_controls("temporal_worker.deployment.build_id", &build_id, v);
-        if self.use_worker_versioning
-            && self.default_versioning_behavior == TemporalVersioningBehavior::Unspecified
-        {
-            v.reject(ValidationError::new(
-                "temporal_worker.deployment.default_versioning_behavior",
-                "must be pinned or auto_upgrade when temporal_worker.deployment.use_worker_versioning = true",
-            ));
+        match (self.use_worker_versioning, self.default_versioning_behavior) {
+            (true, TemporalVersioningBehavior::Unspecified) => {
+                v.reject(ValidationError::new(
+                    "temporal_worker.deployment.default_versioning_behavior",
+                    "must be pinned or auto_upgrade when temporal_worker.deployment.use_worker_versioning = true",
+                ));
+            }
+            (
+                false,
+                TemporalVersioningBehavior::Pinned | TemporalVersioningBehavior::AutoUpgrade,
+            ) => {
+                v.reject(ValidationError::new(
+                    "temporal_worker.deployment.default_versioning_behavior",
+                    "must be unspecified when temporal_worker.deployment.use_worker_versioning = false",
+                ));
+            }
+            (
+                true,
+                TemporalVersioningBehavior::Pinned | TemporalVersioningBehavior::AutoUpgrade,
+            )
+            | (false, TemporalVersioningBehavior::Unspecified) => {}
         }
         TemporalDeploymentConfig {
             deployment_name,

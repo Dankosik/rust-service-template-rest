@@ -103,10 +103,7 @@ impl WorkspaceMetricsMeter {
             .build()
     }
 
-    #[allow(
-        dead_code,
-        reason = "crate-internal worker drain counter consumed by the worker module"
-    )]
+    #[cfg(any(feature = "worker", test))]
     pub(crate) fn record_drain_forced() {
         metrics::counter!(DRAIN_FORCED_METRIC).increment(1);
     }

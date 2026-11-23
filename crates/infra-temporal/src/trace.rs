@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use futures_util::future::BoxFuture;
 use opentelemetry::global;
-use opentelemetry::propagation::{Extractor, Injector};
+#[cfg(any(feature = "worker", test))]
+use opentelemetry::propagation::Extractor;
+use opentelemetry::propagation::Injector;
+#[cfg(any(feature = "worker", test))]
 use opentelemetry::trace::TraceContextExt as _;
 use temporalio_client::errors::{
     WorkflowInteractionError, WorkflowQueryError, WorkflowStartError, WorkflowUpdateError,
@@ -65,6 +68,7 @@ impl Injector for SanitizedCarrier {
     }
 }
 
+#[cfg(any(feature = "worker", test))]
 impl Extractor for SanitizedCarrier {
     fn get(&self, key: &str) -> Option<&str> {
         let max_bytes = max_bytes_for_key(key)?;
@@ -112,10 +116,7 @@ pub(crate) fn inject_current_context_into_headers(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "crate-internal inbound trace helper consumed by the worker module"
-)]
+#[cfg(any(feature = "worker", test))]
 pub(crate) fn extract_context_from_headers(
     headers: &HashMap<String, Payload>,
     converter: &PayloadConverter,
