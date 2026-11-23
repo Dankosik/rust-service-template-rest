@@ -1,7 +1,6 @@
 use super::*;
-use crate::load::{load_from, load_migration_from};
+use crate::load::{ErrorKind, InputError, load_from, load_migration_from};
 use crate::test_support::{BUILD, env, write};
-use crate::validate::admit_with;
 use crate::{LoadOptions, LogFormat};
 use secrecy::ExposeSecret as _;
 use std::assert_matches;
@@ -15,9 +14,9 @@ fn defaults_are_inert() {
     let input = PostgresInput::default();
     assert!(!input.enabled);
     assert!(input.dsn.is_none());
-    assert_eq!(input.max_connections.0.get(), 4);
+    assert_eq!(input.max_connections, None);
     assert_eq!(input.password_file, None);
-    assert_eq!(input.session_budgets.0, PostgresSessionBudgets::Startup);
+    assert_eq!(input.session_budgets, PostgresSessionBudgets::Startup);
     assert!(admit_with(|v| input.admit(v)).unwrap().is_none());
 }
 
@@ -62,10 +61,10 @@ fn pooled_processes_can_disable_notifications() {
         ("APP__POSTGRES__NOTIFICATIONS", "false"),
     ];
     let service = load_from(&options, BUILD, env(&variables)).unwrap();
-    assert!(!service.postgres.as_ref().unwrap().notifications);
+    assert!(!service.postgres().unwrap().notifications);
     // template:begin jobs:worker-postgres-notifications-test
     let worker = crate::load::load_worker_from(&options, BUILD, env(&variables)).unwrap();
-    assert!(!worker.postgres.as_ref().unwrap().notifications);
+    assert!(!worker.postgres().unwrap().notifications);
     // template:end jobs:worker-postgres-notifications-test
 }
 
@@ -81,7 +80,7 @@ fn the_migration_override_supplies_its_own_endpoint_and_credentials() {
         ("APP__POSTGRES__MIGRATION_DSN", direct),
     ];
     let service = load_from(&options, BUILD, env(&variables)).unwrap();
-    let runtime = service.postgres.as_ref().unwrap();
+    let runtime = service.postgres().unwrap();
     assert_eq!(runtime.dsn.expose_secret(), shared);
     assert_eq!(
         runtime.password_file.as_deref(),
@@ -119,18 +118,12 @@ fn blank_migration_dsn_falls_back_to_runtime_dsn_and_password_file(#[case] blank
 }
 
 #[rstest::rstest]
-#[case::integer(config::Value::from(123_i64))]
-#[case::boolean(config::Value::from(true))]
-#[case::array(config::Value::from(vec!["postgres://localhost/app"]))]
-fn migration_dsn_rejects_non_string_config_scalars(#[case] value: config::Value) {
-    let err = config::Config::builder()
-        .set_override("migration_dsn", value)
-        .unwrap()
-        .build()
-        .unwrap()
-        .try_deserialize::<MigrationPostgresInput>()
-        .unwrap_err();
-    assert!(err.to_string().contains("expected a string"), "{err}");
+#[case::integer("migration_dsn = 123\n")]
+#[case::boolean("migration_dsn = true\n")]
+#[case::array("migration_dsn = [\"postgres://localhost/app\"]\n")]
+fn migration_dsn_rejects_non_string_config_scalars(#[case] body: &str) {
+    let err = crate::load::deserialize_toml_for_test::<MigrationPostgresInput>(body).unwrap_err();
+    assert!(err.contains("expected a string"), "{err}");
 }
 
 #[rstest::rstest]
@@ -140,7 +133,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
     let input = PostgresInput {
         enabled,
         dsn: Some(dsn()),
-        max_connections: MaxConnectionsInput(NonZeroU32::new(501).unwrap()),
+        max_connections: Some(NonZeroU32::new(501).unwrap()),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -151,7 +144,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
 fn every_postgres_violation_is_reported_together() {
     let input = PostgresInput {
         enabled: true,
-        max_connections: MaxConnectionsInput(NonZeroU32::new(501).unwrap()),
+        max_connections: Some(NonZeroU32::new(501).unwrap()),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -168,7 +161,7 @@ fn pool_size_rejects_fractional_toml() {
         ..LoadOptions::default()
     };
     let err = load_from(&options, BUILD, env(&[])).unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     assert!(
         err.to_string().contains("postgres.max_connections"),
         "{err}"
@@ -199,12 +192,17 @@ fn only_migration_loading_decodes_and_validates_the_deadline() {
         // template:end jobs:pooled-worker-ignores-migration-deadline
         let err = load_migration_from(&options, BUILD, env(&variables)).unwrap_err();
         if deadline == "invalid" {
-            assert_matches!(err, MigrationLoadError::Config(Error::Deserialize(_)));
+            assert_matches!(
+                err,
+                MigrationLoadError::Config(Error(ErrorKind::Deserialize(_)))
+            );
         } else {
             assert_matches!(
                 err,
-                MigrationLoadError::Config(Error::Validate(errors))
-                    if errors.names("postgres.migration_deadline")
+                MigrationLoadError::Config(error)
+                    if error
+                        .validation_errors()
+                        .is_some_and(|errors| errors.names("postgres.migration_deadline"))
             );
         }
     }
@@ -239,7 +237,7 @@ fn messaging_worker_ignores_the_service_database() {
     let unknown =
         crate::load::load_worker_from(&options, BUILD, env(&[("APP__DATABASE__ENABLED", "true")]))
             .unwrap_err();
-    assert_matches!(unknown, Error::Deserialize(_));
+    assert_matches!(unknown.0, ErrorKind::Deserialize(_));
 }
 // template:end worker:messaging-only-postgres-test
 
@@ -314,7 +312,7 @@ fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
     let service = load_from(&options, BUILD, env(&[])).unwrap();
     assert_eq!(
         migration.service_name(),
-        service.observability.otel.service_name
+        service.observability().otel.service_name
     );
 
     let blank = load_migration_from(
@@ -325,8 +323,10 @@ fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
     .unwrap_err();
     assert_matches!(
         blank,
-        MigrationLoadError::Config(Error::Validate(errors))
-            if errors.names("observability.otel.service_name")
+        MigrationLoadError::Config(error)
+            if error
+                .validation_errors()
+                .is_some_and(|errors| errors.names("observability.otel.service_name"))
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -346,7 +346,7 @@ fn migration_uses_the_service_identity_and_rejects_invalid_overrides() {
     .unwrap_err();
     assert_matches!(
         non_string,
-        MigrationLoadError::Config(Error::Deserialize(_)),
+        MigrationLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{non_string}"
     );
 }
@@ -367,11 +367,11 @@ fn migration_ignores_only_the_replica_identity_within_app() {
         ..LoadOptions::default()
     };
     let migration = load_migration_from(&options, BUILD, env(&enabled)).unwrap();
-    assert_eq!(migration.app().env, "local");
+    assert_eq!(migration.app().env(), "local");
     assert!(migration.app().is_local_development());
     assert!(migration.app().instance_id.is_none());
     let service = load_from(&options, BUILD, env(&enabled)).unwrap_err();
-    assert_matches!(service, Error::Deserialize(_), "{service}");
+    assert_matches!(service.0, ErrorKind::Deserialize(_), "{service}");
 
     for key in [
         "env",
@@ -391,7 +391,7 @@ fn migration_ignores_only_the_replica_identity_within_app() {
         let error = load_migration_from(&options, BUILD, env(&enabled)).unwrap_err();
         assert_matches!(
             error,
-            MigrationLoadError::Config(Error::Deserialize(_)),
+            MigrationLoadError::Config(Error(ErrorKind::Deserialize(_))),
             "{key}: {error}"
         );
     }
@@ -408,7 +408,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
             load_migration_from(&LoadOptions::default(), BUILD, env(&[(key, "1")])).unwrap_err();
         assert_matches!(
             unknown,
-            MigrationLoadError::Config(Error::Deserialize(_)),
+            MigrationLoadError::Config(Error(ErrorKind::Deserialize(_))),
             "{unknown}"
         );
     }
@@ -421,7 +421,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     .unwrap_err();
     assert_matches!(
         &typo_section,
-        MigrationLoadError::Config(Error::Deserialize(_)),
+        MigrationLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{typo_section}"
     );
     assert!(!typo_section.to_string().contains("secret-pw"));
@@ -435,7 +435,8 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     .unwrap_err();
     assert_matches!(
         &missing_dsn,
-        MigrationLoadError::Config(Error::Validate(errors)) if errors.names("postgres.dsn"),
+        MigrationLoadError::Config(error)
+            if error.validation_errors().is_some_and(|errors| errors.names("postgres.dsn")),
         "{missing_dsn}"
     );
 
@@ -452,7 +453,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     .unwrap_err();
     assert_matches!(
         unknown_err,
-        MigrationLoadError::Config(Error::Deserialize(_)),
+        MigrationLoadError::Config(Error(ErrorKind::Deserialize(_))),
         "{unknown_err}"
     );
 
@@ -472,7 +473,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     .unwrap_err();
     assert_matches!(
         err,
-        MigrationLoadError::Config(Error::SecretInFile { .. }),
+        MigrationLoadError::Config(Error(ErrorKind::Input(InputError::SecretInFile { .. }))),
         "{err}"
     );
 }

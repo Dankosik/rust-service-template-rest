@@ -1,28 +1,70 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::fmt;
 
 use utoipa::openapi::Components;
 
-use super::FinalizeError;
+use super::{FinalizeError, FinalizeKind};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ComponentKind {
+    Schemas,
+    Responses,
+    Parameters,
+    Examples,
+    RequestBodies,
+    Headers,
+    Links,
+    Callbacks,
+    PathItems,
+    MediaTypes,
+    SecuritySchemes,
+    Extensions,
+}
+
+impl ComponentKind {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Schemas => "schemas",
+            Self::Responses => "responses",
+            Self::Parameters => "parameters",
+            Self::Examples => "examples",
+            Self::RequestBodies => "requestBodies",
+            Self::Headers => "headers",
+            Self::Links => "links",
+            Self::Callbacks => "callbacks",
+            Self::PathItems => "pathItems",
+            Self::MediaTypes => "mediaTypes",
+            Self::SecuritySchemes => "securitySchemes",
+            Self::Extensions => "extensions",
+        }
+    }
+}
+
+impl fmt::Display for ComponentKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub(super) fn merge(target: &mut Components, incoming: Components) -> Result<(), FinalizeError> {
     macro_rules! collections {
-        ($($field:ident => $name:literal),+ $(,)?) => {
-            $(merge_map($name, &mut target.$field, incoming.$field)?;)+
+        ($($field:ident => $kind:ident),+ $(,)?) => {
+            $(merge_map(ComponentKind::$kind, &mut target.$field, incoming.$field)?;)+
         };
     }
     collections!(
-        schemas => "schemas",
-        responses => "responses",
-        parameters => "parameters",
-        examples => "examples",
-        request_bodies => "requestBodies",
-        headers => "headers",
-        links => "links",
-        callbacks => "callbacks",
-        path_items => "pathItems",
-        media_types => "mediaTypes",
-        security_schemes => "securitySchemes",
+        schemas => Schemas,
+        responses => Responses,
+        parameters => Parameters,
+        examples => Examples,
+        request_bodies => RequestBodies,
+        headers => Headers,
+        links => Links,
+        callbacks => Callbacks,
+        path_items => PathItems,
+        media_types => MediaTypes,
+        security_schemes => SecuritySchemes,
     );
     if let Some(extensions) = incoming.extensions {
         let target = target.extensions.get_or_insert_default();
@@ -30,10 +72,10 @@ pub(super) fn merge(target: &mut Components, incoming: Components) -> Result<(),
             .iter()
             .find(|(name, value)| target.get(*name).is_some_and(|old| old != *value))
         {
-            return Err(FinalizeError::ConflictingComponent {
-                kind: "extensions",
+            return Err(FinalizeError::new(FinalizeKind::ConflictingComponent {
+                kind: ComponentKind::Extensions,
                 name: name.clone(),
-            });
+            }));
         }
         target.merge(extensions);
     }
@@ -49,7 +91,7 @@ pub(crate) fn same_definition<T: PartialEq + serde::Serialize>(left: &T, right: 
 }
 
 pub(crate) fn merge_map<T: PartialEq + serde::Serialize>(
-    kind: &'static str,
+    kind: ComponentKind,
     target: &mut BTreeMap<String, T>,
     incoming: impl IntoIterator<Item = (String, T)>,
 ) -> Result<(), FinalizeError> {
@@ -59,10 +101,10 @@ pub(crate) fn merge_map<T: PartialEq + serde::Serialize>(
                 entry.insert(value);
             }
             Entry::Occupied(entry) if !same_definition(entry.get(), &value) => {
-                return Err(FinalizeError::ConflictingComponent {
+                return Err(FinalizeError::new(FinalizeKind::ConflictingComponent {
                     kind,
                     name: entry.key().clone(),
-                });
+                }));
             }
             Entry::Occupied(_) => {}
         }
@@ -117,7 +159,10 @@ mod tests {
 
         assert!(matches!(
             root.merge(parameter_contract("Number of pages")),
-            Err(FinalizeError::ConflictingComponent { kind: "parameters", name }) if name == "Page"
+            Err(FinalizeError(FinalizeKind::ConflictingComponent {
+                kind: ComponentKind::Parameters,
+                name
+            })) if name == "Page"
         ));
     }
 }

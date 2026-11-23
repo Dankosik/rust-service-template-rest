@@ -221,9 +221,10 @@ or the destination policy changes.
 When migrating a handler that used `VerifiedPrincipal::access_token()`, keep
 identity-only handlers on `VerifiedPrincipal`. For each HTTP operation that
 exchanges the caller's token, declare `x-bearer-delegation: true` alongside
-its bearer security requirement. The handler can then read
-`infra_http::DelegationCredential` from request extensions. Record the
-authorized downstream audience for that exchange.
+its bearer security requirement. The handler can then extract
+`infra_http::VerifiedDelegation` (or read `infra_http::DelegationCredential`
+from request extensions). Record the authorized downstream audience for that
+exchange.
 <!-- template:end authn:production-bearer-delegation -->
 <!-- template:begin grpc-authn:production-rpc-delegation -->
 In bearer mode, declare a scope rule for every registered business RPC. Use
@@ -268,12 +269,12 @@ provisioning, qualify the exact issuer and token endpoint that will be passed
 to the synchronous registration callback. The check requires only those URLs.
 
 ```sh
-cargo run --locked -p infra-oauth2-client-credentials --example keycloak_preflight -- "$ISSUER" "$TOKEN_ENDPOINT"
+cargo run --locked -p infra-oauth2-client-credentials --example oidc_preflight -- "$ISSUER" "$TOKEN_ENDPOINT"
 ```
 
-Install the checked pair as `assertion_audience` and `token_url` after a
+Install the checked pair as `auth.audience` and `token_url` after a
 successful exit. Repeat on changes to either value. An integration with async
-setup can instead call `Registration::prepare_keycloak(options).await` to run
+setup can instead call `Registration::prepare_with_oidc_discovery(issuer, options).await` to run
 the same check before it creates a registration. Discovery must return the
 configured issuer exactly and the configured HTTPS token endpoint. The
 endpoint can have a different host from the issuer. On failure, correct the
@@ -492,8 +493,10 @@ direct publishers that supply their own globally unique IDs. Check historical
 IDs for overlap before activating the new namespace.
 
 Route resubmissions of pre-upgrade operations by their recorded identity.
-Use the original unbound route, event contents, time and order to reconcile
-an existing receipt. An unknown unbound event fails with `PublisherRequired`.
+Use the original unbound route, event contents, time and order with
+`PreparedEvent::reconcile_legacy_outbox` (or `reconcile_legacy_outbox_ordered`)
+to reconcile an existing receipt; an unknown unbound event returns
+`ReconcileOutcome::Missing` and cannot be enqueued without a bound `OutboxRoute`.
 New operations use the bound route, including when their local ID also
 appears in another publisher's history. Workers retry already committed
 intents with their stored headers. DLQ restoration preserves the logical

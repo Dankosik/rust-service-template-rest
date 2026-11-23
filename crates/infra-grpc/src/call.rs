@@ -1,95 +1,117 @@
-use std::panic::AssertUnwindSafe;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
-
-use bytes::Bytes;
-use futures_util::FutureExt as _;
-use http::HeaderMap;
-use http_body::{Body, Frame, SizeHint};
+use http::{HeaderMap, HeaderValue};
+use infra_grpc_core::protocol::{STATUS_HEADERS, header_status_code};
+use infra_grpc_core::watched::{PanicOutcome, StreamEnd, StreamHooks, WatchedBody};
 use operation_context::{Deadline, OperationContext, Stopped};
-use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::{CancellationToken, DropGuard};
-use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::header_status_code;
-use crate::status::FixedFailure;
+use crate::status::{ClassifiedStatus, FixedFailure};
 
-#[derive(Default)]
 pub(crate) struct ServerCustody {
     pub(crate) permit: Option<OwnedSemaphorePermit>,
     pub(crate) cancel_on_drop: Option<DropGuard>,
-    pub(crate) deadline: Option<Deadline>,
-    pub(crate) end_on_drain: Option<CancellationToken>,
+    pub(crate) stop: Option<ServerStop>,
 }
 
-pub(crate) fn stopped_status(reason: Stopped) -> tonic::Status {
-    match reason {
-        Stopped::Deadline => FixedFailure::Deadline.status(),
-        Stopped::Cancelled => tonic::Status::cancelled("request cancelled"),
+impl ServerCustody {
+    pub(crate) fn deadline(deadline: Option<Deadline>) -> Self {
+        Self {
+            permit: None,
+            cancel_on_drop: None,
+            stop: deadline.map(ServerStop::Deadline),
+        }
+    }
+
+    fn into_hooks(
+        self,
+        call: Call,
+        fallback_context: Option<opentelemetry::Context>,
+    ) -> (ServerHooks, Option<ServerStop>) {
+        let deadline = self.stop.as_ref().and_then(ServerStop::deadline);
+        let hooks = ServerHooks {
+            call,
+            permit: self.permit,
+            cancel_on_drop: self.cancel_on_drop,
+            deadline,
+            fallback_context,
+        };
+        (hooks, self.stop)
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
-pub(crate) fn check_open(context: &OperationContext) -> Result<(), axum::response::Response> {
-    context
-        .check()
-        .map_err(|reason| stopped_status(reason).into_http())
+pub(crate) fn stopped_status(reason: Stopped) -> ClassifiedStatus {
+    match reason {
+        Stopped::Deadline => ClassifiedStatus::fixed(FixedFailure::Deadline),
+        Stopped::Cancelled => {
+            ClassifiedStatus::plain(tonic::Status::cancelled("request cancelled"))
+        }
+    }
 }
 
-const STATUS_HEADERS: [http::HeaderName; 3] = [
-    tonic::Status::GRPC_STATUS,
-    tonic::Status::GRPC_MESSAGE,
-    tonic::Status::GRPC_STATUS_DETAILS,
-];
+pub(crate) fn check_open(context: &OperationContext) -> Result<(), ClassifiedStatus> {
+    context.check().map_err(stopped_status)
+}
+
 const MIN_HEADERS_FOR_STATUS_PROJECTION: usize = 32;
 
-fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
-    headers.get(tonic::Status::GRPC_STATUS_DETAILS)?;
-    let status = if headers.len() < MIN_HEADERS_FOR_STATUS_PROJECTION {
-        tonic::Status::from_header_map(headers)
-    } else {
-        let mut fields = HeaderMap::with_capacity(STATUS_HEADERS.len());
-        for name in STATUS_HEADERS {
-            if let Some(value) = headers.get(&name) {
-                fields.insert(name, value.clone());
-            }
+fn status_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut projected = HeaderMap::with_capacity(STATUS_HEADERS.len());
+    for name in STATUS_HEADERS {
+        if let Some(value) = headers.get(&name) {
+            projected.insert(name, value.clone());
         }
-        tonic::Status::from_header_map(&fields)
-    }?;
-    crate::status::catalog_code(&status)
+    }
+    projected
+}
+
+fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
+    if !headers.contains_key(tonic::Status::GRPC_STATUS_DETAILS) {
+        return None;
+    }
+    let projected;
+    let source = if headers.len() < MIN_HEADERS_FOR_STATUS_PROJECTION {
+        headers
+    } else {
+        projected = status_headers(headers);
+        &projected
+    };
+    crate::status::catalog_code(&tonic::Status::from_header_map(source)?)
 }
 
 #[derive(Clone, Copy)]
-struct ServerOutcome {
+pub(crate) struct ServerOutcome {
     code: tonic::Code,
-    failure: Option<service_failure::Code>,
+    catalog_code: Option<service_failure::Code>,
 }
 
 impl ServerOutcome {
     const fn unknown() -> Self {
         Self {
             code: tonic::Code::Unknown,
-            failure: None,
+            catalog_code: None,
+        }
+    }
+
+    pub(crate) const fn fixed(failure: FixedFailure) -> Self {
+        Self {
+            code: failure.grpc_code(),
+            catalog_code: Some(failure.catalog_code()),
         }
     }
 
     fn from_status(status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
-            failure: crate::status::catalog_code(status),
+            catalog_code: crate::status::catalog_code(status),
         }
     }
 
     fn from_headers(headers: &HeaderMap) -> Option<Self> {
+        let code = header_status_code(headers)?;
         Some(Self {
-            code: header_status_code(headers)?,
-            failure: header_catalog_code(headers),
+            code,
+            catalog_code: header_catalog_code(headers),
         })
     }
 
@@ -102,403 +124,181 @@ impl ServerOutcome {
     }
 }
 
-type FramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
-
-struct LocalStatus {
-    status: tonic::Status,
-    failure: Option<service_failure::Code>,
+#[derive(Clone, Copy)]
+enum LocalStatus {
+    Failure(FixedFailure),
+    Drained,
 }
 
 impl LocalStatus {
-    fn failure(failure: FixedFailure) -> Self {
-        Self {
-            status: failure.status(),
-            failure: Some(failure.catalog_code()),
-        }
-    }
-
-    fn drained() -> Self {
-        Self {
-            status: tonic::Status::ok(""),
-            failure: None,
-        }
-    }
-
     fn write_headers(self, headers: &mut HeaderMap) -> ServerOutcome {
-        let _ = self.status.add_header(headers);
-        ServerOutcome {
-            code: self.status.code(),
-            failure: self.failure,
+        match self {
+            Self::Failure(failure) => {
+                failure.write_headers(headers);
+                ServerOutcome::fixed(failure)
+            }
+            Self::Drained => {
+                headers.insert(tonic::Status::GRPC_STATUS, HeaderValue::from_static("0"));
+                ServerOutcome {
+                    code: tonic::Code::Ok,
+                    catalog_code: None,
+                }
+            }
         }
     }
 }
 
-struct ActiveStream<B> {
-    body: B,
-    call: Call,
+struct ServerGuards {
     _permit: Option<OwnedSemaphorePermit>,
     _cancel_on_drop: Option<DropGuard>,
+}
+
+struct ServerHooks {
+    call: Call,
+    permit: Option<OwnedSemaphorePermit>,
+    cancel_on_drop: Option<DropGuard>,
     deadline: Option<Deadline>,
-    fallback: Option<opentelemetry::Context>,
-    waker: Option<Waker>,
+    fallback_context: Option<opentelemetry::Context>,
 }
 
-enum ServerState<B> {
-    Active(ActiveStream<B>),
-    PendingTrailers(HeaderMap),
-    Closed,
-}
+impl<E> StreamHooks<E> for ServerHooks {
+    type Stop = LocalStatus;
+    type Outcome = ServerOutcome;
+    type Guards = ServerGuards;
 
-struct StreamFinalizer<B> {
-    active: ActiveStream<B>,
-    outcome: ServerOutcome,
-}
-
-impl<B> StreamFinalizer<B> {
-    fn emit(self) {
-        if let Some(failure) = self.outcome.failure {
-            self.active.call.record_failure(failure);
-        }
-        self.active.call.finish(self.outcome.code);
-    }
-}
-
-impl<B> ServerState<B> {
-    fn is_expired(&self) -> bool {
-        let Self::Active(active) = self else {
-            return false;
-        };
-        active.deadline.is_some_and(Deadline::expired)
+    fn stopped(&self) -> Option<LocalStatus> {
+        self.deadline
+            .is_some_and(Deadline::expired)
+            .then_some(LocalStatus::Failure(FixedFailure::Deadline))
     }
 
-    fn transition(&mut self, next: Self, outcome: ServerOutcome) -> Option<StreamFinalizer<B>> {
-        match std::mem::replace(self, next) {
-            Self::Active(active) => Some(StreamFinalizer { active, outcome }),
-            other => {
-                *self = other;
-                None
-            }
-        }
+    fn in_scope<R>(&self, poll: impl FnOnce() -> R) -> R {
+        let _entered = self.call.span().enter();
+        let _attached = self
+            .fallback_context
+            .clone()
+            .map(opentelemetry::Context::attach);
+        poll()
     }
 
-    fn stage_status_trailers(&mut self, status: LocalStatus) -> Option<StreamFinalizer<B>> {
-        if !matches!(self, Self::Active(_)) {
-            return None;
-        }
-        let mut trailers = HeaderMap::new();
-        let outcome = status.write_headers(&mut trailers);
-        self.transition(Self::PendingTrailers(trailers), outcome)
-    }
-}
-
-impl<B: Body> ServerState<B> {
-    fn cut_off(
-        &mut self,
-        status: LocalStatus,
-    ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
-        let finalizer = self.stage_status_trailers(status);
-        (self.pop_terminal(), finalizer)
+    fn on_panic(&self) -> PanicOutcome<LocalStatus, ServerOutcome> {
+        PanicOutcome::Stop(LocalStatus::Failure(FixedFailure::Internal))
     }
 
-    fn close_if_terminal(&mut self, polled: &FramePoll<B::Error>) -> Option<StreamFinalizer<B>> {
-        let outcome = match polled {
-            Poll::Ready(Some(Ok(frame))) => {
-                let trailers = frame.trailers_ref()?;
+    fn write_stop(&self, stop: LocalStatus, trailers: &mut HeaderMap) -> ServerOutcome {
+        stop.write_headers(trailers)
+    }
+
+    fn end_outcome(&self, end: StreamEnd<'_, E>) -> ServerOutcome {
+        match end {
+            StreamEnd::Trailers(trailers) => {
                 ServerOutcome::from_headers(trailers).unwrap_or_else(ServerOutcome::unknown)
             }
-            Poll::Ready(Some(Err(_)) | None) => ServerOutcome::unknown(),
-            Poll::Pending => return None,
-        };
-        self.transition(Self::Closed, outcome)
-    }
-
-    fn pop_terminal(&mut self) -> FramePoll<B::Error> {
-        match std::mem::replace(self, Self::Closed) {
-            Self::PendingTrailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
-            stage => {
-                *self = stage;
-                Poll::Ready(None)
-            }
+            StreamEnd::Error(_) | StreamEnd::Empty => ServerOutcome::unknown(),
         }
     }
-}
 
-impl<B> ServerState<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-{
-    fn poll_next(
-        &mut self,
-        cx: &mut Context<'_>,
-        watched: bool,
-    ) -> (FramePoll<B::Error>, Option<StreamFinalizer<B>>) {
-        let Self::Active(active) = self else {
-            return (self.pop_terminal(), None);
-        };
-        if active.deadline.is_some_and(Deadline::expired) {
-            return self.cut_off(LocalStatus::failure(FixedFailure::Deadline));
-        }
-        if watched {
-            register_waker(&mut active.waker, cx.waker());
-        }
-        let inner = {
-            let _entered = active.call.span().enter();
-            let _attached = active.fallback.clone().map(opentelemetry::Context::attach);
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                Pin::new(&mut active.body).poll_frame(cx)
-            }))
-        };
-        match inner {
-            Ok(_) if self.is_expired() => {
-                self.cut_off(LocalStatus::failure(FixedFailure::Deadline))
-            }
-            Ok(polled) => {
-                let finalizer = self.close_if_terminal(&polled);
-                (polled, finalizer)
-            }
-            Err(_panic) => self.cut_off(LocalStatus::failure(FixedFailure::Internal)),
+    fn watcher_lost() -> LocalStatus {
+        LocalStatus::Failure(FixedFailure::Internal)
+    }
+
+    fn emit(self, outcome: ServerOutcome) -> ServerGuards {
+        self.call
+            .finish_with_failure(outcome.code, outcome.catalog_code);
+        ServerGuards {
+            _permit: self.permit,
+            _cancel_on_drop: self.cancel_on_drop,
         }
     }
 }
 
-struct WatchedBody<B> {
-    state: Arc<Mutex<ServerState<B>>>,
-    stop_watcher: Option<AbortOnDropHandle<()>>,
-    #[cfg(test)]
-    stop_watcher_done: Option<tokio::sync::oneshot::Receiver<()>>,
+pub(crate) enum ServerStop {
+    Drain {
+        deadline: Option<Deadline>,
+        drain: CancellationToken,
+    },
+    Deadline(Deadline),
+}
+
+impl ServerStop {
+    const fn deadline(&self) -> Option<Deadline> {
+        match *self {
+            Self::Drain { deadline, .. } => deadline,
+            Self::Deadline(deadline) => Some(deadline),
+        }
+    }
+}
+
+async fn wait_server_stop(stop: ServerStop) -> LocalStatus {
+    match stop {
+        ServerStop::Drain { deadline, drain } => {
+            let context = OperationContext::new(deadline, drain);
+            match context.wait_stopped().await {
+                Stopped::Deadline => LocalStatus::Failure(FixedFailure::Deadline),
+                Stopped::Cancelled => LocalStatus::Drained,
+            }
+        }
+        ServerStop::Deadline(deadline) => {
+            deadline.wait().await;
+            LocalStatus::Failure(FixedFailure::Deadline)
+        }
+    }
 }
 
 pub(crate) fn wrap_response(
-    mut response: axum::response::Response,
+    response: axum::response::Response,
     call: Call,
-    fallback: Option<opentelemetry::Context>,
+    fallback_context: Option<opentelemetry::Context>,
     custody: ServerCustody,
+    known_outcome: Option<ServerOutcome>,
 ) -> axum::response::Response {
-    let initial = if custody.deadline.is_some_and(Deadline::expired) {
-        let status = LocalStatus::failure(FixedFailure::Deadline);
-        for header in STATUS_HEADERS {
-            response.headers_mut().remove(header);
-        }
-        Some(status.write_headers(response.headers_mut()))
-    } else {
-        ServerOutcome::from_response(&response)
+    let (hooks, stop) = custody.into_hooks(call, fallback_context);
+    WatchedBody::attach_response(
+        response,
+        hooks,
+        |_, response| known_outcome.or_else(|| ServerOutcome::from_response(response)),
+        move |_| stop.map(wait_server_stop),
+        axum::body::Body::new,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use http_body::{Body, Frame};
+    use http_body_util::BodyExt as _;
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
     };
-    response.map(|body| ResponseBody::start(body, call, fallback, custody, initial).into_body())
-}
+    use parking_lot::Mutex;
+    use tokio::sync::{Semaphore, oneshot};
 
-enum ResponseBody<B> {
-    Local(ServerState<B>),
-    Watched(WatchedBody<B>),
-}
+    use super::*;
 
-impl<B> ResponseBody<B>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
-    fn start(
+    const BUDGET: Duration = Duration::from_secs(1);
+
+    type ResponseBody<B> = WatchedBody<B, ServerHooks>;
+
+    fn start_response_body<B>(
         body: B,
         call: Call,
         fallback: Option<opentelemetry::Context>,
         custody: ServerCustody,
         initial: Option<ServerOutcome>,
-    ) -> Self {
-        let body_ended = body.is_end_stream();
-        let mut state = ServerState::Active(ActiveStream {
-            body,
-            call,
-            _permit: custody.permit,
-            _cancel_on_drop: custody.cancel_on_drop,
-            deadline: custody.deadline,
-            fallback,
-            waker: None,
-        });
-        let finalizer = if let Some(outcome) = initial {
-            state.transition(ServerState::Closed, outcome)
-        } else if state.is_expired() {
-            state.stage_status_trailers(LocalStatus::failure(FixedFailure::Deadline))
-        } else if body_ended {
-            state.transition(ServerState::Closed, ServerOutcome::unknown())
-        } else {
-            None
-        };
-        if let Some(finalizer) = finalizer {
-            finalizer.emit();
-            return Self::Local(state);
-        }
-        if let Some(drain) = custody.end_on_drain {
-            let context = OperationContext::new(custody.deadline, drain);
-            Self::Watched(WatchedBody::new(state, async move {
-                match context.wait_stopped().await {
-                    Stopped::Deadline => LocalStatus::failure(FixedFailure::Deadline),
-                    Stopped::Cancelled => LocalStatus::drained(),
-                }
-            }))
-        } else if let Some(deadline) = custody.deadline {
-            Self::Watched(WatchedBody::new(state, async move {
-                deadline.wait().await;
-                LocalStatus::failure(FixedFailure::Deadline)
-            }))
-        } else {
-            Self::Local(state)
-        }
-    }
-
-    fn into_body(self) -> axum::body::Body
+    ) -> Option<ResponseBody<B>>
     where
-        B::Error: Into<axum::BoxError>,
+        B: Body<Data = Bytes> + Unpin + Send + 'static,
     {
-        match self {
-            Self::Local(ServerState::Closed) => axum::body::Body::empty(),
-            Self::Local(state) => axum::body::Body::new(state),
-            Self::Watched(body) => axum::body::Body::new(body),
-        }
+        let (hooks, stop) = custody.into_hooks(call, fallback);
+        WatchedBody::start(body, hooks, initial, move |_| stop.map(wait_server_stop))
     }
-}
-
-impl<B> WatchedBody<B>
-where
-    B: Send + 'static,
-{
-    fn new(
-        state: ServerState<B>,
-        stopped: impl Future<Output = LocalStatus> + Send + 'static,
-    ) -> Self {
-        let state = Arc::new(Mutex::new(state));
-        let weak = Arc::downgrade(&state);
-        #[cfg(test)]
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let watcher = tokio::spawn(async move {
-            #[cfg(test)]
-            let _done_tx = done_tx;
-            let result = AssertUnwindSafe(async {
-                let status = stopped.await;
-                if let Some(state) = weak.upgrade() {
-                    terminate_stream(&state, status);
-                }
-            })
-            .catch_unwind()
-            .await;
-            if result.is_err()
-                && let Some(state) = weak.upgrade()
-            {
-                terminate_stream(&state, LocalStatus::failure(FixedFailure::Internal));
-            }
-        });
-        Self {
-            state,
-            stop_watcher: Some(AbortOnDropHandle::new(watcher)),
-            #[cfg(test)]
-            stop_watcher_done: Some(done_rx),
-        }
-    }
-
-    fn poll_stop_watcher(&mut self, cx: &mut Context<'_>) {
-        if let Some(stop_watcher) = &mut self.stop_watcher
-            && let Poll::Ready(joined) = Future::poll(Pin::new(stop_watcher), cx)
-        {
-            self.stop_watcher = None;
-            if joined.is_err() {
-                terminate_stream(&self.state, LocalStatus::failure(FixedFailure::Internal));
-            }
-        }
-    }
-}
-
-fn terminate_stream<B>(state: &Mutex<ServerState<B>>, status: LocalStatus) {
-    let finalizer = state.lock().stage_status_trailers(status);
-    if let Some(mut finalizer) = finalizer {
-        if let Some(waker) = finalizer.active.waker.take() {
-            waker.wake();
-        }
-        finalizer.emit();
-    }
-}
-
-fn register_waker(slot: &mut Option<Waker>, waker: &Waker) {
-    match slot {
-        Some(existing) => existing.clone_from(waker),
-        None => *slot = Some(waker.clone()),
-    }
-}
-
-impl<B> Body for ServerState<B>
-where
-    B: Body<Data = Bytes> + Unpin,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
-        let (polled, finalizer) = self.poll_next(cx, false);
-        if let Some(finalizer) = finalizer {
-            finalizer.emit();
-        }
-        polled
-    }
-
-    fn is_end_stream(&self) -> bool {
-        matches!(self, Self::Closed)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        match self {
-            Self::Active(active) => active.body.size_hint(),
-            Self::PendingTrailers(_) | Self::Closed => SizeHint::with_exact(0),
-        }
-    }
-}
-
-impl<B> Body for WatchedBody<B>
-where
-    B: Body<Data = Bytes> + Unpin + Send + 'static,
-{
-    type Data = Bytes;
-    type Error = B::Error;
-
-    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> FramePoll<B::Error> {
-        let this = self.get_mut();
-        this.poll_stop_watcher(cx);
-        let (polled, finalizer) = this.state.lock().poll_next(cx, true);
-        if let Some(finalizer) = finalizer {
-            this.stop_watcher = None;
-            finalizer.emit();
-        }
-        polled
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.state.lock().is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.state.lock().size_hint()
-    }
-}
-
-impl<B> Drop for WatchedBody<B> {
-    fn drop(&mut self) {
-        let stage = {
-            let mut guard = self.state.lock();
-            std::mem::replace(&mut *guard, ServerState::Closed)
-        };
-        drop(self.stop_watcher.take());
-        drop(stage);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use http_body_util::BodyExt as _;
-    use opentelemetry::trace::{
-        SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId, TraceState,
-    };
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::Duration;
-    use tokio::sync::Semaphore;
-
-    const BUDGET: Duration = Duration::from_secs(1);
 
     #[test]
     fn rich_trailers_use_the_first_status_values_even_with_repeated_metadata() {
@@ -521,7 +321,103 @@ mod tests {
 
         let outcome = ServerOutcome::from_headers(&trailers).unwrap();
         assert_eq!(outcome.code, tonic::Code::DeadlineExceeded);
-        assert_eq!(outcome.failure, Some(service_failure::Code::GatewayTimeout));
+        assert_eq!(
+            outcome.catalog_code,
+            Some(service_failure::Code::GatewayTimeout)
+        );
+
+        let mut malformed = HeaderMap::new();
+        malformed.insert(
+            tonic::Status::GRPC_STATUS,
+            http::HeaderValue::from_static("8"),
+        );
+        malformed.insert(
+            tonic::Status::GRPC_STATUS_DETAILS,
+            http::HeaderValue::from_static("!"),
+        );
+        for _ in 0..64 {
+            malformed.append("custom", http::HeaderValue::from_static("metadata"));
+        }
+        let malformed_outcome = ServerOutcome::from_headers(&malformed).unwrap();
+        assert_eq!(malformed_outcome.code, tonic::Code::ResourceExhausted);
+        assert_eq!(malformed_outcome.catalog_code, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_status_matches_tonic_headers_and_expired_deadline_overrides_known_outcome() {
+        let mut drained = HeaderMap::new();
+        let drained_outcome = LocalStatus::Drained.write_headers(&mut drained);
+        let mut tonic_ok = HeaderMap::new();
+        tonic::Status::ok("").add_header(&mut tonic_ok).unwrap();
+        assert_eq!(drained, tonic_ok);
+        assert_eq!(drained_outcome.code, tonic::Code::Ok);
+        assert_eq!(drained_outcome.catalog_code, None);
+
+        for failure in [FixedFailure::Deadline, FixedFailure::Internal] {
+            let mut local = HeaderMap::new();
+            let outcome = LocalStatus::Failure(failure).write_headers(&mut local);
+            let mut expected = HeaderMap::new();
+            failure.status().add_header(&mut expected).unwrap();
+            assert_eq!(local, expected);
+            assert_eq!(outcome.code, failure.grpc_code());
+            assert_eq!(outcome.catalog_code, Some(failure.catalog_code()));
+        }
+
+        for (failure, grpc_code, failure_code) in [
+            (FixedFailure::Internal, "Internal", "internal_error"),
+            (
+                FixedFailure::Deadline,
+                "DeadlineExceeded",
+                "gateway_timeout",
+            ),
+        ] {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _recorder = metrics::set_default_local_recorder(&recorder);
+            let _ = wrap_response(
+                http::Response::new(axum::body::Body::empty()),
+                server_call(),
+                None,
+                ServerCustody::deadline(None),
+                Some(ServerOutcome::fixed(failure)),
+            );
+            let rendered = handle.render();
+            assert!(
+                rendered.contains(&format!("grpc_code=\"{grpc_code}\"}} 1")),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("failure_code=\"{failure_code}\"}} 1")),
+                "{rendered}"
+            );
+        }
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let response = wrap_response(
+            FixedFailure::Internal.status().into_http(),
+            server_call(),
+            None,
+            ServerCustody::deadline(Some(Deadline::after(Duration::ZERO))),
+            Some(ServerOutcome::fixed(FixedFailure::Internal)),
+        );
+        let status = tonic::Status::from_header_map(response.headers()).unwrap();
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(
+            crate::status::catalog_code(&status),
+            Some(service_failure::Code::GatewayTimeout)
+        );
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("grpc_code=\"DeadlineExceeded\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("failure_code=\"gateway_timeout\"} 1"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("grpc_code=\"Internal\""), "{rendered}");
     }
 
     fn budget_deadline() -> Deadline {
@@ -532,21 +428,30 @@ mod tests {
         frames: VecDeque<Frame<Bytes>>,
         polls: Arc<AtomicUsize>,
         dropped: Arc<AtomicBool>,
+        on_drop: Option<oneshot::Sender<()>>,
     }
 
     impl ProbeBody {
-        fn pending() -> Self {
-            Self {
-                frames: VecDeque::new(),
-                polls: Arc::default(),
-                dropped: Arc::default(),
-            }
+        fn pending() -> (Self, oneshot::Receiver<()>) {
+            let (tx, rx) = oneshot::channel();
+            (
+                Self {
+                    frames: VecDeque::new(),
+                    polls: Arc::default(),
+                    dropped: Arc::default(),
+                    on_drop: Some(tx),
+                },
+                rx,
+            )
         }
     }
 
     impl Drop for ProbeBody {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);
+            if let Some(tx) = self.on_drop.take() {
+                let _ = tx.send(());
+            }
         }
     }
 
@@ -567,19 +472,28 @@ mod tests {
 
     fn server_call() -> Call {
         let path = "/test.Service/Stream";
-        let methods =
-            crate::services::Methods::new([(path.into(), crate::services::CallType::BidiStream)]);
+        let methods = crate::services::Methods::new([(
+            path.into(),
+            crate::services::MethodKind::Registered {
+                call_type: crate::services::CallType::BidiStream,
+                end_on_drain: false,
+            },
+            crate::services::MethodPolicy::None,
+        )]);
         Call::start(methods.resolve(path), path)
     }
 
-    fn start_watched<B>(body: B, custody: ServerCustody) -> WatchedBody<B>
+    fn start_watched<B>(body: B, custody: ServerCustody) -> ResponseBody<B>
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        match ResponseBody::start(body, server_call(), None, custody, None) {
-            ResponseBody::Watched(body) => body,
-            ResponseBody::Local(_) => panic!("expected a response with a stop watcher"),
-        }
+        let body = start_response_body(body, server_call(), None, custody, None)
+            .expect("expected a response with a stop watcher");
+        assert!(
+            body.is_watching(),
+            "expected a response with a stop watcher"
+        );
+        body
     }
 
     #[tokio::test]
@@ -590,14 +504,16 @@ mod tests {
         let frames = futures_util::stream::iter([Err::<Frame<Bytes>, _>(
             tonic::Status::unavailable("body read failed"),
         )]);
-        let mut body = ResponseBody::start(
-            http_body_util::StreamBody::new(frames),
-            server_call(),
-            None,
-            ServerCustody::default(),
-            None,
-        )
-        .into_body();
+        let mut body = axum::body::Body::new(
+            start_response_body(
+                http_body_util::StreamBody::new(frames),
+                server_call(),
+                None,
+                ServerCustody::deadline(None),
+                None,
+            )
+            .unwrap(),
+        );
         let error = body
             .frame()
             .await
@@ -620,7 +536,7 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
         let token = CancellationToken::new();
-        let source = ProbeBody::pending();
+        let (source, dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
         let mut body = start_watched(
@@ -628,13 +544,11 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(token.clone().drop_guard()),
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
-        let stop_watcher = body.stop_watcher.take().unwrap();
         tokio::time::advance(BUDGET).await;
-        tokio::time::timeout(BUDGET, stop_watcher)
+        tokio::time::timeout(BUDGET, dropped_rx)
             .await
             .unwrap()
             .unwrap();
@@ -671,7 +585,7 @@ mod tests {
         let permits = Arc::new(Semaphore::new(1));
         let listener_drain = CancellationToken::new();
         let response_token = listener_drain.child_token();
-        let source = ProbeBody::pending();
+        let (source, dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
         let mut body = start_watched(
@@ -679,13 +593,14 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(response_token.clone().drop_guard()),
-                deadline: None,
-                end_on_drain: Some(response_token),
+                stop: Some(ServerStop::Drain {
+                    deadline: None,
+                    drain: response_token,
+                }),
             },
         );
-        let watcher = body.stop_watcher.take().unwrap();
         listener_drain.cancel();
-        tokio::time::timeout(BUDGET, watcher)
+        tokio::time::timeout(BUDGET, dropped_rx)
             .await
             .unwrap()
             .unwrap();
@@ -709,7 +624,7 @@ mod tests {
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
-        let mut source = ProbeBody::pending();
+        let (mut source, _dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let mut trailers = HeaderMap::new();
         tonic::Status::aborted("peer terminal")
@@ -721,19 +636,16 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
-        let done = body.stop_watcher_done.take().unwrap();
         assert_eq!(
             header_status_code(body.frame().await.unwrap().unwrap().trailers_ref().unwrap()),
             Some(tonic::Code::Aborted)
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(body.stop_watcher.is_none());
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+        assert!(!body.is_watching());
         tokio::time::advance(BUDGET).await;
         assert!(body.frame().await.is_none());
         drop(body);
@@ -750,23 +662,20 @@ mod tests {
     async fn response_drop_cancels_propagated_work_and_aborts_stop_watcher() {
         let cancellation = CancellationToken::new();
         let permits = Arc::new(Semaphore::new(1));
-        let source = ProbeBody::pending();
+        let (source, _dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
-        let mut body = start_watched(
+        let body = start_watched(
             source,
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: Some(cancellation.clone().drop_guard()),
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
-        let done = body.stop_watcher_done.take().unwrap();
         drop(body);
         assert!(cancellation.is_cancelled());
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
     }
 
     struct PanicBody(Arc<AtomicBool>);
@@ -803,11 +712,9 @@ mod tests {
             ServerCustody {
                 permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                 cancel_on_drop: None,
-                deadline: Some(budget_deadline()),
-                end_on_drain: None,
+                stop: Some(ServerStop::Deadline(budget_deadline())),
             },
         );
-        let done = body.stop_watcher_done.take().unwrap();
         let trailers = body
             .frame()
             .await
@@ -824,7 +731,7 @@ mod tests {
         );
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+        assert!(!body.is_watching());
         assert!(body.frame().await.is_none());
         drop(body);
         let rendered = handle.render();
@@ -838,7 +745,7 @@ mod tests {
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let permits = Arc::new(Semaphore::new(1));
-        let source = ProbeBody::pending();
+        let (source, _dropped_rx) = ProbeBody::pending();
         let dropped = Arc::clone(&source.dropped);
         let polls = Arc::clone(&source.polls);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -852,8 +759,7 @@ mod tests {
                 ServerCustody {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
                     cancel_on_drop: None,
-                    deadline: Some(budget_deadline()),
-                    end_on_drain: None,
+                    stop: Some(ServerStop::Deadline(budget_deadline())),
                 },
             )
         };
@@ -885,12 +791,17 @@ mod tests {
         let deadline = stopped_status(Stopped::Deadline);
         assert_eq!(deadline.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
-            crate::status::catalog_code(&deadline),
+            deadline.catalog_code(),
+            Some(service_failure::Code::GatewayTimeout)
+        );
+        assert_eq!(
+            crate::status::catalog_code(deadline.status()),
             Some(service_failure::Code::GatewayTimeout)
         );
         let cancelled = stopped_status(Stopped::Cancelled);
         assert_eq!(cancelled.code(), tonic::Code::Cancelled);
-        assert_eq!(crate::status::catalog_code(&cancelled), None);
+        assert_eq!(cancelled.catalog_code(), None);
+        assert_eq!(crate::status::catalog_code(cancelled.status()), None);
     }
 
     #[tokio::test]
@@ -926,14 +837,16 @@ mod tests {
             server_call,
         );
         assert!(call.span().is_disabled());
-        let mut body = ResponseBody::start(
-            ContextBody(Arc::clone(&seen)),
-            call,
-            Some(fallback),
-            ServerCustody::default(),
-            None,
-        )
-        .into_body();
+        let mut body = axum::body::Body::new(
+            start_response_body(
+                ContextBody(Arc::clone(&seen)),
+                call,
+                Some(fallback),
+                ServerCustody::deadline(None),
+                None,
+            )
+            .unwrap(),
+        );
         let ambient = opentelemetry::Context::current()
             .span()
             .span_context()

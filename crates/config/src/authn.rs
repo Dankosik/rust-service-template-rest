@@ -1,5 +1,6 @@
 // template:begin oidc-introspection:authn-nonzero-import
-use std::{num::NonZeroU32, time::Duration};
+use std::num::{NonZeroU32, NonZeroUsize};
+use std::time::Duration;
 // template:end oidc-introspection:authn-nonzero-import
 
 // template:begin oidc-introspection:authn-secrecy-import
@@ -10,7 +11,6 @@ use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 use serde_with::DeserializeAs;
 
-use crate::de::{StrictEnum, StrictString};
 use crate::validate::{
     Rejected, ValidationError, Violations, missing, required, required_non_blank,
 };
@@ -30,21 +30,10 @@ impl Audiences {
         &self.0
     }
 
-    fn from_values(values: impl IntoIterator<Item = String>) -> Result<Self, &'static str> {
-        let deduplicated: Vec<String> = values
-            .into_iter()
-            .map(|value| {
-                if value.trim().is_empty() {
-                    Err("values must be nonblank")
-                } else {
-                    Ok(value)
-                }
-            })
-            .process_results(|iter| iter.unique().collect())?;
-        if deduplicated.is_empty() {
-            return Err("must be a nonempty string or list of nonblank exact values");
-        }
-        Ok(Self(deduplicated))
+    fn from_values(values: impl IntoIterator<Item = String>) -> Option<Self> {
+        let values: Vec<String> = values.into_iter().unique().collect();
+        (!values.is_empty() && values.iter().all(|value| !value.trim().is_empty()))
+            .then_some(Self(values))
     }
 }
 
@@ -53,12 +42,11 @@ impl<'de> Deserialize<'de> for Audiences {
     where
         D: Deserializer<'de>,
     {
-        #[serde_with::serde_as]
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Input {
-            One(#[serde_as(as = "StrictString")] String),
-            Many(#[serde_as(as = "Vec<StrictString>")] Vec<String>),
+            One(String),
+            Many(Vec<String>),
         }
 
         let input = Input::deserialize(deserializer).map_err(|_| {
@@ -71,20 +59,12 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => Self::from_values([value]),
             Input::Many(values) => Self::from_values(values),
         }
-        .map_err(|_| {
+        .ok_or_else(|| {
             serde::de::Error::invalid_value(
                 Unexpected::Other("an empty or blank audience"),
                 &"a nonempty string or list of nonblank exact values",
             )
         })
-    }
-}
-
-impl TryFrom<Vec<String>> for Audiences {
-    type Error = &'static str;
-
-    fn try_from(values: Vec<String>) -> Result<Self, Self::Error> {
-        Self::from_values(values)
     }
 }
 
@@ -95,7 +75,7 @@ impl<'de> DeserializeAs<'de, Audiences> for AudienceList {
     where
         D: Deserializer<'de>,
     {
-        let raw: String = StrictString::deserialize_as(deserializer)?;
+        let raw = String::deserialize(deserializer)?;
         let invalid = || {
             serde::de::Error::invalid_value(
                 Unexpected::Other("a malformed audience list"),
@@ -103,9 +83,8 @@ impl<'de> DeserializeAs<'de, Audiences> for AudienceList {
             )
         };
         let value = toml::de::ValueDeserializer::parse(&raw).map_err(|_| invalid())?;
-        let values: Vec<String> =
-            Vec::<StrictString>::deserialize_as(value).map_err(|_| invalid())?;
-        Audiences::from_values(values).map_err(|_| invalid())
+        let values: Vec<String> = Vec::deserialize(value).map_err(|_| invalid())?;
+        Audiences::from_values(values).ok_or_else(invalid)
     }
 }
 
@@ -153,66 +132,55 @@ enum AuthnMode {
 #[debug("AuthnInput {{ .. }}")]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct AuthnInput {
-    #[serde_as(as = "StrictEnum")]
     mode: AuthnMode,
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     issuer: Option<String>,
     audience: Option<Audiences>,
-    #[serde(default)]
     #[serde_as(as = "Option<AudienceList>")]
     audiences: Option<Audiences>,
     // template:begin oidc-jwt:authn-config-jwt-variant
     /// Required JWT access-token contract.
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictEnum>")]
     token_profile: Option<TokenProfile>,
     /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
     /// Missing uses `[RS256]`.
-    #[serde(default)]
     #[serde_as(as = "Option<AlgorithmList>")]
     algorithms: Option<Vec<JwtAlgorithm>>,
     /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
     /// metadata.
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     jwks_uri: Option<String>,
     /// Maximum age since the verifier last acquired usable keys.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictDuration>")]
     jwks_max_age: Option<std::time::Duration>,
     // template:end oidc-jwt:authn-config-jwt-variant
     // template:begin oidc-introspection:authn-config-introspection-variant
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     introspection_endpoint: Option<String>,
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     introspection_client_id: Option<String>,
     /// Environment-only client secret. Missing or blank is rejected.
     /// Whitespace determines absence only; a present credential retains
     /// its exact bytes for the provider, including surrounding whitespace.
-    #[serde(default)]
-    #[serde_as(as = "crate::de::BlankSecretAsNone")]
+    #[serde_as(as = "crate::de::BlankAsNoneVerbatim")]
     introspection_client_secret: Option<SecretString>,
     /// Immediate provider-exchange capacity. Missing uses 32.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictCount>")]
     provider_concurrency: Option<NonZeroU32>,
     /// Reuse verified positive results until their fixed expiry. Default off.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictBool>")]
     cache_enabled: Option<bool>,
     /// Maximum retained results, from 1 through 1024. Missing uses 256.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictCount>")]
     cache_capacity: Option<usize>,
     /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
-    #[serde(default)]
     #[serde_as(as = "Option<crate::de::StrictDuration>")]
     cache_ttl: Option<Duration>,
     // template:end oidc-introspection:authn-config-introspection-variant
 }
+
+// template:begin oidc-introspection:authn-introspection-cache-config
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntrospectionCacheConfig {
+    pub capacity: NonZeroUsize,
+    pub ttl: Duration,
+}
+// template:end oidc-introspection:authn-introspection-cache-config
 
 #[derive(Clone, Default)]
 pub enum AuthnConfig {
@@ -235,10 +203,8 @@ pub enum AuthnConfig {
         introspection_endpoint: String,
         introspection_client_id: String,
         introspection_client_secret: SecretString,
-        provider_concurrency: NonZeroU32,
-        cache_enabled: bool,
-        cache_capacity: usize,
-        cache_ttl: Duration,
+        provider_concurrency: NonZeroUsize,
+        cache: Option<IntrospectionCacheConfig>,
     },
     // template:end oidc-introspection:authn-admitted-introspection-variant
 }
@@ -283,12 +249,11 @@ impl<'de> DeserializeAs<'de, Vec<JwtAlgorithm>> for AlgorithmList {
 
         const EXPECTED: &str = "a list of supported JWT algorithms or a comma-separated string";
 
-        #[serde_with::serde_as]
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Input {
-            List(#[serde_as(as = "Vec<StrictEnum>")] Vec<JwtAlgorithm>),
-            Text(#[serde_as(as = "StrictString")] String),
+            List(Vec<JwtAlgorithm>),
+            Text(String),
         }
 
         let input = Input::deserialize(deserializer).map_err(|_| {
@@ -315,10 +280,7 @@ impl<'de> DeserializeAs<'de, Vec<JwtAlgorithm>> for AlgorithmList {
 // template:end oidc-jwt:authn-default-algorithms
 
 // template:begin oidc-introspection:authn-default-provider-concurrency
-fn default_provider_concurrency() -> NonZeroU32 {
-    const { NonZeroU32::new(32).expect("32 is nonzero") }
-}
-
+const DEFAULT_PROVIDER_CONCURRENCY: NonZeroU32 = NonZeroU32::MIN.saturating_add(31);
 const DEFAULT_CACHE_CAPACITY: usize = 256;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
 // template:end oidc-introspection:authn-default-provider-concurrency
@@ -450,8 +412,6 @@ impl AuthnInput {
 
     // template:begin oidc-introspection:authn-admit-introspection
     fn admit_introspection(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
-        use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
-
         self.reject_jwt_fields(v);
         let condition = "authn.mode = oidc-introspection";
         let issuer = v.record(required_non_blank("authn.issuer", self.issuer, condition));
@@ -471,33 +431,55 @@ impl AuthnInput {
             self.introspection_client_secret,
             condition,
         ));
-        let provider_concurrency = self
-            .provider_concurrency
-            .unwrap_or_else(default_provider_concurrency);
-        let cache_enabled = self.cache_enabled.unwrap_or(false);
-        let cache_capacity = self.cache_capacity.unwrap_or(DEFAULT_CACHE_CAPACITY);
-        let cache_ttl = self.cache_ttl.unwrap_or(DEFAULT_CACHE_TTL);
-        v.check(crate::validate::int_range(
-            "authn.cache_capacity",
-            cache_capacity,
-            CACHE_CAPACITY,
-        ));
-        v.check(crate::validate::duration_range(
-            "authn.cache_ttl",
-            cache_ttl,
-            CACHE_TTL,
-        ));
+        let provider_concurrency = v.record(
+            NonZeroUsize::try_from(
+                self.provider_concurrency
+                    .unwrap_or(DEFAULT_PROVIDER_CONCURRENCY),
+            )
+            .map_err(|_| {
+                ValidationError::new("authn.provider_concurrency", "cannot fit this platform")
+            }),
+        );
+        let cache = Self::admit_introspection_cache(
+            self.cache_enabled,
+            self.cache_capacity,
+            self.cache_ttl,
+            v,
+        );
         Ok(AuthnConfig::OidcIntrospection {
             issuer: issuer?,
             audience: audience?,
             introspection_endpoint: introspection_endpoint?,
             introspection_client_id: introspection_client_id?,
             introspection_client_secret: secret?,
-            provider_concurrency,
-            cache_enabled,
-            cache_capacity,
-            cache_ttl,
+            provider_concurrency: provider_concurrency?,
+            cache: cache?,
         })
+    }
+
+    fn admit_introspection_cache(
+        enabled: Option<bool>,
+        capacity: Option<usize>,
+        ttl: Option<Duration>,
+        v: &mut Violations,
+    ) -> Result<Option<IntrospectionCacheConfig>, Rejected> {
+        use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
+
+        let ttl = ttl.unwrap_or(DEFAULT_CACHE_TTL);
+        let capacity = v.record(crate::validate::nonzero_usize_range(
+            "authn.cache_capacity",
+            capacity.unwrap_or(DEFAULT_CACHE_CAPACITY),
+            CACHE_CAPACITY,
+        ));
+        v.check(crate::validate::duration_range(
+            "authn.cache_ttl",
+            ttl,
+            CACHE_TTL,
+        ));
+        let capacity = capacity?;
+        Ok(enabled
+            .unwrap_or(false)
+            .then_some(IntrospectionCacheConfig { capacity, ttl }))
     }
     // template:end oidc-introspection:authn-admit-introspection
 

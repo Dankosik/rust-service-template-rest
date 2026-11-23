@@ -3,49 +3,78 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata};
 
-use crate::metrics::static_counter_key;
-
-macro_rules! sdk_events {
-    ($($variant:ident => ($name:literal, $label:literal)),+ $(,)?) => {
-        #[derive(Clone, Copy, Enum)]
-        enum SdkEvent { $($variant),+ }
-
-        impl SdkEvent {
-            fn from_name(name: &str) -> Option<Self> {
-                match name {
-                    $($name => Some(Self::$variant),)+
-                    _ => None,
-                }
-            }
-
-            fn metric_key(self) -> &'static metrics::Key {
-                match self {
-                    $(Self::$variant => static_counter_key!(DIAGNOSTICS_METRIC, "event" => $label)),+
-                }
-            }
-        }
-    };
+#[derive(Clone, Copy, Enum)]
+enum SdkEvent {
+    SpanDroppingStarted,
+    SpansDropped,
+    PartialSuccess,
+    ResponseParseError,
+    StatusError,
+    NetworkError,
+    ResponseBodyTooLarge,
+    ExportError,
 }
 
-sdk_events! {
-    SpanDroppingStarted => ("BatchSpanProcessor.SpanDroppingStarted", "queue_dropping_started"),
-    SpansDropped => ("BatchSpanProcessor.SpansDropped", "queue_spans_dropped"),
-    PartialSuccess => ("HttpTraceClient.PartialSuccess", "partial_success"),
-    ResponseParseError => ("HttpTraceClient.ResponseParseError", "response_parse_error"),
-    StatusError => ("HttpClient.StatusError", "http_status_error"),
-    NetworkError => ("HttpClient.NetworkError", "network_error"),
-    ResponseBodyTooLarge => ("HttpClient.ResponseBodyTooLarge", "response_body_too_large"),
-    ExportError => ("BatchSpanProcessor.ExportError", "export_error"),
+impl SdkEvent {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "BatchSpanProcessor.SpanDroppingStarted" => Some(Self::SpanDroppingStarted),
+            "BatchSpanProcessor.SpansDropped" => Some(Self::SpansDropped),
+            "HttpTraceClient.PartialSuccess" => Some(Self::PartialSuccess),
+            "HttpTraceClient.ResponseParseError" => Some(Self::ResponseParseError),
+            "HttpClient.StatusError" => Some(Self::StatusError),
+            "HttpClient.NetworkError" => Some(Self::NetworkError),
+            "HttpClient.ResponseBodyTooLarge" => Some(Self::ResponseBodyTooLarge),
+            "BatchSpanProcessor.ExportError" => Some(Self::ExportError),
+            _ => None,
+        }
+    }
+
+    fn metric_key(self) -> &'static metrics::Key {
+        match self {
+            Self::SpanDroppingStarted => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "queue_dropping_started")
+            ),
+            Self::SpansDropped => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "queue_spans_dropped")
+            ),
+            Self::PartialSuccess => {
+                crate::metrics::static_metric_key!(DIAGNOSTICS_METRIC, ("event", "partial_success"))
+            }
+            Self::ResponseParseError => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "response_parse_error")
+            ),
+            Self::StatusError => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "http_status_error")
+            ),
+            Self::NetworkError => {
+                crate::metrics::static_metric_key!(DIAGNOSTICS_METRIC, ("event", "network_error"))
+            }
+            Self::ResponseBodyTooLarge => crate::metrics::static_metric_key!(
+                DIAGNOSTICS_METRIC,
+                ("event", "response_body_too_large")
+            ),
+            Self::ExportError => {
+                crate::metrics::static_metric_key!(DIAGNOSTICS_METRIC, ("event", "export_error"))
+            }
+        }
+    }
 }
 
 const DIAGNOSTICS_METRIC: &str = "telemetry_sdk_diagnostics_total";
 const QUEUE_DROPPED_METRIC: &str = "telemetry_sdk_queue_dropped_spans";
 const REJECTED_METRIC: &str = "telemetry_sdk_reported_rejected_spans_total";
+static METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
 static COUNTS: EnumMap<SdkEvent, AtomicU64> =
     EnumMap::from_array([const { AtomicU64::new(0) }; enum_len::<SdkEvent>()]);
-static DROPPED: Observed = Observed::new();
-static REJECTED: Observed = Observed::new();
+static DROPPED_SPANS: Observed = Observed::new();
+static REJECTED_SPANS: Observed = Observed::new();
 
 struct Observed {
     value: AtomicU64,
@@ -77,7 +106,7 @@ impl Observed {
     }
 }
 
-pub(super) fn is_denied_target(target: &str) -> bool {
+pub(super) fn is_dependency_target(target: &str) -> bool {
     [
         "opentelemetry",
         "opentelemetry_sdk",
@@ -97,6 +126,9 @@ pub(super) fn is_denied_target(target: &str) -> bool {
         "rustls",
         "rustls_platform_verifier",
         "rustls-platform-verifier",
+        // template:begin clickhouse:telemetry-denied-clickhouse
+        "clickhouse",
+        // template:end clickhouse:telemetry-denied-clickhouse
     ]
     .iter()
     .any(|family| super::is_within_target(target, family))
@@ -145,12 +177,12 @@ pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
     match sdk_event {
         SdkEvent::SpansDropped => {
             if let Some(count) = numeric_field(event, "dropped_span_count") {
-                DROPPED.set(count);
+                DROPPED_SPANS.set(count);
             }
         }
         SdkEvent::PartialSuccess => {
             if let Some(count) = numeric_field(event, "rejected_spans") {
-                REJECTED.add(count);
+                REJECTED_SPANS.add(count);
             }
         }
         SdkEvent::SpanDroppingStarted
@@ -178,14 +210,11 @@ pub(super) fn describe_metrics() {
 }
 
 pub(super) fn publish() {
-    static METADATA: metrics::Metadata<'static> =
-        metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
     for (event, count) in &COUNTS {
-        metrics::with_recorder(|recorder| recorder.register_counter(event.metric_key(), &METADATA))
+        crate::metrics::static_counter(event.metric_key(), &METRIC_METADATA)
             .absolute(count.load(Ordering::Relaxed));
     }
-    if let Some(count) = DROPPED.get() {
+    if let Some(count) = DROPPED_SPANS.get() {
         #[expect(
             clippy::cast_precision_loss,
             reason = "Prometheus gauges use f64; the observation retains its exact u64 in the atomic"
@@ -193,7 +222,7 @@ pub(super) fn publish() {
         let count = count as f64;
         metrics::gauge!(QUEUE_DROPPED_METRIC).set(count);
     }
-    if let Some(count) = REJECTED.get() {
+    if let Some(count) = REJECTED_SPANS.get() {
         metrics::counter!(REJECTED_METRIC).absolute(count);
     }
 }

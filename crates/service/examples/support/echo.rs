@@ -2,10 +2,9 @@ use futures_util::{StreamExt as _, stream::BoxStream};
 use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
     ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
-    echo_service_server::{EchoService, EchoServiceServer, SERVICE_NAME},
+    echo_service_server::{EchoService, EchoServiceServer},
 };
-use infra_grpc::{Failure, ResponseContext, Services};
-use service_failure::Code;
+use infra_grpc::{Code, Failure, RequestExt as _, ServiceRegistration, Services};
 use tonic::{Request, Response, Status};
 
 const MAX_MESSAGE_BYTES: usize = 1024;
@@ -18,16 +17,18 @@ struct Echo;
 
 pub(super) fn register(
     services: &mut Services,
-    mut apply_caller_rule: impl FnMut(&mut Services, &str) -> Result<(), infra_grpc::Error>,
+    mut apply_caller_rule: impl FnMut(
+        &mut ServiceRegistration<'_>,
+        &str,
+    ) -> Result<(), infra_grpc::Error>,
 ) -> Result<(), infra_grpc::Error> {
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-    services.add(EchoServiceServer::new(Echo))?;
+    let mut echo = services.add(EchoServiceServer::new(Echo))?;
     for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-        let path = format!("/{SERVICE_NAME}/{method}");
         // template:begin grpc-authn:grpc-example-scope-requirements
-        services.require_scopes(&path, &[])?;
+        echo.require_scopes(method, &[])?;
         // template:end grpc-authn:grpc-example-scope-requirements
-        apply_caller_rule(services, &path)?;
+        apply_caller_rule(&mut echo, method)?;
     }
     Ok(())
 }
@@ -76,7 +77,7 @@ impl EchoService for Echo {
         &self,
         request: Request<tonic::Streaming<BidiStreamRequest>>,
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
-        let context = ResponseContext::require_from_request(&request)?.clone();
+        let context = request.response_context()?.clone();
         let responses = request
             .into_inner()
             .map(|item| {

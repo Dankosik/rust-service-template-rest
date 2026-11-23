@@ -2,7 +2,7 @@ use shared_rules::rfc9110::is_tchar;
 
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentType(String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -10,11 +10,10 @@ pub struct ContentType(String);
 pub struct InvalidContentType;
 
 impl ContentType {
-    pub fn try_new(value: impl Into<String>) -> Result<Self, InvalidContentType> {
-        let value = value.into();
-        let valid = value.len() <= MAX_CONTENT_TYPE_BYTES && media_type(value.as_bytes()).is_some();
-        if valid {
-            Ok(Self(value))
+    pub fn try_new(value: impl AsRef<str> + Into<String>) -> Result<Self, InvalidContentType> {
+        let bytes = value.as_ref().as_bytes();
+        if bytes.len() <= MAX_CONTENT_TYPE_BYTES && validate_media_type(bytes).is_some() {
+            Ok(Self(value.into()))
         } else {
             Err(InvalidContentType)
         }
@@ -30,8 +29,50 @@ impl ContentType {
     }
 }
 
+impl AsRef<str> for ContentType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for ContentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::borrow::Borrow<str> for ContentType {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::str::FromStr for ContentType {
+    type Err = InvalidContentType;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_new(value)
+    }
+}
+
+impl TryFrom<String> for ContentType {
+    type Error = InvalidContentType;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl TryFrom<&str> for ContentType {
+    type Error = InvalidContentType;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
 // RFC 9110 §§5.5, 5.6.5–5.6.6 and 8.3.1
-fn media_type(value: &[u8]) -> Option<()> {
+fn validate_media_type(value: &[u8]) -> Option<()> {
     if matches!(value.last(), Some(b' ' | b'\t')) {
         return None;
     }
@@ -94,7 +135,12 @@ mod tests {
             "Text/Plain\t; title=\"a;\\\"b\\\\c\t\" ; empty=\"\";\t;",
             &maximum,
         ] {
-            assert_eq!(ContentType::try_new(value).unwrap().as_str(), value);
+            let parsed: ContentType = value.parse().unwrap();
+            assert_eq!(parsed.as_str(), value);
+            assert_eq!(parsed.as_ref(), value);
+            assert_eq!(parsed.to_string(), value);
+            assert_eq!(ContentType::try_from(value).unwrap(), parsed);
+            assert_eq!(ContentType::try_from(value.to_owned()).unwrap(), parsed);
         }
         for value in [
             "",

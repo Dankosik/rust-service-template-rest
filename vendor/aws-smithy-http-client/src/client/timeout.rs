@@ -17,6 +17,7 @@ use aws_smithy_async::future::timeout::{TimedOutError, Timeout};
 use aws_smithy_async::rt::sleep::Sleep;
 use aws_smithy_async::rt::sleep::{AsyncSleep, SharedAsyncSleep};
 use aws_smithy_runtime_api::box_error::BoxError;
+use hyper_util::client::legacy::connect::HttpConnector;
 
 #[derive(Debug)]
 pub(crate) struct HttpTimeoutError {
@@ -51,6 +52,7 @@ impl Error for HttpTimeoutError {
 pub(crate) struct ConnectTimeout<I> {
     inner: I,
     timeout: Option<(SharedAsyncSleep, Duration)>,
+    scope_tcp_timeout: bool,
 }
 
 impl<I> ConnectTimeout<I> {
@@ -61,6 +63,7 @@ impl<I> ConnectTimeout<I> {
         Self {
             inner,
             timeout: Some((sleep, timeout)),
+            scope_tcp_timeout: false,
         }
     }
 
@@ -68,7 +71,13 @@ impl<I> ConnectTimeout<I> {
         Self {
             inner,
             timeout: None,
+            scope_tcp_timeout: false,
         }
+    }
+
+    pub(crate) fn set_request_timeout(&mut self, sleep: SharedAsyncSleep, duration: Duration) {
+        self.timeout = Some((sleep, duration));
+        self.scope_tcp_timeout = true;
     }
 }
 
@@ -79,6 +88,9 @@ pub(crate) struct HttpReadTimeout<I> {
 }
 
 impl<I> HttpReadTimeout<I> {
+    pub(crate) fn inner_mut(&mut self) -> &mut I {
+        &mut self.inner
+    }
     /// Create a new `HttpReadTimeout` around `inner`.
     ///
     /// Typically, `I` will implement [`tower::Service<http::Request<SdkBody>>`].
@@ -145,6 +157,28 @@ where
     }
 }
 
+pin_project! {
+    pub(crate) struct ScopedTcpConnect<F> {
+        #[pin]
+        inner: F,
+        timeout: Option<Duration>,
+    }
+}
+
+impl<F: Future> Future for ScopedTcpConnect<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        match *this.timeout {
+            Some(timeout) => {
+                HttpConnector::with_scoped_connect_timeout(timeout, || this.inner.poll(cx))
+            }
+            None => this.inner.poll(cx),
+        }
+    }
+}
+
 impl<I> tower::Service<Uri> for ConnectTimeout<I>
 where
     I: tower::Service<Uri>,
@@ -152,7 +186,7 @@ where
 {
     type Response = I::Response;
     type Error = BoxError;
-    type Future = MaybeTimeoutFuture<I::Future>;
+    type Future = MaybeTimeoutFuture<ScopedTcpConnect<I::Future>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx).map_err(|err| err.into())
@@ -162,14 +196,30 @@ where
         match &self.timeout {
             Some((sleep, duration)) => {
                 let sleep = sleep.sleep(*duration);
+                let tcp_timeout = self.scope_tcp_timeout.then_some(*duration);
+                let inner = match tcp_timeout {
+                    Some(timeout) => {
+                        HttpConnector::with_scoped_connect_timeout(timeout, || self.inner.call(req))
+                    }
+                    None => self.inner.call(req),
+                };
                 MaybeTimeoutFuture::Timeout {
-                    timeout: Timeout::new(self.inner.call(req), sleep),
+                    timeout: Timeout::new(
+                        ScopedTcpConnect {
+                            inner,
+                            timeout: tcp_timeout,
+                        },
+                        sleep,
+                    ),
                     error_type: "HTTP connect",
                     duration: *duration,
                 }
             }
             None => MaybeTimeoutFuture::NoTimeout {
-                future: self.inner.call(req),
+                future: ScopedTcpConnect {
+                    inner: self.inner.call(req),
+                    timeout: None,
+                },
             },
         }
     }

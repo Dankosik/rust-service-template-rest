@@ -2,6 +2,7 @@ use std::{fmt::Write as _, net::SocketAddr, sync::Arc, task::Context, time::Dura
 
 use bytes::Bytes;
 use http::{Request, Version, header};
+use operation_context::{Deadline, OperationContext};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
@@ -11,7 +12,7 @@ use tokio::{
 
 use tls_test_support::TlsMaterial;
 
-use crate::{Error, Limits, MAX_RESPONSE_HEADER_COUNT, test_support::*};
+use crate::{DispatchError, Error, ExchangeError, MAX_RESPONSE_HEADER_COUNT, test_support::*};
 
 #[tokio::test]
 async fn standard_request_returns_standard_response_with_full_body() {
@@ -22,7 +23,7 @@ async fn standard_request_returns_standard_response_with_full_body() {
     )
     .await;
     let response = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("trusted TLS response");
     assert_eq!(response.status(), http::StatusCode::CREATED);
@@ -40,9 +41,9 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
     let untrusted = TlsMaterial::new(FIXTURE_HOST);
     std::assert_matches!(
         fixture_client(address, &untrusted)
-            .execute(request(), deadline())
+            .execute(&default_context(), request())
             .await,
-        Err(Error::Transport { .. })
+        Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
     server.await.expect("untrusted fixture server succeeds");
 
@@ -53,11 +54,11 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
     std::assert_matches!(
         client
             .execute(
+                &default_context(),
                 request_to("https://different.fixture.test/fixture"),
-                deadline()
             )
             .await,
-        Err(Error::Transport { .. })
+        Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
     server.await.expect("hostname fixture server succeeds");
 }
@@ -65,8 +66,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
 #[tokio::test]
 async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut ceiling = limits();
-    ceiling.response_body_bytes = 2;
+    let ceiling = limits().with_response_body_bytes(2).expect("valid limit");
     let cases = [
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
@@ -90,7 +90,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
     for (wire, succeeds) in cases {
         let (address, server) = tls_server(&material, wire).await;
         let result = fixture_client_with_limits(address, &material, ceiling)
-            .execute_buffered(request(), &operation_context::OperationContext::unbounded())
+            .execute(&OperationContext::unbounded(), request())
             .await;
         if succeeds {
             assert_eq!(
@@ -99,9 +99,11 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
             );
         } else {
             let error = result.expect_err("response exceeds the ceiling after headers");
+            assert_eq!(error.status(), Some(http::StatusCode::OK));
+            std::assert_matches!(error.error(), Error::ResponseBodyTooLarge);
             std::assert_matches!(
                 error,
-                crate::ExchangeError::AfterResponse {
+                ExchangeError::AfterResponse {
                     status: http::StatusCode::OK,
                     source: Error::ResponseBodyTooLarge,
                 }
@@ -124,12 +126,9 @@ async fn fragmented_body_preserves_bytes_and_discards_trailers() {
     let response = fixture_client_with_limits(
         address,
         &material,
-        Limits {
-            response_body_bytes: 26,
-            ..limits()
-        },
+        limits().with_response_body_bytes(26).expect("valid limit"),
     )
-    .execute(request(), deadline())
+    .execute(&default_context(), request())
     .await
     .expect("fragmented exact-ceiling response reaches EOF");
     assert_eq!(response.body().as_ref(), b"abcdefghijklmnopqrstuvwxyz");
@@ -140,20 +139,21 @@ async fn fragmented_body_preserves_bytes_and_discards_trailers() {
 #[tokio::test]
 async fn parser_header_count_overflow_is_a_transport_error() {
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut parser_limit = limits();
-    parser_limit.response_header_count = 1;
+    let parser_limit = limits().with_response_header_count(1).expect("valid limit");
     let (address, server) = tls_server(
         &material,
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
     )
     .await;
     let error = fixture_client_with_limits(address, &material, parser_limit)
-        .execute_buffered(request(), &operation_context::OperationContext::unbounded())
+        .execute(&OperationContext::unbounded(), request())
         .await
         .expect_err("header overflow precedes an admitted response");
+    assert_eq!(error.status(), None);
+    std::assert_matches!(error.error(), Error::Transport { .. });
     std::assert_matches!(
         error,
-        crate::ExchangeError::BeforeResponse(Error::Transport { .. })
+        ExchangeError::BeforeResponse(Error::Transport { .. })
     );
     server.await.expect("parser header fixture joins");
 }
@@ -161,8 +161,9 @@ async fn parser_header_count_overflow_is_a_transport_error() {
 #[tokio::test]
 async fn largest_header_count_limit_admits_that_many_response_headers() {
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut largest = limits();
-    largest.response_header_count = MAX_RESPONSE_HEADER_COUNT;
+    let largest = limits()
+        .with_response_header_count(MAX_RESPONSE_HEADER_COUNT)
+        .expect("valid limit");
     let mut head = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n".to_vec();
     for index in 1..MAX_RESPONSE_HEADER_COUNT {
         head.extend_from_slice(format!("h{index}:\r\n").as_bytes());
@@ -170,7 +171,7 @@ async fn largest_header_count_limit_admits_that_many_response_headers() {
     head.extend_from_slice(b"\r\n");
     let (address, server) = tls_server(&material, head.leak()).await;
     let response = fixture_client_with_limits(address, &material, largest)
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("response at the header ceiling");
     assert_eq!(response.headers().len(), MAX_RESPONSE_HEADER_COUNT);
@@ -202,7 +203,7 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
             .expect("head fixture completes within its budget")
         });
         let result = fixture_client(address, &material)
-            .execute(request(), deadline())
+            .execute(&default_context(), request())
             .await;
         let written = server.await.expect("head fixture joins");
         if admitted {
@@ -212,7 +213,7 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
         } else {
             std::assert_matches!(
                 result,
-                Err(Error::Transport { ref source }) if source.source()
+                Err(ExchangeError::BeforeResponse(Error::Transport { ref source })) if source.source()
                     .and_then(|cause| cause.downcast_ref::<hyper::Error>())
                     .is_some_and(hyper::Error::is_parse),
                 "expected the HTTP parser to reject the oversized head, write: {written:?}"
@@ -229,8 +230,7 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     }
 
     let material = TlsMaterial::new(FIXTURE_HOST);
-    let mut ceiling = limits();
-    ceiling.response_body_bytes = 2;
+    let ceiling = limits().with_response_body_bytes(2).expect("valid limit");
     let cases = [
         (
             b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nno!".as_slice(),
@@ -257,10 +257,11 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
     ];
     for (wire, name, expected) in cases {
         let (address, server) = tls_server(&material, wire).await;
-        let error = fixture_client_with_limits(address, &material, ceiling)
-            .execute(request(), deadline())
+        let error: Error = fixture_client_with_limits(address, &material, ceiling)
+            .execute(&default_context(), request())
             .await
-            .expect_err(name);
+            .expect_err(name)
+            .into();
         match expected {
             Expected::BodyTooLarge => std::assert_matches!(error, Error::ResponseBodyTooLarge),
             Expected::Transport => {
@@ -282,9 +283,14 @@ async fn expired_deadline_refuses_before_network_work() {
         .expect("no-connect listener");
     let client = fixture_client(listener.local_addr().expect("listener address"), &material);
     let expired = client
-        .execute(request(), Instant::now() - Duration::from_millis(1))
+        .execute(
+            &OperationContext::from_deadline(Deadline::at(
+                Instant::now() - Duration::from_millis(1),
+            )),
+            request(),
+        )
         .await;
-    std::assert_matches!(expired, Err(Error::Timeout));
+    std::assert_matches!(expired, Err(ExchangeError::BeforeResponse(Error::Timeout)));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
             .await
@@ -293,8 +299,14 @@ async fn expired_deadline_refuses_before_network_work() {
 }
 
 #[tokio::test]
-async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
-    use operation_context::OperationContext;
+async fn stopped_request_context_refuses_all_entry_points_before_dispatch() {
+    fn refused<T>(expired: bool, result: &Result<T, Error>) -> bool {
+        if expired {
+            matches!(result, Err(Error::Timeout))
+        } else {
+            matches!(result, Err(Error::Cancelled))
+        }
+    }
 
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -308,26 +320,18 @@ async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
         if !expired {
             context.cancel();
         }
-        let refused = |result: Result<_, Error>| {
-            if expired {
-                matches!(result, Err(Error::Timeout))
-            } else {
-                matches!(result, Err(Error::Cancelled))
-            }
-        };
-        let mut supplied = request();
-        supplied.extensions_mut().insert(context.clone());
-        assert!(refused(client.execute(supplied, deadline()).await));
-        let mut supplied = request();
-        supplied.extensions_mut().insert(context.clone());
         assert!(refused(
-            client
-                .execute_with_context(supplied, &OperationContext::unbounded())
+            expired,
+            &client
+                .execute(&context, request())
                 .await
+                .map_err(Error::from)
         ));
         assert!(refused(
-            client.execute_with_context(request(), &context).await
+            expired,
+            &client.execute_for_headers(&context, request()).await
         ));
+        assert!(refused(expired, &client.prepare(&context, request())));
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
@@ -338,39 +342,33 @@ async fn stopped_request_context_refuses_both_entry_points_before_dispatch() {
 
 #[tokio::test]
 async fn nested_request_stops_for_each_inherited_or_local_cancellation() {
-    use operation_context::OperationContext;
-
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = fixture_client(listener.local_addr().unwrap(), &material);
-    for cancelled in 0..3 {
-        let scopes = [(); 3].map(|()| OperationContext::unbounded());
-        let mut outer = request();
-        outer.extensions_mut().insert(scopes[1].clone());
-        let parent = client.prepare(outer, &scopes[0]).unwrap();
-        let mut inner = request();
-        inner.extensions_mut().insert(scopes[2].clone());
-        let exchange = client.execute_buffered(inner, parent.context().clone());
+    for cancel_parent in [false, true] {
+        let parent = OperationContext::unbounded();
+        let prepared = client.prepare(&parent, request()).unwrap();
+        let child = prepared.context().clone();
+        let exchange = client.execute(&child, request());
         let (result, _connection) = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(exchange, async {
                 let (connection, _) = listener.accept().await.unwrap();
-                scopes[cancelled].cancel();
+                if cancel_parent {
+                    parent.cancel();
+                } else {
+                    child.cancel();
+                }
                 connection
             })
         })
         .await
         .expect("a cancelled exchange must finish during the TLS handshake");
-        std::assert_matches!(
-            result,
-            Err(crate::ExchangeError::BeforeResponse(Error::Cancelled))
-        );
+        std::assert_matches!(result, Err(ExchangeError::BeforeResponse(Error::Cancelled)));
     }
 }
 
 #[tokio::test]
 async fn context_cancellation_ends_an_incomplete_buffered_body() {
-    use operation_context::OperationContext;
-
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let address = listener.local_addr().expect("address");
@@ -394,7 +392,7 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     });
     let client = fixture_client(address, &material);
     let context = OperationContext::with_timeout(Duration::from_secs(2));
-    let exchange = client.execute_with_context(request(), &context);
+    let exchange = client.execute(&context, request());
     tokio::pin!(exchange);
     tokio::select! {
         result = &mut exchange => panic!("incomplete body completed: {result:?}"),
@@ -404,7 +402,8 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     std::assert_matches!(
         tokio::time::timeout(Duration::from_millis(200), exchange)
             .await
-            .expect("cancellation must end waiting before the local ceiling"),
+            .expect("cancellation must end waiting before the local ceiling")
+            .map_err(Error::from),
         Err(Error::Cancelled)
     );
     server.abort();
@@ -438,17 +437,23 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     for (operation, parent) in [(1, 2), (2, 1), (u64::MAX, 1)] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut ceiling = limits();
-        ceiling.operation_timeout = Duration::from_secs(operation);
+        let ceiling = limits()
+            .with_operation_timeout(Duration::from_secs(operation))
+            .expect("valid limit");
         let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
         let subscriber =
             tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
         let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let parent_context = OperationContext::with_timeout(Duration::from_secs(parent));
         let result = client
-            .execute(request(), Instant::now() + Duration::from_secs(parent))
+            .execute(&parent_context, request())
             .with_subscriber(subscriber)
             .await;
-        std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
+        std::assert_matches!(
+            result,
+            Err(ExchangeError::BeforeResponse(Error::Timeout)),
+            "{result:?}"
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), listener.accept())
                 .await
@@ -460,33 +465,57 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
 
 #[tokio::test(start_paused = true)]
 async fn dispatch_can_be_refused_after_request_setup() {
-    use operation_context::OperationContext;
     use tracing::instrument::WithSubscriber as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
+    #[derive(Debug, Eq, PartialEq, thiserror::Error)]
+    #[error("credential expired before dispatch")]
+    struct Refused;
+
+    let recorder = observation_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut ceiling = limits();
-    ceiling.operation_timeout = Duration::from_secs(5);
+    let ceiling = limits()
+        .with_operation_timeout(Duration::from_secs(5))
+        .expect("valid limit");
     let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
     let subscriber =
         tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let credential_expiry = Instant::now() + Duration::from_secs(1);
     let context = OperationContext::with_timeout(Duration::from_secs(5));
     let mut observed_status = None;
 
     let result = client
-        .prepare(request(), &context)
+        .prepare(&context, request())
         .unwrap()
-        .send(
-            || Instant::now() < credential_expiry,
+        .send_checked(
+            || {
+                if Instant::now() < credential_expiry {
+                    Ok(())
+                } else {
+                    Err(Refused)
+                }
+            },
             |status| observed_status = Some(status),
         )
         .with_subscriber(subscriber)
         .await;
 
-    std::assert_matches!(result, Err(Error::DispatchRefused));
+    std::assert_matches!(result, Err(DispatchError::Refused(Refused)));
     assert_eq!(observed_status, None);
+    let scrape = recorder.handle().render();
+    assert_eq!(
+        recorded_count(
+            &scrape,
+            &[
+                "outbound_outcome=\"error\"",
+                "error_type=\"dispatch_refused\"",
+            ],
+        ),
+        1
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
             .await
@@ -504,9 +533,15 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFi
         values: &tracing::span::Record<'_>,
         _: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut fields = FieldVisitor(SpanFields::new());
-        values.record(&mut fields);
-        if fields.0.contains_key("outbound.outcome") {
+        let mut finished = false;
+        values.record(
+            &mut |field: &tracing::field::Field, _: &dyn std::fmt::Debug| {
+                if field.name() == "outbound.outcome" {
+                    finished = true;
+                }
+            },
+        );
+        if finished {
             tokio::time::pause();
             let mut advance = std::pin::pin!(tokio::time::advance(Duration::from_secs(20)));
             let _ = std::future::Future::poll(
@@ -519,20 +554,33 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFi
 
 #[tokio::test]
 async fn terminal_observation_preserves_the_timely_operation_result_once() {
+    use observe_test_support::{SpanCapture, install_default};
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
+    let diagnostics = SpanCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber =
-        tracing::subscriber::set_default(diagnostics.clone().with(AdvanceOnAttemptFinish));
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry()
+            .with(diagnostics.clone())
+            .with(AdvanceOnAttemptFinish)
+            .with(tracing_subscriber::filter::filter_fn(|meta| {
+                meta.is_span() && meta.name() == "outbound_http"
+            })),
+    );
+    let _subscriber = install_default(&dispatch);
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let client = fixture_client(address, &material);
-    let end = deadline();
-    let response = client.execute(request(), end).await.unwrap();
+    let end = Instant::now() + Duration::from_secs(1);
+    let response = client
+        .execute(
+            &OperationContext::from_deadline(Deadline::at(end)),
+            request(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
     assert!(Instant::now() > end, "terminal callback crossed the end");
     server.abort();
@@ -545,9 +593,9 @@ async fn terminal_observation_preserves_the_timely_operation_result_once() {
         recorded_count(&scrape, &["outbound_outcome=\"response\""]),
         1
     );
-    let spans = diagnostics.0.lock().unwrap();
+    let spans = diagnostics.snapshot();
     assert_eq!(spans.len(), 1);
-    assert_eq!(spans[0]["outbound.outcome"], "\"response\"");
+    assert_eq!(spans[0].field("outbound.outcome"), Some("\"response\""));
 }
 
 struct ResponseWake(tokio::sync::Notify);
@@ -586,11 +634,12 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
         .await
         .expect("ready-response fixture budget");
     });
-    let mut ceiling = limits();
-    ceiling.operation_timeout = Duration::from_secs(10);
+    let ceiling = limits()
+        .with_operation_timeout(Duration::from_secs(10))
+        .expect("valid limit");
     let client = fixture_client_with_limits(address, &material, ceiling);
-    let mut exchange =
-        Box::pin(client.execute(request(), Instant::now() + Duration::from_secs(10)));
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut exchange = Box::pin(client.execute(&context, request()));
     tokio::select! {
         result = &mut exchange => panic!("response is still gated: {result:?}"),
         result = request_received => result.unwrap(),
@@ -609,7 +658,11 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     let result = exchange.await;
-    std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
+    std::assert_matches!(
+        result,
+        Err(ExchangeError::BeforeResponse(Error::Timeout)),
+        "{result:?}"
+    );
 }
 
 async fn unresponsive_listener() -> (SocketAddr, tokio::net::TcpListener, Vec<TcpStream>) {
@@ -635,11 +688,15 @@ async fn unresponsive_address_leaves_time_for_the_next_one() {
     let (unresponsive, _listener, _queued) = unresponsive_listener().await;
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut limits = limits();
-    limits.operation_timeout = Duration::from_secs(2);
+    let limits = limits()
+        .with_operation_timeout(Duration::from_secs(2))
+        .expect("valid limit");
     let response =
         fixture_client_resolving(FIXTURE_HOST, vec![unresponsive, address], &material, limits)
-            .execute(request(), Instant::now() + Duration::from_secs(2))
+            .execute(
+                &OperationContext::with_timeout(Duration::from_secs(2)),
+                request(),
+            )
             .await
             .expect("the second address answers");
     assert_eq!(response.status(), 200);
@@ -661,7 +718,7 @@ async fn a_reused_client_uses_a_replacement_address_on_its_next_dial() {
 
     assert_eq!(
         client
-            .execute(request(), deadline())
+            .execute(&default_context(), request())
             .await
             .expect("old address response")
             .status(),
@@ -672,7 +729,7 @@ async fn a_reused_client_uses_a_replacement_address_on_its_next_dial() {
     resolver.replace(vec![new_address]);
     assert_eq!(
         client
-            .execute(request(), deadline())
+            .execute(&default_context(), request())
             .await
             .expect("replacement address response")
             .status(),
@@ -706,9 +763,9 @@ async fn request_is_not_replayed_after_the_peer_received_it() {
     });
     std::assert_matches!(
         fixture_client(address, &material)
-            .execute(request(), deadline())
+            .execute(&default_context(), request())
             .await,
-        Err(Error::Transport { .. })
+        Err(ExchangeError::BeforeResponse(Error::Transport { .. }))
     );
     assert!(
         !server.await.expect("replay fixture joins"),
@@ -722,11 +779,11 @@ async fn completed_exchange_reuses_an_idle_https_connection() {
     let (address, server) = tls_server_reuses_one_connection(&material).await;
     let client = fixture_client(address, &material);
     client
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("first pooled response");
     let second = client
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("second pooled response");
     assert_eq!(second.status(), http::StatusCode::NO_CONTENT);
@@ -749,7 +806,7 @@ async fn target_and_caller_headers_reach_the_wire_unchanged() {
             .insert(name, value.parse().expect("header value"));
     }
     fixture_client(address, &material)
-        .execute(request, deadline())
+        .execute(&default_context(), request)
         .await
         .expect("captured request response");
     let wire = captured.await.expect("captured request");
@@ -773,7 +830,7 @@ async fn buffered_body_length_replaces_caller_framing_on_the_wire() {
         .body(Bytes::from_static(b"hello"))
         .expect("misframed request");
     fixture_client(address, &material)
-        .execute(request, deadline())
+        .execute(&default_context(), request)
         .await
         .expect("captured request response");
     let wire = captured.await.expect("captured request");
@@ -792,8 +849,8 @@ async fn the_client_sets_host_and_a_default_accept_on_the_wire() {
         tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     fixture_client(address, &material)
         .execute(
+            &default_context(),
             request_to("https://PROVIDER.fixture.test/items"),
-            deadline(),
         )
         .await
         .expect("captured request response");
@@ -833,7 +890,7 @@ async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
                 .insert(header::CONTENT_LENGTH, sent.parse().expect("length"));
         }
         fixture_client(address, &material)
-            .execute(request, deadline())
+            .execute(&default_context(), request)
             .await
             .expect("captured request response");
         let wire = captured
@@ -881,7 +938,7 @@ async fn opted_in_client_sends_the_context_of_its_named_client_span() {
     );
     fixture_client(address, &material)
         .with_trace_context()
-        .execute(request, deadline())
+        .execute(&default_context(), request)
         .await
         .expect("captured request response");
     let wire = captured.await.expect("captured request");
@@ -923,7 +980,7 @@ async fn transport_source_redacts_request_and_response_content() {
             .expect("credential header"),
     );
     let error = fixture_client(address, &material)
-        .execute(request, deadline())
+        .execute(&default_context(), request)
         .await
         .expect_err("truncated response fails");
     let mut diagnostics = String::new();
@@ -945,100 +1002,281 @@ async fn transport_source_redacts_request_and_response_content() {
     server.await.expect("truncated fixture server succeeds");
 }
 
-#[tokio::test]
-async fn collect_bounded_body_avoids_copying_single_frame_and_checks_context_between_frames() {
-    use std::collections::VecDeque;
-    use std::convert::Infallible;
-    use std::pin::Pin;
-    use std::task::Poll;
+struct FrameBody {
+    frames: std::collections::VecDeque<hyper::body::Frame<Bytes>>,
+    exact_size: Option<u64>,
+    on_poll: Option<Box<dyn FnMut(usize) + Send>>,
+    polls: usize,
+}
 
-    use hyper::body::{Body, Frame};
-
-    struct FrameBody {
-        frames: VecDeque<Frame<Bytes>>,
-        on_poll: Option<Box<dyn FnMut(usize) + Send>>,
-        polls: usize,
-    }
-
-    impl Body for FrameBody {
-        type Data = Bytes;
-        type Error = Infallible;
-
-        fn poll_frame(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-            let poll_index = self.polls;
-            self.polls += 1;
-            if let Some(on_poll) = self.on_poll.as_mut() {
-                on_poll(poll_index);
-            }
-            Poll::Ready(self.frames.pop_front().map(Ok))
+impl FrameBody {
+    fn new(frames: impl Into<std::collections::VecDeque<hyper::body::Frame<Bytes>>>) -> Self {
+        Self {
+            frames: frames.into(),
+            exact_size: None,
+            on_poll: None,
+            polls: 0,
         }
     }
+}
 
-    let context: crate::RequestContext = operation_context::OperationContext::unbounded().into();
-    let payload = Bytes::from(b"single-frame-payload".to_vec());
-    let expected_ptr = payload.as_ptr();
-    let single = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::new()),
-            Frame::data(payload),
-            Frame::data(Bytes::new()),
-            Frame::trailers(http::HeaderMap::new()),
-        ]),
-        on_poll: None,
-        polls: 0,
+impl hyper::body::Body for FrameBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        let poll_index = self.polls;
+        self.polls += 1;
+        if let Some(on_poll) = self.on_poll.as_mut() {
+            on_poll(poll_index);
+        }
+        std::task::Poll::Ready(self.frames.pop_front().map(Ok))
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.exact_size.map_or_else(
+            hyper::body::SizeHint::default,
+            hyper::body::SizeHint::with_exact,
+        )
+    }
+}
+
+struct TrackedBacking {
+    bytes: Vec<u8>,
+    released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AsRef<[u8]> for TrackedBacking {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for TrackedBacking {
+    fn drop(&mut self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[tokio::test]
+async fn collect_bounded_body_releases_source_backing_and_checks_context_between_frames() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
+
+    use hyper::body::Frame;
+
+    let context = OperationContext::unbounded();
+    let expected = b"single-frame-payload";
+    let mut backing_bytes = vec![0_u8; 4096];
+    backing_bytes[..expected.len()].copy_from_slice(expected);
+    let released = Arc::new(AtomicBool::new(false));
+    let backing = Bytes::from_owner(TrackedBacking {
+        bytes: backing_bytes,
+        released: Arc::clone(&released),
+    });
+    let payload = backing.slice(..expected.len());
+    drop(backing);
+    assert!(!released.load(Ordering::Acquire));
+
+    let single = FrameBody::new([
+        Frame::data(Bytes::new()),
+        Frame::data(payload),
+        Frame::data(Bytes::new()),
+        Frame::trailers(http::HeaderMap::new()),
+    ]);
     let buffered = crate::collect_bounded_body(single, 64, &context)
         .await
         .expect("single-frame body succeeds");
-    assert_eq!(buffered.as_ref(), b"single-frame-payload");
-    assert_eq!(buffered.as_ptr(), expected_ptr);
+    assert!(
+        released.load(Ordering::Acquire),
+        "single-frame buffered body must not retain the transport backing allocation"
+    );
+    assert_eq!(buffered.as_ref(), expected);
 
-    let multi = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::from_static(b"ab")),
-            Frame::data(Bytes::from_static(b"cd")),
-            Frame::data(Bytes::from_static(b"ef")),
-        ]),
-        on_poll: None,
-        polls: 0,
-    };
+    let empty = FrameBody::new([
+        Frame::data(Bytes::new()),
+        Frame::trailers(http::HeaderMap::new()),
+    ]);
+    let empty_buffered = crate::collect_bounded_body(empty, 64, &context)
+        .await
+        .expect("empty body succeeds");
+    assert!(empty_buffered.is_empty());
+
+    let multi = FrameBody::new([
+        Frame::data(Bytes::from_static(b"ab")),
+        Frame::data(Bytes::from_static(b"cd")),
+        Frame::data(Bytes::from_static(b"ef")),
+    ]);
     let concatenated = crate::collect_bounded_body(multi, 6, &context)
         .await
         .expect("multi-frame body at exact limit succeeds");
     assert_eq!(concatenated.as_ref(), b"abcdef");
 
-    let over_limit = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::from_static(b"abcd")),
-            Frame::data(Bytes::from_static(b"efg")),
-        ]),
-        on_poll: None,
-        polls: 0,
-    };
+    let mut exact_multi = FrameBody::new([
+        Frame::data(Bytes::from_static(b"abc")),
+        Frame::data(Bytes::from_static(b"de")),
+    ]);
+    exact_multi.exact_size = Some(5);
+    let exact_buffered = crate::collect_bounded_body(exact_multi, 64, &context)
+        .await
+        .expect("fixed-length multi-frame body succeeds");
+    assert_eq!(exact_buffered.as_ref(), b"abcde");
+    assert_eq!(
+        exact_buffered
+            .try_into_mut()
+            .expect("unique exact buffer")
+            .capacity(),
+        5
+    );
+
+    let mut advertised_over_limit = FrameBody::new([Frame::data(Bytes::from_static(b"a"))]);
+    advertised_over_limit.exact_size = Some(7);
+    advertised_over_limit.on_poll = Some(Box::new(|_| panic!("advertised overflow must not poll")));
+    std::assert_matches!(
+        crate::collect_bounded_body(advertised_over_limit, 6, &context).await,
+        Err(Error::ResponseBodyTooLarge)
+    );
+
+    let over_limit = FrameBody::new([
+        Frame::data(Bytes::from_static(b"abcd")),
+        Frame::data(Bytes::from_static(b"efg")),
+    ]);
     std::assert_matches!(
         crate::collect_bounded_body(over_limit, 6, &context).await,
         Err(Error::ResponseBodyTooLarge)
     );
 
-    let op = operation_context::OperationContext::unbounded();
+    let op = OperationContext::unbounded();
     let cancel = op.clone();
-    let cancelled_between_frames = FrameBody {
-        frames: VecDeque::from([
-            Frame::data(Bytes::from_static(b"first")),
-            Frame::data(Bytes::from_static(b"second")),
-        ]),
-        on_poll: Some(Box::new(move |poll_index| {
-            if poll_index == 0 {
-                cancel.cancel();
-            }
-        })),
-        polls: 0,
-    };
+    let mut cancelled_between_frames = FrameBody::new([
+        Frame::data(Bytes::from_static(b"first")),
+        Frame::data(Bytes::from_static(b"second")),
+    ]);
+    cancelled_between_frames.on_poll = Some(Box::new(move |poll_index| {
+        if poll_index == 0 {
+            cancel.cancel();
+        }
+    }));
     std::assert_matches!(
-        crate::collect_bounded_body(cancelled_between_frames, 64, &op.into()).await,
+        crate::collect_bounded_body(cancelled_between_frames, 64, &op).await,
         Err(Error::Cancelled)
     );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn test_https_constructor_uses_fixture_root_and_enforces_boundaries() {
+    use crate::test_support::{TestBuildError, client_http, client_https};
+    use crate::{Origin, TransportErrorKind};
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let origin = Origin::parse_https(&format!("https://{FIXTURE_HOST}")).expect("origin");
+    let (address, server) = tls_server(
+        &material,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntls",
+    )
+    .await;
+    let client = client_https(origin.clone(), limits(), &material.root, address)
+        .expect("fixture HTTPS client");
+    let response = client
+        .execute(&default_context(), request())
+        .await
+        .expect("fixture HTTPS response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert_eq!(response.body().as_ref(), b"tls");
+    server.await.expect("fixture TLS server joins");
+
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let untrusted = TlsMaterial::new(FIXTURE_HOST);
+    let error = client_https(origin.clone(), limits(), &untrusted.root, address)
+        .expect("client with different root")
+        .execute(&default_context(), request())
+        .await
+        .expect_err("untrusted root fails TLS")
+        .into_error();
+    assert_eq!(error.transport_kind(), Some(TransportErrorKind::Tls));
+    server.await.expect("untrusted fixture TLS server joins");
+
+    std::assert_matches!(
+        client_https(
+            origin.clone(),
+            limits(),
+            &material.root,
+            "10.0.0.1:443".parse().expect("non-loopback address"),
+        ),
+        Err(TestBuildError::InvalidOrigin(_))
+    );
+    std::assert_matches!(
+        client_https(origin, limits(), b"not-der", address),
+        Err(TestBuildError::Tls(_))
+    );
+    let http_client = client_http("http://127.0.0.1:8080", limits()).expect("test http client");
+    assert_eq!(http_client.host(), "127.0.0.1");
+    assert_eq!(http_client.port(), 8080);
+    assert_eq!(
+        http_client.uri("/items").expect("test http uri"),
+        http::Uri::from_static("http://127.0.0.1:8080/items")
+    );
+}
+
+#[tokio::test]
+async fn prepared_request_exposes_headers_and_accepts_non_send_hooks() {
+    use std::{cell::Cell, convert::Infallible, rc::Rc};
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let client = fixture_client(address, &material);
+    let mut request = request();
+    request
+        .headers_mut()
+        .insert(header::AUTHORIZATION, "Bearer test".parse().expect("auth"));
+    let prepared = client
+        .prepare(&default_context(), request)
+        .expect("prepared request");
+    assert_eq!(prepared.headers()[header::AUTHORIZATION], "Bearer test");
+
+    let admitted = Rc::new(Cell::new(false));
+    let observed = Rc::new(Cell::new(None));
+    let admitted_hook = Rc::clone(&admitted);
+    let observed_hook = Rc::clone(&observed);
+    let response = prepared
+        .send_checked(
+            move || {
+                admitted_hook.set(true);
+                Ok::<(), Infallible>(())
+            },
+            move |status| observed_hook.set(Some(status)),
+        )
+        .await
+        .expect("send_checked response");
+    assert!(admitted.get());
+    assert_eq!(observed.get(), Some(http::StatusCode::OK));
+    assert_eq!(response.body().as_ref(), b"ok");
+    server.await.expect("fixture server joins");
+
+    let (address, captured, server) =
+        tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let client = fixture_client(address, &material);
+    let mut prepared = client
+        .prepare(&default_context(), crate::test_support::request())
+        .expect("prepared request for send");
+    prepared.set_authorization("Bearer direct".parse().expect("auth"));
+    let response = prepared.send().await.expect("direct send response");
+    assert_eq!(response.body().as_ref(), b"ok");
+    assert!(
+        captured
+            .await
+            .expect("captured direct send")
+            .to_ascii_lowercase()
+            .contains("authorization: bearer direct\r\n")
+    );
+    server.await.expect("direct send fixture joins");
 }

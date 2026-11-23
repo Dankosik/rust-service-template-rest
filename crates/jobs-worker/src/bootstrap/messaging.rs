@@ -1,19 +1,26 @@
 use std::time::Duration;
 
-use health::Probe;
 use infra_messaging::{
-    Consumer, ConsumerOptions, Credentials, Messaging, MessagingError, MessagingOptions,
-    Registry as MessagingRegistry,
+    Consumer, ConsumerOptions, Credentials, Deadline, Messaging, MessagingOptions, MessagingProbe,
+    MessagingStartup, OperationContext, Registry as MessagingRegistry, TransportSecurity,
 };
-use service_config::{MessagingCredentials, WorkerConfig};
-use tokio::time::Instant;
+use service_config::{
+    AdmittedMessaging, MessagingCredentials, MessagingTransportSecurity, WorkerConfig,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{WorkerError, worker_identity};
 use crate::background::Background;
-use crate::resources::{BrokerResource, Resources};
+use crate::resources::Resources;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(super) struct ConnectedMessaging {
+    pub(super) consumer: Option<Consumer>,
+    // template:begin outbox:worker-bootstrap-connected-outbox
+    pub(super) outbox: infra_messaging::OutboxProducer,
+    // template:end outbox:worker-bootstrap-connected-outbox
+}
 
 pub(super) struct RetainedMessages {
     pub(super) registry: MessagingRegistry,
@@ -34,7 +41,7 @@ impl MessagingPlan {
     ) -> Result<Option<Self>, WorkerError> {
         messages
             .registry
-            .check_publication_limit(max_payload_bytes(config)?)?;
+            .check_publication_limit(config.messaging().max_payload_bytes())?;
         let consumes_messages = messages.registry.has_handlers();
         // template:begin outbox:worker-bootstrap-postgres-messages-intent
         let consumes_messages = consumes_messages || messages.postgres_messages.is_some();
@@ -42,26 +49,25 @@ impl MessagingPlan {
         if !consumes_messages {
             return Ok(None);
         }
-        let keys = config.messaging.consumer_keys()?;
+        let admitted = config.messaging().admit_consumer()?;
         let consumer = ConsumerOptions {
-            durable_name: keys.durable.to_owned(),
-            filter_subject: keys.filter_subject.to_owned(),
-            dlq_subject: keys.dlq_subject.to_owned(),
+            durable_name: admitted.durable.to_owned(),
+            filter_subject: admitted.filter_subject.to_owned(),
+            dlq_subject: admitted.dlq_subject.to_owned(),
             dlq_stream: None,
-            concurrency: std::num::NonZeroUsize::try_from(config.messaging.consumer_concurrency)
-                .map_err(|_| WorkerError::MessagingConcurrency)?,
+            concurrency: admitted.concurrency,
         };
         Ok(Some(Self {
-            options: messaging_options(config, keys.source_stream, Some(consumer))?,
+            options: messaging_options(config, admitted.messaging, Some(consumer)),
             retained_messages: Some(messages),
         }))
     }
 
     // template:begin outbox:worker-bootstrap-outbox-messaging
     pub(super) fn for_producer(config: &WorkerConfig) -> Result<Self, WorkerError> {
-        let source_stream = config.messaging.producer_source_stream()?;
+        let admitted = config.messaging().admit_producer()?;
         Ok(Self {
-            options: messaging_options(config, source_stream, None)?,
+            options: messaging_options(config, admitted, None),
             retained_messages: None,
         })
     }
@@ -70,9 +76,12 @@ impl MessagingPlan {
 
 pub(super) async fn connect_messaging(
     plan: MessagingPlan,
+    // template:begin outbox:worker-bootstrap-connect-messaging-pool
+    pool: Option<&infra_postgres::Pool>,
+    // template:end outbox:worker-bootstrap-connect-messaging-pool
     cancel: &CancellationToken,
-    resources: &mut Resources,
-) -> Result<Option<Consumer>, WorkerError> {
+    retained: &mut Option<MessagingStartup>,
+) -> Result<(MessagingProbe, ConnectedMessaging), WorkerError> {
     let MessagingPlan {
         options,
         retained_messages,
@@ -80,66 +89,62 @@ pub(super) async fn connect_messaging(
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
     let mut retained_messages = retained_messages;
     if let Some(messages) = &mut retained_messages {
-        messages.register_postgres_messages(resources)?;
+        messages.register_postgres_messages(pool)?;
         messages
             .registry
             .check_publication_limit(options.max_payload_bytes)?;
     }
     // template:end outbox:worker-bootstrap-activate-postgres-messages
-    let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
-    let BrokerResource::Starting(startup) = resources
-        .broker
-        .insert(BrokerResource::Starting(Box::new(startup)))
-    else {
-        return Err(MessagingError::Connection.into());
-    };
+    let context = OperationContext::new(
+        Some(Deadline::after(MESSAGING_STARTUP_TIMEOUT)),
+        cancel.child_token(),
+    );
+    let startup = retained.insert(Messaging::prepare(options, &context)?);
     let messaging = startup.admit().await?;
-    resources.broker = Some(BrokerResource::Admitted(messaging.clone()));
     // template:begin outbox:worker-bootstrap-admit-outbox-source
-    messaging.outbox_producer()?;
+    let outbox = messaging.outbox_producer()?;
     // template:end outbox:worker-bootstrap-admit-outbox-source
-    if let Some(messages) = retained_messages {
-        Ok(Some(
-            messaging
-                .consumer(messages.registry, deadline, cancel)
-                .await?,
-        ))
+    let consumer = if let Some(messages) = retained_messages {
+        Some(messaging.consumer(messages.registry, &context).await?)
     } else {
-        Ok(None)
-    }
-}
-
-fn max_payload_bytes(config: &WorkerConfig) -> Result<usize, WorkerError> {
-    usize::try_from(config.messaging.max_payload_bytes.as_u64())
-        .map_err(|_| WorkerError::MessagingPayloadBound)
+        None
+    };
+    Ok((
+        messaging.probe(),
+        ConnectedMessaging {
+            consumer,
+            // template:begin outbox:worker-bootstrap-connected-outbox-value
+            outbox,
+            // template:end outbox:worker-bootstrap-connected-outbox-value
+        },
+    ))
 }
 
 fn messaging_options(
     config: &WorkerConfig,
-    source_stream: &str,
+    admitted: AdmittedMessaging<'_>,
     consumer: Option<ConsumerOptions>,
-) -> Result<MessagingOptions, WorkerError> {
-    let messaging = &config.messaging;
-    Ok(MessagingOptions {
-        connection_name: worker_identity(&config.observability.otel.service_name),
-        servers: messaging.urls.clone(),
-        credentials: messaging.credentials.as_ref().map(|source| match source {
-            MessagingCredentials::Inline(secret) => Credentials::Inline(secret.clone()),
-            MessagingCredentials::File(path) => Credentials::File(path.clone()),
-        }),
-        root_ca_path: messaging.root_ca_path.clone(),
-        allow_plaintext: messaging.plaintext_admitted(),
-        tls_first: messaging.tls_first,
-        source_stream: source_stream.to_owned(),
-        max_payload_bytes: max_payload_bytes(config)?,
+) -> MessagingOptions {
+    let security = match admitted.security {
+        MessagingTransportSecurity::Tls => TransportSecurity::Tls,
+        MessagingTransportSecurity::TlsFirst => TransportSecurity::TlsFirst,
+        MessagingTransportSecurity::AllowPlaintext => TransportSecurity::AllowPlaintext,
+    };
+    let credentials = match admitted.credentials {
+        MessagingCredentials::Inline(secret) => Some(Credentials::Inline(secret.clone())),
+        MessagingCredentials::File(path) => Some(Credentials::File(path.clone())),
+        MessagingCredentials::Unauthenticated => None,
+    };
+    MessagingOptions {
+        connection_name: worker_identity(&config.observability().otel.service_name),
+        servers: admitted.urls.to_vec(),
+        credentials,
+        root_ca_path: admitted.root_ca_path.map(std::path::Path::to_path_buf),
+        security,
+        source_stream: admitted.source_stream.to_owned(),
+        max_payload_bytes: admitted.max_payload_bytes,
         consumer,
-    })
-}
-
-pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
-    let messaging = resources.admitted_messaging()?;
-    Some(Box::new(messaging.probe()))
+    }
 }
 
 pub(super) fn start_consumer(
@@ -147,12 +152,12 @@ pub(super) fn start_consumer(
     resources: &mut Resources,
     background: &Background,
 ) {
-    resources.consumer = Some(consumer.start(&background.cancel));
+    resources.work.consumer = Some(consumer.start(background.cancel()));
     tracing::info!("messaging_consuming_started");
 }
 
 pub(super) async fn consumer_failure(resources: &Resources) -> WorkerError {
-    match &resources.consumer {
+    match &resources.work.consumer {
         Some(consumer) => WorkerError::ConsumerStopped(consumer.failed().await),
         None => std::future::pending().await,
     }

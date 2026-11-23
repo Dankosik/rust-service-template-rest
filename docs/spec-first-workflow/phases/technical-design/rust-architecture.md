@@ -1,76 +1,102 @@
 # Rust Architecture And Ownership
 
-Disclosed branch of [Technical Design](../technical-design.md). Own semantic
-crate/module ownership and cross-seam Rust contracts under `rust-idiomatic` and
-`rust-structural-quality` (loading `rust-axum`, `rust-api-contract`,
-`rust-errors`, or `rust-dependencies` only when their trigger fires).
+Disclosed branch of [Technical Design](../technical-design.md) (audited in
+[Design Review](../design-review.md)). Own crate/module ownership, deep Rust
+seams, and compile reality under `rust-idiomatic` and `rust-structural-quality`
+(loading `rust-axum`, `rust-api-contract`, `rust-errors`, or `rust-dependencies`
+when their trigger fires).
 
 ## Vocabulary And Deep-Module Discipline
 
-Speak consistently in `design.md`: **module** (unit with interface and
-implementation), **interface** (everything a caller must know—types, methods,
-invariants, ordering, error modes, lifetimes, cost—broader than a signature),
-**seam** (code location of an interface, distinct from a runtime **crossing**),
-**adapter** (concrete implementation at a seam), **depth / leverage**
-(capability hidden per unit of interface, never padded lines), and **locality**
-(change, bugs, and verification in one place).
+Keep terminology exact across `design.md`: use **seam** for a code interface
+boundary (distinct from a runtime **crossing**), treat **interface** as
+everything a caller must know beyond the type signature (invariants, ordering,
+error modes, lifetimes, cost), and judge **depth** by caller **leverage** and
+maintainer **locality** rather than line count.
 
-- **Depth belongs to the interface:** compose private helpers or internal seams
-  without `pub` leaks, and collapse shallow pass-through chains (`handler ->
-  service -> repo -> mapper`) enforcing no invariant.
-- **Highest seam & caller walkthrough:** extend existing seams before adding
-  new ones, placing new seams at the highest observable point hiding wiring.
-  For each non-trivial new or changed seam, write a compact Rust signature and
-  3–8 line caller sketch against real workspace types (`AppState`,
-  `OperationContext`, `service_failure::Code`, `infra_http::Problem`, `&mut
-  Tx<'_>`). Keep a new structure only when deleting it scatters an invariant or
-  breaks a dependency, compile-time, or lifecycle constraint.
-- **Seam discipline & replace-don't-layer:** use the dependency categories below
-  to decide whether a trait is warranted. Preserve public proving surfaces
-  without exposing internals solely for tests, and list
-  superseded shallow modules, wrappers, and internal tests to delete.
+Apply four seam rules:
+
+1. **Highest existing seam first:** extend existing seams before adding new
+   ones; place any new seam at the highest observable point that hides wiring
+   (the fewer seams, the better). **One adapter means a hypothetical seam; two
+   real adapters mean a real seam.**
+2. **Three deepening questions on every proposed seam:**
+   - Can I reduce the number of methods or collapse multi-step caller
+     coordination into one deep call?
+   - Can I simplify the parameters or encode invariants and tx scope
+     (`&mut Tx<'_>`) directly in types?
+   - Applying the **deletion test**: if this module, wrapper, or trait
+     vanishes, does complexity vanish (shallow pass-through) or reappear across
+     callers (earned depth)?
+3. **Caller walkthrough (happy + worst-case failure/cancel):** for every
+   non-trivial new or changed seam (`S<n>`), write a realistic 3–8 line
+   call-site sketch against live workspace types (`AppState`,
+   `OperationContext`, `service_failure::Code`, `infra_http::Problem`,
+   `&mut Tx<'_>`) covering **both** the happy path and the hardest failure,
+   timeout, or cancellation path. If the caller must coordinate magic call
+   order, hold `&mut Tx<'_>` across network `.await`, or match internal storage
+   errors, deepen the seam.
+4. **Replace, don't layer — and keep seams deterministically provable:** keep
+   the public interface as the proving surface (internal seams stay private
+   behind the module), drive time and expiry through `tokio::time::pause` or
+   plain `now` parameters rather than hidden `SystemTime::now()`, verify
+   external wire seams can inject every designed timeout or failure mode
+   locally (reusing existing `crates/*-test-support` harnesses without
+   mock-only traits), and list superseded shallow modules, wrappers, and
+   internal-only tests to delete.
 
 ## Dependency Categories
 
+Classify every dependency behind a seam to decide whether a trait is earned:
+
 1. **Pure / in-process** (domain logic, state machines, codecs,
-   `crates/shared-rules`): no trait; absorb into a deep module, passing `now`
-   or generated IDs as plain parameters instead of a `Clock`/`Rng` trait.
+   `crates/shared-rules`): concrete types and functions; pass `now` or
+   generated IDs as plain parameters instead of `Clock`/`Rng` traits.
 2. **Local-substitutable / real workspace backend** (`infra-postgres`,
    `infra-cache`, `infra-messaging`, `infra-object-storage`, Axum `Router`):
-   keep the seam internal or at the transport interface with no mock-only trait
-   so Implementation verifies against the real local store or router.
+   keep the seam internal or at the transport interface with concrete adapters
+   so Implementation verifies against the real local store or router (no
+   fake-adapter port trait wrapping a local backend).
 3. **Remote / true external seam** (`infra-outbound-http`,
-   `infra-outbound-grpc`, OIDC, webhooks): expose the real client adapter for
-   local wire-seam verification, adding a minimal port/trait only with ≥2 real
-   adapters or pure transport-independent orchestration.
+   `infra-outbound-grpc`, OIDC, webhooks): keep the real client adapter at the
+   wire seam; introduce a minimal port/trait only with `≥2` real adapters or
+   pure transport-independent orchestration.
 
-## Rust Contracts, Compile Reality, And Workspace Graph
+## Simplicity-First Compile Reality And Workspace Graph
 
-- **Type-encoded invariants & error seams:** encode validated values, ordering,
-  tx scope (`&mut Tx<'_>`), and ownership in types and lifetimes; pin each
-  seam's typed error boundary and mapping to `service_failure::Code` and
-  retryability.
-- **Exhaustive workspace types:** public workspace enums and structs are
-  exhaustive (`rust-idiomatic`). Before adding a variant or field to a wide type
-  (`service_failure::Code`, `AppConfig`, `AppState`), check cross-crate
-  fan-out—prefer mapping feature-local errors onto existing `Code` variants, or
-  surface the blast radius in `Shared mutated surfaces` and `Planning hooks`.
-- **Compile-reality honesty:** check [workspace utility
-  crates](../../../../.agents/skills/rust-dependencies/references/workspace-crates.md)
-  before proposing custom codecs, retries, compact containers, or derive
-  boilerplate, and verify against the lints, patches, and `Cargo.lock` sources
-  grounded in step 1. Treat tricky bounds as verified **only** after reading
-  their defining trait/macro source—`async fn` trait `!Send` (RPITIT across
-  `tokio::spawn`), `&mut Tx<'_>` or guards across `.await` in Axum handlers,
-  `dyn` object safety, `FromRequest` (last, body-consuming) vs
-  `FromRequestParts`, `tower::Layer`/`Service`, `utoipa::ToSchema` on
-  generic/newtype wrappers, and `sqlx::query!` custom types. Route any
-  statically unproved bound or runtime quirk through [Technical
-  Design](../technical-design.md#steps) step 2's uncertainty disposition.
-- **Workspace graph & profiles:** reconcile crate placement, dependency edges,
-  `allow_dependents`, `crates/shared-rules` (`std`-only), optional profiles
-  (`template/profiles.json`), and canonical generated-contract writers
-  against [`quality/architecture.json`](../../../../quality/architecture.json)
-  and [Repository
-  Architecture](../../../repo-architecture.md#global-invariants), sharing
-  feature logic across `crates/service` and `crates/jobs-worker`.
+- **Kill tricky bounds before proving them:** default to concrete structs with
+  inherent `async fn`, `axum::middleware::from_fn_with_state`, and ordinary
+  enums over `async` traits (RPITIT `!Send` across `tokio::spawn`), custom
+  `tower::Layer`/`Service`, generic `utoipa::ToSchema` wrappers, or typestates
+  unless an accepted constraint genuinely demands them.
+- **Honest verification bar:** check [workspace utility
+  crates](../../../../.agents/skills/rust-dependencies/references/workspace-crates.md),
+  `Cargo.toml` `[workspace.lints]`, `clippy.toml`, `vendor/*/PATCHES.md`, and
+  locked crate APIs (`cargo metadata --locked --offline --format-version 1`).
+  Treat tricky bounds (`async fn` trait `Send`, `&mut Tx<'_>` or guards across
+  `.await`, `FromRequest` body consumption vs `FromRequestParts`, `dyn` object
+  safety, `utoipa::ToSchema`, `sqlx::query!` custom types) as verified only
+  after inspecting their defining trait or macro source. Whenever trait-solver
+  or macro resolution remains uncertain statically, classify it honestly as an
+  **unverified compile assumption** (`A<n>`) routed to `[integration-first]`
+  instead of claiming static proof.
+- **Typed error seams & exhaustive workspace types:** pin each seam's typed
+  error boundary, `service_failure::Code` mapping, and retryability. Public
+  workspace enums and structs are exhaustive (`rust-idiomatic`): inspect
+  cross-crate fan-out before adding a variant or field to wide exhaustive types
+  (`service_failure::Code`, `AppState`, or public `service_config` enums)—prefer
+  mapping feature-local errors onto existing `Code` variants, or record the
+  blast radius in `Handoff deltas for Planning`.
+- **Workspace graph & profiles:** reconcile crate placement,
+  `roles.<role>.allow_roles`, `allow_members`, `allow_dependents`,
+  `crates/shared-rules` (`std`-only), optional profiles
+  (`template/profiles.json`), and generated-contract owners against
+  [`quality/architecture.json`](../../../../quality/architecture.json) and
+  [Repository Architecture](../../../repo-architecture.md#global-invariants)
+  (sharing feature logic across `crates/service` and `crates/jobs-worker` when
+  both binaries are retained).
+
+*Done when:* every new or changed `S<n>` has a happy + worst-case failure/cancel
+caller walkthrough against verified workspace types, a justified dependency
+category, reconciled `quality/architecture.json` and exhaustive-type blast
+radius, and zero unacknowledged compile assumptions.

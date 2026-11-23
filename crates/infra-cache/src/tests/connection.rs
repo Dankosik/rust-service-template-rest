@@ -6,7 +6,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use operation_context::Stopped;
 
 use super::*;
-use crate::{CacheLookup, MutationError, OperationError, SetError};
+use crate::{CacheLookup, MutationError, MutationFailure, OperationError, UnknownOutcome};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -244,8 +244,8 @@ async fn acl_denial_is_distinct_in_traces_and_keeps_the_response_series_and_conn
 #[tokio::test]
 async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
     let caller = OperationContext::unbounded();
-    let refused = MutationError::NotApplied(OperationError::Unavailable);
-    let unknown = MutationError::OutcomeUnknown(OperationError::Unavailable);
+    let refused = MutationError::NotApplied(MutationFailure::Unavailable);
+    let unknown = MutationError::OutcomeUnknown(UnknownOutcome::Unavailable);
     for (set, reply, expected) in [
         (true, &b"-NOPERM access denied\r\n"[..], Err(refused)),
         (true, b"-NOREPLICAS not enough replicas\r\n", Err(refused)),
@@ -268,7 +268,7 @@ async fn mutations_require_a_recognized_acknowledgement_or_refusal() {
                 namespace
                     .set(&caller, "key", b"value", Duration::from_secs(1))
                     .await,
-                expected.map_err(SetError::Mutation),
+                expected,
                 "{reply:?}"
             );
         } else {
@@ -292,7 +292,7 @@ async fn direct_cache_start_rejects_unsupported_byte_limits() {
         })
         .await
         .unwrap_err();
-        assert_eq!(error, CacheError::InvalidSizeLimit);
+        assert_eq!(error.0, StartErrorKind::InvalidSizeLimit);
     }
 }
 
@@ -305,7 +305,7 @@ async fn a_cache_window_must_leave_room_for_maintenance() {
         })
         .await
         .unwrap_err();
-        assert_eq!(error, CacheError::InvalidConcurrency);
+        assert_eq!(error.0, StartErrorKind::InvalidConcurrency);
     }
 }
 
@@ -322,6 +322,7 @@ async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stop
     .unwrap();
     let reserve = Duration::from_secs(8);
     let lookup = CacheLookup::new(Some(cache.namespace(namespace!("aside"))), reserve);
+    assert!(lookup.namespace().is_some());
     let unbounded = OperationContext::unbounded();
     assert_eq!(lookup.lookup(&unbounded, "miss").await, Ok(None));
     server
@@ -335,6 +336,7 @@ async fn cache_aside_lookup_leaves_the_source_reserve_and_propagates_parent_stop
     assert_eq!(server.command_count("GETRANGE", Some("aside:hit")), 1);
 
     let disabled = CacheLookup::new(None, reserve);
+    assert!(disabled.namespace().is_none());
     assert_eq!(disabled.lookup(&unbounded, "missing_cache").await, Ok(None));
     let cancelled = OperationContext::unbounded();
     cancelled.cancel();
@@ -395,10 +397,10 @@ async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     assert_eq!(namespace.get(&caller, "é").await, Ok(None));
     namespace.set(&caller, "é", b"ok", ttl).await.unwrap();
     namespace.delete(&caller, "é").await.unwrap();
-    let key_too_large = MutationError::NotApplied(OperationError::KeyTooLarge);
+    let key_too_large = MutationError::NotApplied(MutationFailure::KeyTooLarge);
     assert_eq!(
         namespace.set(&caller, "éx", b"", ttl).await,
-        Err(SetError::Mutation(key_too_large))
+        Err(key_too_large)
     );
     assert_eq!(namespace.delete(&caller, "éx").await, Err(key_too_large));
     assert_eq!(
@@ -407,9 +409,7 @@ async fn cache_admits_full_key_and_value_byte_limits_before_dispatch() {
     );
     assert_eq!(
         namespace.set(&caller, "é", b"abc", ttl).await,
-        Err(SetError::Mutation(MutationError::NotApplied(
-            OperationError::ValueTooLarge
-        )))
+        Err(MutationError::NotApplied(MutationFailure::ValueTooLarge))
     );
     for command in ["EXISTS", "GETRANGE", "SET", "DEL"] {
         assert_eq!(server.command_count(command, Some("n:é")), 1);
@@ -564,8 +564,8 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
     context.cancel();
     assert_eq!(
         tokio::time::timeout(limit, write).await,
-        Ok(Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Stopped(Stopped::Cancelled)
+        Ok(Err(MutationError::OutcomeUnknown(UnknownOutcome::Stopped(
+            Stopped::Cancelled
         ))))
     );
     assert_eq!(server.connections(), 1);
@@ -685,7 +685,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     }
 
     let during_build = OperationContext::unbounded();
-    let write = cache.link.command::<(), _>(
+    let write = cache.link.dispatch::<(), _>(
         |connection| {
             let mut command = redis::cmd("DEL");
             command.arg("stop:during_build");
@@ -695,12 +695,13 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
             })
         },
         &during_build,
-        crate::namespace::Operation::Delete,
+        None,
+        crate::connection::AfterReply::KeepConfirmed,
     );
     assert!(matches!(
         write.await,
-        Err(crate::error::CommandError::NotApplied(
-            crate::error::CommandFailure::Stopped(Stopped::Cancelled)
+        Err(crate::connection::DispatchError::NotApplied(
+            crate::error::FailureCause::Stopped(Stopped::Cancelled)
         ))
     ));
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
@@ -876,9 +877,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary_without_waiting_for_a_ca
     server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set(&caller, "key", b"value", ttl).await,
-        Err(SetError::Mutation(MutationError::NotApplied(
-            OperationError::Unavailable
-        )))
+        Err(MutationError::NotApplied(MutationFailure::Unavailable))
     );
 
     server
@@ -938,7 +937,8 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use std::task::Poll;
 
-    use crate::error::{CommandError, CommandFailure, ErrorType};
+    use crate::connection::{AfterReply, DispatchError};
+    use crate::error::{ErrorType, FailureCause};
 
     let caller = OperationContext::unbounded();
     let server = FakeServer::start().await;
@@ -975,14 +975,15 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     );
     let refused = cache
         .link
-        .command::<(), std::future::Ready<redis::RedisResult<()>>>(
+        .dispatch::<(), std::future::Ready<redis::RedisResult<()>>>(
             |_| panic!("a refused command must not be built"),
             &caller,
-            crate::namespace::Operation::Delete,
+            None,
+            AfterReply::KeepConfirmed,
         );
     assert!(matches!(
         futures_util::poll!(std::pin::pin!(refused)),
-        Poll::Ready(Err(CommandError::NotApplied(CommandFailure::Failed(
+        Poll::Ready(Err(DispatchError::NotApplied(FailureCause::Failed(
             ErrorType::Other
         ))))
     ));
@@ -1035,13 +1036,13 @@ async fn reliability_full_application_window_leaves_maintenance_admission() {
     let mut excess = Box::pin(sibling.delete(&caller, "refused"));
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
-        Poll::Ready(Err(MutationError::NotApplied(OperationError::Unavailable)))
+        Poll::Ready(Err(MutationError::NotApplied(MutationFailure::Unavailable)))
     );
     drop(pending);
     let deadline = OperationContext::with_timeout(Duration::from_millis(100));
     assert_eq!(
         sibling.delete(&deadline, "waiting-for-replies").await,
-        Err(MutationError::NotApplied(OperationError::Stopped(
+        Err(MutationError::NotApplied(MutationFailure::Stopped(
             Stopped::Deadline
         )))
     );
@@ -1103,9 +1104,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
                     Duration::from_secs(1)
                 )
                 .await,
-            Err(SetError::Mutation(MutationError::OutcomeUnknown(
-                OperationError::Unavailable
-            )))
+            Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
@@ -1137,7 +1136,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
     let old = server.stall_existing();
     assert_eq!(
         namespace.delete(&caller, "delete-once").await,
-        Err(MutationError::OutcomeUnknown(OperationError::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     metrics.wait_for_retirements(4).await;
     assert_work_metrics(&metrics, 0, 0, 4);
@@ -1335,13 +1334,13 @@ async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned()
         )
         .await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    assert_eq!(cache.close(deadline).await, CloseOutcome::Complete);
+    assert_eq!(
+        cache.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
     assert_eq!(
         pending.await,
-        Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Unavailable
-        )))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     server
         .wait_for(
@@ -1354,10 +1353,7 @@ async fn explicit_close_stops_a_live_connection_while_namespaces_keep_it_owned()
         namespace.get(&caller, "after").await,
         Err(OperationError::Unavailable)
     );
-    assert_eq!(
-        cache.close(tokio::time::Instant::now()).await,
-        CloseOutcome::Complete
-    );
+    assert_eq!(cache.close(Duration::ZERO).await, CloseOutcome::Complete);
     assert_eq!(server.connections(), old);
 }
 
@@ -1378,18 +1374,18 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
             }
             Stopped::Deadline => OperationContext::with_timeout(Duration::ZERO),
         };
-        let cause = OperationError::Stopped(reason);
-        assert_eq!(namespace.get(&context, "stopped").await, Err(cause));
+        assert_eq!(
+            namespace.get(&context, "stopped").await,
+            Err(OperationError::Stopped(reason))
+        );
+        let refused = MutationError::NotApplied(MutationFailure::Stopped(reason));
         assert_eq!(
             namespace
                 .set(&context, "stopped", b"value", Duration::from_secs(1))
                 .await,
-            Err(SetError::Mutation(MutationError::NotApplied(cause)))
+            Err(refused)
         );
-        assert_eq!(
-            namespace.delete(&context, "stopped").await,
-            Err(MutationError::NotApplied(cause))
-        );
+        assert_eq!(namespace.delete(&context, "stopped").await, Err(refused));
     }
     assert_eq!(namespace.get(&caller, "live").await, Ok(None));
     assert_eq!(
@@ -1496,6 +1492,42 @@ async fn acknowledged_write_keeps_its_result_after_cancellation_and_disconnect()
         .await;
 
     assert_eq!(write.await, Ok(()));
+}
+
+#[tokio::test]
+async fn cancelled_mutation_with_ready_error_reply_still_reports_cancellation() {
+    let caller = OperationContext::unbounded();
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .await
+    .expect("start cache");
+    let namespace = cache.namespace(namespace!("cancelled_mutation_error"));
+    assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
+
+    server
+        .observed
+        .answer_next("SET", b"-NOPERM access denied\r\n");
+    let context = OperationContext::unbounded();
+    let write = namespace.set(&context, "key", b"value", Duration::from_secs(10));
+    tokio::pin!(write);
+    assert!(futures_util::poll!(write.as_mut()).is_pending());
+    server
+        .wait_for(Duration::from_secs(1), "SET was not sent", || {
+            server.command_count("SET", Some("cancelled_mutation_error:key")) == 1
+        })
+        .await;
+    assert_eq!(namespace.get(&caller, "fence").await, Ok(None));
+
+    context.cancel();
+    assert_eq!(
+        write.await,
+        Err(MutationError::NotApplied(MutationFailure::Stopped(
+            Stopped::Cancelled
+        )))
+    );
 }
 
 #[tokio::test]
@@ -1612,8 +1644,8 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         tokio::time::timeout(Duration::from_millis(200), write)
             .await
             .expect("cancellation must end waiting before the local ceiling"),
-        Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Stopped(Stopped::Cancelled)
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Stopped(
+            Stopped::Cancelled
         )))
     );
     assert_work_metrics(&metrics, 0, 0, 0);
@@ -1943,7 +1975,7 @@ fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() 
             .await
             .expect("admission must time out while the blocking worker is unavailable")
             .unwrap_err();
-        assert_eq!(error, CacheError::AdmissionTimedOut);
+        assert_eq!(error.0, StartErrorKind::AdmissionTimedOut);
 
         let tasks = tokio_util::task::TaskTracker::new();
         {
@@ -1952,7 +1984,7 @@ fn a_stalled_blocking_pool_bounds_startup_and_keeps_one_pending_password_read() 
         }
         std::assert_matches!(
             futures_util::poll!(std::pin::pin!(file.read(&tasks))),
-            std::task::Poll::Ready(Err(crate::credentials::ReadFailure::Busy))
+            std::task::Poll::Ready(Err(crate::credentials::PasswordFileReadFailure::Busy))
         );
         tasks.close();
         assert!(futures_util::poll!(std::pin::pin!(tasks.wait())).is_pending());

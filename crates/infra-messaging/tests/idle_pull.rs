@@ -6,9 +6,12 @@
 use std::time::Duration;
 
 use async_nats::jetstream::{self, stream};
-use domain_events::EventPayload;
+use domain_events::{Event, EventPayload};
 use futures_util::StreamExt as _;
-use infra_messaging::{ConsumerOptions, Messaging, MessagingOptions, Registry, Route};
+use infra_messaging::{
+    ConsumerOptions, Messaging, MessagingOptions, Registry, Route, TransportSecurity,
+};
+use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -131,14 +134,14 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     .await;
 
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let context = OperationContext::new(Some(Deadline::at(deadline())), cancel.clone());
+    let messaging = Messaging::connect(
         MessagingOptions {
             connection_name: "infra-messaging-idle-test".to_owned(),
             servers: vec![url],
             credentials: None,
             root_ca_path: None,
-            allow_plaintext: true,
-            tls_first: false,
+            security: TransportSecurity::AllowPlaintext,
             source_stream: stream_name.clone(),
             max_payload_bytes: 1024,
             consumer: Some(ConsumerOptions {
@@ -149,19 +152,18 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
                 concurrency: std::num::NonZeroUsize::MIN,
             }),
         },
-        deadline(),
-        cancel.clone(),
-    ))
+        &context,
+    )
     .await
     .expect("idle fixture stream is admitted");
     let route = Route::<IdleEvent>::new(subject);
     let mut registry = Registry::default();
-    registry.declare(&route).expect("route is valid");
     registry
-        .register(&route, |_, _| async { Ok(()) })
-        .expect("handler is registered");
+        .declare(&route)
+        .expect("route is valid")
+        .handle(|_: Event<IdleEvent>, _: OperationContext| async { Ok(()) });
     let consumer = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context)
         .await
         .expect("durable consumer is admitted");
 
@@ -193,7 +195,9 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
         .await
         .expect("bounded consumer drain joins its pull task");
     assert_eq!(
-        messaging.close(deadline(), &CancellationToken::new()).await,
+        messaging
+            .close(&OperationContext::from_deadline(Deadline::at(deadline())))
+            .await,
         infra_messaging::CloseOutcome::Complete
     );
     for name in [stream_name, dlq_stream] {

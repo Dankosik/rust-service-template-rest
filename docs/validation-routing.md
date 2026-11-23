@@ -1,9 +1,11 @@
 # Validation Routing
 
 [AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local completion.
-Run `just` to see every command available for this checkout, and `mise install`
-to install the pinned CLI tools from [`mise.toml`](../mise.toml). CI routes
-jobs via [`.github/actions/detect-changes/detect.py`](../.github/actions/detect-changes/detect.py).
+Run `just` to see every command available for this checkout (including
+`just lint-changed`, `just test-changed`, and `just test-budget`), and
+`mise install` to install the pinned CLI tools from [`mise.toml`](../mise.toml).
+CI routes jobs via [`.github/actions/detect-changes/detect.py`](../.github/actions/detect-changes/detect.py)
+and scopes PR Rust checks via [`scripts/checks/rust_selection.py`](../scripts/checks/rust_selection.py).
 
 ## Policy rules beyond `just`
 

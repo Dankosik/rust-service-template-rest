@@ -1,7 +1,7 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::de::{BlankAsNone, BlankSecretAsNone, StrictEnum, StrictString};
+use crate::de::{BlankAsNone, BlankAsNoneVerbatim};
 use crate::validate::{Rejected, ValidationError, Violations, optional_pair, required_non_blank};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -20,28 +20,19 @@ enum ServiceAuthMode {
 #[debug("ServiceAuthInput {{ .. }}")]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ServiceAuthInput {
-    #[serde_as(as = "StrictEnum")]
     mode: ServiceAuthMode,
     /// This service's name: the audience it accepts and its tokens'
     /// `iss` and `sub`.
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     name: Option<String>,
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     jwt_type: Option<String>,
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictString>")]
     trust: Option<String>,
     /// The `kid` receivers hold this service's public key under.
     /// Required together with `private_key`.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     key_id: Option<String>,
     /// Environment-only PKCS#8 PEM of this service's EC P-256 signing
     /// key. Without it the service verifies callers but calls no one.
-    #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     private_key: Option<SecretString>,
 }
 
@@ -119,24 +110,20 @@ impl ServiceAuthInput {
                     self.trust,
                     condition,
                 ));
-                let signing_key = v
-                    .record(optional_pair(
-                        "service_auth.key_id",
-                        self.key_id,
-                        "service_auth.private_key",
-                        self.private_key,
-                    ))
-                    .map(|pair| {
-                        pair.map(|(key_id, private_key)| ServiceSigningKey {
-                            key_id,
-                            private_key,
-                        })
-                    });
+                let signing_key = v.record(optional_pair(
+                    "service_auth.key_id",
+                    self.key_id,
+                    "service_auth.private_key",
+                    self.private_key,
+                ));
                 Ok(ServiceAuthConfig::Jwt {
                     name: name?,
                     jwt_type: jwt_type?,
                     trust: trust?,
-                    signing_key: signing_key?,
+                    signing_key: signing_key?.map(|(key_id, private_key)| ServiceSigningKey {
+                        key_id,
+                        private_key,
+                    }),
                 })
             }
         }

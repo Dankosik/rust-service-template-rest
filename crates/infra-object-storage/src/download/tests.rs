@@ -12,8 +12,8 @@ use super::*;
 use crate::observe::{Histograms, Operation};
 use crate::tests::{Records, in_tracing_child};
 
-fn local_context(timeout: Duration) -> CallContext {
-    CallContext::new(&OperationContext::unbounded(), timeout)
+fn local_context(timeout: Duration) -> BoundedContext {
+    OperationContext::unbounded().bounded(timeout)
 }
 
 fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>) {
@@ -49,12 +49,13 @@ fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>
 async fn collection_reserves_only_the_unread_tail() {
     for (read_chunks, expected) in [(0, &b"abcde"[..]), (1, &b"de"[..]), (2, &b""[..])] {
         let (mut download, admission, eof) = download(Duration::from_mins(1));
+        let timer = download.timer.as_ref().unwrap().abort_handle();
         eof.send(()).unwrap();
         for _ in 0..read_chunks {
             download.next_chunk().await.unwrap().unwrap();
         }
         if read_chunks == 2 {
-            joined(&mut download.timer).await;
+            wait_for_timer(&timer).await;
             tokio::time::advance(Duration::from_mins(1)).await;
             assert_eq!(download.next_chunk().await.unwrap(), None);
             assert!(download.is_end_stream());
@@ -177,7 +178,7 @@ fn assert_download_failure(
     expected: ObjectStorageError,
     partial: bool,
     frames: bool,
-) -> (Download, Arc<AtomicUsize>) {
+) -> (Download, Arc<AtomicUsize>, AbortHandle) {
     let drops = Arc::new(AtomicUsize::new(0));
     let admission = Arc::new(Semaphore::new(1));
     let metadata = ObjectMetadata {
@@ -197,6 +198,7 @@ fn assert_download_failure(
         Arc::clone(&admission).try_acquire_owned().unwrap(),
         local_context(Duration::from_mins(1)),
     );
+    let timer = download.timer.as_ref().unwrap().abort_handle();
     let mut context = Context::from_waker(Waker::noop());
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert_eq!(admission.available_permits(), 0);
@@ -221,7 +223,7 @@ fn assert_download_failure(
     assert_eq!(download.size_hint().lower(), 0);
     assert_eq!(download.size_hint().upper(), None);
     assert!(!download.is_end_stream());
-    (download, drops)
+    (download, drops, timer)
 }
 
 #[tokio::test(start_paused = true)]
@@ -267,10 +269,10 @@ async fn retained_failed_download_releases_body_and_finishes_once() {
         for (chunk, error, expected, outcome, partial) in cases {
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
-            let (mut download, drops) = metrics::with_local_recorder(&recorder, || {
+            let (mut download, drops, timer) = metrics::with_local_recorder(&recorder, || {
                 assert_download_failure(chunk, error, expected, partial, frames)
             });
-            joined(&mut download.timer).await;
+            wait_for_timer(&timer).await;
             tokio::time::advance(Duration::from_mins(1)).await;
             let mut context = Context::from_waker(Waker::noop());
             assert_eq!(
@@ -300,8 +302,7 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
         return;
     }
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
     let cases = [
         (
             Some(Duration::from_secs(2)),
@@ -343,14 +344,14 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
             ByteStream::from_body_1_x(body),
             guard,
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            CallContext::new(&context, storage_timeout),
+            context.bounded(storage_timeout),
         );
         if expected == ObjectStorageError::Stopped(Stopped::Cancelled) {
             context.cancel();
         } else {
             tokio::time::advance(Duration::from_secs(2)).await;
         }
-        joined(&mut download.timer).await;
+        joined(download.timer.as_mut().unwrap()).await;
         tokio::time::timeout(Duration::from_secs(1), body_dropped)
             .await
             .unwrap()
@@ -422,14 +423,15 @@ async fn a_provider_chunk_or_eof_at_the_original_cutoff_is_not_delivered() {
             ByteStream::from_body_1_x(LateChunk { cutoff, chunk }),
             OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None),
             Arc::clone(&admission).try_acquire_owned().unwrap(),
-            CallContext::new(&context, Duration::from_mins(1)),
+            context.bounded(Duration::from_mins(1)),
         );
+        let timer = download.timer.as_ref().unwrap().abort_handle();
         assert_eq!(
             download.next_chunk().await,
             Err(ObjectStorageError::Stopped(Stopped::Deadline))
         );
         assert_eq!(admission.available_permits(), 1);
-        joined(&mut download.timer).await;
+        wait_for_timer(&timer).await;
     }
 }
 
@@ -551,18 +553,31 @@ async fn expiry_destroys_the_unpolled_body_and_withheld_chunk() {
             self.0.store(true, Ordering::SeqCst);
         }
     }
+    struct ConsumerWake(AtomicBool);
+    impl std::task::Wake for ConsumerWake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
     let freed = Arc::new(AtomicBool::new(false));
     let bytes = Bytes::from_owner(Tracked(Arc::clone(&freed)));
     let (body, destroyed) = body(Some(bytes));
     let timeout = Duration::from_millis(20);
     let (mut download, slots) = open(body, 4, timeout);
-    assert!(
-        download
-            .poll_chunk(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    let original = Arc::new(ConsumerWake(AtomicBool::new(false)));
+    let replacement = Arc::new(ConsumerWake(AtomicBool::new(false)));
+    for consumer in [&original, &replacement] {
+        let waker = Waker::from(Arc::clone(consumer));
+        assert!(
+            download
+                .poll_chunk(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+    }
     tokio::time::advance(timeout).await;
-    joined(&mut download.timer).await;
+    joined(download.timer.as_mut().unwrap()).await;
+    assert!(!original.0.load(Ordering::SeqCst));
+    assert!(replacement.0.load(Ordering::SeqCst));
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
         .unwrap()
@@ -580,7 +595,7 @@ async fn empty_eof_and_pending_consumers_share_the_deadline() {
     for consumer in 0..3 {
         let (body, destroyed) = body(None);
         let (mut download, slots) = open(body, 0, Duration::from_millis(20));
-        let completion = download.timer.abort_handle();
+        let completion = download.timer.as_ref().unwrap().abort_handle();
         let result = match consumer {
             0 => download.next_chunk().await.map(|_| ()),
             1 => download.frame().await.unwrap().map(|_| ()),
@@ -602,12 +617,12 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
         return;
     }
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
     let (body, destroyed) = body(None);
     let (mut download, slots) = open(body, 4, Duration::from_mins(1));
-    download.timer.abort();
-    joined(&mut download.timer).await;
+    let timer = download.timer.as_mut().unwrap();
+    timer.abort();
+    joined(timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
         .unwrap()
@@ -633,7 +648,7 @@ async fn drop_and_provider_panic_release_custody_before_timer_runs() {
         let (mut body, mut destroyed) = body(None);
         body.panic = panic;
         let (mut download, slots) = open(body, 4, Duration::from_mins(1));
-        let completion = download.timer.abort_handle();
+        let completion = download.timer.as_ref().unwrap().abort_handle();
         if panic {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 download.poll_chunk(&mut Context::from_waker(Waker::noop()))
@@ -645,7 +660,6 @@ async fn drop_and_provider_panic_release_custody_before_timer_runs() {
             );
             assert!(destroyed.try_recv().is_ok());
             assert_eq!(slots.available_permits(), 1);
-            joined(&mut download.timer).await;
         } else {
             drop(download);
             assert!(destroyed.try_recv().is_ok());
@@ -661,6 +675,7 @@ async fn ready_empty_frames_cooperate_with_the_deadline_timer() {
     let polls = Arc::new(AtomicUsize::new(0));
     body.empty_polls = Some(Arc::clone(&polls));
     let (mut download, slots) = open(body, 4, Duration::from_millis(20));
+    let timer = download.timer.as_ref().unwrap().abort_handle();
     let progressed = Arc::new(AtomicBool::new(false));
     let progress = Arc::clone(&progressed);
     let other = tokio::spawn(async move {
@@ -679,7 +694,7 @@ async fn ready_empty_frames_cooperate_with_the_deadline_timer() {
         .unwrap()
         .unwrap();
     assert!(polls.load(Ordering::SeqCst) > 0);
-    joined(&mut download.timer).await;
+    wait_for_timer(&timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
         .unwrap()
@@ -689,6 +704,7 @@ async fn ready_empty_frames_cooperate_with_the_deadline_timer() {
 #[tokio::test(start_paused = true)]
 async fn partial_reads_spend_the_original_budget() {
     let (mut download, admission, eof) = download(Duration::from_secs(3));
+    let timer = download.timer.as_ref().unwrap().abort_handle();
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(download.next_chunk().await.unwrap().unwrap(), "abc");
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -698,5 +714,5 @@ async fn partial_reads_spend_the_original_budget() {
         Err(ObjectStorageError::Unavailable)
     );
     assert_eq!(admission.available_permits(), 1);
-    joined(&mut download.timer).await;
+    wait_for_timer(&timer).await;
 }

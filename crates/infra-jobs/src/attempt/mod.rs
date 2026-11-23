@@ -22,7 +22,8 @@ use crate::state::FailureReason;
 use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
 use outcome::{
-    HandlerOutcome, RetryCause, Transition, WritePlan, Written, map_outcome, send_outcome, write_of,
+    AttemptOutcome, HandlerOutcome, Transition, WritePlan, Written, send_write, transition_of,
+    write_of,
 };
 
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
@@ -75,45 +76,6 @@ pub(crate) fn describe_metrics() {
 }
 
 #[derive(Clone, Copy, Enum)]
-enum AttemptOutcome {
-    Completed,
-    Timeout,
-    Retry,
-    Snoozed,
-    Cancelled,
-    Permanent,
-    Exhausted,
-}
-
-impl AttemptOutcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Completed => Transition::COMPLETED_LABEL,
-            Self::Timeout => "timeout",
-            Self::Retry => "retry",
-            Self::Snoozed => "snoozed",
-            Self::Cancelled => "cancelled",
-            Self::Permanent => FailureReason::Permanent.as_str(),
-            Self::Exhausted => FailureReason::Exhausted.as_str(),
-        }
-    }
-
-    const fn of_retry(cause: RetryCause) -> Self {
-        match cause {
-            RetryCause::Failure => Self::Retry,
-            RetryCause::Timeout => Self::Timeout,
-        }
-    }
-
-    const fn of_failure(reason: FailureReason) -> Self {
-        match reason {
-            FailureReason::Permanent => Self::Permanent,
-            FailureReason::Exhausted => Self::Exhausted,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Enum)]
 enum Persistence {
     Applied,
     Unchanged,
@@ -137,8 +99,8 @@ impl Persistence {
     }
 }
 
-fn attempts_counter(kind: &'static str, outcome: &'static str) -> metrics::Counter {
-    metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => outcome)
+fn attempts_counter(kind: &'static str, outcome_label: &'static str) -> metrics::Counter {
+    metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => outcome_label)
 }
 
 fn persistence_counter(kind: &'static str, persistence: Persistence) -> metrics::Counter {
@@ -240,47 +202,41 @@ pub(crate) struct ClaimFence {
     pub(crate) token: uuid::Uuid,
 }
 
-pub(crate) fn record_exhausted(handles: &KindMetrics, attempt: &AttemptId, summary: &str) {
-    observe_terminal_failure(handles, attempt, FailureReason::Exhausted, summary);
+pub(crate) fn observe_exhausted(kind_metrics: &KindMetrics, attempt: &AttemptId, summary: &str) {
+    observe_terminal_failure(kind_metrics, attempt, FailureReason::Exhausted, summary);
 }
 
-fn observe_attempt(handles: &KindMetrics, attempt: &AttemptId, transition: &Transition) {
-    let outcome = transition.label();
+fn observe_attempt(kind_metrics: &KindMetrics, attempt: &AttemptId, transition: &Transition) {
+    let outcome = transition.outcome();
+    let label = outcome.label();
     match transition {
+        Transition::Fail { .. } => return,
         Transition::Complete(_) => {
-            handles.attempt(AttemptOutcome::Completed).increment(1);
-            tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_completed");
+            tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = label, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
-            handles.attempt(AttemptOutcome::Snoozed).increment(1);
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_finished");
+            log_attempt_finished(attempt, label, error_field(summary));
         }
-        Transition::Release => {
-            handles.attempt(AttemptOutcome::Cancelled).increment(1);
-            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_finished");
+        Transition::Release => log_attempt_finished(attempt, label, None),
+        Transition::Retry { summary, .. } => {
+            log_attempt_failed(attempt, label, summary);
         }
-        Transition::Retry { summary, cause, .. } => {
-            handles
-                .attempt(AttemptOutcome::of_retry(*cause))
-                .increment(1);
-            log_attempt_failed(attempt, outcome, summary);
-        }
-        Transition::Fail { .. } => {}
     }
+    kind_metrics.attempt(outcome).increment(1);
 }
 
 fn observe_terminal_failure(
-    handles: &KindMetrics,
+    kind_metrics: &KindMetrics,
     attempt: &AttemptId,
     reason: FailureReason,
     summary: &str,
 ) {
-    let outcome = reason.as_str();
-    handles
+    let outcome_label = reason.as_str();
+    kind_metrics
         .attempt(AttemptOutcome::of_failure(reason))
         .increment(1);
     if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        handles
+        kind_metrics
             .last_terminal_attempt_timestamp()
             .set(timestamp.as_secs_f64());
     }
@@ -288,21 +244,32 @@ fn observe_terminal_failure(
         job.id = %attempt.job_id,
         job.kind = attempt.kind,
         job.attempt = attempt.number,
-        outcome,
-        job.failure_reason = outcome,
+        outcome = outcome_label,
+        job.failure_reason = outcome_label,
         error = summary,
         "job_failed"
     );
 }
 
-fn log_attempt_failed(attempt: &AttemptId, outcome: &'static str, summary: &str) {
+fn log_attempt_failed(attempt: &AttemptId, outcome_label: &'static str, summary: &str) {
     tracing::info!(
         job.id = %attempt.job_id,
         job.kind = attempt.kind,
         job.attempt = attempt.number,
-        outcome,
+        outcome = outcome_label,
         error = error_field(summary),
         "job_attempt_failed"
+    );
+}
+
+fn log_attempt_finished(attempt: &AttemptId, outcome_label: &'static str, error: Option<&str>) {
+    tracing::info!(
+        job.id = %attempt.job_id,
+        job.kind = attempt.kind,
+        job.attempt = attempt.number,
+        outcome = outcome_label,
+        error,
+        "job_attempt_finished"
     );
 }
 
@@ -343,7 +310,7 @@ pub(crate) fn supervise(
         .run(payload)
         .instrument(span)
         .await;
-        guard.retire();
+        guard.disarm();
     }
 }
 
@@ -370,12 +337,10 @@ fn attempt_span(attempt: &AttemptId) -> tracing::Span {
 }
 
 fn record_on_span(span: &tracing::Span, transition: &Transition) {
-    span.record("outcome", transition.label());
-    match transition {
-        Transition::Retry { .. } | Transition::Fail { .. } => {
-            span.record("otel.status_code", "ERROR");
-        }
-        Transition::Complete(_) | Transition::Snooze { .. } | Transition::Release => {}
+    let outcome = transition.outcome();
+    span.record("outcome", outcome.label());
+    if outcome.is_span_error() {
+        span.record("otel.status_code", "ERROR");
     }
 }
 
@@ -385,40 +350,27 @@ impl AttemptRun<'_> {
             self.observe_uncertain();
             return;
         };
-        let transition = map_outcome(
+        let transition = transition_of(
             &self.attempt,
             self.registered.policy,
-            self.registered.is_outbox,
+            self.registered.mode,
             handler_outcome,
         );
-        let handles = self.registered.metrics();
-        self.observe_outcome(handles, &transition, handler_duration);
+        let kind_metrics = self.registered.metrics();
+        self.observe_outcome(kind_metrics, &transition, handler_duration);
         let Some(plan) = write_of(&transition) else {
-            self.observe_acknowledged(handles, Operation::Record, Written::Applied);
+            self.observe_acknowledged(kind_metrics, Operation::Record, Written::Applied);
             return;
         };
         let written = self.persist(plan).await;
-        match written {
-            Some(written) => self.observe_acknowledged(handles, plan.operation(), written),
-            None => self.observe_uncertain(),
-        }
-        if let Transition::Fail { reason, summary } = &transition {
-            if written == Some(Written::Applied) {
-                observe_terminal_failure(handles, &self.attempt, *reason, summary);
-            } else {
-                log_attempt_failed(&self.attempt, transition.label(), summary);
-            }
-        }
+        self.observe_persistence(kind_metrics, &transition, plan.operation(), written);
     }
 
     async fn execute_handler(
         &self,
         payload: Result<Vec<u8>, JobError>,
     ) -> Option<(HandlerOutcome, Option<Duration>)> {
-        if deadline_reached_or_cleanup_ended(
-            &self.group.lifecycle.cleanup,
-            self.supervisor_deadline,
-        ) {
+        if self.supervision_ended() {
             return None;
         }
         let attempt_deadline = clamped_deadline(
@@ -429,10 +381,11 @@ impl AttemptRun<'_> {
         let cancel = CancellationToken::new();
         let prepared = payload.map_err(HandlerOutcome::Error).and_then(|bytes| {
             prepare_handler(
-                self.registered.dispatch.as_ref(),
+                self.registered.handler.as_ref(),
                 Attempt {
-                    number: self.attempt.number,
                     fence: self.fence,
+                    kind: self.attempt.kind,
+                    number: self.attempt.number,
                     attempt_deadline,
                     cancellation: cancel.clone(),
                 },
@@ -440,26 +393,38 @@ impl AttemptRun<'_> {
                 &bytes,
             )
         });
-        match prepared {
-            Err(handler_outcome) => Some((handler_outcome, None)),
-            Ok(future) => {
-                let started = Instant::now();
-                let handler_outcome = drive(
-                    &self.group.lifecycle.cleanup,
-                    future,
-                    cancel,
-                    attempt_deadline,
-                    self.supervisor_deadline,
-                )
-                .await?;
-                Some((handler_outcome, Some(started.elapsed())))
-            }
-        }
+        let future = match prepared {
+            Ok(future) => future,
+            Err(handler_outcome) => return Some((handler_outcome, None)),
+        };
+        let started = Instant::now();
+        let handler_outcome = drive_handler(
+            &self.group.lifecycle.cleanup,
+            future,
+            cancel,
+            attempt_deadline,
+            self.supervisor_deadline,
+        )
+        .await?;
+        Some((handler_outcome, Some(started.elapsed())))
+    }
+
+    fn supervision_ended(&self) -> bool {
+        deadline_reached_or_cleanup_ended(&self.group.lifecycle.cleanup, self.supervisor_deadline)
+    }
+
+    async fn supervised<T>(&self, future: impl Future<Output = T>) -> Option<T> {
+        within(
+            &self.group.lifecycle.cleanup,
+            self.supervisor_deadline,
+            future,
+        )
+        .await
     }
 
     async fn persist(&self, plan: WritePlan<'_>) -> Option<Written> {
         loop {
-            let attempt = async {
+            let write_once = async {
                 match plan {
                     WritePlan::CompleteBatched => {
                         complete_batched(
@@ -471,17 +436,11 @@ impl AttemptRun<'_> {
                         .await
                     }
                     WritePlan::Single(write) => {
-                        send_outcome(self.group, self.fence, write, self.supervisor_deadline).await
+                        send_write(self.group, self.fence, write, self.supervisor_deadline).await
                     }
                 }
             };
-            if let Ok(written) = within(
-                &self.group.lifecycle.cleanup,
-                self.supervisor_deadline,
-                attempt,
-            )
-            .await?
-            {
+            if let Ok(written) = self.supervised(write_once).await? {
                 return Some(written);
             }
             let until = clamped_deadline(
@@ -489,45 +448,59 @@ impl AttemptRun<'_> {
                 RECORD_RETRY_INTERVAL,
                 self.supervisor_deadline,
             );
-            within(
-                &self.group.lifecycle.cleanup,
-                self.supervisor_deadline,
-                tokio::time::sleep_until(until),
-            )
-            .await?;
+            self.supervised(tokio::time::sleep_until(until)).await?;
         }
     }
 
     fn observe_outcome(
         &self,
-        handles: &KindMetrics,
+        kind_metrics: &KindMetrics,
         transition: &Transition,
         handler_duration: Option<Duration>,
     ) {
-        if matches!(transition, Transition::Release) {
-            self.group
-                .lifecycle
-                .counters
-                .cancelled
-                .fetch_add(1, Ordering::Relaxed);
+        let counters = &self.group.lifecycle.counters;
+        let counter = if matches!(transition, Transition::Release) {
+            &counters.cancelled
         } else {
-            self.group
-                .lifecycle
-                .counters
-                .known_results
-                .fetch_add(1, Ordering::Relaxed);
-        }
+            &counters.known_results
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         record_on_span(&tracing::Span::current(), transition);
         if let Some(duration) = handler_duration {
-            handles.duration.record(duration);
+            kind_metrics.duration.record(duration);
         }
-        observe_attempt(handles, &self.attempt, transition);
+        observe_attempt(kind_metrics, &self.attempt, transition);
     }
 
-    fn observe_acknowledged(&self, handles: &KindMetrics, operation: Operation, written: Written) {
+    fn observe_persistence(
+        &self,
+        kind_metrics: &KindMetrics,
+        transition: &Transition,
+        operation: Operation,
+        written: Option<Written>,
+    ) {
+        match written {
+            Some(written) => self.observe_acknowledged(kind_metrics, operation, written),
+            None => self.observe_uncertain(),
+        }
+        if let Transition::Fail { reason, summary } = transition {
+            if written == Some(Written::Applied) {
+                observe_terminal_failure(kind_metrics, &self.attempt, *reason, summary);
+            } else {
+                log_attempt_failed(&self.attempt, transition.label(), summary);
+            }
+        }
+    }
+
+    fn observe_acknowledged(
+        &self,
+        kind_metrics: &KindMetrics,
+        operation: Operation,
+        written: Written,
+    ) {
         observe_recovery(self.group, operation);
         let persistence = Persistence::acknowledged(written);
-        handles.persistence(persistence).increment(1);
+        kind_metrics.persistence(persistence).increment(1);
         tracing::debug!(
             job.id = %self.attempt.job_id,
             job.kind = self.attempt.kind,
@@ -564,14 +537,14 @@ impl AttemptRun<'_> {
     }
 }
 
-fn prepare_handler(
-    dispatch: &crate::kind::Dispatch,
+fn prepare_handler<'a>(
+    handler: &'a dyn crate::kind::ErasedHandler,
     attempt: Attempt,
-    pool: infra_postgres::PgPool,
+    pool: infra_postgres::Pool,
     payload: &[u8],
-) -> Result<HandlerFuture, HandlerOutcome> {
+) -> Result<HandlerFuture<'a>, HandlerOutcome> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        dispatch(attempt, pool, payload)
+        handler.prepare(attempt, pool, payload)
     }))
     .map_err(|_| HandlerOutcome::Panic)?
     .map_err(HandlerOutcome::PayloadDecode)
@@ -625,9 +598,9 @@ fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
     base.checked_add(wait).unwrap_or(limit).min(limit)
 }
 
-async fn drive(
+async fn drive_handler(
     cleanup: &ForcedCleanup,
-    future: HandlerFuture,
+    future: HandlerFuture<'_>,
     cancel: CancellationToken,
     attempt_deadline: Instant,
     supervisor_deadline: Instant,
@@ -641,7 +614,7 @@ async fn drive(
             drop(payload);
         }
     });
-    let reason = {
+    let interrupted = {
         let mut run = std::pin::pin!(std::panic::AssertUnwindSafe(&mut *handler).catch_unwind());
         let mut first_poll = true;
         let bounded_run = std::future::poll_fn(|cx| {
@@ -660,7 +633,7 @@ async fn drive(
             }
             run.as_mut()
                 .poll(cx)
-                .map(|result| Some(outcome_from(result)))
+                .map(|result| Some(handler_outcome_from(result)))
         });
         tokio::select! {
             biased;
@@ -668,7 +641,7 @@ async fn drive(
             () = cleanup.forced() => {}
             () = tokio::time::sleep_until(attempt_deadline) => {}
         }
-        let reason = if cleanup.requested_before(attempt_deadline) {
+        let interrupted = if cleanup.requested_before(attempt_deadline) {
             HandlerOutcome::Cancelled
         } else {
             HandlerOutcome::Timeout
@@ -676,16 +649,16 @@ async fn drive(
         cancel.cancel();
         let grace = clamped_deadline(Instant::now(), COOPERATIVE_GRACE, supervisor_deadline);
         if let Some(result) = within(cleanup, grace, &mut run).await {
-            return Some(outcome_after_cancel(&result, reason));
+            return Some(outcome_after_cancel(&result, interrupted));
         }
-        reason
+        interrupted
     };
     drop(handler);
-    (!deadline_reached_or_cleanup_ended(cleanup, supervisor_deadline)).then_some(reason)
+    (!deadline_reached_or_cleanup_ended(cleanup, supervisor_deadline)).then_some(interrupted)
 }
 
 fn outcome_after_cancel(
-    result: &Result<Result<Completion, JobError>, Panicked>,
+    result: &Result<Result<Completion, JobError>, PanicPayload>,
     reason: HandlerOutcome,
 ) -> HandlerOutcome {
     match result {
@@ -694,9 +667,11 @@ fn outcome_after_cancel(
     }
 }
 
-type Panicked = Box<dyn std::any::Any + Send>;
+type PanicPayload = Box<dyn std::any::Any + Send>;
 
-fn outcome_from(result: Result<Result<Completion, JobError>, Panicked>) -> HandlerOutcome {
+fn handler_outcome_from(
+    result: Result<Result<Completion, JobError>, PanicPayload>,
+) -> HandlerOutcome {
     match result {
         Ok(Ok(completion)) => HandlerOutcome::Success(completion),
         Ok(Err(error)) => HandlerOutcome::Error(error),
@@ -722,7 +697,7 @@ mod tests {
     }
 
     impl crate::JobKind for DecodeProbe {
-        const NAME: &'static str = "test.decode_probe";
+        const NAME: crate::KindName = crate::KindName::new("test.decode_probe");
     }
 
     #[tokio::test]
@@ -738,22 +713,24 @@ mod tests {
             }
         });
         let registry = kinds.validate().unwrap();
-        let registered = registry.get(<DecodeProbe as crate::JobKind>::NAME).unwrap();
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
+        let registered = registry
+            .get(<DecodeProbe as crate::JobKind>::NAME.as_str())
             .unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let attempt = || Attempt {
             fence: ClaimFence {
                 job_id: ID,
                 generation: 1,
                 token: uuid::Uuid::nil(),
             },
+            kind: <DecodeProbe as crate::JobKind>::NAME.as_str(),
             number: 1,
             attempt_deadline: Instant::now() + Duration::from_secs(1),
             cancellation: CancellationToken::new(),
         };
         let failed = prepare_handler(
-            registered.dispatch.as_ref(),
+            registered.handler.as_ref(),
             attempt(),
             pool.clone(),
             b"true",
@@ -765,7 +742,7 @@ mod tests {
         assert!(!ran.load(Ordering::Relaxed));
 
         let Ok(later) = prepare_handler(
-            registered.dispatch.as_ref(),
+            registered.handler.as_ref(),
             attempt(),
             pool.clone(),
             b"false",
@@ -774,7 +751,7 @@ mod tests {
         };
         later.await.unwrap();
         assert!(ran.load(Ordering::Relaxed));
-        pool.close().await;
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]
@@ -808,11 +785,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         tokio::time::advance(Duration::from_secs(1)).await;
 
-        let handler_outcome = drive(
+        let handler_outcome = drive_handler(
             &ForcedCleanup::default(),
             Box::pin(async move {
                 let _ = ran.send(());
-                Ok(Completion::Pending)
+                Ok(Completion::Uncommitted)
             }),
             cancel.clone(),
             deadline,
@@ -833,7 +810,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (resume, suspended) = tokio::sync::oneshot::channel();
         let (ran, observed) = tokio::sync::oneshot::channel();
-        let mut attempt = std::pin::pin!(drive(
+        let mut attempt = std::pin::pin!(drive_handler(
             &cleanup,
             Box::pin(async move {
                 suspended.await.unwrap();
@@ -859,12 +836,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(1);
         let (resume, suspended) = tokio::sync::oneshot::channel();
         let (ran, observed) = tokio::sync::oneshot::channel();
-        let mut attempt = std::pin::pin!(drive(
+        let mut attempt = std::pin::pin!(drive_handler(
             &cleanup,
             Box::pin(async move {
                 suspended.await.unwrap();
                 let _ = ran.send(());
-                Ok(Completion::Pending)
+                Ok(Completion::Uncommitted)
             }),
             cancel.clone(),
             deadline,
@@ -901,11 +878,11 @@ mod tests {
             let token = CancellationToken::new();
             let child = token.child_token();
             let until = Instant::now() + Duration::from_secs(10);
-            let result = drive(
+            let result = drive_handler(
                 &ForcedCleanup::default(),
                 Box::pin(async move {
                     match exit {
-                        "success" => Ok(Completion::Pending),
+                        "success" => Ok(Completion::Uncommitted),
                         "failure" => Err(JobError::permanent("refused")),
                         _ => panic!("handler panicked"),
                     }
@@ -920,55 +897,14 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct SpanFields(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
-
-    struct Collect<'a>(&'a mut std::collections::BTreeMap<String, String>);
-
-    impl tracing::field::Visit for Collect<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.insert(field.name().to_owned(), format!("{value:?}"));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.insert(field.name().to_owned(), value.to_owned());
-        }
-    }
-
-    impl tracing::Subscriber for SpanFields {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            let mut spans = self.0.lock().unwrap();
-            let mut fields = std::collections::BTreeMap::new();
-            attributes.record(&mut Collect(&mut fields));
-            spans.push(fields);
-            tracing::span::Id::from_u64(spans.len() as u64)
-        }
-
-        fn record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-            let index = usize::try_from(span.into_u64()).unwrap() - 1;
-            values.record(&mut Collect(&mut self.0.lock().unwrap()[index]));
-        }
-
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-        fn event(&self, _: &tracing::Event<'_>) {}
-
-        fn enter(&self, _: &tracing::span::Id) {}
-
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     #[test]
     fn the_attempt_span_is_named_for_its_kind_and_carries_the_outcome() {
         let id = JobId(uuid::Uuid::try_parse("01234567-89ab-cdef-fedc-ba9876543210").unwrap());
-        let spans = SpanFields::default();
-        tracing::subscriber::with_default(spans.clone(), || {
+        let spans = observe_test_support::SpanCapture::new();
+        {
+            let _guard = spans.install_default();
             for handler_outcome in [
-                HandlerOutcome::Success(Completion::Pending),
+                HandlerOutcome::Success(Completion::Uncommitted),
                 HandlerOutcome::Error(JobError::retryable("fail")),
                 HandlerOutcome::Error(JobError::permanent("stop")),
                 HandlerOutcome::Cancelled,
@@ -985,17 +921,22 @@ mod tests {
                 };
                 record_on_span(
                     &span,
-                    &map_outcome(&attempt, Policy::default(), false, handler_outcome),
+                    &transition_of(
+                        &attempt,
+                        Policy::default(),
+                        crate::kind::KindMode::Ordinary,
+                        handler_outcome,
+                    ),
                 );
             }
-        });
-        let spans = spans.0.lock().unwrap();
+        }
+        let spans = spans.snapshot();
         let seen: Vec<_> = spans
             .iter()
-            .map(|fields| {
+            .map(|span| {
                 (
-                    fields["outcome"].as_str(),
-                    fields.get("otel.status_code").map(String::as_str),
+                    span.unquoted("outcome").unwrap(),
+                    span.unquoted("otel.status_code"),
                 )
             })
             .collect();
@@ -1009,10 +950,13 @@ mod tests {
             ]
         );
         let first = &spans[0];
-        assert_eq!(first["otel.name"], "process sample");
-        assert_eq!(first["otel.kind"], "consumer");
-        assert_eq!(first["job.kind"], "sample");
-        assert_eq!(first["job.id"], "01234567-89ab-cdef-fedc-ba9876543210");
-        assert_eq!(first["job.attempt"], "3");
+        assert_eq!(first.unquoted("otel.name"), Some("process sample"));
+        assert_eq!(first.unquoted("otel.kind"), Some("consumer"));
+        assert_eq!(first.unquoted("job.kind"), Some("sample"));
+        assert_eq!(
+            first.unquoted("job.id"),
+            Some("01234567-89ab-cdef-fedc-ba9876543210")
+        );
+        assert_eq!(first.unquoted("job.attempt"), Some("3"));
     }
 }

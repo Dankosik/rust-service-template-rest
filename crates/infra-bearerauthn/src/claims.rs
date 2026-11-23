@@ -1,5 +1,5 @@
 use crate::{
-    Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
+    Actor, OptionsError, Principal, VerificationError, VerificationReason,
     principal::{Identifiers, Identity},
 };
 use compact_str::CompactString;
@@ -11,22 +11,44 @@ use crate::TokenProfile;
 use serde_json::value::RawValue;
 // template:end oidc-jwt:authn-claims-jwt-import
 
+pub(crate) struct JsonObject<T>(pub(crate) T);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = JsonObject<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(JsonObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+    }
+}
+
 /// RFC 7519 §4.1.4
 const LEEWAY: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct ClaimPolicy {
     issuer: Arc<str>,
     audiences: Vec<String>,
 }
 
 impl ClaimPolicy {
-    pub(crate) fn try_new(
-        issuer: &str,
-        mut audiences: Vec<String>,
-    ) -> Result<Self, PreparationError> {
+    pub(crate) fn try_new(issuer: &str, mut audiences: Vec<String>) -> Result<Self, OptionsError> {
         if audiences.is_empty() || audiences.iter().any(|audience| audience.trim().is_empty()) {
-            return Err(PreparationError::invalid_options());
+            return Err(OptionsError);
         }
         audiences.sort_unstable();
         Ok(Self {
@@ -253,52 +275,15 @@ pub(crate) fn validate_jwt_claims(
     token_profile: TokenProfile,
     now: Duration,
 ) -> Result<VerifiedClaims, VerificationError> {
-    let invalid = VerificationError::invalid;
-    let payload =
-        String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let (not_before, expiry, identifiers, scopes, actor) = {
-        let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
-            .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-        let scope = claims.scope.resolve(token_profile, claims.scp)?;
-        let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
-            (claims.iss, claims.aud, claims.exp)
-        else {
-            return Err(invalid(VerificationReason::MissingClaim));
-        };
-        let not_before = claims.nbf.map(|NumericDate(date)| date);
-        check_lifetime(expiry, not_before, now)?;
-        policy.check_issuer_and_audience(&issuer, &audience)?;
-        let identifiers = match token_profile {
-            // RFC 9068 §2.2
-            TokenProfile::Rfc9068 => {
-                let (Some(subject), Some(client_id), Some(_), Some(_)) = (
-                    non_empty(claims.sub),
-                    non_empty(claims.client_id),
-                    claims.iat,
-                    claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
-                ) else {
-                    return Err(invalid(VerificationReason::MissingClaim));
-                };
-                Identifiers::Subject {
-                    subject,
-                    client_id: Some(client_id),
-                }
-            }
-            TokenProfile::ResourceServer => {
-                let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
-                    .into_iter()
-                    .find_map(non_empty);
-                Identifiers::from_claims(non_empty(claims.sub), client_id)?
-            }
-        };
-        let scopes = Scopes::from_claim(scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
-        let actor = claims
-            .act
-            .map(parse_actor)
-            .transpose()
-            .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
-        (not_before, expiry, identifiers, scopes, actor)
-    };
+    let payload = String::from_utf8(payload)
+        .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
+    let JwtClaimFields {
+        not_before,
+        expiry,
+        identifiers,
+        scopes,
+        actor,
+    } = read_jwt_claims(&payload, policy, token_profile, now)?;
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
@@ -314,6 +299,71 @@ pub(crate) fn validate_jwt_claims(
     })
 }
 
+struct JwtClaimFields {
+    not_before: Option<Duration>,
+    expiry: Duration,
+    identifiers: Identifiers,
+    scopes: Scopes,
+    actor: Option<Actor>,
+}
+
+fn read_jwt_claims(
+    payload: &str,
+    policy: &ClaimPolicy,
+    token_profile: TokenProfile,
+    now: Duration,
+) -> Result<JwtClaimFields, VerificationError> {
+    let invalid = VerificationError::invalid;
+    let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(payload)
+        .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
+    let effective_scope = claims.scope.resolve(token_profile, claims.scp)?;
+    let (Some(BorrowableString(issuer)), Some(audience), Some(NumericDate(expiry))) =
+        (claims.iss, claims.aud, claims.exp)
+    else {
+        return Err(invalid(VerificationReason::MissingClaim));
+    };
+    let not_before = claims.nbf.map(|NumericDate(date)| date);
+    check_lifetime(expiry, not_before, now)?;
+    policy.check_issuer_and_audience(&issuer, &audience)?;
+    let identifiers = match token_profile {
+        // RFC 9068 §2.2
+        TokenProfile::Rfc9068 => {
+            let (Some(subject), Some(client_id), Some(_), Some(_)) = (
+                non_empty(claims.sub),
+                non_empty(claims.client_id),
+                claims.iat,
+                claims.jti.filter(|BorrowableString(jti)| !jti.is_empty()),
+            ) else {
+                return Err(invalid(VerificationReason::MissingClaim));
+            };
+            Identifiers::Subject {
+                subject,
+                client_id: Some(client_id),
+            }
+        }
+        TokenProfile::ResourceServer => {
+            let client_id = [claims.client_id, claims.azp, claims.appid, claims.cid]
+                .into_iter()
+                .find_map(non_empty);
+            Identifiers::from_claims(non_empty(claims.sub), client_id)?
+        }
+    };
+    let scopes =
+        Scopes::from_claim(effective_scope).ok_or_else(|| invalid(VerificationReason::Scope))?;
+    let actor = claims
+        .act
+        .map(parse_actor)
+        .transpose()
+        .map_err(|EmptyActorSubject| invalid(VerificationReason::MalformedClaims))?;
+    Ok(JwtClaimFields {
+        not_before,
+        expiry,
+        identifiers,
+        scopes,
+        actor,
+    })
+}
+
 /// RFC 7519 §2
 struct NumericDate(Duration);
 
@@ -325,11 +375,11 @@ impl NumericDate {
         }
 
         let (mantissa, exponent) = number.split_once(['e', 'E']).unwrap_or((number, "0"));
-        let unsigned = mantissa.strip_prefix('-').unwrap_or(mantissa);
-        if !unsigned.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        let magnitude = mantissa.strip_prefix('-').unwrap_or(mantissa);
+        if !magnitude.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             return None;
         }
-        let (whole, fractional) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let (whole, fractional) = magnitude.split_once('.').unwrap_or((magnitude, ""));
         let digits = whole.bytes().chain(fractional.bytes());
         let Some(first_nonzero) = digits.clone().position(|digit| digit != b'0') else {
             return Some(Self(Duration::ZERO));
@@ -354,13 +404,14 @@ impl NumericDate {
             return Some(Self(Duration::from_nanos(1)));
         }
 
-        let mut significant_digits = digits.skip(first_nonzero);
-        let whole_nanoseconds = (0..nanosecond_digits).fold(0_u128, |value, _| {
-            let digit = significant_digits.next().map_or(0, |digit| digit - b'0');
-            value * 10 + u128::from(digit)
-        });
+        let mut significant_digits = digits.skip(first_nonzero).map(|digit| digit - b'0');
+        let mut whole_nanoseconds = 0_u128;
+        for _ in 0..nanosecond_digits {
+            whole_nanoseconds =
+                whole_nanoseconds * 10 + u128::from(significant_digits.next().unwrap_or(0));
+        }
         let nanoseconds =
-            whole_nanoseconds + u128::from(significant_digits.any(|digit| digit != b'0'));
+            whole_nanoseconds + u128::from(significant_digits.any(|digit| digit != 0));
         (nanoseconds <= Duration::MAX.as_nanos())
             .then(|| Self(Duration::from_nanos_u128(nanoseconds)))
     }
@@ -389,21 +440,22 @@ impl VerifiedClaims {
 
 /// RFC 7662 §2.2
 pub(crate) fn validate_introspection_claims(
-    bytes: &[u8],
+    response_body: &[u8],
     policy: &ClaimPolicy,
     now: Duration,
 ) -> Result<VerifiedClaims, VerificationError> {
-    let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
+    let malformed_response = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
-    let payload = std::str::from_utf8(bytes)
-        .map_err(|_| malformed())?
+    let payload = std::str::from_utf8(response_body)
+        .map_err(|_| malformed_response())?
         .trim_matches([' ', '\t', '\r', '\n']);
     let JsonObject(envelope) =
-        serde_json::from_str::<JsonObject<Envelope>>(payload).map_err(|_| malformed())?;
+        serde_json::from_str::<JsonObject<Envelope>>(payload).map_err(|_| malformed_response())?;
     if !envelope.active {
         return Err(invalid(VerificationReason::Inactive));
     }
-    let claims: ActiveClaims<'_> = serde_json::from_str(payload).map_err(|_| malformed())?;
+    let claims: ActiveClaims<'_> =
+        serde_json::from_str(payload).map_err(|_| malformed_response())?;
     let (Some(BorrowableString(issuer)), Some(audience), Some(expiry)) =
         (claims.iss, claims.aud, claims.exp)
     else {
@@ -422,7 +474,7 @@ pub(crate) fn validate_introspection_claims(
         .act
         .map(parse_actor)
         .transpose()
-        .map_err(|EmptyActorSubject| malformed())?;
+        .map_err(|EmptyActorSubject| malformed_response())?;
     Ok(VerifiedClaims {
         not_before,
         principal: Principal::new(
@@ -482,33 +534,47 @@ pub(crate) struct Scopes(Vec<String>);
 
 impl Scopes {
     fn from_claim(scope: Option<StringOrStrings<'_>>) -> Option<Self> {
-        let mut values: Vec<String> = match scope {
-            None => Vec::new(),
-            Some(StringOrStrings::One(value)) if value.is_empty() => Vec::new(),
-            Some(StringOrStrings::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
-            Some(StringOrStrings::Many(values)) => {
-                values.into_iter().map(Cow::into_owned).collect()
+        match scope {
+            None => Some(Self(Vec::new())),
+            Some(StringOrStrings::One(value)) if value.is_empty() => Some(Self(Vec::new())),
+            Some(StringOrStrings::One(value)) => match value.split_once(' ') {
+                None => shared_rules::rfc6749::is_scope_token(&value)
+                    .then(|| Self(vec![value.into_owned()])),
+                Some((first, rest)) => {
+                    let mut values: SmallVec<[&str; 8]> = std::iter::once(first)
+                        .chain(rest.split(' '))
+                        .map(|part| shared_rules::rfc6749::is_scope_token(part).then_some(part))
+                        .collect::<Option<_>>()?;
+                    values.sort_unstable();
+                    values.dedup();
+                    Some(Self(values.into_iter().map(str::to_owned).collect()))
+                }
+            },
+            Some(StringOrStrings::Many(mut values)) => {
+                if !values
+                    .iter()
+                    .all(|value| shared_rules::rfc6749::is_scope_token(value))
+                {
+                    return None;
+                }
+                values.sort_unstable();
+                values.dedup();
+                Some(Self(values.into_iter().map(Cow::into_owned).collect()))
             }
-        };
-        if !values
-            .iter()
-            .all(|value| shared_rules::rfc6749::is_scope_token(value))
-        {
-            return None;
         }
-        values.sort_unstable();
-        values.dedup();
-        Some(Self(values))
     }
 
     pub(crate) fn as_slice(&self) -> &[String] {
         &self.0
     }
 
-    pub(crate) fn contains_all(&self, required: &[String]) -> bool {
-        required
-            .iter()
-            .all(|scope| self.0.binary_search(scope).is_ok())
+    pub(crate) fn contains_all(&self, required: impl IntoIterator<Item: AsRef<str>>) -> bool {
+        required.into_iter().all(|scope| {
+            let scope = scope.as_ref();
+            self.0
+                .binary_search_by(|candidate| candidate.as_str().cmp(scope))
+                .is_ok()
+        })
     }
 }
 
@@ -531,9 +597,9 @@ mod tests {
         assert_eq!(metadata.label, "example");
         assert!(serde_json::from_str::<super::JsonObject<Metadata<'_>>>(r#"["example"]"#).is_err());
     }
-    // template:begin oidc-jwt:authn-claims-jwt-test-imports
     use std::time::Duration;
 
+    // template:begin oidc-jwt:authn-claims-jwt-test-imports
     use super::validate_jwt_claims;
     use crate::TokenProfile;
     // template:end oidc-jwt:authn-claims-jwt-test-imports
@@ -607,7 +673,13 @@ mod tests {
         .unwrap();
         assert_eq!(principal.subject(), None);
         assert_eq!(principal.client_id(), Some("client"));
+        assert_eq!(
+            principal.identity(),
+            crate::PrincipalIdentity::ClientOnly("client")
+        );
         assert_eq!(principal.scopes(), ["read", "write"]);
+        assert!(principal.has_scopes(["read", "write"]));
+        assert!(!principal.has_scopes(["read", "admin"]));
         assert_eq!(principal.expires_at(), 130);
         assert_eq!(
             verify(serde_json::json!({"exp": 130, "sub": ""})).unwrap_err(),
@@ -982,11 +1054,11 @@ mod tests {
         assert_eq!(claims.accounts[0].balance, i128::MIN);
         assert_eq!(principal.scopes(), ["read", "write"]);
         let error = principal.claims::<WrongShape>().unwrap_err();
-        assert_eq!(error, crate::ClaimAccessError::InvalidShape);
+        assert_eq!(error, crate::ClaimAccessError);
         assert!(!format!("{error:?} {error} {principal:?}").contains("private-value"));
         assert_eq!(
             principal.claims::<RepeatedMember>().unwrap_err(),
-            crate::ClaimAccessError::InvalidShape
+            crate::ClaimAccessError
         );
     }
 
@@ -1078,8 +1150,8 @@ mod tests {
                 true,
             ),
             (
-                serde_json::json!({"scp":["read"]}),
-                Some(vec!["read"]),
+                serde_json::json!({"scp":["write", "read", "write"]}),
+                Some(vec!["read", "write"]),
                 true,
             ),
             (
@@ -1098,6 +1170,7 @@ mod tests {
             (serde_json::json!({"scope":"read","scp":42}), None, true),
             (serde_json::json!({"scope":"read  write"}), None, true),
             (serde_json::json!({"scope":["read write"]}), None, false),
+            (serde_json::json!({"scp":["read", "bad scope"]}), None, true),
         ] {
             let response = merged(
                 serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"}),
@@ -1140,6 +1213,40 @@ mod tests {
                 }
             }
             // template:end oidc-jwt:authn-claims-scope-jwt-assertion
+        }
+    }
+
+    #[test]
+    fn single_scope_strings_reuse_owned_buffers_and_preserve_space_splitting() {
+        use std::borrow::Cow;
+
+        let escaped: super::StringOrStrings<'_> =
+            serde_json::from_str(r#""read\u003awrite""#).unwrap();
+        let super::StringOrStrings::One(Cow::Owned(ref raw)) = escaped else {
+            panic!("escaped JSON string must deserialize as Cow::Owned");
+        };
+        let owned_ptr = raw.as_ptr();
+        let scopes = super::Scopes::from_claim(Some(escaped)).unwrap();
+        assert_eq!(scopes.as_slice(), ["read:write"]);
+        assert_eq!(scopes.as_slice()[0].as_ptr(), owned_ptr);
+
+        let escaped_list: super::StringOrStrings<'_> =
+            serde_json::from_str(r#""write\u0020read\u0020write""#).unwrap();
+        assert_eq!(
+            super::Scopes::from_claim(Some(escaped_list))
+                .unwrap()
+                .as_slice(),
+            ["read", "write"]
+        );
+
+        for invalid in [" ", " read", "read ", "read  write", "bad\x7fscope"] {
+            assert!(
+                super::Scopes::from_claim(Some(super::StringOrStrings::One(Cow::Borrowed(
+                    invalid
+                ))))
+                .is_none(),
+                "{invalid:?}"
+            );
         }
     }
 }

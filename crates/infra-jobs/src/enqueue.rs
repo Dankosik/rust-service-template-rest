@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use infra_postgres::{Tx, TxMode, observed};
 
-use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
+use crate::kind::{InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
 
 // template:begin outbox:jobs-outbox-module
@@ -12,12 +12,71 @@ pub mod outbox;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
-const MIN_PAYLOAD_CAPACITY: usize = 256;
+const JSON_STRING_QUOTES_BYTES: usize = "\"\"".len();
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EnqueueOptions<'a> {
-    pub delay: Duration,
-    pub unique_key: Option<&'a str>,
+#[derive(Debug)]
+pub struct PayloadSizer {
+    bytes: usize,
+    poll_budget: usize,
+}
+
+impl PayloadSizer {
+    pub const BYTES_PER_POLL: usize = 4096;
+
+    #[must_use]
+    pub const fn with_base(bytes: usize) -> Self {
+        Self {
+            bytes,
+            poll_budget: Self::BYTES_PER_POLL,
+        }
+    }
+
+    pub fn from_skeleton<T: serde::Serialize + ?Sized>(value: &T) -> Result<Self, EnqueueError> {
+        Ok(Self::with_base(
+            json_payload_len(value).map_err(EnqueueError::Serialize)?,
+        ))
+    }
+
+    pub async fn add_str_with<E: From<EnqueueError>>(
+        &mut self,
+        field: &str,
+        mut admit: impl FnMut(&str) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut rest = field;
+        while !rest.is_empty() {
+            let end = rest.floor_char_boundary(self.poll_budget);
+            if end == 0 {
+                tokio::task::yield_now().await;
+                self.poll_budget = Self::BYTES_PER_POLL;
+                continue;
+            }
+            let (fragment, tail) = rest.split_at(end);
+            admit(fragment)?;
+            let escaped = json_payload_len(fragment).map_err(EnqueueError::Serialize)?
+                - JSON_STRING_QUOTES_BYTES;
+            self.bytes = checked_serialized_len(self.bytes, escaped)
+                .map_err(|error| EnqueueError::Serialize(serde_json::Error::io(error)))?;
+            self.poll_budget -= end;
+            rest = tail;
+        }
+        Ok(())
+    }
+
+    pub async fn add_str(&mut self, field: &str) -> Result<(), EnqueueError> {
+        self.add_str_with(field, |_| Ok(())).await
+    }
+
+    #[must_use]
+    pub const fn total_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub const fn check_limit(&self) -> Result<(), EnqueueError> {
+        if self.bytes > MAX_PAYLOAD_BYTES {
+            return Err(EnqueueError::PayloadTooLarge { bytes: self.bytes });
+        }
+        Ok(())
+    }
 }
 
 #[must_use]
@@ -37,14 +96,6 @@ pub enum LivePayloadComparison {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueueError {
-    // template:begin outbox:jobs-outbox-enqueue-error
-    #[error("{} requires the dedicated outbox enqueue operation", outbox::KIND)]
-    OutboxKind,
-    #[error("payload contains a decoded NUL character")]
-    PayloadContainsNul,
-    // template:end outbox:jobs-outbox-enqueue-error
-    #[error("job kind {0:?} is not a valid kind name")]
-    InvalidKind(&'static str),
     #[error(
         "unique key must be 1 to {MAX_UNIQUE_KEY_BYTES} bytes of UTF-8 without control characters"
     )]
@@ -86,14 +137,47 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
 pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &K,
-    options: EnqueueOptions<'_>,
-) -> Result<Enqueued, EnqueueError> {
-    // template:begin outbox:jobs-outbox-enqueue-guard
-    if K::NAME == outbox::KIND {
-        return Err(EnqueueError::OutboxKind);
+) -> Result<JobId, EnqueueError> {
+    enqueue_unkeyed(tx, payload, Duration::ZERO).await
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub async fn enqueue_delayed<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    delay: Duration,
+) -> Result<JobId, EnqueueError> {
+    enqueue_unkeyed(tx, payload, delay).await
+}
+
+async fn enqueue_unkeyed<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    delay: Duration,
+) -> Result<JobId, EnqueueError> {
+    match enqueue_inner(tx, payload, delay, None).await? {
+        Enqueued::Created(id) => Ok(id),
+        Enqueued::Duplicate => Err(EnqueueError::Database(sqlx::Error::RowNotFound)),
     }
-    // template:end outbox:jobs-outbox-enqueue-guard
-    let prepared = prepare(payload, options)?;
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub async fn enqueue_unique<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    unique_key: &str,
+    delay: Duration,
+) -> Result<Enqueued, EnqueueError> {
+    enqueue_inner(tx, payload, delay, Some(unique_key)).await
+}
+
+async fn enqueue_inner<K: JobKind>(
+    tx: &mut Tx<'_, impl TxMode>,
+    payload: &K,
+    delay: Duration,
+    unique_key: Option<&str>,
+) -> Result<Enqueued, EnqueueError> {
+    let prepared = prepare(payload, delay, unique_key)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
     let inserted = observed!(
@@ -104,13 +188,13 @@ pub async fn enqueue<K: JobKind>(
                      statement_timestamp() + ($3::bigint * interval '1 microsecond'), $4, $5) \
              ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
              DO NOTHING",
-            K::NAME,
+            K::NAME.as_str(),
             prepared.unique_key,
             prepared.delay_micros,
             trace.trace_parent(),
             trace.trace_state(),
             id.0,
-            prepared.payload,
+            prepared.payload_text,
         )
         .execute(&mut *tx),
     )
@@ -119,7 +203,7 @@ pub async fn enqueue<K: JobKind>(
         return Ok(Enqueued::Duplicate);
     }
     if prepared.delay_micros == 0 {
-        notify_workers_after_commit(tx, K::NAME);
+        notify_workers_after_commit(tx, K::NAME.as_str());
     }
     Ok(Enqueued::Created(id))
 }
@@ -137,13 +221,7 @@ pub async fn compare_live_payload<K: JobKind>(
     unique_key: &str,
     payload: &K,
 ) -> Result<LivePayloadComparison, EnqueueError> {
-    let prepared = prepare(
-        payload,
-        EnqueueOptions {
-            delay: Duration::ZERO,
-            unique_key: Some(unique_key),
-        },
-    )?;
+    let prepared = prepare(payload, Duration::ZERO, Some(unique_key))?;
     let stored = observed!(
         "compare job payload",
         sqlx::query!(
@@ -153,7 +231,7 @@ pub async fn compare_live_payload<K: JobKind>(
                AND unique_key = $2::text COLLATE \"C\" \
                AND state IN ('pending', 'running') \
              FOR UPDATE",
-            K::NAME,
+            K::NAME.as_str(),
             prepared.unique_key,
         )
         .fetch_optional(&mut *tx),
@@ -163,10 +241,10 @@ pub async fn compare_live_payload<K: JobKind>(
         return Ok(LivePayloadComparison::NoLongerLive);
     };
     let same = if let Some(payload_text) = stored.payload_text {
-        payload_text == prepared.payload
+        payload_text == prepared.payload_text
     } else {
         let legacy = stored.legacy_payload.as_deref().unwrap_or_default();
-        legacy_payload_matches::<K>(legacy, &prepared.payload)?
+        legacy_payload_matches::<K>(legacy, &prepared.payload_text)?
     };
     Ok(if same {
         LivePayloadComparison::Same
@@ -177,45 +255,18 @@ pub async fn compare_live_payload<K: JobKind>(
 
 fn legacy_payload_matches<K: JobKind>(legacy: &str, expected: &str) -> Result<bool, EnqueueError> {
     let decoded = serde_json::from_str::<K>(legacy).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    let mut writer = PayloadWriter::default();
-    serde_json::to_writer(&mut writer, &decoded).map_err(EnqueueError::Serialize)?;
-    Ok(writer.total == expected.len() && writer.retained == expected.as_bytes())
+    match json_payload::to_vec_bounded(&decoded, MAX_PAYLOAD_BYTES) {
+        Ok(encoded) => Ok(encoded == expected.as_bytes()),
+        Err(json_payload::EncodeError::TooLarge { .. }) => Ok(false),
+        Err(json_payload::EncodeError::Serialize(error)) => Err(EnqueueError::Serialize(error)),
+    }
 }
 
 #[derive(Debug)]
 struct Prepared<'a> {
-    payload: String,
+    payload_text: String,
     unique_key: Option<&'a str>,
     delay_micros: i64,
-}
-
-#[derive(Default)]
-struct PayloadWriter {
-    retained: Vec<u8>,
-    total: usize,
-}
-
-impl Write for PayloadWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.total = checked_serialized_len(self.total, bytes.len())?;
-        let keep = bytes.len().min(MAX_PAYLOAD_BYTES - self.retained.len());
-        let needed = self.retained.len() + keep;
-        if needed > self.retained.capacity() {
-            let capacity = self
-                .retained
-                .capacity()
-                .saturating_mul(2)
-                .max(needed)
-                .clamp(MIN_PAYLOAD_CAPACITY, MAX_PAYLOAD_BYTES);
-            self.retained.reserve_exact(capacity - self.retained.len());
-        }
-        self.retained.extend_from_slice(&bytes[..keep]);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
@@ -227,36 +278,35 @@ fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn prepare<'a, K: JobKind>(
     payload: &K,
-    options: EnqueueOptions<'a>,
+    delay: Duration,
+    unique_key: Option<&'a str>,
 ) -> Result<Prepared<'a>, EnqueueError> {
-    if !kind::is_valid_kind_name(K::NAME) {
-        return Err(EnqueueError::InvalidKind(K::NAME));
-    }
-    if options
-        .unique_key
-        .is_some_and(|key| !is_valid_unique_key(key))
-    {
+    if unique_key.is_some_and(|key| !is_valid_unique_key(key)) {
         return Err(EnqueueError::InvalidUniqueKey);
     }
-    let delay_micros = checked_delay_micros(options.delay)?;
-    let payload = encode_payload(payload)?;
-    serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
+    let delay_micros = checked_delay_micros(delay)?;
+    let payload_text = encode_payload(payload, 0)?;
+    serde_json::from_str::<K>(&payload_text).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
-        payload,
-        unique_key: options.unique_key,
+        payload_text,
+        unique_key,
         delay_micros,
     })
 }
 
-fn encode_payload(payload: &impl serde::Serialize) -> Result<String, EnqueueError> {
-    let mut writer = PayloadWriter::default();
-    json_payload::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
-    if writer.total > MAX_PAYLOAD_BYTES {
-        return Err(EnqueueError::PayloadTooLarge {
-            bytes: writer.total,
-        });
-    }
-    String::from_utf8(writer.retained).map_err(|error| {
+fn encode_payload(
+    payload: &impl serde::Serialize,
+    capacity_hint: usize,
+) -> Result<String, EnqueueError> {
+    let encoded =
+        json_payload::to_vec_bounded_with_capacity(payload, MAX_PAYLOAD_BYTES, capacity_hint)
+            .map_err(|error| match error {
+                json_payload::EncodeError::Serialize(error) => EnqueueError::Serialize(error),
+                json_payload::EncodeError::TooLarge { bytes } => {
+                    EnqueueError::PayloadTooLarge { bytes }
+                }
+            })?;
+    String::from_utf8(encoded).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
             error,
@@ -271,16 +321,12 @@ fn is_valid_unique_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::io::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{
-        EnqueueError, EnqueueOptions, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter,
-        prepare,
-    };
-    use crate::JobKind;
+    use super::{EnqueueError, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadSizer, prepare};
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
+    use crate::{JobKind, KindName};
     use serde::ser::Error as _;
     use serde::{Deserialize, Serialize};
 
@@ -290,28 +336,21 @@ mod tests {
     }
 
     impl JobKind for Widget {
-        const NAME: &'static str = "widget";
+        const NAME: KindName = KindName::new("widget");
     }
 
     #[derive(Serialize, Deserialize)]
     struct Raw(String);
 
     impl JobKind for Raw {
-        const NAME: &'static str = "raw";
+        const NAME: KindName = KindName::new("raw");
     }
 
     #[derive(Serialize, Deserialize)]
     struct Keyed(BTreeMap<String, String>);
 
     impl JobKind for Keyed {
-        const NAME: &'static str = "keyed";
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct BadKind;
-
-    impl JobKind for BadKind {
-        const NAME: &'static str = "Bad Name";
+        const NAME: KindName = KindName::new("keyed");
     }
 
     #[derive(Deserialize)]
@@ -347,7 +386,7 @@ mod tests {
     }
 
     impl JobKind for Streamed {
-        const NAME: &'static str = "streamed";
+        const NAME: KindName = KindName::new("streamed");
     }
 
     fn widget() -> Widget {
@@ -356,40 +395,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalid_kind_wins_over_a_bad_key() {
-        let err = prepare(
-            &BadKind,
-            EnqueueOptions {
-                delay: Duration::ZERO,
-                unique_key: Some(""),
-            },
-        )
-        .unwrap_err();
-        std::assert_matches!(err, EnqueueError::InvalidKind("Bad Name"));
-    }
-
     #[derive(Serialize, Deserialize)]
     struct Reading {
         value: f64,
     }
 
     impl JobKind for Reading {
-        const NAME: &'static str = "reading";
+        const NAME: KindName = KindName::new("reading");
     }
 
     #[test]
     fn key_and_delay_validation_precede_non_finite_serialization() {
         let payload = Reading { value: f64::NAN };
         for (key, invalid_key) in [("", true), ("valid", false)] {
-            let err = prepare(
-                &payload,
-                EnqueueOptions {
-                    delay: MAX_DELAY + Duration::from_nanos(1),
-                    unique_key: Some(key),
-                },
-            )
-            .unwrap_err();
+            let err =
+                prepare(&payload, MAX_DELAY + Duration::from_nanos(1), Some(key)).unwrap_err();
             if invalid_key {
                 std::assert_matches!(err, EnqueueError::InvalidUniqueKey);
             } else {
@@ -405,7 +425,7 @@ mod tests {
             failure: StreamFailure::None,
             calls: AtomicUsize::new(0),
         };
-        let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
+        let err = prepare(&payload, Duration::ZERO, None).unwrap_err();
         std::assert_matches!(err, EnqueueError::PayloadDoesNotDecode(_));
         assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
     }
@@ -413,46 +433,25 @@ mod tests {
     #[test]
     fn unique_key_bounds() {
         let accepted = "k".repeat(MAX_UNIQUE_KEY_BYTES);
-        let prepared = prepare(
-            &widget(),
-            EnqueueOptions {
-                delay: Duration::ZERO,
-                unique_key: Some(&accepted),
-            },
-        )
-        .unwrap();
+        let prepared = prepare(&widget(), Duration::ZERO, Some(&accepted)).unwrap();
         assert_eq!(prepared.unique_key, Some(accepted.as_str()));
 
         std::assert_matches!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: Duration::ZERO,
-                    unique_key: Some(""),
-                },
-            ),
+            prepare(&widget(), Duration::ZERO, Some("")),
             Err(EnqueueError::InvalidUniqueKey)
         );
         std::assert_matches!(
             prepare(
                 &widget(),
-                EnqueueOptions {
-                    delay: Duration::ZERO,
-                    unique_key: Some(&"k".repeat(MAX_UNIQUE_KEY_BYTES + 1)),
-                },
+                Duration::ZERO,
+                Some(&"k".repeat(MAX_UNIQUE_KEY_BYTES + 1)),
             ),
             Err(EnqueueError::InvalidUniqueKey)
         );
         let crossing = format!("{}é", "a".repeat(254));
         assert_eq!(crossing.len(), 256);
         std::assert_matches!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: Duration::ZERO,
-                    unique_key: Some(&crossing),
-                },
-            ),
+            prepare(&widget(), Duration::ZERO, Some(&crossing)),
             Err(EnqueueError::InvalidUniqueKey)
         );
     }
@@ -461,13 +460,7 @@ mod tests {
     fn unique_key_rejects_control_characters() {
         for key in ["\n", "\u{0}", "\u{7f}", "\u{85}"] {
             std::assert_matches!(
-                prepare(
-                    &widget(),
-                    EnqueueOptions {
-                        delay: Duration::ZERO,
-                        unique_key: Some(key),
-                    },
-                ),
+                prepare(&widget(), Duration::ZERO, Some(key)),
                 Err(EnqueueError::InvalidUniqueKey),
                 "{key:?}"
             );
@@ -476,38 +469,16 @@ mod tests {
 
     #[test]
     fn delay_bounds() {
-        assert!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: MAX_DELAY,
-                    unique_key: None,
-                },
-            )
-            .is_ok()
-        );
+        assert!(prepare(&widget(), MAX_DELAY, None).is_ok());
         std::assert_matches!(
-            prepare(
-                &widget(),
-                EnqueueOptions {
-                    delay: MAX_DELAY + Duration::from_nanos(1),
-                    unique_key: None,
-                },
-            ),
+            prepare(&widget(), MAX_DELAY + Duration::from_nanos(1), None),
             Err(EnqueueError::InvalidDelay(InvalidDelay))
         );
     }
 
     #[test]
     fn checked_delay_drops_sub_microseconds() {
-        let prepared = prepare(
-            &widget(),
-            EnqueueOptions {
-                delay: Duration::new(1, 999_999_999),
-                unique_key: None,
-            },
-        )
-        .unwrap();
+        let prepared = prepare(&widget(), Duration::new(1, 999_999_999), None).unwrap();
         assert_eq!(prepared.delay_micros, 1_999_999);
         assert_eq!(checked_delay_micros(Duration::ZERO), Ok(0));
         assert_eq!(checked_delay_micros(MAX_DELAY), Ok(3_153_600_000_000_000));
@@ -520,13 +491,13 @@ mod tests {
     #[test]
     fn payload_size_bound() {
         let exact = Raw("a".repeat(MAX_PAYLOAD_BYTES - 2));
-        let prepared = prepare(&exact, EnqueueOptions::default()).unwrap();
-        assert_eq!(prepared.payload.len(), MAX_PAYLOAD_BYTES);
-        assert_eq!(prepared.payload, format!("\"{}\"", exact.0));
+        let prepared = prepare(&exact, Duration::ZERO, None).unwrap();
+        assert_eq!(prepared.payload_text.len(), MAX_PAYLOAD_BYTES);
+        assert_eq!(prepared.payload_text, format!("\"{}\"", exact.0));
 
         for length in [MAX_PAYLOAD_BYTES - 1, MAX_PAYLOAD_BYTES * 8] {
             let too_big = Raw("a".repeat(length));
-            let err = prepare(&too_big, EnqueueOptions::default()).unwrap_err();
+            let err = prepare(&too_big, Duration::ZERO, None).unwrap_err();
             std::assert_matches!(
                 err,
                 EnqueueError::PayloadTooLarge { bytes } if bytes == length + 2
@@ -540,8 +511,8 @@ mod tests {
             ("a".to_owned(), "é\n\"\\".to_owned()),
             ("b".to_owned(), "🦀".to_owned()),
         ]));
-        let prepared = prepare(&payload, EnqueueOptions::default()).unwrap();
-        assert_eq!(prepared.payload, r#"{"a":"é\n\"\\","b":"🦀"}"#);
+        let prepared = prepare(&payload, Duration::ZERO, None).unwrap();
+        assert_eq!(prepared.payload_text, r#"{"a":"é\n\"\\","b":"🦀"}"#);
     }
 
     #[test]
@@ -556,7 +527,7 @@ mod tests {
                 failure,
                 calls: AtomicUsize::new(0),
             };
-            let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
+            let err = prepare(&payload, Duration::ZERO, None).unwrap_err();
             match failure {
                 StreamFailure::Custom => {
                     let EnqueueError::Serialize(error) = err else {
@@ -579,28 +550,136 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl std::task::Wake for WakeCount {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn poll_to_completion<T>(future: impl Future<Output = T>) -> (T, usize) {
+        let notifications = std::sync::Arc::new(WakeCount::default());
+        let waker = std::task::Waker::from(std::sync::Arc::clone(&notifications));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        for polls in 1..=1024 {
+            let previous = notifications.0.load(Ordering::Relaxed);
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(value) => return (value, polls),
+                std::task::Poll::Pending => assert!(
+                    notifications.0.load(Ordering::Relaxed) > previous,
+                    "a bounded preflight poll must schedule its next wakeup"
+                ),
+            }
+        }
+        panic!("bounded future did not complete");
+    }
+
     #[test]
-    fn serialization_retains_only_the_payload_limit_despite_large_size_hint() {
-        let mut writer = PayloadWriter::default();
-        serde_json::to_writer(&mut writer, &0).unwrap();
-        assert!(writer.retained.capacity() < MAX_PAYLOAD_BYTES);
+    fn payload_sizer_matches_json_bytes_across_utf8_boundaries_and_shared_budget() {
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            first: &'a str,
+            second: &'a str,
+        }
 
-        let mut writer = PayloadWriter::default();
-        let payload = Streamed {
-            elements: MAX_PAYLOAD_BYTES,
-            failure: StreamFailure::None,
-            calls: AtomicUsize::new(0),
-        };
-        serde_json::to_writer(&mut writer, &payload).unwrap();
-        assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
-        assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
-        assert_eq!(writer.total, payload.elements * 9 + 1);
+        let first = format!(
+            "{}é😀\\\"\u{0001}",
+            "x".repeat(PayloadSizer::BYTES_PER_POLL - 1)
+        );
+        let second = "y".repeat(256);
+        let expected = serde_json::to_vec(&Envelope {
+            first: &first,
+            second: &second,
+        })
+        .unwrap()
+        .len();
 
-        let chunk = vec![b'x'; MAX_PAYLOAD_BYTES * 4];
-        let mut writer = PayloadWriter::default();
-        writer.write_all(&chunk).unwrap();
-        assert_eq!(writer.retained.len(), MAX_PAYLOAD_BYTES);
-        assert!(writer.retained.capacity() <= MAX_PAYLOAD_BYTES);
-        assert_eq!(writer.total, chunk.len());
+        let (result, polls) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::from_skeleton(&Envelope {
+                first: "",
+                second: "",
+            })?;
+            sizer.add_str(&first).await?;
+            sizer.add_str(&second).await?;
+            Ok::<_, EnqueueError>(sizer)
+        });
+        let sizer = result.unwrap();
+        assert_eq!(sizer.total_bytes(), expected);
+        assert!(polls >= 2);
+        assert!(sizer.check_limit().is_ok());
+
+        let left = "a".repeat(PayloadSizer::BYTES_PER_POLL - 100);
+        let right = "b".repeat(256);
+        let (shared_result, shared_polls) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(0);
+            sizer.add_str(&left).await?;
+            sizer.add_str(&right).await?;
+            Ok::<_, EnqueueError>(sizer.total_bytes())
+        });
+        assert_eq!(shared_result.unwrap(), left.len() + right.len());
+        assert!(
+            shared_polls >= 2,
+            "fields individually within BYTES_PER_POLL must still share the poll budget"
+        );
+
+        assert!(
+            PayloadSizer::with_base(MAX_PAYLOAD_BYTES)
+                .check_limit()
+                .is_ok()
+        );
+        std::assert_matches!(
+            PayloadSizer::with_base(MAX_PAYLOAD_BYTES + 1).check_limit(),
+            Err(EnqueueError::PayloadTooLarge { bytes }) if bytes == MAX_PAYLOAD_BYTES + 1
+        );
+
+        let (overflow, _) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(usize::MAX);
+            sizer.add_str("a").await
+        });
+        std::assert_matches!(overflow, Err(EnqueueError::Serialize(_)));
+    }
+
+    #[test]
+    fn payload_sizer_admit_rejects_fragments_after_yielding() {
+        #[derive(Debug)]
+        enum Reject {
+            Disallowed,
+            Enqueue(EnqueueError),
+        }
+
+        impl From<EnqueueError> for Reject {
+            fn from(error: EnqueueError) -> Self {
+                Self::Enqueue(error)
+            }
+        }
+
+        let field = format!("{}\n", "x".repeat(PayloadSizer::BYTES_PER_POLL * 2));
+        let (result, polls) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(0);
+            sizer
+                .add_str_with(&field, |fragment| {
+                    if fragment.contains('\n') {
+                        Err(Reject::Disallowed)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+        });
+        assert!(polls >= 3);
+        std::assert_matches!(result, Err(Reject::Disallowed));
+
+        let (overflow, _) = poll_to_completion(async {
+            let mut sizer = PayloadSizer::with_base(usize::MAX);
+            sizer.add_str_with("a", |_| Ok::<_, Reject>(())).await
+        });
+        std::assert_matches!(overflow, Err(Reject::Enqueue(EnqueueError::Serialize(_))));
     }
 }

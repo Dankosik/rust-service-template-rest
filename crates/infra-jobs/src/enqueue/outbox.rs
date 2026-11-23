@@ -1,39 +1,109 @@
 use infra_postgres::{Tx, TxMode, observed};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use super::{EnqueueError, encode_payload, is_valid_unique_key, notify_workers_after_commit};
-use crate::{Handler, JobId, JobKind, KindError, Kinds, KindsBuilder, Policy, trace_context};
+use super::{
+    EnqueueError, MAX_UNIQUE_KEY_BYTES, encode_payload, is_valid_unique_key,
+    notify_workers_after_commit,
+};
+use crate::{Handler, JobId, KindError, Kinds, Policy, trace_context};
 
-pub const KIND: &str = "publish_domain_event";
+pub(crate) const KIND: &str = "publish_domain_event";
+
+#[derive(Debug)]
+pub struct Intent<'a, T: ?Sized> {
+    payload: &'a T,
+    capacity_hint: usize,
+}
+
+impl<T: ?Sized> Clone for Intent<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: ?Sized> Copy for Intent<'_, T> {}
+
+impl<'a, T: ?Sized> Intent<'a, T> {
+    #[must_use]
+    pub const fn new(payload: &'a T) -> Self {
+        Self {
+            payload,
+            capacity_hint: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_capacity(payload: &'a T, capacity_hint: usize) -> Self {
+        Self {
+            payload,
+            capacity_hint,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Order<'a> {
+    pub aggregate_key: &'a str,
+    pub version: i64,
+}
+
+impl<'a> Order<'a> {
+    const fn parts(self) -> (&'a str, i64) {
+        (self.aggregate_key, self.version)
+    }
+}
 
 #[must_use]
-#[derive(Debug)]
-pub enum Admission {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutboxEnqueued {
     Created,
     Duplicate,
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconcileOutcome {
+    Matched,
+    Missing,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OutboxEnqueueError {
+    #[error("payload contains a decoded NUL character")]
+    PayloadContainsNul,
+    #[error("outbox event identity conflicts with its immutable intent or business order")]
     EventIdConflict,
+    #[error("outbox aggregate version is occupied or its predecessor is missing")]
     OrderConflict,
+    #[error(
+        "outbox order requires a 1..={MAX_UNIQUE_KEY_BYTES} byte key without control characters and a positive version"
+    )]
     InvalidOrder,
-    MissingReceipt,
+    #[error(transparent)]
+    Enqueue(#[from] EnqueueError),
 }
 
-pub fn publisher_kinds<T: JobKind>(
-    policy: Policy,
-    handler: impl Handler<T>,
-) -> Result<Kinds, KindError> {
-    let mut kinds = KindsBuilder::new();
-    kinds.register(policy, handler);
-    kinds.validate_outbox()
+/// ```compile_fail
+/// const _: infra_jobs::KindName = infra_jobs::KindName::new("publish_domain_event");
+/// ```
+pub fn publisher_kinds<T>(policy: Policy, handler: impl Handler<T>) -> Result<Kinds, KindError>
+where
+    T: DeserializeOwned + Send + Sync + 'static,
+{
+    Kinds::outbox(policy, handler)
 }
 
-pub async fn enqueue<T: JobKind>(
+pub async fn enqueue<T>(
     tx: &mut Tx<'_, impl TxMode>,
-    intent: &T,
-    order: Option<(&str, i64)>,
-) -> Result<Admission, EnqueueError> {
-    let PreparedIntent::Ready(payload) = prepare_intent(intent, order)? else {
-        return Ok(Admission::InvalidOrder);
-    };
-    let (aggregate_key, version) = order.unzip();
+    intent: Intent<'_, T>,
+    order: Option<Order<'_>>,
+) -> Result<OutboxEnqueued, OutboxEnqueueError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let payload = prepare_intent(intent, order)?;
+    let (aggregate_key, version) = order.map(Order::parts).unzip();
     let trace = trace_context::capture();
     let id = JobId::new_v7();
     let inserted = observed!(
@@ -69,50 +139,51 @@ pub async fn enqueue<T: JobKind>(
         )
         .execute(&mut *tx),
     )
-    .await?;
+    .await
+    .map_err(EnqueueError::from)?;
     if inserted.rows_affected() == 1 {
         notify_workers_after_commit(tx, KIND);
-        return Ok(Admission::Created);
+        return Ok(OutboxEnqueued::Created);
     }
-    Ok(compare_receipt(tx, &payload, order)
-        .await?
-        .into_admission(Admission::OrderConflict))
+    match compare_receipt(tx, &payload, order).await? {
+        ReceiptComparison::Same => Ok(OutboxEnqueued::Duplicate),
+        ReceiptComparison::Different => Err(OutboxEnqueueError::EventIdConflict),
+        ReceiptComparison::Missing => Err(OutboxEnqueueError::OrderConflict),
+    }
 }
 
-pub async fn reconcile<T: JobKind>(
+pub async fn reconcile<T>(
     tx: &mut Tx<'_, impl TxMode>,
-    intent: &T,
-    order: Option<(&str, i64)>,
-) -> Result<Admission, EnqueueError> {
-    let PreparedIntent::Ready(payload) = prepare_intent(intent, order)? else {
-        return Ok(Admission::InvalidOrder);
-    };
-    Ok(compare_receipt(tx, &payload, order)
-        .await?
-        .into_admission(Admission::MissingReceipt))
+    intent: Intent<'_, T>,
+    order: Option<Order<'_>>,
+) -> Result<ReconcileOutcome, OutboxEnqueueError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let payload = prepare_intent(intent, order)?;
+    match compare_receipt(tx, &payload, order).await? {
+        ReceiptComparison::Same => Ok(ReconcileOutcome::Matched),
+        ReceiptComparison::Different => Err(OutboxEnqueueError::EventIdConflict),
+        ReceiptComparison::Missing => Ok(ReconcileOutcome::Missing),
+    }
 }
 
-enum PreparedIntent {
-    Ready(String),
-    InvalidOrder,
-}
-
-fn prepare_intent<T: JobKind>(
-    intent: &T,
-    order: Option<(&str, i64)>,
-) -> Result<PreparedIntent, EnqueueError> {
-    if T::NAME != KIND {
-        return Err(EnqueueError::OutboxKind);
+fn prepare_intent<T>(
+    intent: Intent<'_, T>,
+    order: Option<Order<'_>>,
+) -> Result<String, OutboxEnqueueError>
+where
+    T: Serialize + DeserializeOwned,
+{
+    if order.is_some_and(|order| !is_valid_unique_key(order.aggregate_key) || order.version < 1) {
+        return Err(OutboxEnqueueError::InvalidOrder);
     }
-    if order.is_some_and(|(key, version)| !is_valid_unique_key(key) || version < 1) {
-        return Ok(PreparedIntent::InvalidOrder);
-    }
-    let payload = encode_payload(intent)?;
+    let payload = encode_payload(intent.payload, intent.capacity_hint)?;
     if contains_decoded_nul(&payload) {
-        return Err(EnqueueError::PayloadContainsNul);
+        return Err(OutboxEnqueueError::PayloadContainsNul);
     }
     serde_json::from_str::<T>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
-    Ok(PreparedIntent::Ready(payload))
+    Ok(payload)
 }
 
 fn contains_decoded_nul(payload: &str) -> bool {
@@ -135,22 +206,12 @@ enum ReceiptComparison {
     Missing,
 }
 
-impl ReceiptComparison {
-    const fn into_admission(self, on_missing: Admission) -> Admission {
-        match self {
-            Self::Same => Admission::Duplicate,
-            Self::Different => Admission::EventIdConflict,
-            Self::Missing => on_missing,
-        }
-    }
-}
-
 async fn compare_receipt(
     tx: &mut Tx<'_, impl TxMode>,
     payload: &str,
-    order: Option<(&str, i64)>,
+    order: Option<Order<'_>>,
 ) -> Result<ReceiptComparison, EnqueueError> {
-    let (aggregate_key, version) = order.unzip();
+    let (aggregate_key, version) = order.map(Order::parts).unzip();
     let same = observed!(
         "compare outbox receipt",
         sqlx::query_scalar!(
@@ -176,28 +237,51 @@ async fn compare_receipt(
 
 #[cfg(test)]
 mod tests {
-    use super::{EnqueueError, JobKind, KIND, PreparedIntent, prepare_intent};
+    use super::{Intent, KIND, OutboxEnqueueError, Policy, prepare_intent, publisher_kinds};
+    use crate::{Job, KindError};
 
     #[test]
     fn outbox_admission_distinguishes_literal_escapes_from_nul() {
         #[derive(serde::Deserialize, serde::Serialize)]
-        struct Intent(String);
-
-        impl JobKind for Intent {
-            const NAME: &'static str = KIND;
-        }
+        struct Payload(String);
 
         for prefix in ["", "\\", "\\\\"] {
-            let literal = Intent(format!(r"{prefix}\u0000"));
-            assert!(matches!(
-                prepare_intent(&literal, None),
-                Ok(PreparedIntent::Ready(_))
-            ));
-            let nul = Intent(format!("\\u0000{prefix}\0"));
+            let literal = Payload(format!(r"{prefix}\u0000"));
+            assert!(prepare_intent(Intent::new(&literal), None).is_ok());
+            let nul = Payload(format!("\\u0000{prefix}\0"));
             std::assert_matches!(
-                prepare_intent(&nul, None).err(),
-                Some(EnqueueError::PayloadContainsNul)
+                prepare_intent(Intent::new(&nul), None).err(),
+                Some(OutboxEnqueueError::PayloadContainsNul)
             );
         }
+
+        let sized = Payload("x".repeat(3_000));
+        let expected_len = sized.0.len() + 2;
+        let encoded = prepare_intent(Intent::with_capacity(&sized, expected_len), None).unwrap();
+        assert_eq!(encoded.len(), expected_len);
+        assert_eq!(encoded.capacity(), expected_len);
+    }
+
+    #[test]
+    fn publisher_kinds_builds_single_persistent_outbox_entry_and_validates_policy() {
+        #[derive(serde::Deserialize)]
+        struct Payload;
+
+        let invalid = publisher_kinds(
+            Policy {
+                max_attempts: 0,
+                ..Policy::default()
+            },
+            |_: Job<Payload>| async { Ok(()) },
+        )
+        .unwrap_err();
+        assert_eq!(invalid, KindError::InvalidMaxAttempts { kind: KIND });
+
+        let kinds = publisher_kinds(Policy::default(), |_: Job<Payload>| async { Ok(()) }).unwrap();
+        assert_eq!(kinds.names().collect::<Vec<_>>(), [KIND]);
+        let registered = kinds.get(KIND).unwrap();
+        assert_eq!(registered.mode, crate::kind::KindMode::Outbox);
+        assert!(registered.mode.is_outbox());
+        assert!(!registered.mode.exhausts_transient());
     }
 }

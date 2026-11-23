@@ -17,6 +17,9 @@ mod cache;
 // template:begin object-storage:config-module
 mod object_storage;
 // template:end object-storage:config-module
+// template:begin clickhouse:config-module
+mod clickhouse;
+// template:end clickhouse:config-module
 // template:begin authn:config-module
 mod authn;
 // template:end authn:config-module
@@ -38,20 +41,24 @@ mod jobs;
 // template:begin webhooks:config-webhooks-module
 mod webhooks;
 // template:end webhooks:config-webhooks-module
+// template:begin worker:worker-config
+mod worker;
+// template:end worker:worker-config
 
 mod cli;
 mod de;
-#[cfg(feature = "test-support")]
-pub mod fixtures;
 mod load;
 mod secret_policy;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod validate;
 
 use serde::Deserialize;
 
 use validate::admit_with;
+// template:begin worker:worker-input-import
+use worker::WorkerInput;
+// template:end worker:worker-input-import
 
 pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
@@ -60,9 +67,10 @@ pub use http::{HttpConfig, HttpListenerConfig, ShutdownTail};
 // template:begin worker:config-worker-export
 pub use http::WorkerHttpConfig;
 pub use load::load_worker;
+pub use worker::WorkerConfig;
 // template:end worker:config-worker-export
 // template:begin grpc:config-export
-pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcSecurity, GrpcTlsMaterial};
+pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcTlsMaterial};
 // template:end grpc:config-export
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhookKey};
@@ -74,20 +82,32 @@ pub use observability::{
 };
 pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
-pub use messaging::{ConsumerKeys, MessagingConfig, MessagingCredentials};
+pub use messaging::{
+    AdmittedMessaging, AdmittedMessagingConsumer, MessagingConfig, MessagingCredentials,
+    MessagingTransportSecurity,
+};
 // template:end messaging:config-export
 // template:begin cache:config-export
 pub use cache::{CacheClientCertificate, CacheConfig};
 // template:end cache:config-export
 // template:begin object-storage:config-export
-pub use object_storage::{ObjectStorageConfig, ObjectStorageCredentials, ObjectStorageProvider};
+pub use object_storage::{
+    ObjectStorageAccessKey, ObjectStorageAmazonCredentials, ObjectStorageConfig,
+    ObjectStorageProvider,
+};
 // template:end object-storage:config-export
+// template:begin clickhouse:config-export
+pub use clickhouse::{ClickHouseClientCertificate, ClickHouseConfig, ClickHouseQuerySettings};
+// template:end clickhouse:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
 // template:begin oidc-jwt:config-jwt-input-exports
 pub use authn::{JwtAlgorithm, TokenProfile};
 // template:end oidc-jwt:config-jwt-input-exports
+// template:begin oidc-introspection:config-introspection-exports
+pub use authn::IntrospectionCacheConfig;
+// template:end oidc-introspection:config-introspection-exports
 // template:begin service-auth:config-service-auth-export
 pub use service_auth::{ServiceAuthConfig, ServiceSigningKey};
 // template:end service-auth:config-service-auth-export
@@ -113,7 +133,7 @@ pub use validate::{ValidationError, ValidationErrors};
 #[derive(Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct ConfigInput {
-    pub(crate) app: AppConfig,
+    app: app::AppInput,
     http: http::HttpInput,
     // template:begin grpc:config-input-field
     grpc: grpc::GrpcInput,
@@ -122,18 +142,21 @@ pub(crate) struct ConfigInput {
     inbound_webhooks: inbound_webhooks::InboundWebhooksInput,
     // template:end inbound-webhooks:config-inbound-webhooks-input-field
     // template:begin webhooks:config-outbound-webhooks-input-field
-    webhooks: webhooks::ServiceWebhooksInput,
+    webhooks: webhooks::WebhooksInput,
     // template:end webhooks:config-outbound-webhooks-input-field
     health: HealthConfig,
     log: LogConfig,
     runtime: RuntimeConfig,
-    observability: ObservabilityConfig,
+    observability: observability::ObservabilityInput,
     // template:begin cache:config-input-field
     cache: cache::CacheInput,
     // template:end cache:config-input-field
     // template:begin object-storage:config-input-field
     object_storage: object_storage::ObjectStorageInput,
     // template:end object-storage:config-input-field
+    // template:begin clickhouse:config-input-field
+    clickhouse: clickhouse::ClickHouseInput,
+    // template:end clickhouse:config-input-field
     // template:begin authn:config-input-field
     authn: authn::AuthnInput,
     // template:end authn:config-input-field
@@ -151,15 +174,13 @@ pub(crate) struct ConfigInput {
 impl ConfigInput {
     pub(crate) fn admit(
         self,
-        shutdown_tail: Option<ShutdownTail>,
+        build: BuildInfo,
+        shutdown_tail: ShutdownTail,
     ) -> Result<Config, ValidationErrors> {
         admit_with(|v| {
-            self.app.validate(v);
-            #[allow(
-                unused_variables,
-                reason = "only the gRPC profile consumes the HTTP drain budget"
-            )]
-            let (http, drain_budget) = self.http.admit(shutdown_tail, v);
+            let app = self.app.admit(build, v);
+            let drain_budget = self.http.admit_drain_budget(shutdown_tail, v);
+            let http = self.http.admit(drain_budget, v);
             // template:begin service-auth:config-grpc-enabled
             let grpc_enabled = self.grpc.enabled;
             // template:end service-auth:config-grpc-enabled
@@ -175,22 +196,23 @@ impl ConfigInput {
             self.health.validate(v);
             self.log.validate(v);
             self.runtime.validate(v);
-            self.observability.validate(v);
+            let observability = self.observability.admit(v);
             // template:begin cache:config-admit
-            let cache = self.cache.admit(self.app.is_local_development(), v);
+            let cache = self.cache.admit(app.is_local_development(), v);
             // template:end cache:config-admit
             // template:begin object-storage:config-admit
-            let object_storage = self
-                .object_storage
-                .admit(self.app.is_local_development(), v);
+            let object_storage = self.object_storage.admit(app.is_local_development(), v);
             // template:end object-storage:config-admit
+            // template:begin clickhouse:config-admit
+            let clickhouse = self.clickhouse.admit(app.is_local_development(), v);
+            // template:end clickhouse:config-admit
             // template:begin authn:config-admit
             let authn = self.authn.admit(v);
             // template:end authn:config-admit
             // template:begin service-auth:config-service-auth-admit
-            let service_auth =
-                self.service_auth
-                    .admit(self.app.is_local_development(), grpc_enabled, v);
+            let service_auth = self
+                .service_auth
+                .admit(app.is_local_development(), grpc_enabled, v);
             if let (Ok(Some(listener)), Ok(ServiceAuthConfig::Jwt { .. })) = (&grpc, &service_auth)
                 && matches!(listener.security, GrpcListenerSecurity::Plaintext)
             {
@@ -206,9 +228,9 @@ impl ConfigInput {
             // template:begin http-idempotency:config-http-idempotency-validate
             self.http_idempotency.validate(v);
             // template:end http-idempotency:config-http-idempotency-validate
-            Ok(Config(ServiceSections {
-                app: self.app,
-                http,
+            Ok(Config {
+                app,
+                http: http?,
                 // template:begin grpc:config-admitted-field
                 grpc: grpc?,
                 // template:end grpc:config-admitted-field
@@ -221,13 +243,16 @@ impl ConfigInput {
                 health: self.health,
                 log: self.log,
                 runtime: self.runtime,
-                observability: self.observability,
+                observability,
                 // template:begin cache:config-admitted-field
                 cache: cache?,
                 // template:end cache:config-admitted-field
                 // template:begin object-storage:config-admitted-field
                 object_storage: object_storage?,
                 // template:end object-storage:config-admitted-field
+                // template:begin clickhouse:config-admitted-field
+                clickhouse: clickhouse?,
+                // template:end clickhouse:config-admitted-field
                 // template:begin authn:config-admitted-field
                 authn: authn?,
                 // template:end authn:config-admitted-field
@@ -240,15 +265,154 @@ impl ConfigInput {
                 // template:begin http-idempotency:config-http-idempotency-admitted-field
                 http_idempotency: self.http_idempotency,
                 // template:end http-idempotency:config-http-idempotency-admitted-field
-            }))
+            })
         })
     }
 }
 
-#[derive(Clone, Debug, derive_more::Deref)]
-pub struct Config(ServiceSections);
+#[derive(Clone, Debug)]
+pub struct Config {
+    app: AppConfig,
+    http: HttpConfig,
+    // template:begin grpc:config-field
+    grpc: Option<GrpcConfig>,
+    // template:end grpc:config-field
+    // template:begin inbound-webhooks:config-inbound-webhooks-field
+    inbound_webhooks: std::collections::BTreeMap<String, InboundWebhookEndpointConfig>,
+    // template:end inbound-webhooks:config-inbound-webhooks-field
+    // template:begin webhooks:config-outbound-webhooks-field
+    outbound_webhook_endpoints: Vec<String>,
+    // template:end webhooks:config-outbound-webhooks-field
+    health: HealthConfig,
+    log: LogConfig,
+    runtime: RuntimeConfig,
+    observability: ObservabilityConfig,
+    // template:begin cache:config-field
+    cache: Option<CacheConfig>,
+    // template:end cache:config-field
+    // template:begin object-storage:config-field
+    object_storage: Option<ObjectStorageConfig>,
+    // template:end object-storage:config-field
+    // template:begin clickhouse:config-field
+    clickhouse: Option<ClickHouseConfig>,
+    // template:end clickhouse:config-field
+    // template:begin authn:config-field
+    authn: AuthnConfig,
+    // template:end authn:config-field
+    // template:begin service-auth:config-service-auth-field
+    service_auth: ServiceAuthConfig,
+    // template:end service-auth:config-service-auth-field
+    // template:begin postgres:config-field
+    postgres: Option<PostgresConfig>,
+    // template:end postgres:config-field
+    // template:begin http-idempotency:config-http-idempotency-field
+    http_idempotency: HttpIdempotencyConfig,
+    // template:end http-idempotency:config-http-idempotency-field
+}
 
 impl Config {
+    #[must_use]
+    pub const fn app(&self) -> &AppConfig {
+        &self.app
+    }
+
+    #[must_use]
+    pub const fn http(&self) -> &HttpConfig {
+        &self.http
+    }
+
+    // template:begin grpc:config-accessor
+    #[must_use]
+    pub const fn grpc(&self) -> Option<&GrpcConfig> {
+        self.grpc.as_ref()
+    }
+    // template:end grpc:config-accessor
+
+    // template:begin inbound-webhooks:config-inbound-webhooks-accessor
+    #[must_use]
+    pub const fn inbound_webhooks(
+        &self,
+    ) -> &std::collections::BTreeMap<String, InboundWebhookEndpointConfig> {
+        &self.inbound_webhooks
+    }
+    // template:end inbound-webhooks:config-inbound-webhooks-accessor
+
+    // template:begin webhooks:config-outbound-webhooks-accessor
+    #[must_use]
+    pub fn outbound_webhook_endpoints(&self) -> &[String] {
+        &self.outbound_webhook_endpoints
+    }
+    // template:end webhooks:config-outbound-webhooks-accessor
+
+    #[must_use]
+    pub const fn health(&self) -> &HealthConfig {
+        &self.health
+    }
+
+    #[must_use]
+    pub const fn log(&self) -> &LogConfig {
+        &self.log
+    }
+
+    #[must_use]
+    pub const fn runtime(&self) -> &RuntimeConfig {
+        &self.runtime
+    }
+
+    #[must_use]
+    pub const fn observability(&self) -> &ObservabilityConfig {
+        &self.observability
+    }
+
+    // template:begin cache:config-accessor
+    #[must_use]
+    pub const fn cache(&self) -> Option<&CacheConfig> {
+        self.cache.as_ref()
+    }
+    // template:end cache:config-accessor
+
+    // template:begin object-storage:config-accessor
+    #[must_use]
+    pub const fn object_storage(&self) -> Option<&ObjectStorageConfig> {
+        self.object_storage.as_ref()
+    }
+    // template:end object-storage:config-accessor
+
+    // template:begin clickhouse:config-accessor
+    #[must_use]
+    pub const fn clickhouse(&self) -> Option<&ClickHouseConfig> {
+        self.clickhouse.as_ref()
+    }
+    // template:end clickhouse:config-accessor
+
+    // template:begin authn:config-accessor
+    #[must_use]
+    pub const fn authn(&self) -> &AuthnConfig {
+        &self.authn
+    }
+    // template:end authn:config-accessor
+
+    // template:begin service-auth:config-service-auth-accessor
+    #[must_use]
+    pub const fn service_auth(&self) -> &ServiceAuthConfig {
+        &self.service_auth
+    }
+    // template:end service-auth:config-service-auth-accessor
+
+    // template:begin postgres:config-accessor
+    #[must_use]
+    pub const fn postgres(&self) -> Option<&PostgresConfig> {
+        self.postgres.as_ref()
+    }
+    // template:end postgres:config-accessor
+
+    // template:begin http-idempotency:config-http-idempotency-accessor
+    #[must_use]
+    pub const fn http_idempotency(&self) -> &HttpIdempotencyConfig {
+        &self.http_idempotency
+    }
+    // template:end http-idempotency:config-http-idempotency-accessor
+
     #[must_use]
     pub fn finite_listener_connection_caps(&self) -> u64 {
         finite_http_connection_caps(self.http.listener(), &self.observability.metrics)
@@ -267,46 +431,3 @@ fn finite_http_connection_caps(http: &HttpListenerConfig, metrics: &MetricsConfi
         u64::from(cap.get()) * (1 + u64::from(metrics.addr.is_some()))
     })
 }
-
-#[derive(Clone, Debug)]
-pub struct ServiceSections {
-    pub app: AppConfig,
-    pub http: HttpConfig,
-    // template:begin grpc:config-field
-    pub grpc: Option<GrpcConfig>,
-    // template:end grpc:config-field
-    // template:begin inbound-webhooks:config-inbound-webhooks-field
-    pub inbound_webhooks: std::collections::BTreeMap<String, InboundWebhookEndpointConfig>,
-    // template:end inbound-webhooks:config-inbound-webhooks-field
-    // template:begin webhooks:config-outbound-webhooks-field
-    pub outbound_webhook_endpoints: Vec<String>,
-    // template:end webhooks:config-outbound-webhooks-field
-    pub health: HealthConfig,
-    pub log: LogConfig,
-    pub runtime: RuntimeConfig,
-    pub observability: ObservabilityConfig,
-    // template:begin cache:config-field
-    pub cache: Option<CacheConfig>,
-    // template:end cache:config-field
-    // template:begin object-storage:config-field
-    pub object_storage: Option<ObjectStorageConfig>,
-    // template:end object-storage:config-field
-    // template:begin authn:config-field
-    pub authn: AuthnConfig,
-    // template:end authn:config-field
-    // template:begin service-auth:config-service-auth-field
-    pub service_auth: ServiceAuthConfig,
-    // template:end service-auth:config-service-auth-field
-    // template:begin postgres:config-field
-    pub postgres: Option<PostgresConfig>,
-    // template:end postgres:config-field
-    // template:begin http-idempotency:config-http-idempotency-field
-    pub http_idempotency: HttpIdempotencyConfig,
-    // template:end http-idempotency:config-http-idempotency-field
-}
-
-// template:begin worker:worker-config
-mod worker;
-use worker::WorkerInput;
-pub use worker::{WorkerConfig, WorkerSections};
-// template:end worker:worker-config

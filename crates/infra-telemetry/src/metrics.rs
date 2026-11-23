@@ -13,17 +13,24 @@ use tokio_util::sync::CancellationToken;
 
 use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 
-macro_rules! static_counter_key {
-    ($name:expr, $($label:literal => $value:literal),+ $(,)?) => {{
-        static LABELS: &[::metrics::Label] = &[
-            $(::metrics::Label::from_static_parts($label, $value)),+
+macro_rules! static_metric_key {
+    ($name:expr, $(($key:expr, $value:expr)),+ $(,)?) => {{
+        static LABELS: [metrics::Label; [$($key),+].len()] = [
+            $(metrics::Label::from_static_parts($key, $value)),+
         ];
-        static KEY: ::metrics::Key = ::metrics::Key::from_static_parts($name, LABELS);
+        static KEY: metrics::Key = metrics::Key::from_static_parts($name, &LABELS);
         &KEY
     }};
 }
 
-pub(crate) use static_counter_key;
+pub(crate) use static_metric_key;
+
+pub(crate) fn static_counter(
+    key: &'static metrics::Key,
+    metadata: &'static metrics::Metadata<'static>,
+) -> metrics::Counter {
+    metrics::with_recorder(|recorder| recorder.register_counter(key, metadata))
+}
 
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -56,7 +63,12 @@ fn parse_memory_limit(contents: &str) -> Option<u64> {
         .filter(|bytes| *bytes < CGROUP_V1_UNLIMITED_FLOOR)
 }
 
-fn publish_memory_limit() {
+fn describe_and_publish_memory_limit() {
+    metrics::describe_gauge!(
+        MEMORY_LIMIT_METRIC,
+        metrics::Unit::Bytes,
+        "Memory limit of the control group the process started in; absent when the group has no limit."
+    );
     if let Some(limit) = cgroup_memory_limit() {
         #[expect(
             clippy::cast_precision_loss,
@@ -79,13 +91,7 @@ const SCHEDULER_LAG_BUCKETS: &[f64] = &[
 
 #[derive(Debug, Default)]
 struct Progress {
-    sample: Mutex<Option<ProgressSample>>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ProgressSample {
-    completed: Instant,
-    max_lag: Duration,
+    completed: Mutex<Option<Instant>>,
 }
 
 impl Progress {
@@ -116,25 +122,39 @@ impl Progress {
         metrics::gauge!(SCHEDULER_FRESHNESS_METRIC).set(SCHEDULER_FRESHNESS_LIMIT.as_secs_f64());
     }
 
-    fn record(&self, completed: Instant, lag: Duration) -> Duration {
-        let mut sample = self.sample.lock();
-        let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
-        *sample = Some(ProgressSample { completed, max_lag });
-        max_lag
+    fn record(&self, completed: Instant) {
+        *self.completed.lock() = Some(completed);
     }
 
     fn age_seconds(&self) -> f64 {
-        let sample = *self.sample.lock();
-        sample.map_or(f64::NAN, |sample| sample.completed.elapsed().as_secs_f64())
+        let completed = *self.completed.lock();
+        completed.map_or(f64::NAN, |completed| completed.elapsed().as_secs_f64())
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MetricsError {
+#[error(transparent)]
+pub struct MetricsError(MetricsErrorKind);
+
+#[derive(Debug, thiserror::Error)]
+enum MetricsErrorKind {
     #[error("install metrics recorder: {0}")]
-    Install(#[from] BuildError),
+    Install(#[source] BuildError),
     #[error("configure histogram buckets for {metric}: {source}")]
     HistogramBuckets { metric: String, source: BuildError },
+}
+
+impl MetricsError {
+    fn install(source: BuildError) -> Self {
+        Self(MetricsErrorKind::Install(source))
+    }
+
+    fn histogram_buckets(metric: &str, source: BuildError) -> Self {
+        Self(MetricsErrorKind::HistogramBuckets {
+            metric: metric.to_owned(),
+            source,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -146,33 +166,29 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
-        let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
+        let mut builder = PrometheusBuilder::new()
+            .set_buckets(DEFAULT_BUCKETS)
+            .map_err(MetricsError::install)?;
         for &(name, buckets) in histograms {
             builder = builder
                 .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
-                .map_err(|source| MetricsError::HistogramBuckets {
-                    metric: name.to_owned(),
-                    source,
-                })?;
+                .map_err(|source| MetricsError::histogram_buckets(name, source))?;
         }
         let handle = builder
             .set_buckets_for_metric(
                 Matcher::Full(SCHEDULER_LAG_METRIC.to_owned()),
                 SCHEDULER_LAG_BUCKETS,
-            )?
-            .install_recorder()?;
+            )
+            .map_err(MetricsError::install)?
+            .install_recorder()
+            .map_err(MetricsError::install)?;
         let process = metrics_process::Collector::default();
         process.describe();
         crate::traces::describe_metrics();
         crate::logging::describe_metrics();
         crate::logging::publish_observations();
         Progress::describe_and_initialize();
-        metrics::describe_gauge!(
-            MEMORY_LIMIT_METRIC,
-            metrics::Unit::Bytes,
-            "Memory limit of the control group the process started in; absent when the group has no limit."
-        );
-        publish_memory_limit();
+        describe_and_publish_memory_limit();
         Ok(Self {
             handle,
             process,
@@ -180,8 +196,8 @@ impl Metrics {
         })
     }
 
-    pub fn record_trace_exporter(&self, state: Option<&ExporterState>) {
-        let initialized = matches!(state, Some(ExporterState::Initialized { .. }));
+    pub fn record_trace_exporter(&self, state: &ExporterState) {
+        let initialized = matches!(state, ExporterState::Initialized { .. });
         metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(f64::from(initialized));
     }
 
@@ -195,6 +211,7 @@ impl Metrics {
 
     pub async fn runtime_progress(self, cancel: CancellationToken) {
         let mut expected = Instant::now() + PROGRESS_INTERVAL;
+        let mut max_lag = Duration::ZERO;
         let cancelled = cancel.cancelled();
         tokio::pin!(cancelled);
         loop {
@@ -208,7 +225,8 @@ impl Metrics {
             metrics::histogram!(SCHEDULER_LAG_METRIC).record(lag);
             metrics::counter!(SCHEDULER_SAMPLES_METRIC).increment(1);
             let completed = Instant::now();
-            let max_lag = self.progress.record(completed, lag);
+            self.progress.record(completed);
+            max_lag = max_lag.max(lag);
             metrics::gauge!(SCHEDULER_LAG_MAX_METRIC).set(max_lag.as_secs_f64());
             expected = completed + PROGRESS_INTERVAL;
         }
@@ -236,6 +254,33 @@ pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     let _ = cancel.run_until_cancelled(reporter).await;
 }
 
+const READY_METRIC: &str = "readiness_ready";
+
+fn append_readiness_gauge(body: &mut String, labels: &LabelSet, ready: bool) {
+    static READY_PREFIX: LazyLock<String> = LazyLock::new(|| {
+        let mut prefix = String::new();
+        formatting::write_help_line(
+            &mut prefix,
+            READY_METRIC,
+            None,
+            None,
+            "1 if ready at scrape time, 0 otherwise.",
+        );
+        formatting::write_type_line(&mut prefix, READY_METRIC, None, None, "gauge");
+        prefix
+    });
+    body.push_str(&READY_PREFIX);
+    formatting::write_metric_line(
+        body,
+        READY_METRIC,
+        None,
+        labels,
+        None::<(&str, &str)>,
+        u8::from(ready),
+        None,
+    );
+}
+
 #[expect(
     clippy::disallowed_methods,
     reason = "the private Prometheus listener is outside the application OpenAPI contract"
@@ -244,35 +289,13 @@ pub fn diagnostics_router(
     metrics: Metrics,
     is_ready: impl Fn() -> bool + Clone + Send + Sync + 'static,
 ) -> Router {
-    const READY: &str = "readiness_ready";
-    static READY_PREFIX: LazyLock<String> = LazyLock::new(|| {
-        let mut prefix = String::new();
-        formatting::write_help_line(
-            &mut prefix,
-            READY,
-            None,
-            None,
-            "1 if ready at scrape time, 0 otherwise.",
-        );
-        formatting::write_type_line(&mut prefix, READY, None, None, "gauge");
-        prefix
-    });
-    let ready_prefix = READY_PREFIX.as_str();
-    let labels = LabelSet::from_key_and_global(&metrics::Key::from_static_name(READY), &[].into());
+    let ready_labels =
+        LabelSet::from_key_and_global(&metrics::Key::from_static_name(READY_METRIC), &[].into());
     Router::new().route(
         "/metrics",
         get(async move || {
             let mut body = metrics.render();
-            body.push_str(ready_prefix);
-            formatting::write_metric_line(
-                &mut body,
-                READY,
-                None,
-                &labels,
-                None::<(&str, &str)>,
-                u8::from(is_ready()),
-                None,
-            );
+            append_readiness_gauge(&mut body, &ready_labels, is_ready());
             (
                 [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
                 body,

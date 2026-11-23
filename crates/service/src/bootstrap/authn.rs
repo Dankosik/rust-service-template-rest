@@ -9,6 +9,24 @@ use super::BootstrapError;
 
 const ISSUER_KEY: &str = "authn.issuer";
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AuthnPreparationError {
+    #[error("authentication preparation failed during Options: {0}")]
+    Url(#[from] infra_bearerauthn::InvalidUrl),
+    #[error("authentication preparation failed during Options: {0}")]
+    Options(#[from] infra_bearerauthn::OptionsError),
+    // template:begin oidc-introspection:bootstrap-authn-introspection-error
+    #[error("authentication preparation failed during Options: {0}")]
+    CacheOptions(#[from] infra_bearerauthn::InvalidCacheOptions),
+    #[error(transparent)]
+    ClientBuild(#[from] infra_bearerauthn::ClientBuildError),
+    // template:end oidc-introspection:bootstrap-authn-introspection-error
+    // template:begin oidc-jwt:bootstrap-authn-jwt-error
+    #[error(transparent)]
+    Jwt(#[from] infra_bearerauthn::PreparationError),
+    // template:end oidc-jwt:bootstrap-authn-jwt-error
+}
+
 #[allow(
     unused_variables,
     clippy::unused_async,
@@ -18,8 +36,8 @@ pub(super) async fn prepare(
     config: &Config,
     background: &mut Background,
 ) -> Result<Option<Verifier>, BootstrapError> {
-    let mode = config.authn.mode();
-    match &config.authn {
+    let mode = config.authn().mode();
+    match config.authn() {
         // template:begin oidc-jwt:bootstrap-prepare-auth-jwt
         AuthnConfig::OidcJwt {
             issuer,
@@ -30,25 +48,25 @@ pub(super) async fn prepare(
             jwks_max_age,
         } => {
             let issuer = issuer_url(mode, issuer)?;
-            let (verifier, refresh) = infra_bearerauthn::prepare_jwt(
-                infra_bearerauthn::JwtOptions {
-                    issuer,
-                    audiences: audience.as_slice().to_vec(),
-                    token_profile: match token_profile {
-                        TokenProfile::ResourceServer => {
-                            infra_bearerauthn::TokenProfile::ResourceServer
-                        }
-                        TokenProfile::Rfc9068 => infra_bearerauthn::TokenProfile::Rfc9068,
-                    },
-                    algorithms: algorithms.iter().copied().map(jwt_algorithm).collect(),
-                    jwks_uri: jwks_endpoint(mode, jwks_uri.as_deref())?,
-                    jwks_max_age: *jwks_max_age,
+            let jwks_uri = jwks_endpoint(mode, jwks_uri.as_deref())?;
+            let explicit_jwks_uri = jwks_uri.is_some();
+            let algorithms: Vec<_> = algorithms.iter().copied().map(jwt_algorithm).collect();
+            let options = infra_bearerauthn::JwtOptions::try_new(
+                issuer,
+                audience.as_slice().to_vec(),
+                match token_profile {
+                    TokenProfile::ResourceServer => infra_bearerauthn::TokenProfile::ResourceServer,
+                    TokenProfile::Rfc9068 => infra_bearerauthn::TokenProfile::Rfc9068,
                 },
-                background.child_token(),
+                &algorithms,
+                jwks_uri,
+                *jwks_max_age,
             )
-            .await
-            .map_err(|source| jwt_preparation_error(mode, jwks_uri.is_some(), source))?;
-            background.spawn("jwt_refresh", refresh);
+            .map_err(preparation_error(mode, ISSUER_KEY))?;
+            let (verifier, driver) = infra_bearerauthn::prepare_jwt(options)
+                .await
+                .map_err(|source| jwt_preparation_error(mode, explicit_jwks_uri, source))?;
+            background.spawn_with_token("jwt_refresh", |stop| driver.run(stop.cancelled_owned()));
             Ok(Some(verifier))
         }
         // template:end oidc-jwt:bootstrap-prepare-auth-jwt
@@ -60,49 +78,52 @@ pub(super) async fn prepare(
             introspection_client_id,
             introspection_client_secret,
             provider_concurrency,
-            cache_enabled,
-            cache_capacity,
-            cache_ttl,
+            cache,
         } => {
             const INTROSPECTION_ENDPOINT_KEY: &str = "authn.introspection_endpoint";
             let issuer = issuer_url(mode, issuer)?;
             let endpoint = infra_bearerauthn::EndpointUrl::parse(introspection_endpoint)
                 .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))?;
-            let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
-                .map_err(|_| {
-                    service_config::ValidationError::new(
-                        "authn.provider_concurrency",
-                        "does not fit this platform",
+            let cache = cache
+                .map(|cache| {
+                    infra_bearerauthn::IntrospectionCacheOptions::try_new(
+                        cache.capacity.get(),
+                        cache.ttl,
                     )
-                })?;
-            let cache =
-                infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
-                    .map_err(preparation_error(
-                        mode,
-                        "authn.cache_capacity/authn.cache_ttl",
-                    ))?;
-            infra_bearerauthn::prepare_introspection(infra_bearerauthn::IntrospectionOptions {
-                issuer,
-                audiences: audience.as_slice().to_vec(),
+                })
+                .transpose()
+                .map_err(preparation_error(
+                    mode,
+                    "authn.cache_capacity/authn.cache_ttl",
+                ))?;
+            let options = infra_bearerauthn::IntrospectionOptions::try_new(
+                &issuer,
+                audience.as_slice().to_vec(),
                 endpoint,
-                client_id: introspection_client_id.clone(),
-                client_secret: introspection_client_secret.clone(),
-                provider_concurrency,
-                cache: cache_enabled.then_some(cache),
-            })
-            .map(Some)
-            .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))
+                introspection_client_id.clone(),
+                introspection_client_secret.clone(),
+                *provider_concurrency,
+                cache,
+            )
+            .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))?;
+            infra_bearerauthn::prepare_introspection(options)
+                .map(Some)
+                .map_err(preparation_error(mode, INTROSPECTION_ENDPOINT_KEY))
         }
         // template:end oidc-introspection:bootstrap-prepare-auth-introspection
         AuthnConfig::None => Ok(None),
     }
 }
 
-fn preparation_error(
+fn preparation_error<E: Into<AuthnPreparationError>>(
     mode: &'static str,
     key: &'static str,
-) -> impl FnOnce(infra_bearerauthn::PreparationError) -> BootstrapError {
-    move |source| BootstrapError::AuthenticationPreparation { mode, key, source }
+) -> impl FnOnce(E) -> BootstrapError {
+    move |source| BootstrapError::AuthenticationPreparation {
+        mode,
+        key,
+        source: source.into(),
+    }
 }
 
 fn issuer_url(
@@ -124,7 +145,7 @@ fn jwt_preparation_error(
     BootstrapError::AuthenticationPreparation {
         mode,
         key: config_key,
-        source,
+        source: source.into(),
     }
 }
 
@@ -136,7 +157,6 @@ fn preparation_config_key(
         infra_bearerauthn::PreparationPhase::Jwks if explicit_jwks_uri => JWKS_URI_KEY,
         infra_bearerauthn::PreparationPhase::Jwks
         | infra_bearerauthn::PreparationPhase::Discovery
-        | infra_bearerauthn::PreparationPhase::Options
         | infra_bearerauthn::PreparationPhase::Client => ISSUER_KEY,
     }
 }
@@ -183,7 +203,7 @@ mod jwt_tests {
             "authn.issuer"
         );
         assert_eq!(
-            preparation_config_key(PreparationPhase::Options, true),
+            preparation_config_key(PreparationPhase::Client, true),
             "authn.issuer"
         );
     }

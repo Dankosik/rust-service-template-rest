@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT job.kind, job.claim_generation, job.state,\n                   CASE WHEN job.kind = $2::text AND $3::bool\n                     THEN outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,\n                                                  job.payload_text, job.payload) IS NOT NULL\n                   END AS \"payload_verified?\"\n            FROM background_jobs AS job WHERE job.id = $1 FOR UPDATE OF job\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "claim_generation",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "claim_generation"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "payload_verified?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "5456532e47536c786e17833b353e3f0539979e41c15e8a5358e218aff84ab657"
+}

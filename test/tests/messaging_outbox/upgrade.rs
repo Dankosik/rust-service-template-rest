@@ -1,14 +1,13 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_jobs::operator::{self, OperatorError, RecoveryTarget};
 use infra_messaging::Messaging;
-use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, kinds};
-use infra_postgres::{PgPool, in_tx};
-use integration_tests::{close_pools, dsn_for, poll_until};
+use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, ReconcileOutcome, kinds};
+use integration_tests::{dsn_for, poll_until};
 use migrate::{MIGRATOR, RunError, RunOptions};
+use operation_context::OperationContext;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use sqlx::migrate::MigrateError;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     APP, Fixture, OUTBOX_KIND, POLL, Step, WAIT, close, event, event_key, finish,
@@ -182,7 +181,7 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
     assert_eq!(stored_job(&pool, &first).await["payload_text"], legacy_text);
 
     let jobs = template_pool(&pool, 3).await;
-    close_pools(&[&pool]).await;
+    pool.close().await;
     let replay = fixture
         .publication
         .prepare(&event(LOGICAL_ID, "legacy\nbytes"))
@@ -191,30 +190,36 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
         .publication
         .prepare(&event(LOGICAL_ID, "changed"))
         .unwrap();
-    in_tx(&jobs, async |tx| -> Result<(), Step> {
-        assert_eq!(replay.enqueue(tx).await?, OutboxEnqueued::Duplicate);
+    jobs.in_tx(async |tx| -> Result<(), Step> {
+        assert_eq!(
+            replay.reconcile_legacy_outbox(tx).await?,
+            ReconcileOutcome::Matched
+        );
         std::assert_matches!(
-            changed.enqueue(tx).await,
+            changed.reconcile_legacy_outbox(tx).await,
             Err(OutboxEnqueueError::EventIdConflict)
         );
         Ok(())
     })
     .await
     .unwrap();
-    assert_eq!(outbox_count(&jobs).await, 2);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+        2
+    );
     std::assert_matches!(
-        in_tx(&jobs, async |tx| operator::discard(tx, &alias_target).await).await,
+        jobs.in_tx(async |tx| operator::discard(tx, &alias_target).await)
+            .await,
         Err(OperatorError::Conflict)
     );
-    in_tx(&jobs, async |tx| operator::redrive(tx, &alias_target).await)
+    jobs.in_tx(async |tx| operator::redrive(tx, &alias_target).await)
         .await
         .expect("matching historical job can be redriven");
 
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         messaging_options(&fixture),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
+        &OperationContext::with_timeout(WAIT),
+    )
     .await
     .unwrap();
     let registry = kinds(messaging.outbox_producer().unwrap()).unwrap();
@@ -223,7 +228,11 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
         "redriven historical job completes under the original UUID",
         WAIT,
         POLL,
-        async || (stored_job(&jobs, &duplicate).await["state"] == "completed").then_some(()),
+        async || {
+            (stored_job(infra_postgres::test_support::as_sqlx(&jobs), &duplicate).await["state"]
+                == "completed")
+                .then_some(())
+        },
     )
     .await;
     assert_eq!(fixture.published().await, 1);
@@ -240,9 +249,12 @@ async fn upgrade_reconciles_equivalent_history_and_redrives_the_original_job(poo
     }
     assert_eq!(message.payload.as_ref(), BODY);
     let independent = prepared(&fixture, LOGICAL_ID, "legacy\nbytes");
-    in_tx(&jobs, async |tx| -> Result<(), Step> {
+    jobs.in_tx(async |tx| -> Result<(), Step> {
         assert_eq!(independent.enqueue(tx).await?, OutboxEnqueued::Created);
-        assert_eq!(replay.enqueue(tx).await?, OutboxEnqueued::Duplicate);
+        assert_eq!(
+            replay.reconcile_legacy_outbox(tx).await?,
+            ReconcileOutcome::Matched
+        );
         Ok(())
     })
     .await
@@ -329,7 +341,7 @@ async fn upgrade_refuses_conflicting_history_without_changing_jobs_or_schema(poo
         ],
         before
     );
-    close_pools(&[&pool]).await;
+    pool.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -448,9 +460,11 @@ async fn upgrade_requeues_only_verified_transient_exhaustion_without_displacing_
     ] {
         assert_eq!(history[1][field], before[field], "archived {field}");
     }
-    let stale = in_tx(&pool, async |tx| operator::redrive(tx, &old_target).await).await;
+    let stale = infra_postgres::test_support::pool_from_sqlx(pool.clone())
+        .in_tx(async |tx| operator::redrive(tx, &old_target).await)
+        .await;
     std::assert_matches!(stale, Err(OperatorError::Stale));
-    close_pools(&[&pool]).await;
+    pool.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -563,5 +577,5 @@ async fn upgrade_bounds_only_pending_outbox_retries_with_legacy_schedule_evidenc
         }
         assert_eq!(after, before, "legacy job {scenario}");
     }
-    close_pools(&[&pool]).await;
+    pool.close().await;
 }

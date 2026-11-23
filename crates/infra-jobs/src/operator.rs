@@ -1,7 +1,6 @@
-use std::{borrow::Cow, collections::BTreeSet, fmt, time::Duration};
+use std::{borrow::Cow, collections::BTreeSet, fmt, str::FromStr, time::Duration};
 
-use infra_postgres::{Tx, TxError, observed, set_statement_timeout};
-use sqlx::PgPool;
+use infra_postgres::{Pool, Tx, TxError, observed};
 
 use crate::kind::{MAX_KIND_LEN, is_valid_kind_name};
 use crate::{JobId, StartupError};
@@ -48,7 +47,7 @@ pub struct RecoveryTarget {
 
 impl RecoveryTarget {
     pub fn try_new(id: &str, kind: &str, version: &str) -> Result<Self, InputError> {
-        let id = parse_id(id)?;
+        let id = parse_job_id(id)?;
         if !is_valid_kind_name(kind) {
             return Err(InputError::Kind);
         }
@@ -56,6 +55,19 @@ impl RecoveryTarget {
             return Err(InputError::Version);
         }
         let version = version.parse().map_err(|_| InputError::Version)?;
+        Self::try_from_parts(id, kind, version)
+    }
+
+    pub fn try_from_parts(id: JobId, kind: &str, version: i64) -> Result<Self, InputError> {
+        if id.0.is_nil() {
+            return Err(InputError::Id);
+        }
+        if !is_valid_kind_name(kind) {
+            return Err(InputError::Kind);
+        }
+        if version < 0 {
+            return Err(InputError::Version);
+        }
         Ok(Self {
             id,
             kind: kind.to_owned(),
@@ -77,7 +89,7 @@ impl RecoveryTarget {
     }
 }
 
-fn parse_id(value: &str) -> Result<JobId, InputError> {
+pub fn parse_job_id(value: &str) -> Result<JobId, InputError> {
     let id = uuid::Uuid::try_parse(value).map_err(|_| InputError::Id)?;
     if id.is_nil() {
         return Err(InputError::Id);
@@ -85,24 +97,90 @@ fn parse_id(value: &str) -> Result<JobId, InputError> {
     Ok(JobId(id))
 }
 
-fn parse_cursor(cursor: &str) -> Result<JobId, InputError> {
-    let text = cursor
-        .strip_prefix(CURSOR_PREFIX)
-        .ok_or(InputError::Cursor)?;
-    let id = parse_id(text).map_err(|_| InputError::Cursor)?;
-    if text
-        != id
-            .0
-            .hyphenated()
-            .encode_lower(&mut uuid::Uuid::encode_buffer())
-    {
-        return Err(InputError::Cursor);
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Debug)]
+#[debug("Cursor({_0})")]
+pub struct Cursor(JobId);
+
+impl Cursor {
+    pub fn parse(value: &str) -> Result<Self, InputError> {
+        let text = value
+            .strip_prefix(CURSOR_PREFIX)
+            .ok_or(InputError::Cursor)?;
+        let id = parse_job_id(text).map_err(|_| InputError::Cursor)?;
+        if text
+            != id
+                .0
+                .hyphenated()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+        {
+            return Err(InputError::Cursor);
+        }
+        Ok(Self(id))
     }
-    Ok(id)
+
+    #[must_use]
+    pub const fn job_id(self) -> JobId {
+        self.0
+    }
 }
 
-fn encode_cursor(id: JobId) -> String {
-    format!("{CURSOR_PREFIX}{id}")
+impl fmt::Display for Cursor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{CURSOR_PREFIX}{}", self.0)
+    }
+}
+
+impl FromStr for Cursor {
+    type Err = InputError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageQuery {
+    after: Option<Cursor>,
+    limit: u16,
+}
+
+impl PageQuery {
+    pub fn try_new(after: Option<&str>, limit: u16) -> Result<Self, InputError> {
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(InputError::Limit);
+        }
+        let after = after.map(Cursor::parse).transpose()?;
+        Ok(Self { after, limit })
+    }
+
+    #[must_use]
+    pub const fn after(self) -> Option<Cursor> {
+        self.after
+    }
+
+    #[must_use]
+    pub const fn with_after(self, after: Option<Cursor>) -> Self {
+        Self { after, ..self }
+    }
+
+    #[must_use]
+    pub const fn limit(self) -> u16 {
+        self.limit
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HandledKinds(BTreeSet<String>);
+
+impl HandledKinds {
+    pub fn parse_csv(value: &str) -> Result<Self, InputError> {
+        Ok(Self(parse_handled_kinds(value)?))
+    }
+
+    #[must_use]
+    pub const fn names(&self) -> &BTreeSet<String> {
+        &self.0
+    }
 }
 
 fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputError> {
@@ -124,33 +202,12 @@ fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputErr
     Ok(kinds)
 }
 
-#[derive(Debug)]
-pub struct Inspection(Selection);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InspectionMode {
-    One,
+enum Filter<'a> {
     Failed,
-    Unhandled,
+    Unhandled { handled_kinds: &'a BTreeSet<String> },
 }
 
-#[derive(Debug)]
-enum Selection {
-    One(JobId),
-    Page {
-        after: Option<JobId>,
-        limit: u16,
-        filter: Filter,
-    },
-}
-
-#[derive(Debug)]
-enum Filter {
-    Failed,
-    Unhandled { handled_kinds: BTreeSet<String> },
-}
-
-impl Filter {
+impl Filter<'_> {
     fn admits(&self, item: &JobSnapshot) -> bool {
         match self {
             Self::Failed => item.state == JobState::Failed,
@@ -161,77 +218,12 @@ impl Filter {
     }
 }
 
-impl Inspection {
-    pub fn one(id: &str) -> Result<Self, InputError> {
-        Ok(Self(Selection::One(parse_id(id)?)))
-    }
-
-    pub fn failed(after: Option<&str>, limit: u16) -> Result<Self, InputError> {
-        Self::page(after, limit, Filter::Failed)
-    }
-
-    pub fn unhandled(
-        handled_kinds: &str,
-        after: Option<&str>,
-        limit: u16,
-    ) -> Result<Self, InputError> {
-        let handled_kinds = parse_handled_kinds(handled_kinds)?;
-        Self::page(after, limit, Filter::Unhandled { handled_kinds })
-    }
-
-    #[must_use]
-    pub const fn mode(&self) -> InspectionMode {
-        match &self.0 {
-            Selection::One(_) => InspectionMode::One,
-            Selection::Page { filter, .. } => match filter {
-                Filter::Failed => InspectionMode::Failed,
-                Filter::Unhandled { .. } => InspectionMode::Unhandled,
-            },
-        }
-    }
-
-    #[must_use]
-    pub const fn job_id(&self) -> Option<JobId> {
-        match &self.0 {
-            Selection::One(id) => Some(*id),
-            Selection::Page { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn handled_kinds(&self) -> Option<&BTreeSet<String>> {
-        match &self.0 {
-            Selection::Page {
-                filter: Filter::Unhandled { handled_kinds },
-                ..
-            } => Some(handled_kinds),
-            Selection::One(_)
-            | Selection::Page {
-                filter: Filter::Failed,
-                ..
-            } => None,
-        }
-    }
-
-    fn page(after: Option<&str>, limit: u16, filter: Filter) -> Result<Self, InputError> {
-        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
-            return Err(InputError::Limit);
-        }
-        let after = after.map(parse_cursor).transpose()?;
-        Ok(Self(Selection::Page {
-            after,
-            limit,
-            filter,
-        }))
-    }
-}
-
 #[derive(Debug)]
 pub struct JobSnapshot {
     pub id: JobId,
     pub kind: String,
     pub state: JobState,
-    pub version: String,
+    pub version: i64,
     pub attempts: i32,
     pub failure_reason: Option<FailureReason>,
     pub created_at: String,
@@ -242,22 +234,22 @@ pub struct JobSnapshot {
 }
 
 #[derive(Debug)]
-pub enum InspectionResult {
-    One {
-        observed_at: String,
-        item: Option<JobSnapshot>,
-    },
-    Page {
-        observed_at: String,
-        scanned: u16,
-        items: Vec<JobSnapshot>,
-        next_cursor: Option<String>,
-    },
+pub struct OneInspection {
+    pub observed_at: String,
+    pub item: Option<JobSnapshot>,
+}
+
+#[derive(Debug)]
+pub struct PageInspection {
+    pub observed_at: String,
+    pub scanned: u16,
+    pub items: Vec<JobSnapshot>,
+    pub next_cursor: Option<Cursor>,
 }
 
 #[derive(Debug)]
 pub struct Redriven {
-    pub new_version: String,
+    pub new_version: i64,
 }
 
 #[derive(thiserror::Error)]
@@ -314,7 +306,7 @@ impl fmt::Debug for OperatorError {
     }
 }
 
-pub async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
+pub async fn check_startup(pool: &Pool) -> Result<(), StartupError> {
     crate::session::check_startup(pool).await
 }
 
@@ -322,7 +314,7 @@ struct SnapshotRow {
     id: uuid::Uuid,
     kind: String,
     state: String,
-    version: String,
+    version: i64,
     attempts: i16,
     failure_reason: Option<String>,
     created_at: String,
@@ -361,7 +353,7 @@ macro_rules! snapshot_query {
     ($tail:tt $(, $arg:expr)*) => {
         sqlx::query_as!(
             SnapshotRow,
-            r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
+            r#"SELECT id, kind, state, claim_generation AS version, attempts, failure_reason,
         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
         to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
         to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
@@ -373,56 +365,78 @@ macro_rules! snapshot_query {
     };
 }
 
-pub async fn inspect(
-    tx: &mut Tx<'_>,
-    inspection: &Inspection,
-) -> Result<InspectionResult, OperatorError> {
-    set_statement_timeout(tx, STATEMENT_TIMEOUT).await?;
-    let observed_at = observed("observe jobs time", sqlx::query_scalar!(
+async fn observe_time(tx: &mut Tx<'_>) -> Result<String, OperatorError> {
+    Ok(observed!("observe jobs time", sqlx::query_scalar!(
         r#"SELECT to_char(statement_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "observed_at!""#
-    ).fetch_one(&mut *tx)).await?;
-    match &inspection.0 {
-        Selection::One(id) => {
-            let row = observed(
-                "inspect jobs",
-                snapshot_query!("WHERE id = $1", id.0).fetch_optional(&mut *tx),
-            )
-            .await?;
-            let item = row.map(JobSnapshot::try_from).transpose()?;
-            Ok(InspectionResult::One { observed_at, item })
-        }
-        Selection::Page {
+    ).fetch_one(&mut *tx)).await?)
+}
+
+pub async fn inspect_one(tx: &mut Tx<'_>, id: JobId) -> Result<OneInspection, OperatorError> {
+    tx.set_statement_timeout(STATEMENT_TIMEOUT).await?;
+    let observed_at = observe_time(tx).await?;
+    let row = observed!(
+        "inspect jobs",
+        snapshot_query!("WHERE id = $1", id.0).fetch_optional(&mut *tx),
+    )
+    .await?;
+    let item = row.map(JobSnapshot::try_from).transpose()?;
+    Ok(OneInspection { observed_at, item })
+}
+
+pub async fn inspect_failed(
+    tx: &mut Tx<'_>,
+    page: PageQuery,
+) -> Result<PageInspection, OperatorError> {
+    inspect_page(tx, page, Filter::Failed).await
+}
+
+pub async fn inspect_unhandled(
+    tx: &mut Tx<'_>,
+    handled: &HandledKinds,
+    page: PageQuery,
+) -> Result<PageInspection, OperatorError> {
+    inspect_page(
+        tx,
+        page,
+        Filter::Unhandled {
+            handled_kinds: &handled.0,
+        },
+    )
+    .await
+}
+
+async fn inspect_page(
+    tx: &mut Tx<'_>,
+    page: PageQuery,
+    filter: Filter<'_>,
+) -> Result<PageInspection, OperatorError> {
+    tx.set_statement_timeout(STATEMENT_TIMEOUT).await?;
+    let observed_at = observe_time(tx).await?;
+    let after = page.after.map_or(uuid::Uuid::nil(), |cursor| cursor.0.0);
+    let rows = observed!(
+        "inspect jobs",
+        snapshot_query!(
+            "WHERE id > $1 ORDER BY id LIMIT $2",
             after,
-            limit,
-            filter,
-        } => {
-            let after = after.map_or(uuid::Uuid::nil(), |id| id.0);
-            let rows = observed(
-                "inspect jobs",
-                snapshot_query!(
-                    "WHERE id > $1 ORDER BY id LIMIT $2",
-                    after,
-                    i64::from(*limit)
-                )
-                .fetch_all(&mut *tx),
-            )
-            .await?;
-            page_result(rows, *limit, filter, observed_at)
-        }
-    }
+            i64::from(page.limit)
+        )
+        .fetch_all(&mut *tx),
+    )
+    .await?;
+    page_result(rows, page.limit, &filter, observed_at)
 }
 
 fn page_result(
     rows: Vec<SnapshotRow>,
     limit: u16,
-    filter: &Filter,
+    filter: &Filter<'_>,
     observed_at: String,
-) -> Result<InspectionResult, OperatorError> {
+) -> Result<PageInspection, OperatorError> {
     let scanned = u16::try_from(rows.len()).map_err(|_| OperatorError::InvalidStoredState)?;
     let next_cursor = if scanned < limit {
         None
     } else {
-        rows.last().map(|row| encode_cursor(JobId(row.id)))
+        rows.last().map(|row| Cursor(JobId(row.id)))
     };
     let mut items = Vec::new();
     for row in rows {
@@ -431,7 +445,7 @@ fn page_result(
             items.push(item);
         }
     }
-    Ok(InspectionResult::Page {
+    Ok(PageInspection {
         observed_at,
         scanned,
         items,
@@ -445,28 +459,26 @@ enum RecoveryAction {
     Discard,
 }
 
-async fn lock_failed_target(
+async fn lock_recoverable_target(
     tx: &mut Tx<'_>,
     target: &RecoveryTarget,
     action: RecoveryAction,
 ) -> Result<(), OperatorError> {
-    set_statement_timeout(tx, STATEMENT_TIMEOUT).await?;
-    let row = observed(
+    tx.set_statement_timeout(STATEMENT_TIMEOUT).await?;
+    let row = observed!(
         "lock failed job",
         sqlx::query!(
             r#"
             SELECT job.kind, job.claim_generation, job.state,
-                   CASE
-                     WHEN job.kind IS DISTINCT FROM $2::text THEN true
-                     WHEN $3::bool THEN false
-                     ELSE outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,
+                   CASE WHEN job.kind = $2::text AND $3::bool
+                     THEN outbox_verified_payload(job.id, job.unique_key, job.predecessor_job_id,
                                                   job.payload_text, job.payload) IS NOT NULL
-                   END AS "allowed!"
+                   END AS "payload_verified?"
             FROM background_jobs AS job WHERE job.id = $1 FOR UPDATE OF job
             "#,
             target.id.0,
             crate::RESERVED_OUTBOX_KIND,
-            matches!(action, RecoveryAction::Discard),
+            matches!(action, RecoveryAction::Redrive),
         )
         .fetch_optional(&mut *tx),
     )
@@ -477,7 +489,15 @@ async fn lock_failed_target(
     {
         return Err(OperatorError::Stale);
     }
-    if !row.allowed {
+    let allowed = match (
+        crate::RESERVED_OUTBOX_KIND == Some(row.kind.as_str()),
+        action,
+    ) {
+        (false, _) => true,
+        (true, RecoveryAction::Discard) => false,
+        (true, RecoveryAction::Redrive) => row.payload_verified == Some(true),
+    };
+    if !allowed {
         return Err(OperatorError::Conflict);
     }
     Ok(())
@@ -496,25 +516,22 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
 }
 
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
-    lock_failed_target(tx, target, RecoveryAction::Redrive).await?;
-    observed(
+    lock_recoverable_target(tx, target, RecoveryAction::Redrive).await?;
+    let new_version = observed!(
         "redrive failed job",
-        sqlx::query_as!(
-            Redriven,
-            r#"
-        UPDATE background_jobs SET
-            recovery_history = recovery_history || jsonb_build_array(jsonb_build_object(
-                'version', claim_generation::text, 'attempts', attempts,
-                'failure_reason', failure_reason, 'finished_at', finished_at,
-                'attempted_by', attempted_by, 'error_summary', error_summary,
-                'errors', errors, 'redriven_at', statement_timestamp())),
-            state = 'pending', not_before = statement_timestamp(), attempts = 0,
-            claim_generation = nextval('background_jobs_claim_generation'),
-            claim_expires_at = NULL, attempted_by = NULL, finished_at = NULL,
-            failure_reason = NULL, error_summary = NULL, errors = '[]'
-        WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'
-        RETURNING claim_generation::text AS "new_version!: String"
-        "#,
+        sqlx::query_scalar!(
+            "UPDATE background_jobs SET \
+                recovery_history = recovery_history || jsonb_build_array(jsonb_build_object( \
+                    'version', claim_generation::text, 'attempts', attempts, \
+                    'failure_reason', failure_reason, 'finished_at', finished_at, \
+                    'attempted_by', attempted_by, 'error_summary', error_summary, \
+                    'errors', errors, 'redriven_at', statement_timestamp())), \
+                state = 'pending', not_before = statement_timestamp(), attempts = 0, \
+                claim_generation = nextval('background_jobs_claim_generation'), \
+                claim_expires_at = NULL, attempted_by = NULL, finished_at = NULL, \
+                failure_reason = NULL, error_summary = NULL, errors = '[]' \
+             WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed' \
+             RETURNING claim_generation",
             target.id.0,
             target.kind,
             target.version
@@ -523,12 +540,13 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
     )
     .await
     .map_err(conflict_or_database)?
-    .ok_or(OperatorError::Stale)
+    .ok_or(OperatorError::Stale)?;
+    Ok(Redriven { new_version })
 }
 
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
-    lock_failed_target(tx, target, RecoveryAction::Discard).await?;
-    let result = observed("discard failed job", sqlx::query!(
+    lock_recoverable_target(tx, target, RecoveryAction::Discard).await?;
+    let result = observed!("discard failed job", sqlx::query!(
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
         target.id.0, target.kind, target.version
     ).execute(&mut *tx)).await?;
@@ -567,31 +585,48 @@ mod tests {
         );
         assert_eq!(RecoveryTarget::try_new(ID, "a", "0").unwrap().version(), 0);
         assert!(RecoveryTarget::try_new(&ID.to_ascii_uppercase(), "a", "0").is_ok());
+        let parsed = parse_job_id(ID).unwrap();
+        assert_eq!(
+            RecoveryTarget::try_from_parts(JobId(uuid::Uuid::nil()), "a", 0),
+            Err(InputError::Id)
+        );
+        assert_eq!(
+            RecoveryTarget::try_from_parts(parsed, "bad kind", 0),
+            Err(InputError::Kind)
+        );
+        assert_eq!(
+            RecoveryTarget::try_from_parts(parsed, "a", -1),
+            Err(InputError::Version)
+        );
+        assert_eq!(
+            RecoveryTarget::try_from_parts(parsed, "a", i64::MAX).unwrap(),
+            RecoveryTarget::try_new(ID, "a", "9223372036854775807").unwrap()
+        );
     }
 
     #[test]
-    fn inspection_admits_only_bounded_explicit_requests() {
-        let unhandled_none = Inspection::unhandled("", None, 1).unwrap();
-        assert!(
-            unhandled_none
-                .handled_kinds()
-                .is_some_and(BTreeSet::is_empty)
-        );
-        assert!(Inspection::unhandled("a,a,b", None, 500).is_ok());
+    fn inspection_inputs_admit_only_bounded_explicit_requests() {
+        let unhandled_none = HandledKinds::parse_csv("").unwrap();
+        assert!(unhandled_none.names().is_empty());
+        assert!(HandledKinds::parse_csv("a,a,b").is_ok());
         for list in ["a,", "a, b", "A", ","] {
-            std::assert_matches!(
-                Inspection::unhandled(list, None, 100),
-                Err(InputError::HandledKinds)
-            );
+            std::assert_matches!(HandledKinds::parse_csv(list), Err(InputError::HandledKinds));
         }
-        assert!(Inspection::unhandled(&vec!["a"; 1024].join(","), None, 100).is_ok());
+        assert!(HandledKinds::parse_csv(&vec!["a"; 1024].join(",")).is_ok());
         std::assert_matches!(
-            Inspection::unhandled(&vec!["a"; 1025].join(","), None, 100),
+            HandledKinds::parse_csv(&vec!["a"; 1025].join(",")),
             Err(InputError::HandledKinds)
         );
-        std::assert_matches!(Inspection::failed(None, 0), Err(InputError::Limit));
-        std::assert_matches!(Inspection::failed(None, 501), Err(InputError::Limit));
-        assert!(Inspection::failed(Some(&format!("v1:{ID}")), 100).is_ok());
+        std::assert_matches!(PageQuery::try_new(None, 0), Err(InputError::Limit));
+        std::assert_matches!(PageQuery::try_new(None, 501), Err(InputError::Limit));
+        let cursor_text = format!("v1:{ID}");
+        let page = PageQuery::try_new(Some(&cursor_text), 100).unwrap();
+        assert_eq!(page.after().unwrap().to_string(), cursor_text);
+        assert_eq!(page.limit(), 100);
+        assert_eq!(
+            cursor_text.parse::<Cursor>().unwrap().job_id(),
+            parse_job_id(ID).unwrap()
+        );
         for cursor in [
             format!("v2:{ID}"),
             format!("v1:{}", ID.to_uppercase()),
@@ -600,7 +635,7 @@ mod tests {
             "v1:00000000-0000-0000-0000-000000000000".to_owned(),
         ] {
             std::assert_matches!(
-                Inspection::failed(Some(&cursor), 100),
+                PageQuery::try_new(Some(&cursor), 100),
                 Err(InputError::Cursor)
             );
         }

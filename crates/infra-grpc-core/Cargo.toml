@@ -1,0 +1,34 @@
+[package]
+name = "infra-grpc-core"
+description = "Shared gRPC stream custody, observation, protocol, and TLS primitives."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
+http = { workspace = true }
+http-body = { workspace = true }
+metrics = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+parking_lot = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+secrecy = { workspace = true }
+shared-rules = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+tracing-opentelemetry = { workspace = true }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }

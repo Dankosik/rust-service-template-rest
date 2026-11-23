@@ -16,10 +16,10 @@ arc-swap = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 foldhash = { workspace = true, features = ["std"] }
-futures-util = { workspace = true, features = ["std"] }
 http = { workspace = true }
 http-body = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
+infra-grpc-core = { workspace = true }
 # template:begin service-auth:outbound-grpc-service-auth-dependency
 infra-serviceauth = { workspace = true }
 # template:end service-auth:outbound-grpc-service-auth-dependency
@@ -27,22 +27,23 @@ metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 operation-context = { workspace = true }
 parking_lot = { workspace = true }
-rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
+rustls = { workspace = true, features = ["std"] }
 rustls-platform-verifier = { workspace = true }
 secrecy = { workspace = true }
 shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true }
 tonic = { workspace = true, features = ["channel"] }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-opentelemetry = { workspace = true }
-tracing-opentelemetry-instrumentation-sdk = { workspace = true }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
 
 [dev-dependencies]
 axum = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
 grpc-contracts = { workspace = true }
 http-body-util = { workspace = true }
 infra-http-transport = { workspace = true }
@@ -53,5 +54,5 @@ infra-serviceauth = { workspace = true, features = ["test-support"] }
 # template:end service-auth:outbound-grpc-service-auth-test-dependency
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tls-test-support = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true, features = ["registry"] }

@@ -2,49 +2,39 @@ use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
 
-pub(crate) trait OutcomeLabel: Enum {
-    fn label(self) -> &'static str;
-}
+const DURATION_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
 
-macro_rules! outcome_label {
-    ($(#[$meta:meta])* $vis:vis enum $name:ident {
-        $($variant:ident => $label:literal),+ $(,)?
-    }) => {
-        $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, ::enum_map::Enum)]
-        $vis enum $name {
-            $($variant),+
-        }
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[
+    (crate::producer::PUBLISH_DURATION_SECONDS, DURATION_BUCKETS),
+    (crate::consumer::HANDLER_DURATION_SECONDS, DURATION_BUCKETS),
+];
 
-        impl $crate::observe::OutcomeLabel for $name {
-            fn label(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $label),+
-                }
-            }
-        }
-    };
+pub(crate) fn describe_metrics() {
+    crate::producer::describe_metrics();
+    crate::probe::describe_metrics();
+    crate::connection::describe_metrics();
+    crate::consumer::describe_metrics();
+    crate::credentials::describe_metrics();
 }
-pub(crate) use outcome_label;
 
 #[derive(derive_more::Debug)]
 #[debug("Outcomes")]
-pub(crate) struct Outcomes<O: OutcomeLabel> {
+pub(crate) struct Outcomes<O: Enum> {
     handles: EnumMap<O, (metrics::Counter, metrics::Histogram)>,
 }
 
-impl<O: OutcomeLabel> Outcomes<O> {
+impl<O: Enum> Outcomes<O> {
     pub(crate) fn register(
         total: &'static str,
         duration: &'static str,
         label_key: &'static str,
         event_type: Option<&'static str>,
+        label: fn(O) -> &'static str,
     ) -> Self {
         let handles = EnumMap::from_fn(|outcome: O| {
-            let mut labels = vec![metrics::Label::from_static_parts(
-                label_key,
-                outcome.label(),
-            )];
+            let mut labels = vec![metrics::Label::from_static_parts(label_key, label(outcome))];
             if let Some(event_type) = event_type {
                 labels.push(metrics::Label::from_static_parts("event_type", event_type));
             }

@@ -5,20 +5,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use axum::{Extension, Router};
+use axum::Router;
 use hyper::rt::Executor;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
-use hyper_util::service::TowerToHyperService;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
-use tower::ServiceBuilder;
+use tower::ServiceExt as _;
 
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
+
+static CONNECTIONS_METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+static CONNECTIONS_REFUSED_KEY: metrics::Key =
+    metrics::Key::from_static_name(CONNECTIONS_REFUSED_METRIC);
+
+fn connections_refused_counter() -> metrics::Counter {
+    metrics::with_recorder(|recorder| {
+        recorder.register_counter(&CONNECTIONS_REFUSED_KEY, &CONNECTIONS_METRIC_METADATA)
+    })
+}
 
 const LISTEN_BACKLOG: u32 = 65_535;
 
@@ -55,17 +65,39 @@ pub struct TlsOptions {
 // template:end grpc:http2-listener-options
 
 #[derive(Debug, thiserror::Error)]
-pub enum ServerError {
-    #[error("bind http listener {addr}: {source}")]
-    Bind {
-        addr: SocketAddr,
+#[error("bind http listener {addr}: {source}")]
+pub struct BindError {
+    addr: SocketAddr,
+    #[source]
+    source: std::io::Error,
+}
+
+impl BindError {
+    #[must_use]
+    pub const fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DrainError {
+    #[error("http accept loop task: {source}")]
+    AcceptTask {
         #[source]
-        source: std::io::Error,
+        source: tokio::task::JoinError,
+        residue: DrainResidue,
     },
-    #[error("http accept loop task: {0}")]
-    AcceptTask(#[source] tokio::task::JoinError),
     #[error("http accept loop termination was not confirmed before the drain deadline")]
-    AcceptTimeout,
+    AcceptTimeout { residue: DrainResidue },
+}
+
+impl DrainError {
+    #[must_use]
+    pub const fn residue(&self) -> DrainResidue {
+        match *self {
+            Self::AcceptTask { residue, .. } | Self::AcceptTimeout { residue } => residue,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,10 +106,14 @@ pub enum AcceptFailure {
     Panicked,
 }
 
+#[must_use = "inspect drain outcome to detect timed-out shutdown"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drained {
     Complete,
-    TimedOut { remaining_connections: usize },
+    TimedOut {
+        remaining_at_deadline: usize,
+        residue: DrainResidue,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,6 +123,7 @@ pub struct DrainResidue {
     pub remaining_delegated_tasks: usize,
 }
 
+#[must_use = "dropping Server aborts the HTTP accept loop immediately"]
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
@@ -99,20 +136,47 @@ pub struct Server {
 
 #[derive(Clone, Debug)]
 struct ConnectionShutdown {
-    drain: CancellationToken,
+    drain: Arc<CancellationToken>,
     force: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransportScheme {
+    Http,
+    Https,
+}
+
+impl TransportScheme {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_tls(self) -> bool {
+        matches!(self, Self::Https)
+    }
+}
+
+impl std::fmt::Display for TransportScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct ConnectionInfo {
-    scheme: &'static str,
+    scheme: TransportScheme,
     state: Arc<ConnectionState>,
 }
 
 #[derive(Debug)]
 struct ConnectionState {
     forced: AtomicBool,
-    drain: CancellationToken,
+    drain: Arc<CancellationToken>,
 }
 
 impl ConnectionInfo {
@@ -122,7 +186,7 @@ impl ConnectionInfo {
     }
 
     #[must_use]
-    pub const fn scheme(&self) -> &'static str {
+    pub const fn scheme(&self) -> TransportScheme {
         self.scheme
     }
 
@@ -139,36 +203,24 @@ pub struct BoundListener {
 }
 
 impl BoundListener {
-    pub fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
-        let listener = listen(addr).map_err(|source| ServerError::Bind { addr, source })?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|source| ServerError::Bind { addr, source })?;
-        Ok(Self {
-            listener,
-            local_addr,
-        })
+    pub fn bind(addr: SocketAddr) -> Result<Self, BindError> {
+        listen(addr).map_err(|source| BindError { addr, source })
     }
 
-    #[must_use]
     pub fn serve(self, app: Router, options: Http1Options) -> Server {
-        let (driver, delegated) = http1_driver(options);
-        serve_plaintext(self, app, options.connections, driver, delegated)
+        serve_plaintext(self, app, options.connections, http1_driver(options))
     }
 
     // template:begin grpc:http-bound-listener-tls
-    #[must_use]
     pub fn serve_tls(self, app: Router, options: Http1Options, tls: TlsOptions) -> Server {
-        let (driver, delegated) = http1_driver(options);
-        serve_tls(self, app, options.connections, driver, delegated, tls)
+        serve_tls(self, app, options.connections, http1_driver(options), tls)
     }
 
-    #[must_use]
     pub fn serve_h2(self, app: Router, options: Http2Options, tls: Option<TlsOptions>) -> Server {
-        let (driver, delegated) = http2_driver(options);
+        let driver = http2_driver(options);
         match tls {
-            Some(tls) => serve_tls(self, app, options.connections, driver, delegated, tls),
-            None => serve_plaintext(self, app, options.connections, driver, delegated),
+            Some(tls) => serve_tls(self, app, options.connections, driver, tls),
+            None => serve_plaintext(self, app, options.connections, driver),
         }
     }
     // template:end grpc:http-bound-listener-tls
@@ -179,15 +231,13 @@ fn serve_plaintext(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
-    delegated: ListenerExecutor,
 ) -> Server {
     serve_listener(
         bound,
         app,
         limits,
         driver,
-        delegated,
-        "http",
+        TransportScheme::Http,
         |stream, _| async move { Some(stream) },
     )
 }
@@ -198,7 +248,6 @@ fn serve_tls(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
-    delegated: ListenerExecutor,
     tls: TlsOptions,
 ) -> Server {
     let TlsOptions {
@@ -216,9 +265,8 @@ fn serve_tls(
         app,
         limits,
         driver,
-        delegated,
-        "https",
-        move |stream, peer| accept_tls(acceptor.clone(), stream, peer, handshake_timeout, protocol),
+        TransportScheme::Https,
+        move |stream, peer| accept_tls(acceptor, stream, peer, handshake_timeout, protocol),
     )
 }
 
@@ -248,7 +296,7 @@ async fn accept_tls(
 }
 // template:end grpc:http-serve-tls
 
-fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
+fn listen(addr: SocketAddr) -> std::io::Result<BoundListener> {
     let socket = match addr {
         SocketAddr::V4(_) => TcpSocket::new_v4(),
         SocketAddr::V6(_) => TcpSocket::new_v6(),
@@ -256,7 +304,12 @@ fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
     #[cfg(not(windows))]
     socket.set_reuseaddr(true)?;
     socket.bind(addr)?;
-    socket.listen(LISTEN_BACKLOG)
+    let listener = socket.listen(LISTEN_BACKLOG)?;
+    let local_addr = listener.local_addr()?;
+    Ok(BoundListener {
+        listener,
+        local_addr,
+    })
 }
 
 fn configure_accepted(stream: &TcpStream) {
@@ -266,7 +319,7 @@ fn configure_accepted(stream: &TcpStream) {
 }
 
 impl Server {
-    pub fn bind(addr: SocketAddr, app: Router, options: Http1Options) -> Result<Self, ServerError> {
+    pub fn bind(addr: SocketAddr, app: Router, options: Http1Options) -> Result<Self, BindError> {
         Ok(BoundListener::bind(addr)?.serve(app, options))
     }
 
@@ -290,35 +343,38 @@ impl Server {
         }
     }
 
-    pub async fn drain(self, budget: Duration) -> Result<Drained, ServerError> {
+    pub async fn drain(self, budget: Duration) -> Result<Drained, DrainError> {
         let deadline = deadline_after(budget);
-        self.drain_until(deadline, deadline).await.0
+        self.drain_until(deadline, deadline).await
     }
 
     pub async fn drain_until(
         mut self,
         graceful_deadline: Instant,
         confirmation_deadline: Instant,
-    ) -> (Result<Drained, ServerError>, DrainResidue) {
+    ) -> Result<Drained, DrainError> {
+        enum GracefulStop {
+            AcceptTimeout,
+            AcceptTask(tokio::task::JoinError),
+            TimedOut(usize),
+        }
+
         self.connection_shutdown.drain.cancel();
-        let joined = self.join_accept_until(graceful_deadline).await;
-        let graceful_result = match joined {
+        let stop = match self.join_accept_until(graceful_deadline).await {
             None => {
                 self.accept_loop.abort();
-                Err(ServerError::AcceptTimeout)
+                GracefulStop::AcceptTimeout
             }
-            Some(Err(error)) => Err(ServerError::AcceptTask(error)),
+            Some(Err(error)) => GracefulStop::AcceptTask(error),
             Some(Ok(())) => {
                 if self.drain_tasks_until(graceful_deadline).await {
-                    return (Ok(Drained::Complete), DrainResidue::default());
+                    return Ok(Drained::Complete);
                 }
-                Ok(Drained::TimedOut {
-                    remaining_connections: self.connections.len(),
-                })
+                GracefulStop::TimedOut(self.connections.len())
             }
         };
         self.connection_shutdown.force.cancel();
-        let accept_confirmed = !matches!(graceful_result, Err(ServerError::AcceptTimeout))
+        let accept_confirmed = !matches!(stop, GracefulStop::AcceptTimeout)
             || self
                 .join_accept_until(confirmation_deadline)
                 .await
@@ -334,7 +390,14 @@ impl Server {
             remaining_connections: self.connections.len(),
             remaining_delegated_tasks: self.delegated.tasks.len(),
         };
-        (graceful_result, residue)
+        match stop {
+            GracefulStop::AcceptTimeout => Err(DrainError::AcceptTimeout { residue }),
+            GracefulStop::AcceptTask(source) => Err(DrainError::AcceptTask { source, residue }),
+            GracefulStop::TimedOut(remaining_at_deadline) => Ok(Drained::TimedOut {
+                remaining_at_deadline,
+                residue,
+            }),
+        }
     }
 
     async fn join_accept_until(
@@ -391,6 +454,7 @@ impl<F: Future + Send + 'static> Executor<F> for ListenerExecutor {
 
 struct ConnectionDriver {
     builder: auto::Builder<ListenerExecutor>,
+    executor: ListenerExecutor,
     // template:begin grpc:http2-driver-preface-budget
     protocol: DriverProtocol,
     // template:end grpc:http2-driver-preface-budget
@@ -406,7 +470,7 @@ const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 // template:end grpc:http2-wire-limits
 
-fn http1_driver(options: Http1Options) -> (ConnectionDriver, ListenerExecutor) {
+fn http1_driver(options: Http1Options) -> ConnectionDriver {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
     builder
@@ -419,13 +483,13 @@ fn http1_driver(options: Http1Options) -> (ConnectionDriver, ListenerExecutor) {
                 .max(usize::from(HTTP1_MIN_READ_BUFFER_BYTES)),
         )
         .keep_alive(true);
-    let driver = ConnectionDriver {
+    ConnectionDriver {
         builder: builder.http1_only(),
+        executor,
         // template:begin grpc:http1-driver-no-preface
         protocol: DriverProtocol::Http1,
         // template:end grpc:http1-driver-no-preface
-    };
-    (driver, executor)
+    }
 }
 
 // template:begin grpc:http2-driver
@@ -458,7 +522,7 @@ impl DriverProtocol {
     }
 }
 
-fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
+fn http2_driver(options: Http2Options) -> ConnectionDriver {
     let executor = ListenerExecutor::default();
     let mut builder = auto::Builder::new(executor.clone());
     builder
@@ -470,13 +534,13 @@ fn http2_driver(options: Http2Options) -> (ConnectionDriver, ListenerExecutor) {
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
         .initial_stream_window_size(HTTP2_STREAM_WINDOW)
         .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
-    let driver = ConnectionDriver {
+    ConnectionDriver {
         builder: builder.http2_only(),
+        executor,
         protocol: DriverProtocol::Http2 {
             preface_timeout: options.preface_timeout,
         },
-    };
-    (driver, executor)
+    }
 }
 
 fn observe_http2_preface<IO>(
@@ -499,9 +563,6 @@ where
     let mut notify = Some(notify);
     let mut remaining_bytes = HTTP2_CLIENT_PREFACE_BYTES;
     let io = tokio_util::io::InspectReader::new(io, move |bytes| {
-        if remaining_bytes == 0 {
-            return;
-        }
         remaining_bytes = remaining_bytes.saturating_sub(bytes.len());
         if remaining_bytes == 0
             && let Some(notify) = notify.take()
@@ -521,7 +582,7 @@ struct ConnectionContext {
     driver: ConnectionDriver,
     max_connection_age: Option<Duration>,
     shutdown: ConnectionShutdown,
-    scheme: &'static str,
+    scheme: TransportScheme,
 }
 
 fn serve_listener<F, Fut, IO>(
@@ -529,43 +590,24 @@ fn serve_listener<F, Fut, IO>(
     app: Router,
     limits: ConnectionLimits,
     driver: ConnectionDriver,
-    delegated: ListenerExecutor,
-    scheme: &'static str,
+    scheme: TransportScheme,
     prepare_io: F,
 ) -> Server
 where
-    F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let local_addr = bound.local_addr;
     let connection_shutdown = ConnectionShutdown {
-        drain: CancellationToken::new(),
+        drain: Arc::new(CancellationToken::new()),
         force: CancellationToken::new(),
     };
     let connections = TaskTracker::new();
-    metrics::describe_counter!(
-        CONNECTIONS_REFUSED_METRIC,
-        metrics::Unit::Count,
-        "Accepted connections closed without a response because the connection cap was reached."
-    );
-    if limits.max_connections.is_some() {
-        metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
-    }
-    let (accept_failure_tx, accept_failure) = watch::channel(None);
-    let accept_failure_guard = DropGuard::new(
-        (connection_shutdown.drain.clone(), accept_failure_tx),
-        |(drain, accept_failure_tx)| {
-            let observed = if std::thread::panicking() {
-                AcceptFailure::Panicked
-            } else if !drain.is_cancelled() {
-                AcceptFailure::Ended
-            } else {
-                return;
-            };
-            accept_failure_tx.send_replace(Some(observed));
-        },
-    );
+    describe_connections_refused(limits.max_connections.is_some());
+    let (accept_failure_guard, accept_failure) =
+        accept_failure_signal(Arc::clone(&connection_shutdown.drain));
+    let delegated = driver.executor.clone();
     let context = Arc::new(ConnectionContext {
         app,
         driver,
@@ -594,6 +636,39 @@ where
     }
 }
 
+fn describe_connections_refused(capped: bool) {
+    metrics::describe_counter!(
+        CONNECTIONS_REFUSED_METRIC,
+        metrics::Unit::Count,
+        "Accepted connections closed without a response because the connection cap was reached."
+    );
+    if capped {
+        connections_refused_counter().increment(0);
+    }
+}
+
+type AcceptFailureReporter = (Arc<CancellationToken>, watch::Sender<Option<AcceptFailure>>);
+
+fn accept_failure_signal(
+    drain: Arc<CancellationToken>,
+) -> (
+    DropGuard<AcceptFailureReporter, impl FnOnce(AcceptFailureReporter)>,
+    watch::Receiver<Option<AcceptFailure>>,
+) {
+    let (accept_failure_tx, accept_failure) = watch::channel(None);
+    let guard = DropGuard::new((drain, accept_failure_tx), |(drain, accept_failure_tx)| {
+        let observed = if std::thread::panicking() {
+            AcceptFailure::Panicked
+        } else if !drain.is_cancelled() {
+            AcceptFailure::Ended
+        } else {
+            return;
+        };
+        accept_failure_tx.send_replace(Some(observed));
+    });
+    (guard, accept_failure)
+}
+
 async fn accept_loop<F, Fut, IO>(
     BoundListener {
         listener,
@@ -604,7 +679,7 @@ async fn accept_loop<F, Fut, IO>(
     context: Arc<ConnectionContext>,
     prepare_io: F,
 ) where
-    F: Fn(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -636,7 +711,7 @@ async fn accept_loop<F, Fut, IO>(
             .map(|semaphore| Arc::clone(semaphore).try_acquire_owned())
             .transpose()
         else {
-            metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
+            connections_refused_counter().increment(1);
             tracing::debug!(%local_addr, %peer, "http_connection_refused");
             drop(stream);
             continue;
@@ -650,7 +725,6 @@ async fn accept_loop<F, Fut, IO>(
             prepare_io.clone(),
         ));
     }
-    drop(listener);
 }
 
 fn accept_retry_delay(error: &std::io::Error) -> Option<Duration> {
@@ -692,7 +766,7 @@ fn serve_connection<F, Fut, IO>(
     prepare_io: F,
 ) -> impl Future<Output = ()>
 where
-    F: Fn(TcpStream, SocketAddr) -> Fut,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -705,7 +779,7 @@ where
             scheme: context.scheme,
             state: Arc::new(ConnectionState {
                 forced: AtomicBool::new(false),
-                drain: context.shutdown.drain.clone(),
+                drain: Arc::clone(&context.shutdown.drain),
             }),
         };
         let serve = drive_connection(stream, peer, &context, age_deadline, &info, prepare_io);
@@ -733,7 +807,7 @@ async fn drive_connection<F, Fut, IO>(
     prepare_io: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
-    F: Fn(TcpStream, SocketAddr) -> Fut,
+    F: FnOnce(TcpStream, SocketAddr) -> Fut,
     Fut: Future<Output = Option<IO>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -750,13 +824,15 @@ where
     // template:begin grpc:http2-observe-initial-read
     let (io, preface) = observe_http2_preface(io, context.driver.protocol.preface_timeout());
     // template:end grpc:http2-observe-initial-read
-    let service = ServiceBuilder::new()
-        .layer(Extension(info.clone()))
-        .service(context.app.clone());
+    let service =
+        hyper::service::service_fn(|mut request: hyper::Request<hyper::body::Incoming>| {
+            request.extensions_mut().insert(info.clone());
+            context.app.clone().oneshot(request)
+        });
     let connection = context
         .driver
         .builder
-        .serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
+        .serve_connection(TokioIo::new(io), service);
     tokio::pin!(connection);
     // template:begin grpc:http2-wait-initial-read
     if let Some((deadline, received)) = preface {

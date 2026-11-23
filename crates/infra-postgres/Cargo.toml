@@ -13,10 +13,9 @@ workspace = true
 
 [features]
 hotpath = []
+test-support = []
 
 [dependencies]
-arc-swap = { workspace = true }
-async-trait = { workspace = true }
 enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true }
@@ -46,5 +45,6 @@ nix = { workspace = true, features = ["fs"] }
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
 metrics-util = { workspace = true, features = ["debugging"] }
+observe-test-support = { workspace = true }
 tempfile = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

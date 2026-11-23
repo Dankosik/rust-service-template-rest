@@ -4,16 +4,17 @@ use std::task::{Context, Poll};
 use axum::body::{Body, Bytes};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use infra_object_storage::{
-    Download, MutationError, MutationFailure, ObjectKey, ObjectStorage, ObjectStorageError, PutBody,
+    Download, MutationError, MutationFailure, ObjectKey, ObjectStorage, ObjectStorageError,
+    PutBody, UnknownOutcome,
 };
 
-use crate::context::BodyReadTracker;
+use crate::context::{BodyReadTracker, RequestTracking};
 use crate::problem::{body_too_large, sanitized_problem};
 use crate::{Code, Problem, RequestContext, ResponseContext};
 
 struct TrackedBody {
     body: Body,
-    tracker: BodyReadTracker,
+    tracker: BodyReadTracker<std::sync::Arc<RequestTracking>>,
 }
 
 impl HttpBody for TrackedBody {
@@ -41,11 +42,11 @@ impl HttpBody for TrackedBody {
 impl RequestContext {
     #[must_use]
     pub fn upload_body(&self, length: u64, body: Body) -> PutBody {
-        let tracked = TrackedBody {
-            body,
-            tracker: BodyReadTracker::new(Some(self)),
+        let body = match self.body_read_tracker() {
+            Some(tracker) => PutBody::stream(length, TrackedBody { body, tracker }),
+            None => PutBody::stream(length, body),
         };
-        self.observe_put(PutBody::stream(length, tracked))
+        self.observe_put(body)
     }
 
     #[must_use]
@@ -97,15 +98,15 @@ pub fn mutation_problem(
         },
         MutationError::OutcomeUnknown(reason) => {
             let problem = match reason {
-                MutationFailure::Stopped(stopped) => Problem::from(stopped),
-                _ => Problem::new(Code::ServiceUnavailable),
+                UnknownOutcome::Stopped(stopped) => Problem::from(stopped),
+                UnknownOutcome::Unavailable => Problem::new(Code::ServiceUnavailable),
             };
-            unconfirmed_write(problem)
+            with_unconfirmed_write_detail(problem)
         }
     }
 }
 
-pub(super) fn unconfirmed_write(problem: Problem) -> Problem {
+pub(super) fn with_unconfirmed_write_detail(problem: Problem) -> Problem {
     problem.detail_static("the storage provider could not confirm whether the write took effect")
 }
 

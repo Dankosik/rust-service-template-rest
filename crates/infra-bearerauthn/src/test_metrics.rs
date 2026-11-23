@@ -3,12 +3,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
-use tracing_subscriber::{
-    Layer, Registry,
-    layer::{Context, SubscriberExt as _},
-    registry::LookupSpan,
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+use observe_test_support::{
+    CapturedSpan, EventCapture, FieldMap, MetricsCapture, SpanCapture, dispatch_spans_and_events,
 };
+
+pub(crate) use observe_test_support::labeled;
 
 #[derive(Default)]
 struct BufferedMetrics {
@@ -18,60 +18,34 @@ struct BufferedMetrics {
     acquisitions: Vec<f64>,
 }
 
-#[derive(Clone)]
-struct SpanEntry(Arc<Mutex<String>>);
-
-#[derive(Default)]
-struct Fields(String);
-
-impl tracing::field::Visit for Fields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        write!(self.0, "{}={value:?};", field.name()).unwrap();
+fn render_fields(prefix: &str, fields: &FieldMap) -> String {
+    let mut rendered = prefix.to_owned();
+    for (name, value) in fields {
+        write!(rendered, "{name}={value};").unwrap();
     }
+    rendered
 }
 
-pub(crate) fn labeled(key: &metrics::Key, labels: &[(&str, &str)]) -> bool {
-    labels.iter().all(|(name, value)| {
-        key.labels()
-            .any(|label| label.key() == *name && label.value() == *value)
-    })
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct Diagnostics {
-    recorder: Arc<DebuggingRecorder>,
-    snapshotter: Snapshotter,
-    metrics: Arc<Mutex<BufferedMetrics>>,
-    events: Arc<Mutex<Vec<String>>>,
-    spans: Arc<Mutex<Vec<Arc<Mutex<String>>>>>,
-}
-
-impl Default for Diagnostics {
-    fn default() -> Self {
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        Self {
-            recorder: Arc::new(recorder),
-            snapshotter,
-            metrics: Arc::default(),
-            events: Arc::default(),
-            spans: Arc::default(),
-        }
-    }
+    metrics: MetricsCapture,
+    buffered: Arc<Mutex<BufferedMetrics>>,
+    events: EventCapture,
+    spans: SpanCapture,
 }
 
 impl Diagnostics {
     pub(crate) fn recorder(&self) -> &DebuggingRecorder {
-        &self.recorder
+        self.metrics.recorder()
     }
 
     pub(crate) fn dispatch(&self) -> tracing::Dispatch {
-        tracing::Dispatch::new(Registry::default().with(self.clone()))
+        dispatch_spans_and_events(&self.spans, &self.events)
     }
 
     fn flush_metrics(&self) -> std::sync::MutexGuard<'_, BufferedMetrics> {
-        let snapshot = self.snapshotter.snapshot().into_vec();
-        let mut buffered = self.metrics.lock().unwrap();
+        let snapshot = self.metrics.snapshot_vec();
+        let mut buffered = self.buffered.lock().unwrap();
         for (key, _, _, value) in snapshot {
             match value {
                 DebugValue::Counter(count) => {
@@ -144,58 +118,30 @@ impl Diagnostics {
         reason = "the introspection-only profile asserts span telemetry rather than log events"
     )]
     pub(crate) fn events(&self) -> Vec<String> {
-        self.events.lock().unwrap().clone()
-    }
-
-    pub(crate) fn take_spans(&self) -> Vec<String> {
-        let entries = std::mem::take(&mut *self.spans.lock().unwrap());
-        entries
+        self.events
+            .snapshot()
             .into_iter()
-            .map(|span| span.lock().unwrap().clone())
+            .map(|event| render_fields("", &event.fields))
             .collect()
     }
-}
 
-#[warn(clippy::significant_drop_tightening)]
-impl<S> Layer<S> for Diagnostics
-where
-    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
-{
-    fn on_new_span(
-        &self,
-        attributes: &tracing::span::Attributes<'_>,
-        id: &tracing::span::Id,
-        ctx: Context<'_, S>,
-    ) {
-        let mut fields = Fields(format!("span={};", attributes.metadata().name()));
-        attributes.record(&mut fields);
-        let entry = Arc::new(Mutex::new(fields.0));
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(SpanEntry(Arc::clone(&entry)));
-        }
-        self.spans.lock().unwrap().push(entry);
+    #[allow(
+        dead_code,
+        reason = "the jwt-only profile asserts structured spans via take_captured_spans"
+    )]
+    pub(crate) fn take_spans(&self) -> Vec<String> {
+        self.spans
+            .take()
+            .into_iter()
+            .map(|span| render_fields(&format!("span={};", span.name), &span.fields))
+            .collect()
     }
 
-    fn on_record(
-        &self,
-        id: &tracing::span::Id,
-        values: &tracing::span::Record<'_>,
-        ctx: Context<'_, S>,
-    ) {
-        let Some(span) = ctx.span(id) else {
-            return;
-        };
-        let Some(entry) = span.extensions().get::<SpanEntry>().cloned() else {
-            return;
-        };
-        let mut fields = Fields::default();
-        values.record(&mut fields);
-        entry.0.lock().unwrap().push_str(&fields.0);
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        let mut fields = Fields::default();
-        event.record(&mut fields);
-        self.events.lock().unwrap().push(fields.0);
+    #[allow(
+        dead_code,
+        reason = "the introspection-only profile uses string-rendered span assertions"
+    )]
+    pub(crate) fn take_captured_spans(&self) -> Vec<CapturedSpan> {
+        self.spans.take()
     }
 }

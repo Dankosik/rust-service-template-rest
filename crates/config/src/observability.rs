@@ -3,31 +3,32 @@ use std::net::SocketAddr;
 use secrecy::SecretString;
 use serde::Deserialize;
 
+use crate::de::{
+    BlankAsNone, BlankAsNoneVerbatim, Keep, ListenAddr, Mode, ModeMarker, StrictRatio, When,
+};
 use crate::validate::{ValidationError, Violations, non_blank};
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct ObservabilityFields<Metrics, Otel> {
-    metrics: Metrics,
-    pub(crate) otel: Otel,
+const DEFAULT_SERVICE_NAME: &str = "service";
+const DEFAULT_TRACES_SAMPLER_ARG: f64 = 0.10;
+
+#[serde_with::serde_as]
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default(bound = false))]
+#[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+pub(crate) struct ObservabilityFields<Full: Mode = Keep> {
+    #[serde_as(as = "When<Full>")]
+    metrics: MetricsConfig,
+    pub(crate) otel: OtelFields<Full>,
+    #[serde(skip)]
+    _mode: ModeMarker<Full>,
 }
 
-type ObservabilityInput = ObservabilityFields<MetricsConfig, OtelConfig>;
+pub(crate) type ObservabilityInput = ObservabilityFields;
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(from = "ObservabilityInput")]
+#[derive(Clone, Debug)]
 pub struct ObservabilityConfig {
     pub metrics: MetricsConfig,
     pub otel: OtelConfig,
-}
-
-impl From<ObservabilityInput> for ObservabilityConfig {
-    fn from(input: ObservabilityInput) -> Self {
-        Self {
-            metrics: input.metrics,
-            otel: input.otel,
-        }
-    }
 }
 
 #[serde_with::serde_as]
@@ -40,14 +41,14 @@ pub struct MetricsConfig {
     /// deployment network policy must keep it private. Hostnames are
     /// refused; load does not look them up. Empty disables HTTP exposition
     /// and leaves liveness on the application listener only.
-    #[serde_as(as = "crate::de::BlankAsNone<crate::de::ListenAddr>")]
+    #[serde_as(as = "BlankAsNone<ListenAddr>")]
     #[educe(Default(expression = Some(SocketAddr::from(([0, 0, 0, 0], 9090)))))]
     pub addr: Option<SocketAddr>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TracesSampler {
+enum TracesSamplerKind {
     AlwaysOn,
     AlwaysOff,
     #[serde(rename = "traceidratio")]
@@ -57,45 +58,35 @@ pub enum TracesSampler {
     ParentBasedTraceIdRatio,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TracesSampler {
+    AlwaysOn,
+    AlwaysOff,
+    TraceIdRatio(f64),
+    ParentBasedTraceIdRatio(f64),
+}
+
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default)]
-#[serde(transparent)]
-struct TracesSamplerArgInput(
-    #[serde_as(as = "crate::de::StrictRatio")]
-    #[educe(Default = 0.10)]
-    f64,
-);
-
-#[serde_with::serde_as]
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct OtelFields<Sampler, SamplerArg, Exporter> {
-    #[serde_as(as = "crate::de::StrictString")]
+#[educe(Default(bound = false))]
+#[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+pub(crate) struct OtelFields<Full: Mode = Keep> {
+    #[educe(Default(expression = DEFAULT_SERVICE_NAME.to_owned()))]
     pub(crate) service_name: String,
-    traces_sampler: Sampler,
-    traces_sampler_arg: SamplerArg,
-    exporter: Exporter,
+    #[serde_as(as = "When<Full>")]
+    traces_sampler: TracesSamplerKind,
+    /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
+    /// (finite and in range) even when the selected sampler ignores it.
+    #[serde_as(as = "When<Full, StrictRatio>")]
+    #[educe(Default(expression = DEFAULT_TRACES_SAMPLER_ARG))]
+    traces_sampler_arg: f64,
+    #[serde_as(as = "When<Full>")]
+    exporter: OtelExporterConfig,
+    #[serde(skip)]
+    _mode: ModeMarker<Full>,
 }
 
-impl<Sampler: Default, SamplerArg: Default, Exporter: Default> Default
-    for OtelFields<Sampler, SamplerArg, Exporter>
-{
-    fn default() -> Self {
-        Self {
-            service_name: "service".to_owned(),
-            traces_sampler: Sampler::default(),
-            traces_sampler_arg: SamplerArg::default(),
-            exporter: Exporter::default(),
-        }
-    }
-}
-
-type OtelInput =
-    OtelFields<crate::de::StrictEnum<TracesSampler>, TracesSamplerArgInput, OtelExporterConfig>;
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(from = "OtelInput")]
+#[derive(Clone, Debug)]
 pub struct OtelConfig {
     // template:begin postgres:otel-postgres-application-name-doc
     /// It also supplies PostgreSQL `application_name` for pooled and migrator
@@ -107,27 +98,7 @@ pub struct OtelConfig {
     /// The initializer rewrites this default for a derived service.
     pub service_name: String,
     pub traces_sampler: TracesSampler,
-    /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
-    /// (finite and in range) even when the selected sampler ignores it.
-    pub traces_sampler_arg: f64,
     pub exporter: OtelExporterConfig,
-}
-
-impl From<OtelInput> for OtelConfig {
-    fn from(input: OtelInput) -> Self {
-        Self {
-            service_name: input.service_name,
-            traces_sampler: input.traces_sampler.0,
-            traces_sampler_arg: input.traces_sampler_arg.0,
-            exporter: input.exporter,
-        }
-    }
-}
-
-impl Default for OtelConfig {
-    fn default() -> Self {
-        Self::from(OtelInput::default())
-    }
 }
 
 #[serde_with::serde_as]
@@ -140,8 +111,7 @@ pub struct OtelExporterConfig {
     /// `OTEL_EXPORTER_OTLP_ENDPOINT`; when neither holds a non-blank value
     /// the exporter stays disabled when no credential is configured. Userinfo,
     /// query strings and fragments are rejected.
-    #[serde(default)]
-    #[serde_as(as = "crate::de::BlankAsNone")]
+    #[serde_as(as = "BlankAsNone")]
     #[debug(skip)]
     pub otlp_endpoint: Option<String>,
     /// Collector credential as `key=value,key=value`.
@@ -149,17 +119,33 @@ pub struct OtelExporterConfig {
     /// environment or via `--secrets-dir`.
     /// Requires an HTTPS endpoint in `otlp_endpoint`. Missing, empty, or
     /// whitespace-only is absent (`None`).
-    #[serde(default)]
-    #[serde_as(as = "crate::de::BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     pub otlp_headers: Option<SecretString>,
 }
 
-impl ObservabilityConfig {
-    pub(crate) fn validate(&self, v: &mut Violations) {
+impl ObservabilityInput {
+    pub(crate) fn admit(self, v: &mut Violations) -> ObservabilityConfig {
         v.check(validate_service_name(&self.otel.service_name));
-        v.check(sampler_arg(self.otel.traces_sampler_arg));
+        v.check(validate_traces_sampler_arg(self.otel.traces_sampler_arg));
         if let Some(endpoint) = self.otel.exporter.otlp_endpoint.as_deref() {
-            v.check(otlp_endpoint(endpoint));
+            v.check(validate_otlp_endpoint(endpoint));
+        }
+        let ratio = self.otel.traces_sampler_arg;
+        let traces_sampler = match self.otel.traces_sampler {
+            TracesSamplerKind::AlwaysOn => TracesSampler::AlwaysOn,
+            TracesSamplerKind::AlwaysOff => TracesSampler::AlwaysOff,
+            TracesSamplerKind::TraceIdRatio => TracesSampler::TraceIdRatio(ratio),
+            TracesSamplerKind::ParentBasedTraceIdRatio => {
+                TracesSampler::ParentBasedTraceIdRatio(ratio)
+            }
+        };
+        ObservabilityConfig {
+            metrics: self.metrics,
+            otel: OtelConfig {
+                service_name: self.otel.service_name,
+                traces_sampler,
+                exporter: self.otel.exporter,
+            },
         }
     }
 }
@@ -168,7 +154,7 @@ pub(crate) fn validate_service_name(name: &str) -> Result<(), ValidationError> {
     non_blank("observability.otel.service_name", name)
 }
 
-fn sampler_arg(arg: f64) -> Result<(), ValidationError> {
+fn validate_traces_sampler_arg(arg: f64) -> Result<(), ValidationError> {
     let key = "observability.otel.traces_sampler_arg";
     if !arg.is_finite() {
         return Err(ValidationError::new(key, "must be finite"));
@@ -182,7 +168,7 @@ fn sampler_arg(arg: f64) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
+fn validate_otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
     let key = "observability.otel.exporter.otlp_endpoint";
     let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
     if !is_http_url {
@@ -213,23 +199,26 @@ fn otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::validate::validate_with;
+    use crate::ValidationErrors;
+    use crate::validate::admit_with;
+
+    fn admit(input: ObservabilityInput) -> Result<ObservabilityConfig, ValidationErrors> {
+        admit_with(|v| Ok(input.admit(v)))
+    }
 
     #[test]
     fn sampler_names_follow_opentelemetry_spelling() {
-        #[serde_with::serde_as]
         #[derive(Deserialize)]
         struct Probe {
-            #[serde_as(as = "crate::de::StrictEnum")]
-            sampler: TracesSampler,
+            sampler: TracesSamplerKind,
         }
         for (text, expected) in [
-            ("always_on", TracesSampler::AlwaysOn),
-            ("always_off", TracesSampler::AlwaysOff),
-            ("traceidratio", TracesSampler::TraceIdRatio),
+            ("always_on", TracesSamplerKind::AlwaysOn),
+            ("always_off", TracesSamplerKind::AlwaysOff),
+            ("traceidratio", TracesSamplerKind::TraceIdRatio),
             (
                 "parentbased_traceidratio",
-                TracesSampler::ParentBasedTraceIdRatio,
+                TracesSamplerKind::ParentBasedTraceIdRatio,
             ),
         ] {
             let probe: Probe = toml::from_str(&format!("sampler = \"{text}\"")).unwrap();
@@ -239,16 +228,35 @@ mod tests {
     }
 
     #[test]
-    fn sampler_arg_bounds() {
-        let mut cfg = ObservabilityConfig::default();
-        cfg.otel.traces_sampler_arg = 1.5;
+    fn sampler_arg_bounds_and_variant_attachment() {
+        let mut input = ObservabilityInput::default();
+        input.otel.traces_sampler = TracesSamplerKind::AlwaysOn;
+        input.otel.traces_sampler_arg = 1.5;
         assert!(
-            validate_with(|v| cfg.validate(v))
+            admit(input)
                 .unwrap_err()
                 .names("observability.otel.traces_sampler_arg")
         );
-        cfg.otel.traces_sampler_arg = f64::NAN;
-        assert!(validate_with(|v| cfg.validate(v)).is_err());
+
+        let mut nan = ObservabilityInput::default();
+        nan.otel.traces_sampler_arg = f64::NAN;
+        assert!(admit(nan).is_err());
+
+        let always_on: ObservabilityInput =
+            toml::from_str("[otel]\ntraces_sampler = \"always_on\"\ntraces_sampler_arg = 0.5\n")
+                .unwrap();
+        assert_eq!(
+            admit(always_on).unwrap().otel.traces_sampler,
+            TracesSampler::AlwaysOn
+        );
+
+        let ratio: ObservabilityInput =
+            toml::from_str("[otel]\ntraces_sampler = \"traceidratio\"\ntraces_sampler_arg = 0.5\n")
+                .unwrap();
+        assert_eq!(
+            admit(ratio).unwrap().otel.traces_sampler,
+            TracesSampler::TraceIdRatio(0.5)
+        );
     }
 
     #[test]
@@ -268,30 +276,30 @@ mod tests {
     #[test]
     fn empty_metrics_addr_disables_the_listener() {
         assert_eq!(
-            ObservabilityConfig::default().metrics.addr,
+            admit(ObservabilityInput::default()).unwrap().metrics.addr,
             Some(SocketAddr::from(([0, 0, 0, 0], 9090)))
         );
-        let blank: ObservabilityConfig = toml::from_str("[metrics]\naddr = \"\"\n").unwrap();
-        assert_eq!(blank.metrics.addr, None);
-        validate_with(|v| blank.validate(v)).unwrap();
-        let omitted: ObservabilityConfig = toml::from_str("[metrics]\n").unwrap();
+        let blank: ObservabilityInput = toml::from_str("[metrics]\naddr = \"\"\n").unwrap();
+        assert_eq!(admit(blank).unwrap().metrics.addr, None);
+        let omitted: ObservabilityInput = toml::from_str("[metrics]\n").unwrap();
         assert_eq!(
-            omitted.metrics.addr,
+            admit(omitted).unwrap().metrics.addr,
             Some(SocketAddr::from(([0, 0, 0, 0], 9090)))
         );
     }
 
     #[test]
     fn occupied_otlp_endpoint_must_be_http() {
-        let mut cfg = ObservabilityConfig::default();
-        cfg.otel.exporter.otlp_endpoint = Some("collector:4318".into());
+        let mut input = ObservabilityInput::default();
+        input.otel.exporter.otlp_endpoint = Some("collector:4318".into());
         assert!(
-            validate_with(|v| cfg.validate(v))
+            admit(input)
                 .unwrap_err()
                 .names("observability.otel.exporter.otlp_endpoint")
         );
-        cfg.otel.exporter.otlp_endpoint = Some("http://collector:4318".into());
-        validate_with(|v| cfg.validate(v)).unwrap();
+        let mut valid = ObservabilityInput::default();
+        valid.otel.exporter.otlp_endpoint = Some("http://collector:4318".into());
+        admit(valid).unwrap();
     }
 
     #[test]
@@ -304,10 +312,10 @@ mod tests {
             "https://collector/v1?private-value",
             "https://collector/v1#private-value",
         ] {
-            let mut cfg = ObservabilityConfig::default();
-            cfg.otel.exporter.otlp_endpoint = Some(endpoint.into());
+            let mut input = ObservabilityInput::default();
+            input.otel.exporter.otlp_endpoint = Some(endpoint.into());
             assert!(
-                validate_with(|v| cfg.validate(v))
+                admit(input)
                     .unwrap_err()
                     .names("observability.otel.exporter.otlp_endpoint"),
                 "{endpoint:?}"

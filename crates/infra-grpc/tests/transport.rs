@@ -37,15 +37,16 @@ use infra_bearerauthn::{
 // template:end oidc-introspection:grpc-transport-test-auth-imports
 // template:begin authn:grpc-transport-test-verifier-import
 use infra_bearerauthn::Verifier;
-use infra_grpc::{DelegationCredential, VerifiedPrincipal};
+use infra_grpc::{DelegationCredential, Principal};
 // template:end authn:grpc-transport-test-verifier-import
 use infra_grpc::{
-    ERROR_DOMAIN, Error, Failure, Limits, ResponseContext, ServerTlsMaterial, Services,
+    ERROR_DOMAIN, Failure, Limits, RequestExt as _, ServerOptions, ServerTlsMaterial, Services,
     TlsMaterialError, server_options, server_tls_config,
 };
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
 use infra_outbound_grpc::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial,
+    transport::PreparedCall,
 };
 // template:begin authn:grpc-scope-trace-test-imports
 use axum::extract::State;
@@ -109,13 +110,9 @@ const UNSCOPED: &str = "unscoped";
 // template:end oidc-introspection:grpc-transport-test-introspection-tokens
 // template:begin authn:grpc-transport-test-unary-path
 const ORDERS_READ: &str = "orders.read";
-const STREAM_PATHS: [&str; 3] = [
-    "/example.v1.EchoService/ClientStream",
-    SERVER_STREAM_PATH,
-    "/example.v1.EchoService/BidiStream",
-];
-// template:end authn:grpc-transport-test-unary-path
+const STREAM_METHODS: [&str; 3] = ["ClientStream", "ServerStream", "BidiStream"];
 const SERVER_STREAM_PATH: &str = "/example.v1.EchoService/ServerStream";
+// template:end authn:grpc-transport-test-unary-path
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -183,15 +180,15 @@ impl Hold {
 type UploadAborts = Arc<Mutex<Vec<Result<Option<String>, Code>>>>;
 
 // template:begin authn:grpc-transport-test-admitted-identity
-type AdmittedIdentity = (infra_grpc::VerifiedPrincipal, Option<DelegationCredential>);
+type AdmittedIdentity = (Principal, Option<DelegationCredential>);
 
 #[derive(Clone, Default)]
 struct Orders(Arc<AtomicUsize>);
 
 impl Orders {
-    fn read_order(&self, subject: Option<&str>, order: &str) -> Option<&'static str> {
+    fn read_order(&self, principal: &Principal, order: &str) -> Option<&'static str> {
         self.0.fetch_add(1, Ordering::Relaxed);
-        (subject == Some("subject") && order == "order-42").then_some("order-42")
+        (principal.subject() == Some("subject") && order == "order-42").then_some("order-42")
     }
 
     fn reads(&self) -> usize {
@@ -229,31 +226,26 @@ impl Echo {
     }
 
     fn observe<T>(&self, request: &Request<T>, seen: Seen) {
-        let opening = infra_grpc::request_operation(request)
+        let opening = request
+            .operation()
             .expect("admitted tonic handlers receive the opening context");
         assert!(opening.deadline().is_some());
         let response = request
-            .extensions()
-            .get::<ResponseContext>()
+            .response_context()
             .expect("response work has its own lifetime carrier");
         assert!(!response.operation().cancellation().is_cancelled());
         // template:begin authn:grpc-transport-test-seen-principal
-        let verified =
-            infra_grpc::VerifiedPrincipal::from_extensions(request.extensions()).cloned();
+        let verified = request.principal().ok().cloned();
         assert_eq!(
-            infra_grpc::VerifiedPrincipal::from_request(request)
-                .map(infra_grpc::VerifiedPrincipal::issuer),
-            verified.as_ref().map(infra_grpc::VerifiedPrincipal::issuer),
-        );
-        assert!(
             request
                 .extensions()
-                .get::<infra_bearerauthn::Principal>()
-                .is_none()
+                .get::<Principal>()
+                .map(Principal::issuer),
+            verified.as_ref().map(Principal::issuer),
         );
         let had_identity = verified.is_some();
         if let Some(principal) = verified {
-            let delegation = request.extensions().get::<DelegationCredential>().cloned();
+            let delegation = request.delegation_credential().ok().cloned();
             self.identities.lock().push((principal, delegation));
         }
         // template:end authn:grpc-transport-test-seen-principal
@@ -294,10 +286,10 @@ impl EchoService for Echo {
         match request.get_ref().message.as_str() {
             // template:begin authn:grpc-scope-trace-test-handlers
             order if order.starts_with("order-") => {
-                let principal = VerifiedPrincipal::require_from_request(&request)?;
+                let principal = request.principal()?;
                 let message = self
                     .orders
-                    .read_order(principal.subject(), order)
+                    .read_order(principal, order)
                     .ok_or_else(|| Failure::new(FailureCode::Forbidden))?;
                 Ok(Response::new(UnaryResponse {
                     message: message.to_owned(),
@@ -344,11 +336,8 @@ impl EchoService for Echo {
         request: Request<ServerStreamRequest>,
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         self.observe(&request, Seen::ServerStream);
-        let response_context = request.extensions().get::<ResponseContext>().cloned();
-        let request_context = request
-            .extensions()
-            .get::<operation_context::OperationContext>()
-            .cloned();
+        let response_context = request.response_context().ok().cloned();
+        let request_context = request.operation().ok().cloned();
         let message = request.into_inner().message;
         let first = futures_util::stream::iter([Ok(ServerStreamResponse {
             message: message.clone(),
@@ -571,7 +560,7 @@ impl Fixture {
         let control = readiness.control();
         let prepared = readiness.prepare().await.unwrap();
         let pending_activation = if seed {
-            prepared.activate().unwrap();
+            let _refresher = prepared.activate().unwrap();
             None
         } else {
             Some(prepared)
@@ -584,20 +573,33 @@ impl Fixture {
         services
             .describe(descriptor_set)
             .expect("the fixture contract decodes");
-        services
+        #[allow(
+            unused_mut,
+            unused_variables,
+            reason = "the bearer profile registers scope requirements on the handle"
+        )]
+        let mut echo_registration = services
             .add(EchoServiceServer::new(echo.clone()))
             .expect("echo registers once");
         // template:begin authn:grpc-transport-test-scope-requirement
-        services
-            .require_scopes_for_delegation(UNARY_PATH, &[ORDERS_READ])
+        echo_registration
+            .require_scopes_for_delegation("Unary", &[ORDERS_READ])
             .expect("unary scopes register once");
-        for path in STREAM_PATHS {
-            if Some(path) != omitted_method {
-                services.require_scopes(path, &[]).unwrap();
+        for method in STREAM_METHODS {
+            if Some(method) != omitted_method {
+                echo_registration.require_scopes(method, &[]).unwrap();
             }
         }
         // template:end authn:grpc-transport-test-scope-requirement
-        let app = infra_grpc::router(services, control.reader(), authentication, limits, false)
+        let app = services
+            .build(
+                control.reader(),
+                authentication,
+                ServerOptions {
+                    limits,
+                    trust_trace_context: false,
+                },
+            )
             .expect("router builds");
         let tls = tls.map(|(pki, mtls)| {
             let certificate = pem(&pki.server_certificate);
@@ -699,11 +701,12 @@ fn loopback() -> SocketAddr {
 }
 
 fn plaintext_client(address: SocketAddr) -> Client {
-    Client::try_new(
+    Client::builder(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         CLIENT_TIMEOUT,
     )
+    .build()
     .expect("plaintext client")
 }
 
@@ -735,17 +738,18 @@ fn request<T>(message: T) -> Request<T> {
 
 #[tokio::test(start_paused = true)]
 async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
-    let client = Client::with_opening_limit(
+    let client = Client::builder(
         "http://127.0.0.1:1",
         ClientSecurity::Plaintext,
-        ClientTimeout::FullRpc(Duration::from_secs(2)),
-        Some(NonZeroUsize::MIN),
+        Duration::from_secs(2),
     )
+    .opening_limit(NonZeroUsize::MIN)
+    .build()
     .expect("client config is valid");
     let parent = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
     let mut request = http::Request::new(tonic::body::Body::empty());
     request.extensions_mut().insert(parent.clone());
-    let prepared = client.prepare_call(request).unwrap();
+    let prepared = PreparedCall::prepare(&client, request).unwrap();
     assert_eq!(
         prepared.opening_context().remaining(),
         Some(Duration::from_secs(1))
@@ -755,7 +759,7 @@ async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
     let mut expired = http::Request::new(tonic::body::Body::empty());
     expired.extensions_mut().insert(parent.clone());
     assert_eq!(
-        client.prepare_call(expired).unwrap_err().code(),
+        PreparedCall::prepare(&client, expired).unwrap_err().code(),
         Code::DeadlineExceeded
     );
     assert_eq!(
@@ -766,11 +770,7 @@ async fn prepared_call_preserves_the_parent_budget_before_dispatch() {
         !parent.cancellation().is_cancelled(),
         "the prepared call owns a child cancellation scope"
     );
-    assert!(
-        client
-            .prepare_call(http::Request::new(tonic::body::Body::empty()))
-            .is_ok()
-    );
+    assert!(PreparedCall::prepare(&client, http::Request::new(tonic::body::Body::empty())).is_ok());
 }
 
 fn watch_request(service: &str) -> Request<HealthCheckRequest> {
@@ -1106,13 +1106,13 @@ async fn verify_grpc_order_reads(fixture: &Fixture) {
 async fn read_http_order(
     State(orders): State<Orders>,
     Path(id): Path<String>,
-    principal: infra_http::VerifiedPrincipal,
+    infra_http::VerifiedPrincipal(principal): infra_http::VerifiedPrincipal,
     headers: http::HeaderMap,
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
 
     assert!(!headers.contains_key(AUTHORIZATION));
-    match orders.read_order(principal.subject(), &id) {
+    match orders.read_order(&principal, &id) {
         Some(order) => order.into_response(),
         None => Problem::new(FailureCode::Forbidden).into_response(),
     }
@@ -1134,7 +1134,7 @@ async fn verify_http_order_reads(fixture: &Fixture) {
         .unwrap()
         .build(
             fixture.echo.orders.clone(),
-            infra_http::Authentication::Bearer(Box::new(fixture.verifier.clone())),
+            infra_http::Authentication::Bearer(fixture.verifier.clone()),
             &HardenOptions {
                 max_body_bytes: 1024,
                 request_timeout: WAIT,
@@ -1247,7 +1247,7 @@ async fn order_reads_distinguish_scope_refusals_from_handler_refusals_in_both_tr
 
 #[test]
 fn a_handler_requiring_a_principal_reports_a_missing_identity_as_internal() {
-    let status = VerifiedPrincipal::require_from_request(&Request::new(())).unwrap_err();
+    let status = Request::new(()).principal().unwrap_err();
     assert_eq!(status.code(), Code::Internal);
     assert_eq!(reason(&status), "INTERNAL_ERROR");
 }
@@ -1256,23 +1256,26 @@ fn a_handler_requiring_a_principal_reports_a_missing_identity_as_internal() {
 async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_rule() {
     let (verifier, fixture) = BearerFixture::start().await;
     let mut services = described();
-    services.add(EchoServiceServer::new(Echo::new())).unwrap();
-    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
-        if path != SERVER_STREAM_PATH {
-            services.require_scopes(path, &[]).unwrap();
+    let mut registration = services.add(EchoServiceServer::new(Echo::new())).unwrap();
+    for method in std::iter::once("Unary").chain(STREAM_METHODS) {
+        if method != "ServerStream" {
+            registration.require_scopes(method, &[]).unwrap();
         }
     }
 
-    assert_matches!(
-        infra_grpc::router(
-            services,
-            readiness().control().reader(),
-            infra_grpc::Authentication::Bearer(verifier),
-            limits(),
-            false,
-        )
-        .unwrap_err(),
-        Error::MissingScopeRequirement(path) if path == SERVER_STREAM_PATH
+    assert_eq!(
+        services
+            .build(
+                readiness().control().reader(),
+                infra_grpc::Authentication::Bearer(verifier),
+                ServerOptions {
+                    limits: limits(),
+                    trust_trace_context: false,
+                },
+            )
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC method {SERVER_STREAM_PATH} has no scope requirement")
     );
     fixture.stop().await;
 }
@@ -1280,52 +1283,61 @@ async fn a_bearer_router_rejects_a_registered_method_without_an_explicit_scope_r
 #[test]
 fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_declared_once() {
     let mut services = described();
-    assert_matches!(
-        services.require_scopes(UNARY_PATH, &["echo.read"]),
-        Err(Error::UnregisteredMethodPath(path)) if path == UNARY_PATH
-    );
-    services
+    let mut registration = services
         .add(EchoServiceServer::new(Echo::new()))
         .expect("registration");
-    for path in [
-        "example.v1.EchoService/Unary",
-        "/example.v1.EchoService",
-        "/example.v1.EchoService/",
-        "/example.v1.EchoService/Unary/extra",
-        "/example.v1.EchoService/unary",
-        "/example.v1.EchoService/Unry",
-        "/example.v1.Other/Unary",
+    for method in [
+        "",
+        "Unary/extra",
+        "unary",
+        "Unry",
+        "/example.v1.EchoService/Unary",
     ] {
-        assert_matches!(
-            services.require_scopes(path, &["echo.read"]),
-            Err(Error::UnregisteredMethodPath(rejected)) if rejected == path,
-            "{path}"
+        let expected_path = format!("/{ECHO_SERVICE}/{method}");
+        assert_eq!(
+            registration
+                .require_scopes(method, &["echo.read"])
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "gRPC scope requirement for {expected_path} must name a described method of a registered service"
+            ),
+            "{method}"
         );
     }
-    services
-        .require_scopes(UNARY_PATH, &["echo.read"])
+    registration
+        .require_scopes("Unary", &["echo.read"])
         .expect("first requirement");
-    assert_matches!(
-        services.require_scopes(UNARY_PATH, &["echo.write"]),
-        Err(Error::DuplicateScopeRequirement(path)) if path == UNARY_PATH
+    assert_eq!(
+        registration
+            .require_scopes("Unary", &["echo.write"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC scope requirement is declared twice for {UNARY_PATH}")
     );
 }
 
 #[test]
 fn malformed_scope_tokens_are_rejected_without_registering_a_requirement() {
     let mut services = described();
-    services.add(EchoServiceServer::new(Echo::new())).unwrap();
+    let mut registration = services.add(EchoServiceServer::new(Echo::new())).unwrap();
 
-    assert_matches!(
-        services.require_scopes(UNARY_PATH, &["echo.read", "echo.read echo.write"]),
-        Err(Error::InvalidScopeToken { path, index: 1 }) if path == UNARY_PATH
+    assert_eq!(
+        registration
+            .require_scopes("Unary", &["echo.read", "echo.read echo.write"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC scope requirement for {UNARY_PATH} has an invalid scope token at index 1")
     );
-    assert_matches!(
-        services.require_scopes_for_delegation(UNARY_PATH, &[""]),
-        Err(Error::InvalidScopeToken { path, index: 0 }) if path == UNARY_PATH
+    assert_eq!(
+        registration
+            .require_scopes_for_delegation("Unary", &[""])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC scope requirement for {UNARY_PATH} has an invalid scope token at index 0")
     );
-    services
-        .require_scopes_for_delegation(UNARY_PATH, &["echo.read", "echo.write"])
+    registration
+        .require_scopes_for_delegation("Unary", &["echo.read", "echo.write"])
         .unwrap();
 }
 // template:end authn:grpc-transport-test-insufficient-scope
@@ -1426,25 +1438,27 @@ fn opening_app_waiting(
     max_admission_wait: Duration,
 ) -> infra_grpc::Application {
     let mut services = described();
-    services.add(EchoServiceServer::new(echo.clone())).unwrap();
-    for path in std::iter::once(UNARY_PATH).chain(STREAM_PATHS) {
-        services.require_scopes(path, &[]).unwrap();
+    let mut registration = services.add(EchoServiceServer::new(echo.clone())).unwrap();
+    for method in std::iter::once("Unary").chain(STREAM_METHODS) {
+        registration.require_scopes(method, &[]).unwrap();
     }
-    infra_grpc::router(
-        services,
-        readiness().control().reader(),
-        infra_grpc::Authentication::Bearer(verifier),
-        Limits {
-            max_in_flight: NonZeroU32::new(capacity),
-            max_admission_wait,
-            ..limits()
-        },
-        false,
-    )
-    .unwrap()
+    services
+        .build(
+            readiness().control().reader(),
+            infra_grpc::Authentication::Bearer(verifier),
+            ServerOptions {
+                limits: Limits {
+                    max_in_flight: NonZeroU32::new(capacity),
+                    max_admission_wait,
+                    ..limits()
+                },
+                trust_trace_context: false,
+            },
+        )
+        .unwrap()
 }
 
-async fn hold_capacity(app: &infra_grpc::Application) -> axum::response::Response {
+async fn hold_capacity(app: &infra_grpc::Application) -> http::Response<tonic::body::Body> {
     app.clone()
         .oneshot(opening_request(
             "/example.v1.EchoService/ServerStream",
@@ -1887,6 +1901,9 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
 // template:begin authn:grpc-transport-test-shared-queue-limit
 #[tokio::test]
 async fn both_admission_queues_share_the_call_wait_limit() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let metrics = recorder.handle();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let (verifier, bearer) = BearerFixture::start().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_secs(1));
@@ -1912,6 +1929,11 @@ async fn both_admission_queues_share_the_call_wait_limit() {
         "queued",
     )));
     assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    assert!(
+        metrics.render().contains("grpc_server_admission_waiting 1"),
+        "{}",
+        metrics.render()
+    );
     tokio::time::advance(Duration::from_millis(750)).await;
 
     echo.hold.release();
@@ -1927,6 +1949,23 @@ async fn both_admission_queues_share_the_call_wait_limit() {
         .unwrap();
     assert!(started.elapsed() >= Duration::from_secs(1));
     assert_at_capacity(&grpc_status(&response).unwrap());
+    let rendered = metrics.render();
+    assert!(
+        rendered.contains("grpc_server_admission_wait_seconds_count 2"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("grpc_server_admission_waiting 0"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("grpc_server_shed_requests_total 1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("failure_code=\"service_unavailable\"} 1"),
+        "{rendered}"
+    );
     assert_seen(&echo, &[Seen::ServerStream]);
     drop(held);
     tokio::time::resume();
@@ -2004,10 +2043,10 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
     let (verifier, bearer) = BearerFixture::start().await;
     let header = format!("Bearer {}", BearerMode::SELECTED.token(false));
     let (_, previously_verified) = verifier
-        .authenticate_presented_with_context(
+        .authenticate_presented(
+            &operation_context::OperationContext::unbounded(),
             [header.as_bytes()],
             infra_bearerauthn::Transport::Grpc,
-            &operation_context::OperationContext::unbounded(),
         )
         .await
         .unwrap();
@@ -2038,7 +2077,7 @@ async fn verified_principal_exposes_identity_and_spoofed_extensions_cannot_bypas
         .identities
         .lock()
         .pop()
-        .expect("handler observed VerifiedPrincipal");
+        .expect("handler observed Principal");
     assert!(credential.is_none());
     assert_eq!(captured.issuer(), "https://issuer.example");
     assert_eq!(captured.subject(), Some("subject"));
@@ -2304,12 +2343,13 @@ async fn client_clones_share_opening_capacity_until_cancellation_or_response_hea
     let fixture = Fixture::plaintext().await;
     let new_client = || {
         EchoServiceClient::new(
-            Client::with_opening_limit(
+            Client::builder(
                 &format!("http://{}", fixture.address),
                 ClientSecurity::Plaintext,
                 ClientTimeout::OpeningOnly(CLIENT_TIMEOUT),
-                Some(NonZeroUsize::MIN),
             )
+            .opening_limit(NonZeroUsize::MIN)
+            .build()
             .unwrap(),
         )
     };
@@ -2408,11 +2448,12 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
         },
     )
     .await;
-    let adapter = Client::with_timeout_policy(
+    let adapter = Client::builder(
         &format!("http://{}", fixture.address),
         ClientSecurity::Plaintext,
         ClientTimeout::OpeningOnly(Duration::from_millis(100)),
     )
+    .build()
     .unwrap();
     let mut client = EchoServiceClient::new(adapter);
     let mut response = timeout(
@@ -2489,8 +2530,9 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
         (OpeningOnly(local), Some("30S"), None, Some(30)),
         (OpeningOnly(local), Some("30S"), Some(10), Some(10)),
     ] {
-        let client =
-            Client::with_timeout_policy(&destination, ClientSecurity::Plaintext, policy).unwrap();
+        let client = Client::builder(&destination, ClientSecurity::Plaintext, policy)
+            .build()
+            .unwrap();
         let mut request = http::Request::builder()
             .method("POST")
             .uri(UNARY_PATH)
@@ -2511,10 +2553,13 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
                     Duration::from_secs(seconds),
                 ));
         }
-        let mut prepared = client.prepare_call(request).unwrap();
-        prepared
-            .headers_mut()
-            .insert("grpc-timeout", http::HeaderValue::from_static("1H"));
+        let prepared = PreparedCall::prepare(&client, request)
+            .unwrap()
+            .try_step(|_, headers| {
+                headers.insert("grpc-timeout", http::HeaderValue::from_static("1H"));
+                Ok(())
+            })
+            .unwrap();
         tokio::time::advance(admission).await;
         tokio::time::resume();
         let result = timeout(WAIT, prepared.send()).await.unwrap();
@@ -2531,7 +2576,10 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
         assert_eq!(response.headers()["grpc-status"], "0");
         let headers = wire.try_recv().unwrap();
         if let Some(lifetime) = lifetime {
-            let forwarded = infra_outbound_grpc::grpc_timeout(&headers).unwrap();
+            let forwarded = headers
+                .get(shared_rules::grpc::TIMEOUT_HEADER)
+                .and_then(|value| shared_rules::grpc::parse_timeout(value.as_bytes()))
+                .unwrap();
             let precision = Duration::from_micros(1);
             let earliest = lifetime.saturating_sub(origin.elapsed() + precision);
             let latest = lifetime.saturating_sub(admission) + precision;
@@ -2552,11 +2600,12 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
 #[tokio::test]
 async fn supplied_caller_deadline_expires_open_stream_and_recovers_capacity() {
     let fixture = Fixture::limited(1).await;
-    let adapter = Client::with_timeout_policy(
+    let adapter = Client::builder(
         &format!("http://{}", fixture.address),
         ClientSecurity::Plaintext,
         ClientTimeout::OpeningOnly(Duration::from_secs(1)),
     )
+    .build()
     .unwrap();
     let mut client = EchoServiceClient::new(adapter);
     let mut call = request(ServerStreamRequest {
@@ -2854,9 +2903,9 @@ fn the_builtin_health_name_cannot_be_registered_as_a_business_service() {
         .describe(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .unwrap();
     let (_, health) = tonic_health::server::health_reporter();
-    assert_matches!(
-        services.add(health).unwrap_err(),
-        Error::DuplicateService("grpc.health.v1.Health")
+    assert_eq!(
+        services.add(health).unwrap_err().to_string(),
+        "gRPC service grpc.health.v1.Health is registered twice"
     );
 }
 
@@ -2885,7 +2934,7 @@ async fn health_watch_ends_on_drain_and_the_listener_drain_completes() {
     .unwrap_err();
     assert_eq!(unknown.code(), Code::NotFound);
 
-    fixture
+    let _refresher = fixture
         .pending_activation
         .take()
         .unwrap()
@@ -3028,11 +3077,12 @@ async fn client_bidi_abort_mid_upload_surfaces_stream_error_not_eof() {
         } else {
             CLIENT_TIMEOUT
         };
-        let adapter = Client::try_new(
+        let adapter = Client::builder(
             &format!("http://{}", fixture.address),
             ClientSecurity::Plaintext,
             client_budget,
         )
+        .build()
         .unwrap();
         let mut client = EchoServiceClient::new(adapter);
         let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -3113,10 +3163,11 @@ async fn client_bidi_abort_mid_upload_surfaces_stream_error_not_eof() {
 async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
     let pki = Pki::new(&["127.0.0.1", "localhost"]);
     let fixture = Fixture::tls(&pki, false).await;
+    let ca = pem(&pki.ca_certificate);
     let mut client = EchoServiceClient::new(tls_client(
         fixture.address,
         ClientTlsMaterial {
-            ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+            ca_certificate_pem: Some(&ca),
             identity: None,
         },
     ));
@@ -3135,14 +3186,16 @@ async fn a_new_dial_uses_the_replaced_localhost_address_without_changing_tls_ide
     let pki = Pki::new(&["localhost"]);
     let first = Fixture::tls_at(&pki, "127.0.0.1:0".parse().unwrap()).await;
     let port = first.address.port();
-    let client = Client::try_new(
+    let ca = pem(&pki.ca_certificate);
+    let client = Client::builder(
         &format!("https://localhost:{port}"),
         ClientSecurity::Tls(ClientTlsMaterial {
-            ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+            ca_certificate_pem: Some(&ca),
             identity: None,
         }),
         CLIENT_TIMEOUT,
     )
+    .build()
     .unwrap();
     let mut client = EchoServiceClient::new(client);
     let response = timeout(WAIT, client.unary(request(unary("ipv4"))))
@@ -3170,15 +3223,17 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
     let replacement = Pki::new(&["localhost"]);
     let fixture = Fixture::tls_at(&replacement, "127.0.0.1:0".parse().unwrap()).await;
     let destination = format!("https://localhost:{}", fixture.address.port());
+    let stale_ca = pem(&stale.ca_certificate);
     let mut stale_client = EchoServiceClient::new(
-        Client::try_new(
+        Client::builder(
             &destination,
             ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(pem(&stale.ca_certificate)),
+                ca_certificate_pem: Some(&stale_ca),
                 identity: None,
             }),
             CLIENT_TIMEOUT,
         )
+        .build()
         .unwrap(),
     );
     let status = timeout(WAIT, stale_client.unary(request(unary("stale"))))
@@ -3187,15 +3242,17 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
         .unwrap_err();
     assert_eq!(status.code(), Code::Unavailable);
 
+    let replacement_ca = pem(&replacement.ca_certificate);
     let mut rebuilt_client = EchoServiceClient::new(
-        Client::try_new(
+        Client::builder(
             &destination,
             ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(pem(&replacement.ca_certificate)),
+                ca_certificate_pem: Some(&replacement_ca),
                 identity: None,
             }),
             CLIENT_TIMEOUT,
         )
+        .build()
         .unwrap(),
     );
     let response = timeout(WAIT, rebuilt_client.unary(request(unary("replacement"))))
@@ -3222,13 +3279,16 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
     .await;
     assert_tls_denied(fixture.address, &pki, None, true).await;
 
+    let ca = pem(&pki.ca_certificate);
+    let client_cert = pem(&pki.client_certificate);
+    let client_key = secrecy::SecretString::from(pem(&pki.client_key));
     let mut client = EchoServiceClient::new(tls_client(
         fixture.address,
         ClientTlsMaterial {
-            ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+            ca_certificate_pem: Some(&ca),
             identity: Some(ClientIdentity {
-                certificate_pem: pem(&pki.client_certificate),
-                private_key_pem: pem(&pki.client_key).into(),
+                certificate_pem: &client_cert,
+                private_key_pem: &client_key,
             }),
         },
     ));
@@ -3385,7 +3445,7 @@ async fn a_generated_method_missing_from_the_descriptor_cannot_dispatch() {
     let original_count = echo.method.len();
     echo.method.retain(|method| method.name() != "ServerStream");
     assert_eq!(echo.method.len() + 1, original_count);
-    let fixture = Fixture::with_descriptor_set(&contract, Some(SERVER_STREAM_PATH)).await;
+    let fixture = Fixture::with_descriptor_set(&contract, Some("ServerStream")).await;
     let mut client = fixture.echo_client();
 
     let omitted = timeout(
@@ -3415,14 +3475,9 @@ fn bytes_that_are_not_a_descriptor_set_are_rejected() {
     let error = Services::new()
         .describe(b"\xffprivate descriptor fixture")
         .unwrap_err();
-    assert_matches!(&error, Error::DecodeDescriptorSet(_));
     let source = std::error::Error::source(&error).unwrap();
     assert!(source.is::<prost::DecodeError>());
-    assert!(
-        error
-            .to_string()
-            .contains("decode gRPC file descriptor set")
-    );
+    assert_eq!(error.to_string(), "decode gRPC file descriptor set");
     assert!(!format!("{error:?} {error} {source}").contains("private descriptor fixture"));
 }
 
@@ -3452,9 +3507,12 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
         ..Default::default()
     };
     descriptor.file.insert(0, unnamed_file);
-    assert_matches!(
-        services.describe(encode(&descriptor)),
-        Err(Error::ConflictingServiceDescription(name)) if name == "example.v1.EchoService"
+    assert_eq!(
+        services
+            .describe(encode(&descriptor))
+            .unwrap_err()
+            .to_string(),
+        "gRPC descriptors disagree on the methods of service example.v1.EchoService"
     );
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
@@ -3474,9 +3532,12 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
     let service = &mut file.service[0];
     service.name = Some(String::new());
     service.method.remove(0);
-    assert_matches!(
-        services.describe(encode(&descriptor)),
-        Err(Error::ConflictingServiceDescription(name)) if name.is_empty()
+    assert_eq!(
+        services
+            .describe(encode(&descriptor))
+            .unwrap_err()
+            .to_string(),
+        "gRPC descriptors disagree on the methods of service "
     );
     descriptor.file[0].service[0]
         .method
@@ -3493,27 +3554,31 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
 fn reflection_added_twice_is_rejected() {
     let mut services = Services::new();
     services.add_reflection().expect("first registration");
-    assert_matches!(
-        services.add_reflection(),
-        Err(Error::DuplicateService(
-            "grpc.reflection.v1.ServerReflection"
-        ))
+    assert_eq!(
+        services.add_reflection().unwrap_err().to_string(),
+        "gRPC service grpc.reflection.v1.ServerReflection is registered twice"
     );
 }
 
 #[test]
 fn a_service_is_described_before_it_is_added_and_added_once() {
-    assert_matches!(
-        Services::new().add(EchoServiceServer::new(Echo::new())),
-        Err(Error::UndescribedService("example.v1.EchoService"))
+    assert_eq!(
+        Services::new()
+            .add(EchoServiceServer::new(Echo::new()))
+            .unwrap_err()
+            .to_string(),
+        "gRPC service example.v1.EchoService is in no described file descriptor set"
     );
     let mut services = described();
     services
         .add(EchoServiceServer::new(Echo::new()))
         .expect("first registration");
-    assert_matches!(
-        services.add(EchoServiceServer::new(Echo::new())),
-        Err(Error::DuplicateService("example.v1.EchoService"))
+    assert_eq!(
+        services
+            .add(EchoServiceServer::new(Echo::new()))
+            .unwrap_err()
+            .to_string(),
+        "gRPC service example.v1.EchoService is registered twice"
     );
 }
 
@@ -3700,11 +3765,12 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             server_options(connection_limits()),
             None,
         );
-        let adapter = Client::try_new(
+        let adapter = Client::builder(
             &format!("http://{}", server.local_addr()),
             ClientSecurity::Plaintext,
             Duration::from_millis(200),
         )
+        .build()
         .unwrap();
         let call = tokio::spawn(async move {
             EchoServiceClient::new(adapter)
@@ -3753,11 +3819,12 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     assert_eq!(status.code(), Code::DeadlineExceeded);
     assert_eq!(status.message(), "request deadline exceeded");
 
-    let bounded = Client::try_new(
+    let bounded = Client::builder(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
         Duration::from_millis(100),
     )
+    .build()
     .expect("bounded client");
     let status = timeout(
         WAIT,
@@ -3778,10 +3845,11 @@ async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
         let pki = Pki::new(&["127.0.0.1"]);
         let healthy = Fixture::tls(&pki, false).await;
         let listener = tokio::net::TcpListener::bind(loopback()).await.unwrap();
+        let ca = pem(&pki.ca_certificate);
         let adapter = tls_client(
             listener.local_addr().unwrap(),
             ClientTlsMaterial {
-                ca_certificate_pem: Some(pem(&pki.ca_certificate)),
+                ca_certificate_pem: Some(&ca),
                 identity: None,
             },
         );
@@ -3864,12 +3932,13 @@ fn pem(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("rcgen emits ASCII PEM")
 }
 
-fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> Client {
-    Client::try_new(
+fn tls_client(address: SocketAddr, material: ClientTlsMaterial<'_>) -> Client {
+    Client::builder(
         &format!("https://127.0.0.1:{}", address.port()),
         ClientSecurity::Tls(material),
         CLIENT_TIMEOUT,
     )
+    .build()
     .expect("tls client")
 }
 
@@ -3941,22 +4010,22 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
         FixtureTransport::try_new("provider.test", address, &pki.ca_der, cancel.child_token())
             .unwrap();
     let verifier = prepare_introspection_with_fixture(
-        IntrospectionOptions {
-            issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
-            audiences: vec!["api".to_owned()],
-            endpoint: EndpointUrl::parse(&format!(
+        IntrospectionOptions::try_new(
+            &IssuerUrl::parse("https://issuer.example").unwrap(),
+            vec!["api".to_owned()],
+            EndpointUrl::parse(&format!(
                 "https://provider.test:{}/introspect",
                 address.port()
             ))
             .unwrap(),
-            client_id: "fixture".to_owned(),
-            client_secret: SecretString::from("fixture"),
-            provider_concurrency: const { std::num::NonZeroUsize::new(32).expect("32 is nonzero") },
-            cache: Some(IntrospectionCacheOptions::try_new(16, Duration::from_mins(1)).unwrap()),
-        },
+            "fixture".to_owned(),
+            SecretString::from("fixture"),
+            const { std::num::NonZeroUsize::new(32).expect("32 is nonzero") },
+            Some(IntrospectionCacheOptions::try_new(16, Duration::from_mins(1)).unwrap()),
+        )
+        .unwrap(),
         fixture,
-    )
-    .unwrap();
+    );
     (
         verifier,
         ProviderFixture {

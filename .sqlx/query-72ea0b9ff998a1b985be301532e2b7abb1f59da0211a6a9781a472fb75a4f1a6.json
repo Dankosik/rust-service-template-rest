@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH sampled AS ( SELECT statement_timestamp() AS observed_at ), registered AS ( SELECT name.kind FROM unnest($1::text[]) AS name(kind) ) SELECT registered.kind AS \"kind!\", available.count AS \"available!\", scheduled.count AS \"scheduled!\", running.count AS \"running!\", failed.count AS \"failed!\", COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - LEAST(available.oldest, expired.oldest)), 0)::double precision AS \"oldest_available_age_seconds!\", EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at_unix_seconds!\" FROM sampled CROSS JOIN registered CROSS JOIN LATERAL ( SELECT count(*) AS count, min(capped.not_before) AS oldest FROM ( SELECT job.not_before FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'pending' AND job.not_before <= sampled.observed_at AND NOT EXISTS (SELECT 1 FROM background_jobs prior WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed') ORDER BY job.not_before, job.id LIMIT $2 ) AS capped ) AS available CROSS JOIN LATERAL ( SELECT count(*) AS count FROM ( SELECT 1 FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'pending' AND (job.not_before > sampled.observed_at OR EXISTS ( SELECT 1 FROM background_jobs prior WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed')) LIMIT $2 ) AS capped ) AS scheduled CROSS JOIN LATERAL ( SELECT count(*) AS count FROM ( SELECT 1 FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'running' LIMIT $2 ) AS capped ) AS running LEFT JOIN LATERAL ( SELECT job.claim_expires_at AS oldest FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'running' AND job.claim_expires_at <= sampled.observed_at AND NOT EXISTS (SELECT 1 FROM background_jobs prior WHERE prior.id = job.predecessor_job_id AND prior.state <> 'completed') ORDER BY job.claim_expires_at LIMIT 1 ) AS expired ON true CROSS JOIN LATERAL ( SELECT count(*) AS count FROM ( SELECT 1 FROM background_jobs AS job WHERE job.kind = registered.kind AND job.state = 'failed' LIMIT $2 ) AS capped ) AS failed",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "available!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "scheduled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "running!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "failed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "oldest_available_age_seconds!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "observed_at_unix_seconds!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "72ea0b9ff998a1b985be301532e2b7abb1f59da0211a6a9781a472fb75a4f1a6"
+}

@@ -22,7 +22,6 @@ base64 = { workspace = true, features = ["alloc"] }
 derive_more = { workspace = true, features = ["debug", "display"] }
 enum-map = { workspace = true, features = ["derive"] }
 http = { workspace = true, features = ["std"] }
-indexmap = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 metrics = { workspace = true }
 foldhash = { workspace = true, features = ["std"] }

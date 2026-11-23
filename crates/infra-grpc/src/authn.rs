@@ -1,18 +1,14 @@
 use axum::extract::Request;
-use axum::response::Response;
-use foldhash::HashMap;
 use http::header::AUTHORIZATION;
 use infra_bearerauthn::{
-    Actor, ClaimAccessError, DelegationCredential, Failure as AuthFailure, Principal, Transport,
-    Verifier,
+    DelegationCredential, Failure as AuthFailure, Principal, Transport, Verifier,
 };
 use operation_context::OperationContext;
-use serde::Deserialize;
 
 use crate::Failure;
 use crate::call::check_open;
-use crate::router::reject_with_budget;
-use crate::status::internal_status;
+use crate::router::{Rejection, reject_with_budget};
+use crate::status::ClassifiedStatus;
 
 pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:begin oidc-jwt:grpc-verifier-setting-jwt
@@ -26,51 +22,7 @@ pub(super) const VERIFIER_SETTINGS: &[&str] = &[
     // template:end service-auth:grpc-verifier-setting-service-tokens
 ];
 
-#[derive(Clone, Debug)]
-pub struct VerifiedPrincipal(Principal);
-
-impl VerifiedPrincipal {
-    pub fn require_from_request<T>(request: &tonic::Request<T>) -> Result<&Self, tonic::Status> {
-        Self::from_request(request).ok_or_else(internal_status)
-    }
-
-    #[must_use]
-    pub fn from_request<T>(request: &tonic::Request<T>) -> Option<&Self> {
-        Self::from_extensions(request.extensions())
-    }
-
-    #[must_use]
-    pub fn from_extensions(extensions: &http::Extensions) -> Option<&Self> {
-        extensions.get::<Self>()
-    }
-
-    delegate::delegate! {
-        to self.0 {
-            pub fn claims<'a, T: Deserialize<'a>>(&'a self) -> Result<T, ClaimAccessError>;
-
-            #[must_use]
-            pub fn actor(&self) -> Option<&Actor>;
-
-            #[must_use]
-            pub const fn expires_at(&self) -> u64;
-
-            #[must_use]
-            pub fn scopes(&self) -> &[String];
-
-            #[must_use]
-            pub fn client_id(&self) -> Option<&str>;
-
-            #[must_use]
-            pub fn subject(&self) -> Option<&str>;
-
-            #[must_use]
-            pub fn issuer(&self) -> &str;
-        }
-    }
-}
-
 pub(crate) fn strip_identity(extensions: &mut http::Extensions) {
-    extensions.remove::<VerifiedPrincipal>();
     extensions.remove::<Principal>();
     extensions.remove::<DelegationCredential>();
 }
@@ -81,21 +33,12 @@ pub(crate) struct ScopeRequirement {
     pub(crate) delegate: bool,
 }
 
-pub(crate) type Scopes = HashMap<String, ScopeRequirement>;
-
-#[derive(Clone)]
-pub(crate) struct InsufficientScope;
-
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
 pub(crate) async fn authenticate(
     verifier: &Verifier,
-    scopes: &Scopes,
+    requirement: Option<&ScopeRequirement>,
     context: &OperationContext,
     mut request: Request,
-) -> Result<Request, Response> {
+) -> Result<Request, Rejection> {
     check_open(context)?;
     let result = {
         let authorization = request
@@ -104,29 +47,40 @@ pub(crate) async fn authenticate(
             .iter()
             .map(http::HeaderValue::as_bytes);
         verifier
-            .authenticate_presented_with_context(authorization, Transport::Grpc, context)
+            .authenticate_presented(context, authorization, Transport::Grpc)
             .await
     };
-    check_open(context)?;
     let (principal, token) = match result {
         Ok(presentation) => presentation,
         Err(failure) => {
-            return Err(reject_with_budget(context, request, authentication_status(failure)).await);
+            if failure == AuthFailure::Unavailable {
+                check_open(context)?;
+            }
+            return Err(
+                reject_with_budget(context, request, authentication_status(failure))
+                    .await
+                    .into(),
+            );
         }
     };
-    let Some(requirement) = scopes.get(request.uri().path()) else {
-        return Err(reject_with_budget(context, request, tonic::Status::unimplemented("")).await);
+    let Some(requirement) = requirement else {
+        return Err(reject_with_budget(
+            context,
+            request,
+            ClassifiedStatus::plain(tonic::Status::unimplemented("")),
+        )
+        .await
+        .into());
     };
-    if !principal.has_scopes(&requirement.scopes) {
-        let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
+    if !principal.has_scopes(requirement.scopes.iter()) {
+        let status = Failure::new(service_failure::Code::Forbidden).into_classified_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
         );
-        let mut response = reject_with_budget(context, request, status).await;
-        response.extensions_mut().insert(InsufficientScope);
-        return Err(response);
+        return Err(Rejection::InsufficientScope(
+            reject_with_budget(context, request, status).await,
+        ));
     }
-    check_open(context)?;
     let delegation = requirement
         .delegate
         .then(|| token.into_delegation_credential());
@@ -134,13 +88,11 @@ pub(crate) async fn authenticate(
     if let Some(credential) = delegation {
         request.extensions_mut().insert(credential);
     }
-    request
-        .extensions_mut()
-        .insert(VerifiedPrincipal(principal));
+    request.extensions_mut().insert(principal);
     Ok(request)
 }
 
-fn authentication_status(failure: AuthFailure) -> tonic::Status {
+fn authentication_status(failure: AuthFailure) -> ClassifiedStatus {
     Failure::new(match failure {
         AuthFailure::Missing => service_failure::Code::AuthenticationRequired,
         AuthFailure::Malformed => service_failure::Code::AuthenticationMalformed,

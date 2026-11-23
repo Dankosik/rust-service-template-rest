@@ -36,26 +36,20 @@ impl Pki {
         clippy::disallowed_methods,
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
-    fn file(
-        &self,
-        scope: SettingScope,
-        variable: &'static str,
-        name: &str,
-        pem: &str,
-    ) -> TrustFile {
+    fn file(&self, scope: EnvScope, variable: &'static str, name: &str, pem: &str) -> TrustFile {
         let path = self.files.path().join(name);
         std::fs::write(&path, pem).expect("write a PEM file");
         TrustFile {
             scope,
-            variable,
+            name: variable,
             path,
         }
     }
 
     fn certificate_file(&self) -> TrustFile {
         self.file(
-            SettingScope::Common,
-            CERTIFICATE_VARS[1],
+            EnvScope::Common,
+            CERTIFICATE_VARS[1].1,
             "ca.pem",
             &self.issuer.pem(),
         )
@@ -68,8 +62,8 @@ impl Pki {
         let certificate = params.signed_by(&key, &self.issuer).expect("client leaf");
         if bundled {
             let certificate = self.file(
-                SettingScope::Common,
-                CLIENT_CERTIFICATE_VARS[1],
+                EnvScope::Common,
+                CLIENT_CERTIFICATE_VARS[1].1,
                 "client-bundle.pem",
                 &format!("{}\n{}", certificate.pem(), key.serialize_pem()),
             );
@@ -83,22 +77,22 @@ impl Pki {
                 }
             };
             let key = TrustFile {
-                scope: SettingScope::Common,
-                variable: CLIENT_KEY_VARS[1],
+                scope: EnvScope::Common,
+                name: CLIENT_KEY_VARS[1].1,
                 path: certificate.path.clone(),
             };
             return (certificate, key);
         }
         (
             self.file(
-                SettingScope::Common,
-                CLIENT_CERTIFICATE_VARS[1],
+                EnvScope::Common,
+                CLIENT_CERTIFICATE_VARS[1].1,
                 "client.pem",
                 &certificate.pem(),
             ),
             self.file(
-                SettingScope::Common,
-                CLIENT_KEY_VARS[1],
+                EnvScope::Common,
+                CLIENT_KEY_VARS[1].1,
                 "client.key",
                 &key.serialize_pem(),
             ),
@@ -140,11 +134,11 @@ impl Pki {
 }
 
 fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
-    span_exporter(
+    build_span_exporter(
         &format!("https://{}/v1/traces", collector.addr),
         HashMap::new(),
         trust,
-        export_timeout(&|_: &str| None),
+        export_timeout_from_env(&|_: &str| None),
         None,
     )
     .expect("the exporter builds")
@@ -223,11 +217,11 @@ fn admitted_credentials_reach_only_the_selected_tls_collector() {
     const HEADERS: &str =
         "Authorization=Bearer%20fixture,X-Once=%250A,X-Bad-Escape=%0A%ZZ,X-Bad-Utf8=%0A%FF";
     if let Ok(mode) = std::env::var(CHILD) {
+        let endpoint = (mode == "typed").then(|| std::env::var(ENDPOINT).unwrap());
+        let headers = (mode == "typed").then(|| SecretString::from(HEADERS));
         let mut opts = options("");
-        if mode == "typed" {
-            opts.otlp_endpoint = Some(std::env::var(ENDPOINT).unwrap());
-            opts.otlp_headers = Some(SecretString::from(HEADERS));
-        }
+        opts.otlp_endpoint = endpoint.as_deref();
+        opts.otlp_headers = headers.as_ref();
         let provider = runtime().block_on(install_tracer_provider(&opts)).unwrap();
         provider.tracer().start("admitted span").end();
         assert_eq!(shutdown(provider), ProviderShutdown::Completed);
@@ -242,7 +236,7 @@ fn admitted_credentials_reach_only_the_selected_tls_collector() {
         child.args(["--exact", "traces::tests::delivery::tls::admitted_credentials_reach_only_the_selected_tls_collector", "--nocapture"])
             .env_clear()
             .env(CHILD, mode)
-            .env(CERTIFICATE_VARS[0], &ca.path);
+            .env(CERTIFICATE_VARS[0].1, &ca.path);
         match mode {
             "typed" => {
                 child.env(ENDPOINT, &endpoint);

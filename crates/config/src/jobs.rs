@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::load::{Error, JobsOperatorLoadError};
 use crate::postgres::{OperatorPostgresConfig, OperatorPostgresInput};
-use crate::validate::{Violations, int_range};
+use crate::validate::{Violations, admit_with, int_range};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -13,8 +13,7 @@ pub(crate) struct JobsOperatorInput {
     postgres: OperatorPostgresInput,
 }
 
-type OperatorAppInput =
-    crate::app::AppFields<serde::de::IgnoredAny, serde::de::IgnoredAny, serde::de::IgnoredAny>;
+type OperatorAppInput = crate::app::AppFields<crate::de::Skip, crate::de::Skip>;
 
 #[derive(Clone, Debug)]
 pub struct JobsOperatorConfig {
@@ -30,18 +29,12 @@ impl JobsOperatorConfig {
 
 impl JobsOperatorInput {
     pub(crate) fn admit(self) -> Result<JobsOperatorConfig, JobsOperatorLoadError> {
-        let mut violations = Violations::default();
-        let local_development = violations
-            .record(crate::app::validate_local_development(
-                &self.app.env,
-                self.app.allow_insecure_development,
-            ))
-            .unwrap_or(false);
-        let postgres = self.postgres.admit(local_development, &mut violations);
-        let postgres = violations
-            .finish(postgres)
-            .map_err(Error::from)?
-            .ok_or(JobsOperatorLoadError::PostgresDisabled)?;
+        let postgres = admit_with(|v| {
+            let local_development = self.app.admit_insecure_development(v);
+            self.postgres.admit(local_development, v)
+        })
+        .map_err(Error::from)?
+        .ok_or(JobsOperatorLoadError::PostgresDisabled)?;
         Ok(JobsOperatorConfig { postgres })
     }
 }
@@ -60,8 +53,8 @@ pub struct JobsConfig {
 }
 
 impl JobsConfig {
-    pub(crate) fn validate(&self, violations: &mut Violations) {
-        violations.check(int_range(
+    pub(crate) fn validate(&self, v: &mut Violations) {
+        v.check(int_range(
             "jobs.max_workers",
             self.max_workers.get(),
             1..=500,

@@ -1,18 +1,19 @@
 use std::time::Duration;
 
-use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use super::{JwtVerifier, TokenProfile};
+pub use crate::refresh::RefreshDriver;
 use crate::{
-    EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError, PreparationPhase,
-    PreparationReason, ProviderFailure, Verifier,
+    DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, OptionsError,
+    PreparationError, PreparationPhase, ProviderFailure, Verifier,
     claims::ClaimPolicy,
-    jwks::{JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure, allowed_algorithms},
+    jwks::{
+        AllowedAlgorithms, JwksSource, KEY_REJECTIONS_METRIC, KeySetFailure, allowed_algorithms,
+    },
     provider::{Document, ProviderClient},
-    refresh::{KeyStore, run_refresh_worker},
+    refresh::KeyStore,
 };
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
@@ -21,103 +22,114 @@ const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("JwtOptions([REDACTED])")]
 pub struct JwtOptions {
-    pub issuer: IssuerUrl,
-    pub audiences: Vec<String>,
-    pub token_profile: TokenProfile,
-    pub algorithms: Vec<JwtAlgorithm>,
-    pub jwks_uri: Option<EndpointUrl>,
-    pub jwks_max_age: Duration,
+    claim_policy: ClaimPolicy,
+    token_profile: TokenProfile,
+    algorithms: AllowedAlgorithms,
+    source: JwksSource,
+    jwks_max_age: Duration,
 }
 
-pub type RefreshTask = BoxFuture<'static, ()>;
+impl JwtOptions {
+    pub fn try_new(
+        issuer: IssuerUrl,
+        audiences: Vec<String>,
+        token_profile: TokenProfile,
+        algorithms: &[JwtAlgorithm],
+        jwks_uri: Option<EndpointUrl>,
+        jwks_max_age: Duration,
+    ) -> Result<Self, OptionsError> {
+        if algorithms.is_empty() || jwks_max_age < shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE {
+            return Err(OptionsError);
+        }
+        let claim_policy = ClaimPolicy::try_new(issuer.as_str(), audiences)?;
+        let source = match jwks_uri {
+            Some(uri) => JwksSource::Configured(uri),
+            None => JwksSource::Discovery(issuer),
+        };
+        Ok(Self {
+            claim_policy,
+            token_profile,
+            algorithms: allowed_algorithms(algorithms),
+            source,
+            jwks_max_age,
+        })
+    }
+}
 
 pub async fn prepare_jwt(
     options: JwtOptions,
-    cancel: CancellationToken,
-) -> Result<(Verifier, RefreshTask), PreparationError> {
+) -> Result<(Verifier, RefreshDriver), PreparationError> {
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let provider = ProviderClient::try_new();
-    let provider = enforce_startup_deadline(startup_deadline, PreparationPhase::Client, provider)?;
-    prepare_with_provider(options, provider, cancel, startup_deadline).await
+    let provider = enforce_startup_deadline(
+        startup_deadline,
+        PreparationPhase::Client,
+        ProviderClient::try_new().map_err(PreparationError::from),
+    )?;
+    prepare_with_provider(options, provider, startup_deadline).await
 }
 
 async fn prepare_with_provider(
     options: JwtOptions,
     provider: ProviderClient,
-    cancel: CancellationToken,
     startup_deadline: Instant,
-) -> Result<(Verifier, RefreshTask), PreparationError> {
+) -> Result<(Verifier, RefreshDriver), PreparationError> {
     metrics::describe_counter!(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
     );
-    let algorithms = allowed_algorithms(&options.algorithms);
-    let claim_policy = if options.algorithms.is_empty()
-        || options.jwks_max_age < shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE
-    {
-        Err(PreparationError::invalid_options())
-    } else {
-        ClaimPolicy::try_new(options.issuer.as_str(), options.audiences)
-    };
-    let claim_policy =
-        enforce_startup_deadline(startup_deadline, PreparationPhase::Options, claim_policy)?;
-    let source = match options.jwks_uri {
-        Some(uri) => JwksSource::Configured(uri),
-        None => JwksSource::Discovery(options.issuer),
-    };
-    let key_set = source
+    let JwtOptions {
+        claim_policy,
+        token_profile,
+        algorithms,
+        source,
+        jwks_max_age,
+    } = options;
+    let fetched = source
         .fetch(&provider, algorithms, startup_deadline)
         .await
         .and_then(|keys| {
             if keys.is_empty() {
-                Err(KeySetFailure::NoUsableKeys)
+                Err(KeySetFailure::Jwks(crate::JwksError::NoUsableKeys))
             } else {
                 Ok(keys)
             }
         })
         .map_err(PreparationError::from);
-    let phase = key_set
-        .as_ref()
-        .err()
-        .map_or(PreparationPhase::Jwks, PreparationError::phase);
-    let key_set = enforce_startup_deadline(startup_deadline, phase, key_set)?;
+    let key_set = enforce_startup_deadline(startup_deadline, PreparationPhase::Jwks, fetched)?;
     let key_store = KeyStore::new(key_set);
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
-        options.token_profile,
+        token_profile,
         algorithms,
         key_store.clone(),
-        options.jwks_max_age,
+        jwks_max_age,
     ));
-    let refresh_task: RefreshTask = Box::pin(run_refresh_worker(
-        key_store,
-        provider,
-        source,
-        algorithms,
-        cancel,
-        options.jwks_max_age,
-    ));
+    let refresh_driver = RefreshDriver::new(key_store, provider, source, algorithms, jwks_max_age);
     enforce_startup_deadline(
         startup_deadline,
         PreparationPhase::Jwks,
-        Ok((verifier, refresh_task)),
+        Ok((verifier, refresh_driver)),
     )
 }
 
 fn enforce_startup_deadline<T>(
     deadline: Instant,
-    phase: PreparationPhase,
+    step_phase: PreparationPhase,
     result: Result<T, PreparationError>,
 ) -> Result<T, PreparationError> {
     if Instant::now() >= deadline {
-        return Err(PreparationError::new(phase, PreparationReason::Timeout));
+        let phase = result
+            .as_ref()
+            .err()
+            .map_or(step_phase, PreparationError::phase);
+        return Err(PreparationError::Timeout(phase));
     }
     result
 }
 
-impl PreparationError {
+impl DiscoveryError {
     fn issuer_mismatch(configured: &IssuerUrl, discovered: String) -> Self {
-        let discovered = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
+        let echoed = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
             && IssuerUrl::parse(&discovered).is_ok()
         {
             discovered
@@ -126,7 +138,7 @@ impl PreparationError {
         };
         Self::IssuerMismatch {
             configured: configured.as_str().to_owned(),
-            discovered,
+            discovered: echoed,
         }
     }
 }
@@ -135,54 +147,49 @@ pub(crate) async fn discover_jwks_uri(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
     deadline: Instant,
-) -> Result<EndpointUrl, PreparationError> {
+) -> Result<EndpointUrl, DiscoveryError> {
     let discovery = fetch_discovery(provider, issuer, deadline).await?;
     if discovery.issuer != issuer.as_str() {
-        return Err(PreparationError::issuer_mismatch(issuer, discovery.issuer));
+        return Err(DiscoveryError::issuer_mismatch(issuer, discovery.issuer));
     }
-    EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| {
-        PreparationError::new(PreparationPhase::Discovery, PreparationReason::InvalidUrl)
-    })
+    EndpointUrl::parse(&discovery.jwks_uri).map_err(|_| DiscoveryError::InvalidJwksUrl)
 }
 
 async fn fetch_discovery(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
     deadline: Instant,
-) -> Result<Discovery, PreparationError> {
+) -> Result<Discovery, DiscoveryError> {
     let path = issuer.url().path().trim_suffix('/');
-    let mut openid = issuer.url().clone();
-    openid.set_path(&format!("{path}/.well-known/openid-configuration"));
-    let discovery = match fetch_metadata(provider, &openid, deadline).await {
+    let mut openid_url = issuer.url().clone();
+    openid_url.set_path(&format!("{path}/.well-known/openid-configuration"));
+    let first = match fetch_metadata(provider, &openid_url, deadline).await {
         Err(
-            first @ (PreparationReason::Fetch(ProviderFailure::Status(_))
-            | PreparationReason::Parse),
-        ) => {
-            let mut rfc8414 = issuer.url().clone();
-            rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            match fetch_metadata(provider, &rfc8414, deadline).await {
-                // RFC 8414 §3
-                Err(PreparationReason::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
-                result => result,
-            }
-        }
-        result => result,
+            first @ (DiscoveryError::Fetch(ProviderFailure::Status(_)) | DiscoveryError::Parse),
+        ) => first,
+        result => return result,
     };
-    discovery.map_err(|reason| PreparationError::new(PreparationPhase::Discovery, reason))
+    let mut rfc8414_url = issuer.url().clone();
+    rfc8414_url.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
+    match fetch_metadata(provider, &rfc8414_url, deadline).await {
+        // RFC 8414 §3
+        Err(DiscoveryError::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
+        result => result,
+    }
 }
 
 async fn fetch_metadata(
     provider: &ProviderClient,
     url: &url::Url,
     deadline: Instant,
-) -> Result<Discovery, PreparationReason> {
+) -> Result<Discovery, DiscoveryError> {
     let bytes = provider
-        .get_document(url, Document::Discovery, Some(deadline))
+        .get_document(url, Document::Discovery, deadline)
         .await
-        .map_err(PreparationReason::Fetch)?;
+        .map_err(DiscoveryError::Fetch)?;
     serde_json::from_slice::<JsonObject<Discovery>>(&bytes)
         .map(|JsonObject(discovery)| discovery)
-        .map_err(|_| PreparationReason::Parse)
+        .map_err(|_| DiscoveryError::Parse)
 }
 
 #[derive(Deserialize)]
@@ -212,20 +219,25 @@ mod tests {
 
     #[test]
     fn preparation_errors_are_closed_and_an_issuer_mismatch_names_both_issuers() {
-        use crate::{IssuerUrl, PreparationError, PreparationPhase, PreparationReason};
+        use crate::{DiscoveryError, IssuerUrl, JwksError, PreparationError, PreparationPhase};
         assert_eq!(
-            PreparationError::new(
-                PreparationPhase::Jwks,
-                PreparationReason::Fetch(crate::ProviderFailure::Status(503))
-            )
-            .to_string(),
+            PreparationError::Jwks(JwksError::Fetch(crate::ProviderFailure::Status(503)))
+                .to_string(),
             "authentication preparation failed during Jwks: Fetch(Status(503))"
         );
         let configured = IssuerUrl::parse("https://issuer.example").unwrap();
-        let error =
-            PreparationError::issuer_mismatch(&configured, "https://issuer.example/".to_owned());
+        let error = PreparationError::Discovery(DiscoveryError::issuer_mismatch(
+            &configured,
+            "https://issuer.example/".to_owned(),
+        ));
         assert_eq!(error.phase(), PreparationPhase::Discovery);
-        assert_eq!(error.reason(), PreparationReason::IssuerMismatch);
+        assert_eq!(
+            error,
+            PreparationError::Discovery(DiscoveryError::IssuerMismatch {
+                configured: "https://issuer.example".to_owned(),
+                discovered: "https://issuer.example/".to_owned(),
+            })
+        );
         assert_eq!(
             error.to_string(),
             "authentication preparation failed during Discovery: IssuerMismatch \
@@ -237,7 +249,11 @@ mod tests {
             format!("https://issuer.example/{}", "a".repeat(256)),
             "not an issuer\nprivate".to_owned(),
         ] {
-            let rendered = PreparationError::issuer_mismatch(&configured, discovered).to_string();
+            let rendered = PreparationError::Discovery(DiscoveryError::issuer_mismatch(
+                &configured,
+                discovered,
+            ))
+            .to_string();
             assert!(rendered.contains("<issuer value omitted>"), "{rendered}");
             assert!(!rendered.contains("private") && !rendered.contains("aaaa"));
         }
@@ -320,37 +336,83 @@ mod tests {
         (address, root, requests)
     }
 
+    #[test]
+    fn jwt_options_validate_audiences_algorithms_and_max_age_at_construction() {
+        let issuer = crate::IssuerUrl::parse("https://issuer.example").unwrap();
+        let valid_age = shared_rules::oidc_jwt::MIN_JWKS_MAX_AGE;
+        assert!(
+            super::JwtOptions::try_new(
+                issuer.clone(),
+                vec!["api".to_owned()],
+                TokenProfile::ResourceServer,
+                &[JwtAlgorithm::Rs256],
+                None,
+                valid_age,
+            )
+            .is_ok()
+        );
+        for (audiences, algorithms, max_age) in [
+            (Vec::new(), [JwtAlgorithm::Rs256].as_slice(), valid_age),
+            (
+                vec![" \t".to_owned()],
+                [JwtAlgorithm::Rs256].as_slice(),
+                valid_age,
+            ),
+            (vec!["api".to_owned()], [].as_slice(), valid_age),
+            (
+                vec!["api".to_owned()],
+                [JwtAlgorithm::Rs256].as_slice(),
+                valid_age.saturating_sub(Duration::from_secs(1)),
+            ),
+        ] {
+            assert_eq!(
+                super::JwtOptions::try_new(
+                    issuer.clone(),
+                    audiences,
+                    TokenProfile::ResourceServer,
+                    algorithms,
+                    None,
+                    max_age,
+                ),
+                Err(crate::OptionsError)
+            );
+        }
+    }
+
     async fn prepare(
         address: std::net::SocketAddr,
         root: &[u8],
         jwks_uri: Option<&str>,
-    ) -> Result<(crate::Verifier, super::RefreshTask), crate::PreparationError> {
+    ) -> Result<(crate::Verifier, super::RefreshDriver), crate::PreparationError> {
         let startup_deadline = tokio::time::Instant::now() + super::STARTUP_BUDGET;
         let origin = format!("https://{FIXTURE_HOST}:{}", address.port());
-        let options = super::JwtOptions {
-            issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
-            audiences: vec!["api".to_owned()],
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
-            jwks_max_age: Duration::from_hours(1),
-            jwks_uri: jwks_uri
-                .map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
-        };
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let provider =
-            crate::provider::new_fixture_client(FIXTURE_HOST, address, root, cancel.clone())
-                .unwrap();
-        super::prepare_with_provider(options, provider, cancel, startup_deadline).await
+        let options = super::JwtOptions::try_new(
+            crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
+            vec!["api".to_owned()],
+            TokenProfile::ResourceServer,
+            &[JwtAlgorithm::Rs256, JwtAlgorithm::Es256],
+            jwks_uri.map(|path| crate::EndpointUrl::parse(&format!("{origin}{path}")).unwrap()),
+            Duration::from_hours(1),
+        )
+        .unwrap();
+        let provider = crate::provider::new_fixture_client(
+            FIXTURE_HOST,
+            address,
+            root,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        super::prepare_with_provider(options, provider, startup_deadline).await
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_expired_startup_budget_takes_precedence_over_a_stage_failure() {
-        use crate::{PreparationError, PreparationPhase, PreparationReason};
+        use crate::{JwksError, PreparationError, PreparationPhase};
         use tokio::time::{Instant, advance};
 
         let deadline = Instant::now() + Duration::from_secs(6);
         let stage = PreparationPhase::Jwks;
-        let parse_failure = PreparationError::new(stage, PreparationReason::Parse);
+        let parse_failure = PreparationError::Jwks(JwksError::Parse);
         let complete = |result| super::enforce_startup_deadline(deadline, stage, result);
         assert_eq!(
             complete(Err(parse_failure.clone())),
@@ -358,7 +420,7 @@ mod tests {
         );
 
         advance(Duration::from_secs(6)).await;
-        let timeout = PreparationError::new(stage, PreparationReason::Timeout);
+        let timeout = PreparationError::Timeout(stage);
         assert_eq!(complete(Err(parse_failure)), Err(timeout.clone()));
         assert_eq!(complete(Ok(())), Err(timeout));
     }
@@ -404,26 +466,26 @@ mod tests {
 
     #[tokio::test]
     async fn a_provider_without_metadata_fails_preparation_with_its_status() {
-        use crate::{PreparationPhase, PreparationReason, ProviderFailure};
+        use crate::{DiscoveryError, PreparationError, PreparationPhase, ProviderFailure};
         let (address, root, requested) = metadata_server(Vec::new()).await;
         let error = prepare(address, &root, None).await.err().unwrap();
         assert_eq!(error.phase(), PreparationPhase::Discovery);
         assert_eq!(
-            error.reason(),
-            PreparationReason::Fetch(ProviderFailure::Status(404))
+            error,
+            PreparationError::Discovery(DiscoveryError::Fetch(ProviderFailure::Status(404)))
         );
         assert_eq!(requested.borrow().len(), 2);
     }
 
     #[tokio::test]
     async fn an_explicitly_empty_jwks_cannot_start_a_verifier() {
-        use crate::{PreparationPhase, PreparationReason};
+        use crate::{JwksError, PreparationError, PreparationPhase};
 
         let (address, root, _) =
             metadata_server(vec![("/keys", StatusCode::OK, r#"{"keys":[]}"#.to_owned())]).await;
         let error = prepare(address, &root, Some("/keys")).await.err().unwrap();
         assert_eq!(error.phase(), PreparationPhase::Jwks);
-        assert_eq!(error.reason(), PreparationReason::NoUsableKeys);
+        assert_eq!(error, PreparationError::Jwks(JwksError::NoUsableKeys));
     }
 
     #[tokio::test]
@@ -455,7 +517,8 @@ mod tests {
             ("/untrusted", StatusCode::OK, document(&old)),
         ])
         .await;
-        let (verifier, mut worker) = prepare(address, &root, None).await.unwrap();
+        let (verifier, driver) = prepare(address, &root, None).await.unwrap();
+        let mut worker = Box::pin(driver.run(std::future::pending()));
         let signed = |key| {
             let mut header = Header::new(ES256);
             header.kid = Some("key".to_owned());
@@ -547,8 +610,8 @@ mod tests {
                 .collect(),
             )
             .await;
-            let (verifier, worker) = prepare(address, &root, Some("/keys")).await.unwrap();
-            let worker = tokio::spawn(worker);
+            let (verifier, driver) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let worker = tokio::spawn(driver.run(std::future::pending()));
             let authorization = |signer: &EncodingKey, kid: &str, subject: &str| {
                 let mut header = Header::new(Algorithm::ES256);
                 header.kid = Some(kid.to_owned());
@@ -621,11 +684,15 @@ mod tests {
         let authorization = format!("Bearer {jwt}");
         let token = crate::parse_bearer([authorization.as_bytes()]).unwrap();
         for abort_started_worker in [false, true] {
-            let (verifier, mut worker) = prepare(address, &root, Some("/keys")).await.unwrap();
+            let (verifier, driver) = prepare(address, &root, Some("/keys")).await.unwrap();
             tokio::time::pause();
-            if abort_started_worker {
+            let running = if abort_started_worker {
+                let mut worker = Box::pin(driver.run(std::future::pending()));
                 assert!(futures_util::poll!(worker.as_mut()).is_pending());
-            }
+                Ok(worker)
+            } else {
+                Err(driver)
+            };
             tokio::time::advance(Duration::from_secs(31)).await;
             let (waiting, registered) = tokio::sync::oneshot::channel();
             let waiter = tokio::spawn({
@@ -640,12 +707,13 @@ mod tests {
                 }
             });
             registered.await.unwrap();
-            if abort_started_worker {
-                let task = tokio::spawn(worker);
-                task.abort();
-                assert!(task.await.unwrap_err().is_cancelled());
-            } else {
-                drop(worker);
+            match running {
+                Ok(worker) => {
+                    let task = tokio::spawn(worker);
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                }
+                Err(driver) => drop(driver),
             }
             let result = tokio::time::timeout(Duration::from_millis(1), waiter)
                 .await
@@ -662,22 +730,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_oidc_location_keeps_its_error_when_rfc8414_is_absent() {
-        use crate::{PreparationPhase, PreparationReason, ProviderFailure};
+        use crate::{DiscoveryError, PreparationError, PreparationPhase, ProviderFailure};
         for ((status, body), fallback, expected) in [
             (
                 (StatusCode::SERVICE_UNAVAILABLE, ""),
                 StatusCode::NOT_FOUND,
-                PreparationReason::Fetch(ProviderFailure::Status(503)),
+                DiscoveryError::Fetch(ProviderFailure::Status(503)),
             ),
             (
                 (StatusCode::SERVICE_UNAVAILABLE, ""),
                 StatusCode::GONE,
-                PreparationReason::Fetch(ProviderFailure::Status(503)),
+                DiscoveryError::Fetch(ProviderFailure::Status(503)),
             ),
             (
                 (StatusCode::OK, "{}"),
                 StatusCode::NOT_FOUND,
-                PreparationReason::Parse,
+                DiscoveryError::Parse,
             ),
         ] {
             let (address, root, requested) = metadata_server(vec![
@@ -695,7 +763,7 @@ mod tests {
             .await;
             let error = prepare(address, &root, None).await.err().unwrap();
             assert_eq!(error.phase(), PreparationPhase::Discovery);
-            assert_eq!(error.reason(), expected);
+            assert_eq!(error, PreparationError::Discovery(expected));
             assert_eq!(
                 *requested.borrow(),
                 [
@@ -758,20 +826,31 @@ mod tests {
                 "operation=jwks,outcome=success",
             ]
         );
-        let spans = diagnostics.take_spans();
-        let server = format!("server.address=\"{FIXTURE_HOST}\";server.port={port};");
-        let client = format!(
-            "span=authn_provider;otel.name=\"GET\";otel.kind=\"client\";http.request.method=\"GET\";{server}"
-        );
+        let spans: Vec<_> = diagnostics
+            .take_captured_spans()
+            .into_iter()
+            .map(|span| (span.name, span.fields))
+            .collect();
+        let base = |operation: &str, status: &str| {
+            observe_test_support::FieldMap::from([
+                ("otel.name", "\"GET\"".to_owned()),
+                ("otel.kind", "\"client\"".to_owned()),
+                ("http.request.method", "\"GET\"".to_owned()),
+                ("server.address", format!("\"{FIXTURE_HOST}\"")),
+                ("server.port", port.to_string()),
+                ("authn.operation", format!("\"{operation}\"")),
+                ("http.response.status_code", status.to_owned()),
+            ])
+        };
+        let mut not_found = base("discovery", "404");
+        not_found.insert("error.type", "\"provider_status_4xx\"".to_owned());
+        not_found.insert("otel.status_code", "\"ERROR\"".to_owned());
         assert_eq!(
             spans,
             [
-                format!(
-                    "{client}authn.operation=\"discovery\";http.response.status_code=404;\
-                     error.type=\"provider_status_4xx\";otel.status_code=\"ERROR\";"
-                ),
-                format!("{client}authn.operation=\"discovery\";http.response.status_code=200;"),
-                format!("{client}authn.operation=\"jwks\";http.response.status_code=200;"),
+                ("authn_provider", not_found),
+                ("authn_provider", base("discovery", "200")),
+                ("authn_provider", base("jwks", "200")),
             ]
         );
     }
@@ -802,29 +881,30 @@ mod tests {
                     .unwrap();
                     let url = format!("https://{FIXTURE_HOST}:{}/keys", address.port());
                     let url = url::Url::parse(&url).unwrap();
-                    let mut pending = Box::pin(provider.get_document(&url, Document::Jwks, None));
+                    let mut pending = Box::pin(provider.get_document(
+                        &url,
+                        Document::Jwks,
+                        tokio::time::Instant::now() + Duration::from_secs(60),
+                    ));
                     assert!(futures_util::poll!(pending.as_mut()).is_pending());
                     drop(pending);
 
                     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
                     assert_eq!(
-                        provider
-                            .get_document(&url, Document::Jwks, Some(deadline))
-                            .await,
+                        provider.get_document(&url, Document::Jwks, deadline).await,
                         Err(ProviderFailure::Timeout)
                     );
                 });
             });
         });
         let samples = diagnostics.take_histograms();
-        let spans = diagnostics.take_spans();
+        let spans = diagnostics.take_captured_spans();
         assert_eq!(samples.len(), 2);
         assert_eq!(spans.len(), 2);
         for (index, outcome) in ["cancelled", "provider_timeout"].into_iter().enumerate() {
             assert!(labeled(&samples[index], &[("outcome", outcome)]));
-            assert!(spans[index].ends_with(&format!(
-                "error.type=\"{outcome}\";otel.status_code=\"ERROR\";"
-            )));
+            assert_eq!(spans[index].unquoted("error.type"), Some(outcome));
+            assert_eq!(spans[index].unquoted("otel.status_code"), Some("ERROR"));
         }
     }
 }

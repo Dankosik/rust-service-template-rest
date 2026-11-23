@@ -7,7 +7,7 @@ use http_body_util::Collected;
 use infra_idempotency_store::RequestFingerprint;
 use serde::de::DeserializeOwned;
 
-use super::identity::request_fingerprint;
+use super::identity::{request_fingerprint, sensitive_fingerprint_headers};
 use crate::Problem;
 use crate::extract::{Path, decode_json, decode_query, require_json_content_type};
 
@@ -28,10 +28,6 @@ impl CommandInput {
         if let Some(original) = parts.extensions.remove::<OriginalUri>() {
             parts.uri = original.0;
         }
-        parts.headers = select_sensitive_headers(
-            &parts.headers,
-            std::iter::once(&CONTENT_TYPE).chain(fingerprint_headers),
-        );
         let trailers = collected.trailers().map_or_else(HeaderMap::new, |fields| {
             let mut trailers = fields.clone();
             for value in trailers.values_mut() {
@@ -39,13 +35,17 @@ impl CommandInput {
             }
             trailers
         });
-        let input = Self {
-            parts,
-            body: collected.to_bytes(),
-            trailers,
-        };
-        let fingerprint = request_fingerprint(&input, fingerprint_headers);
-        (input, fingerprint)
+        let body = collected.to_bytes();
+        let fingerprint = request_fingerprint(&parts, fingerprint_headers, &body, &trailers);
+        parts.headers = sensitive_fingerprint_headers(&parts.headers, fingerprint_headers);
+        (
+            Self {
+                parts,
+                body,
+                trailers,
+            },
+            fingerprint,
+        )
     }
 
     #[must_use]
@@ -78,41 +78,20 @@ impl CommandInput {
         &self.trailers
     }
 
-    pub async fn path<T: DeserializeOwned + Send>(&mut self) -> Result<T, Box<Problem>> {
+    pub async fn path<T: DeserializeOwned + Send>(&mut self) -> Result<T, Problem> {
         Path::from_request_parts(&mut self.parts, &())
             .await
             .map(|Path(value)| value)
-            .map_err(Box::new)
     }
 
-    #[allow(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "query decoding starts when callers poll the returned future"
-    )]
-    pub async fn query<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
-        decode_query(self.raw_query().unwrap_or_default()).map_err(Box::new)
+    pub fn query<T: DeserializeOwned>(&self) -> Result<T, Problem> {
+        decode_query(self.raw_query().unwrap_or_default())
     }
 
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T, Box<Problem>> {
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T, Problem> {
         require_json_content_type(self.parts.headers.get(CONTENT_TYPE))?;
         decode_json(&self.body)
     }
-}
-
-fn select_sensitive_headers<'a>(
-    source: &HeaderMap,
-    names: impl IntoIterator<Item = &'a HeaderName>,
-) -> HeaderMap {
-    let mut selected = HeaderMap::new();
-    for name in names {
-        for value in source.get_all(name) {
-            let mut value = value.clone();
-            value.set_sensitive(true);
-            selected.append(name.clone(), value);
-        }
-    }
-    selected
 }
 
 #[cfg(test)]
@@ -152,7 +131,7 @@ mod tests {
             assert_eq!(input.method(), Method::POST);
             assert_eq!(input.raw_path(), "/accounts/a%20b/widgets/12");
             assert_eq!(input.raw_query(), Some("mode=full"));
-            assert_eq!(input.query::<Options>().await.unwrap().mode, "full");
+            assert_eq!(input.query::<Options>().unwrap().mode, "full");
             assert_eq!(
                 input.path::<(String, u32)>().await.unwrap(),
                 ("a b".to_owned(), 12)

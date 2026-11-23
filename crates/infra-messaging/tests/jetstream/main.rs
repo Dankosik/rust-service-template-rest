@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use health::Probe as _;
 use infra_messaging::{
     ConsumerError, ConsumerOptions, Credentials, HandlerError, Messaging, MessagingOptions,
-    PublishError, Registry, Route,
+    PublishError, Registry, Route, TransportSecurity,
 };
 use operation_context::{Deadline, OperationContext};
 use tokio::sync::{Notify, oneshot};
@@ -167,14 +167,14 @@ impl Fixture {
             .expect("fixture route is valid");
         if matches!(topology, Topology::WithDurable) {
             let mut handled = registry.clone();
-            handled.register(&route, |_, _| async { Ok(()) }).unwrap();
+            handled.register(&route, accept).unwrap();
             created
                 .create_consumer(consumer::pull::Config {
                     name: Some(durable.clone()),
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
                     metadata: handled.durable_metadata(&dlq_stream, &dlq_subject),
-                    ack_wait: Duration::from_secs(46),
+                    ack_wait: infra_messaging::DURABLE_ACK_WAIT,
                     max_deliver: -1,
                     max_ack_pending: 1,
                     ..Default::default()
@@ -233,6 +233,10 @@ fn context(deadline: Instant, cancel: &CancellationToken) -> OperationContext {
     OperationContext::new(Some(Deadline::at(deadline)), cancel.clone())
 }
 
+fn accept<T>(_: Event<T>, _: OperationContext) -> std::future::Ready<Result<(), HandlerError>> {
+    std::future::ready(Ok(()))
+}
+
 fn event(id: &str) -> Event<ExampleEvent> {
     event_with_value(id, "payload")
 }
@@ -267,8 +271,7 @@ fn options_with_servers(
         servers,
         credentials: None,
         root_ca_path: None,
-        allow_plaintext: true,
-        tls_first: false,
+        security: TransportSecurity::AllowPlaintext,
         source_stream: fixture.stream.clone(),
         max_payload_bytes,
         consumer,
@@ -286,8 +289,9 @@ fn consumer_options(fixture: &Fixture) -> ConsumerOptions {
 }
 
 async fn close(messaging: Messaging) {
-    let cancel = CancellationToken::new();
-    let outcome = messaging.close(deadline(), &cancel).await;
+    let outcome = messaging
+        .close(&OperationContext::with_timeout(Duration::from_secs(5)))
+        .await;
     assert_eq!(outcome, infra_messaging::CloseOutcome::Complete);
 }
 
@@ -458,34 +462,10 @@ fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
     span.context().span().span_context().trace_id()
 }
 
-type Logged = Arc<Mutex<Vec<Vec<(&'static str, String)>>>>;
+type Logged = observe_test_support::EventCapture;
 
-struct LoggedFields(Vec<(&'static str, String)>);
-
-impl tracing::field::Visit for LoggedFields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.push((field.name(), format!("{value:?}")));
-    }
-
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.0.push((field.name(), value.to_owned()));
-    }
-}
-
-struct LogCapture(Logged);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let mut fields = LoggedFields(Vec::new());
-        event.record(&mut fields);
-        self.0.lock().expect("log lock").push(fields.0);
-    }
-}
-
-fn capture_logs() -> (tracing::subscriber::DefaultGuard, Logged) {
-    use tracing_subscriber::layer::SubscriberExt as _;
-
-    let logged = Logged::default();
-    let subscriber = tracing_subscriber::registry().with(LogCapture(Arc::clone(&logged)));
-    (tracing::subscriber::set_default(subscriber), logged)
+fn capture_logs() -> (observe_test_support::ScopedDispatch, Logged) {
+    let logged = observe_test_support::EventCapture::new();
+    let guard = logged.install_default();
+    (guard, logged)
 }

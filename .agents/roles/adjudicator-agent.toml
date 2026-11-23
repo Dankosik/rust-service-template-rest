@@ -7,7 +7,7 @@ qwen_model = "inherit"
 cursor_model = "grok-4.6[effort=xhigh]"
 grok_model = "grok-4.6"
 grok_effort = "xhigh"
-output_schema = "lane-result-v1"
+output_schema = "lane-result"
 
 instructions = """
 Use only for one surviving evidence-backed reviewer conflict. Compare the

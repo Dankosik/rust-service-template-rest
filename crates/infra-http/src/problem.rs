@@ -1,15 +1,19 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{Extensions, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::{BufMut as _, BytesMut};
 use compact_str::CompactString;
+use http_body::Body as _;
 use serde::Serialize;
 pub use service_failure::Code;
 pub use service_failure::SANITIZED_DETAIL;
-use utoipa::ToSchema;
+use tower_http::request_id::RequestId;
+use utoipa::openapi::{RefOr, Schema};
+use utoipa::{PartialSchema, ToSchema};
 
 #[allow(
     clippy::match_same_arms,
@@ -75,49 +79,106 @@ pub struct InvalidParam {
     pub reason: CompactString,
 }
 
-/// RFC 9457 problem details with a stable `code` from the closed failure catalog.
-#[serde_with::skip_serializing_none]
-#[derive(Clone, Debug, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Problem {
-    /// Stable machine-readable error code.
-    #[schema(value_type = String, example = json!(Code::BadRequest.as_str()))]
     code: Code,
-    /// Always `about:blank`: the problem has no semantics beyond its HTTP
-    /// status, and `code` names the specific failure.
-    #[serde(rename = "type")]
-    #[schema(format = "uri-reference", example = json!(ABOUT_BLANK))]
-    type_uri: &'static str,
-    /// The HTTP status phrase.
-    #[schema(example = json!(http_title(Code::BadRequest)))]
-    title: &'static str,
-    #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
-    status: u16,
-    #[schema(value_type = Option<String>, nullable = false, example = "invalid request framing")]
     detail: Option<CompactString>,
-    /// URI reference identifying this occurrence when the service exposes
-    /// one.
-    #[schema(value_type = Option<String>, nullable = false, format = "uri-reference")]
     instance: Option<CompactString>,
-    #[schema(value_type = Option<String>, nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
     request_id: Option<CompactString>,
-    /// Which parts of the request failed validation, following the RFC 9457
-    /// extension-member example. Present only on a validation rejection,
-    /// and never carrying the submitted value.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     invalid_params: Vec<InvalidParam>,
-    #[serde(skip)]
     retry_after: Option<Duration>,
+}
+
+const _: () = assert!(std::mem::size_of::<Problem>() <= 128);
+
+#[allow(
+    single_use_lifetimes,
+    reason = "utoipa::ToSchema derive emits impl<'a> without #[automatically_derived]"
+)]
+mod wire {
+    use serde::Serialize;
+    use utoipa::ToSchema;
+
+    use super::{ABOUT_BLANK, Code, InvalidParam, http_status, http_title};
+
+    /// RFC 9457 problem details with a stable `code` from the closed failure catalog.
+    #[serde_with::skip_serializing_none]
+    #[derive(Serialize, ToSchema)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct ProblemWire<'a> {
+        /// Stable machine-readable error code.
+        #[schema(value_type = String, example = json!(Code::BadRequest.as_str()))]
+        pub(super) code: Code,
+        /// Always `about:blank`: the problem has no semantics beyond its HTTP
+        /// status, and `code` names the specific failure.
+        #[serde(rename = "type")]
+        #[schema(format = "uri-reference", example = json!(ABOUT_BLANK))]
+        pub(super) type_uri: &'static str,
+        /// The HTTP status phrase.
+        #[schema(example = json!(http_title(Code::BadRequest)))]
+        pub(super) title: &'static str,
+        #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
+        pub(super) status: u16,
+        #[schema(value_type = Option<String>, nullable = false, example = "invalid request framing")]
+        pub(super) detail: Option<&'a str>,
+        /// URI reference identifying this occurrence when the service exposes
+        /// one.
+        #[schema(value_type = Option<String>, nullable = false, format = "uri-reference")]
+        pub(super) instance: Option<&'a str>,
+        #[schema(value_type = Option<String>, nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
+        pub(super) request_id: Option<&'a str>,
+        /// Which parts of the request failed validation, following the RFC 9457
+        /// extension-member example. Present only on a validation rejection,
+        /// and never carrying the submitted value.
+        #[serde(skip_serializing_if = "is_empty_params")]
+        pub(super) invalid_params: &'a [InvalidParam],
+    }
+
+    const fn is_empty_params(params: &[InvalidParam]) -> bool {
+        params.is_empty()
+    }
+}
+
+impl Serialize for Problem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        wire::ProblemWire {
+            code: self.code,
+            type_uri: ABOUT_BLANK,
+            title: http_title(self.code),
+            status: http_status(self.code).as_u16(),
+            detail: self.detail.as_deref(),
+            instance: self.instance.as_deref(),
+            request_id: self.request_id.as_deref(),
+            invalid_params: &self.invalid_params,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl PartialSchema for Problem {
+    fn schema() -> RefOr<Schema> {
+        <wire::ProblemWire<'static> as PartialSchema>::schema()
+    }
+}
+
+impl ToSchema for Problem {
+    fn name() -> Cow<'static, str> {
+        Cow::Borrowed("Problem")
+    }
+
+    fn schemas(schemas: &mut Vec<(String, RefOr<Schema>)>) {
+        <wire::ProblemWire<'static> as ToSchema>::schemas(schemas);
+    }
 }
 
 impl Problem {
     #[must_use]
-    pub fn new(code: Code) -> Self {
+    pub const fn new(code: Code) -> Self {
         Self {
             code,
-            type_uri: ABOUT_BLANK,
-            title: http_title(code),
-            status: http_status(code).as_u16(),
             detail: None,
             instance: None,
             request_id: None,
@@ -127,7 +188,7 @@ impl Problem {
     }
 
     #[must_use]
-    pub fn code(&self) -> Code {
+    pub const fn code(&self) -> Code {
         self.code
     }
 
@@ -149,11 +210,17 @@ impl Problem {
         self
     }
 
-    #[cfg(test)]
     #[must_use]
-    fn with_request_id(mut self, id: &str) -> Self {
-        self.request_id = Some(CompactString::from(id));
+    pub(crate) fn with_request_id(mut self, request_id: Option<&RequestId>) -> Self {
+        if let Some(id) = request_id.and_then(|value| value.header_value().to_str().ok()) {
+            self.request_id = Some(CompactString::from(id));
+        }
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_request_id_from(self, extensions: &Extensions) -> Self {
+        self.with_request_id(extensions.get::<RequestId>())
     }
 
     #[must_use]
@@ -178,12 +245,24 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let response = axum::Json(&self).into_response();
-        self.attach_to(response)
+        let body = self.encode_body().unwrap_or_else(Body::empty);
+        self.attach_to(Response::new(body))
     }
 }
 
 impl Problem {
+    fn encode_body(&self) -> Option<Body> {
+        let mut writer = BytesMut::with_capacity(256).writer();
+        if serde_json::to_writer(&mut writer, self).is_err() {
+            tracing::error!(
+                code = self.code.as_str(),
+                "http_problem_serialization_failed"
+            );
+            return None;
+        }
+        Some(Body::from(writer.into_inner().freeze()))
+    }
+
     fn attach_to(self, mut response: Response) -> Response {
         *response.status_mut() = http_status(self.code);
         response
@@ -203,24 +282,28 @@ pub(crate) fn pending_problem(problem: Problem) -> Response {
     problem.attach_to(Response::new(Body::empty()))
 }
 
-pub(crate) fn complete_problem(response: &mut Response, request_id: &HeaderValue) {
-    let Some(problem) = response.extensions_mut().get_mut::<Problem>() else {
-        return;
-    };
-    let Ok(id) = request_id.to_str() else {
-        return;
-    };
-    problem.request_id = Some(CompactString::from(id));
-    let mut writer = BytesMut::with_capacity(128).writer();
-    let Ok(()) = serde_json::to_writer(&mut writer, &*problem) else {
-        tracing::error!(
-            code = problem.code.as_str(),
-            "http_problem_serialization_failed"
-        );
-        return;
-    };
-    *response.body_mut() = Body::from(writer.into_inner().freeze());
-    response.headers_mut().remove(CONTENT_LENGTH);
+pub(crate) fn complete_problem(
+    response: &mut Response,
+    request_id: Option<&HeaderValue>,
+) -> Option<Code> {
+    if response.extensions().is_empty() {
+        return None;
+    }
+    let body_empty = response.body().is_end_stream();
+    let problem = response.extensions_mut().get_mut::<Problem>()?;
+    let code = problem.code;
+    let id = request_id.and_then(|value| value.to_str().ok());
+    if !body_empty && (id.is_none() || problem.request_id.as_deref() == id) {
+        return Some(code);
+    }
+    if let Some(id) = id {
+        problem.request_id = Some(CompactString::from(id));
+    }
+    if let Some(body) = problem.encode_body() {
+        *response.body_mut() = body;
+        response.headers_mut().remove(CONTENT_LENGTH);
+    }
+    Some(code)
 }
 
 const U64_MAX_PLUS_ONE_SECS: &str = "18446744073709551616";
@@ -249,6 +332,14 @@ pub fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool
 
 pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail_static("request body could not be read")
+}
+
+pub(crate) fn body_read_problem(error: &axum::Error) -> Problem {
+    if caused_by_length_limit(error) {
+        body_too_large()
+    } else {
+        body_unreadable()
+    }
 }
 
 #[must_use]
@@ -344,9 +435,10 @@ mod tests {
 
     #[tokio::test]
     async fn renders_problem_json_with_optional_members() {
+        let request_id = RequestId::new(HeaderValue::from_static("req-1"));
         let problem = Problem::new(Code::ServiceUnavailable)
             .detail(service_failure::AT_CAPACITY_DETAIL)
-            .with_request_id("req-1")
+            .with_request_id(Some(&request_id))
             .retry_after(Duration::from_millis(200));
         let response = problem.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -368,6 +460,59 @@ mod tests {
         assert_eq!(json["type"], "about:blank");
         assert!(json.get("invalid_params").is_none());
         assert!(json.get("instance").is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_problem_reuses_encoded_body_when_request_id_matches_and_rewrites_otherwise() {
+        use http_body_util::BodyExt as _;
+
+        let req_1 = HeaderValue::from_static("req-1");
+        let req_2 = HeaderValue::from_static("req-2");
+        let request_id = RequestId::new(req_1.clone());
+
+        let mut plain = Response::new(Body::from("ok"));
+        assert_eq!(complete_problem(&mut plain, Some(&req_1)), None);
+
+        let mut already_encoded = Problem::new(Code::BadRequest)
+            .with_request_id(Some(&request_id))
+            .attach_to(Response::new(Body::from("pre-encoded")));
+        assert_eq!(
+            complete_problem(&mut already_encoded, Some(&req_1)),
+            Some(Code::BadRequest)
+        );
+        let bytes = already_encoded
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"pre-encoded");
+
+        let mut stale_id = Problem::new(Code::BadRequest)
+            .with_request_id(Some(&request_id))
+            .attach_to(Response::new(Body::from("pre-encoded")));
+        assert_eq!(
+            complete_problem(&mut stale_id, Some(&req_2)),
+            Some(Code::BadRequest)
+        );
+        assert_eq!(body_json(stale_id).await["request_id"], "req-2");
+
+        let mut pending =
+            pending_problem(Problem::new(Code::BadRequest).with_request_id(Some(&request_id)));
+        assert_eq!(
+            complete_problem(&mut pending, Some(&req_1)),
+            Some(Code::BadRequest)
+        );
+        assert_eq!(body_json(pending).await["request_id"], "req-1");
+
+        let mut pending_without_id = pending_problem(Problem::new(Code::BadRequest));
+        assert_eq!(
+            complete_problem(&mut pending_without_id, None),
+            Some(Code::BadRequest)
+        );
+        let body = body_json(pending_without_id).await;
+        assert_eq!(body["code"], "bad_request");
+        assert!(body.get("request_id").is_none());
     }
 
     #[test]

@@ -1,19 +1,25 @@
 use std::{
+    borrow::Borrow,
+    hash::{Hash, Hasher},
+    str::FromStr,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
 use enum_map::EnumMap;
-use operation_context::Stopped;
+// template:begin oidc-introspection:authn-provider-operation-context-import
+use operation_context::{OperationContext, Stopped};
+// template:end oidc-introspection:authn-provider-operation-context-import
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
 use tracing::Instrument as _;
 use url::Url;
 
-use crate::{PreparationError, PreparationPhase, PreparationReason};
+use crate::{ClientBuildError, InvalidUrl};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
+const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(
@@ -114,7 +120,9 @@ impl Operation {
 enum Outcome {
     Success,
     Failure(ProviderReason),
+    // template:begin oidc-introspection:authn-provider-caller-deadline-outcome
     CallerDeadline,
+    // template:end oidc-introspection:authn-provider-caller-deadline-outcome
     Cancelled,
 }
 
@@ -123,7 +131,9 @@ impl Outcome {
         match self {
             Self::Success => "success",
             Self::Failure(reason) => reason.label(),
+            // template:begin oidc-introspection:authn-provider-caller-deadline-label
             Self::CallerDeadline => "caller_deadline",
+            // template:end oidc-introspection:authn-provider-caller-deadline-label
             Self::Cancelled => "cancelled",
         }
     }
@@ -131,22 +141,22 @@ impl Outcome {
     const fn error_label(self) -> Option<&'static str> {
         match self {
             Self::Success => None,
-            Self::Failure(_) | Self::CallerDeadline | Self::Cancelled => Some(self.label()),
+            _ => Some(self.label()),
         }
     }
 }
 
 type OperationHistograms = EnumMap<Operation, EnumMap<Outcome, OnceLock<metrics::Histogram>>>;
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[derive(Clone, Eq, Hash, PartialEq, derive_more::Debug)]
 #[debug("IssuerUrl([REDACTED])")]
 pub struct IssuerUrl(EndpointUrl);
 
 impl IssuerUrl {
-    pub fn parse(raw: &str) -> Result<Self, PreparationError> {
+    pub fn parse(raw: &str) -> Result<Self, InvalidUrl> {
         let endpoint = parse_endpoint_url(raw)?;
         if endpoint.url().query().is_some() {
-            return Err(invalid_url());
+            return Err(InvalidUrl);
         }
         Ok(Self(endpoint))
     }
@@ -163,15 +173,55 @@ impl IssuerUrl {
     // template:end oidc-jwt:authn-provider-issuer-url
 }
 
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+impl Borrow<str> for IssuerUrl {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for IssuerUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for IssuerUrl {
+    type Err = InvalidUrl;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl TryFrom<&str> for IssuerUrl {
+    type Error = InvalidUrl;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
+#[derive(Clone, Eq, derive_more::Debug)]
 #[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
     exact: String,
     url: Url,
 }
 
+impl PartialEq for EndpointUrl {
+    fn eq(&self, other: &Self) -> bool {
+        self.exact == other.exact
+    }
+}
+
+impl Hash for EndpointUrl {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.exact.hash(state);
+    }
+}
+
 impl EndpointUrl {
-    pub fn parse(raw: &str) -> Result<Self, PreparationError> {
+    pub fn parse(raw: &str) -> Result<Self, InvalidUrl> {
         parse_endpoint_url(raw)
     }
 
@@ -185,11 +235,39 @@ impl EndpointUrl {
     }
 }
 
-fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, PreparationError> {
-    if uri::has_whitespace_or_control(raw) {
-        return Err(invalid_url());
+impl Borrow<str> for EndpointUrl {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
-    let url = Url::parse(raw).map_err(|_| invalid_url())?;
+}
+
+impl AsRef<str> for EndpointUrl {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for EndpointUrl {
+    type Err = InvalidUrl;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl TryFrom<&str> for EndpointUrl {
+    type Error = InvalidUrl;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        Self::parse(raw)
+    }
+}
+
+fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, InvalidUrl> {
+    if uri::has_whitespace_or_control(raw) {
+        return Err(InvalidUrl);
+    }
+    let url = Url::parse(raw).map_err(|_| InvalidUrl)?;
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()
@@ -197,16 +275,12 @@ fn parse_endpoint_url(raw: &str) -> Result<EndpointUrl, PreparationError> {
         || url.fragment().is_some()
         || uri::authority_has_userinfo(raw)
     {
-        return Err(invalid_url());
+        return Err(InvalidUrl);
     }
     Ok(EndpointUrl {
         exact: raw.to_owned(),
         url,
     })
-}
-
-const fn invalid_url() -> PreparationError {
-    PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl)
 }
 
 #[derive(Clone)]
@@ -216,10 +290,8 @@ pub(crate) struct ProviderClient {
 }
 
 impl ProviderClient {
-    pub(crate) fn try_new() -> Result<Self, PreparationError> {
-        Self::from_builder(client_builder()).map_err(|_| {
-            PreparationError::new(PreparationPhase::Client, PreparationReason::ClientBuild)
-        })
+    pub(crate) fn try_new() -> Result<Self, ClientBuildError> {
+        Self::from_builder(client_builder()).map_err(|_| ClientBuildError)
     }
 
     fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
@@ -243,12 +315,17 @@ impl ProviderClient {
         &self,
         url: &Url,
         document: Document,
-        deadline: Option<tokio::time::Instant>,
+        deadline: tokio::time::Instant,
     ) -> Result<Vec<u8>, ProviderFailure> {
+        let request = self.client.get(url.clone());
         self.exchange(document.operation(), "GET", url)
             .run(
-                self.client.get(url.clone()),
-                ExchangeMode::Document { deadline },
+                || Outcome::Cancelled,
+                async move |span| {
+                    tokio::time::timeout_at(deadline, receive(request, false, span))
+                        .await
+                        .unwrap_or(Err(ProviderFailure::Timeout))
+                },
             )
             .await
     }
@@ -261,18 +338,25 @@ impl ProviderClient {
         client_id: &str,
         client_secret: &str,
         form: &[(&str, &str)],
-        caller_stop: CallerStop<'_>,
+        caller_stop: StopProbe<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let request = {
-            let client_id = form_encode(client_id);
-            let client_secret = zeroize::Zeroizing::new(form_encode(client_secret));
+            let encoded_client_id = form_encode(client_id);
+            let encoded_client_secret = zeroize::Zeroizing::new(form_encode(client_secret));
             self.client
                 .post(url.clone())
-                .basic_auth(&client_id, Some(client_secret.as_str()))
+                .basic_auth(&encoded_client_id, Some(encoded_client_secret.as_str()))
                 .form(form)
         };
         self.exchange(Operation::Introspection, "POST", url)
-            .run(request, ExchangeMode::Introspection { caller_stop })
+            .run(
+                move || {
+                    caller_stop
+                        .stopped()
+                        .map_or(Outcome::Cancelled, stopped_outcome)
+                },
+                async move |span| receive(request, true, span).await,
+            )
             .await
     }
     // template:end oidc-introspection:authn-provider-post-form-json
@@ -303,22 +387,29 @@ impl Document {
 }
 // template:end oidc-jwt:authn-provider-document
 
-enum ExchangeMode<'a> {
-    #[allow(
-        dead_code,
-        reason = "the introspection-only profile removes document requests"
-    )]
-    Document {
-        deadline: Option<tokio::time::Instant>,
-    },
-    #[allow(
-        dead_code,
-        reason = "the JWT-only profile removes introspection requests"
-    )]
-    Introspection { caller_stop: CallerStop<'a> },
+// template:begin oidc-introspection:authn-provider-stop-probe
+#[derive(Clone, Copy)]
+pub(crate) enum StopProbe<'a> {
+    Context(&'a OperationContext),
+    Waiter(&'a OnceLock<Stopped>),
 }
 
-pub(crate) type CallerStop<'a> = &'a (dyn Fn() -> Option<Stopped> + Sync);
+impl StopProbe<'_> {
+    fn stopped(self) -> Option<Stopped> {
+        match self {
+            Self::Context(context) => context.stopped(),
+            Self::Waiter(stop) => stop.get().copied(),
+        }
+    }
+}
+
+const fn stopped_outcome(stopped: Stopped) -> Outcome {
+    match stopped {
+        Stopped::Deadline => Outcome::CallerDeadline,
+        Stopped::Cancelled => Outcome::Cancelled,
+    }
+}
+// template:end oidc-introspection:authn-provider-stop-probe
 
 struct Exchange<'a> {
     histograms: &'a OperationHistograms,
@@ -356,34 +447,15 @@ impl<'a> Exchange<'a> {
 
     async fn run(
         self,
-        request: reqwest::RequestBuilder,
-        mode: ExchangeMode<'_>,
+        on_abandon: impl FnOnce() -> Outcome,
+        work: impl AsyncFnOnce(&tracing::Span) -> Result<Vec<u8>, ProviderFailure>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let (caller_stop, require_json_content_type, deadline) = match mode {
-            ExchangeMode::Introspection { caller_stop } => (Some(caller_stop), true, None),
-            ExchangeMode::Document { deadline } => (None, false, deadline),
+        let guard = std::mem::DropGuard::new(self, |exchange| exchange.record(on_abandon()));
+        let result = work(&guard.span).await;
+        let outcome = match &result {
+            Ok(_) => Outcome::Success,
+            Err(failure) => Outcome::Failure(failure.reason()),
         };
-        let guard = std::mem::DropGuard::new(self, |exchange| {
-            let outcome = caller_stop
-                .and_then(|stopped| stopped())
-                .map_or(Outcome::Cancelled, stopped_outcome);
-            exchange.record(outcome);
-        });
-        let response_body =
-            receive(request, require_json_content_type, &guard.span).instrument(guard.span.clone());
-        let result = match deadline {
-            None => response_body.await,
-            Some(deadline) => tokio::time::timeout_at(deadline, response_body)
-                .await
-                .unwrap_or(Err(ProviderFailure::Timeout)),
-        };
-        let outcome = result
-            .as_ref()
-            .err()
-            .copied()
-            .map_or(Outcome::Success, |failure| {
-                Outcome::Failure(failure.reason())
-            });
         std::mem::DropGuard::dismiss(guard).record(outcome);
         result
     }
@@ -405,42 +477,39 @@ impl<'a> Exchange<'a> {
     }
 }
 
-const fn stopped_outcome(stopped: Stopped) -> Outcome {
-    match stopped {
-        Stopped::Deadline => Outcome::CallerDeadline,
-        Stopped::Cancelled => Outcome::Cancelled,
-    }
-}
-
 async fn receive(
     request: reqwest::RequestBuilder,
     require_json_content_type: bool,
     span: &tracing::Span,
 ) -> Result<Vec<u8>, ProviderFailure> {
-    let transport = |error| ProviderFailure::from_transport(&error);
-    let mut response = request.send().await.map_err(transport)?;
-    let status = response.status();
-    span.record("http.response.status_code", status.as_u16());
-    if status != reqwest::StatusCode::OK {
-        return Err(ProviderFailure::Status(status.as_u16()));
-    }
-    if require_json_content_type && !has_json_content_type(&response) {
-        return Err(ProviderFailure::MediaType);
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
-        return Err(ProviderFailure::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(transport)? {
-        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
+    async {
+        let transport_failure = |error| ProviderFailure::from_transport(&error);
+        let mut response = request.send().await.map_err(transport_failure)?;
+        let status = response.status();
+        span.record("http.response.status_code", status.as_u16());
+        if status != reqwest::StatusCode::OK {
+            return Err(ProviderFailure::Status(status.as_u16()));
+        }
+        if require_json_content_type && !has_json_content_type(&response) {
+            return Err(ProviderFailure::MediaType);
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
             return Err(ProviderFailure::TooLarge);
         }
-        body.extend_from_slice(&chunk);
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(transport_failure)? {
+            if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
+                return Err(ProviderFailure::TooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
-    Ok(body)
+    .instrument(span.clone())
+    .await
 }
 
 fn client_builder() -> reqwest::ClientBuilder {
@@ -451,7 +520,7 @@ fn client_builder() -> reqwest::ClientBuilder {
         .retry(reqwest::retry::never())
         .no_proxy()
         .referer(false)
-        .connect_timeout(Duration::from_secs(2))
+        .connect_timeout(PROVIDER_CONNECT_TIMEOUT)
         .timeout(PROVIDER_TIMEOUT)
 }
 
@@ -468,19 +537,19 @@ mod fixture {
     use tokio_util::sync::CancellationToken;
 
     use super::{ProviderClient, client_builder};
-    use crate::Failure;
+    use crate::ClientBuildError;
 
     pub(crate) fn new_fixture_client(
         fixture_host: &str,
         fixture_addr: std::net::SocketAddr,
         fixture_root_der: &[u8],
         cancel: CancellationToken,
-    ) -> Result<ProviderClient, Failure> {
+    ) -> Result<ProviderClient, ClientBuildError> {
         if fixture_host.is_empty() || !fixture_addr.ip().is_loopback() {
-            return Err(Failure::Unavailable);
+            return Err(ClientBuildError);
         }
         let root =
-            reqwest::Certificate::from_der(fixture_root_der).map_err(|_| Failure::Unavailable)?;
+            reqwest::Certificate::from_der(fixture_root_der).map_err(|_| ClientBuildError)?;
         let resolver = std::sync::Arc::new(FixtureResolver {
             host: fixture_host.to_owned(),
             address: fixture_addr,
@@ -491,7 +560,7 @@ mod fixture {
                 .dns_resolver(resolver)
                 .tls_certs_only([root]),
         )
-        .map_err(|_| Failure::Unavailable)
+        .map_err(|_| ClientBuildError)
     }
 
     #[derive(Clone)]
@@ -537,27 +606,8 @@ fn has_json_content_type(response: &reqwest::Response) -> bool {
 
 #[cfg(test)]
 pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8>) {
-    use tokio_rustls::rustls::{
-        ServerConfig,
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    };
-
     let material = tls_test_support::TlsMaterial::new(host);
-    let config = ServerConfig::builder_with_provider(std::sync::Arc::new(
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(
-        vec![CertificateDer::from(material.cert)],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key)),
-    )
-    .unwrap();
-    (
-        tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config)),
-        material.root,
-    )
+    (material.acceptor(), material.root)
 }
 
 #[cfg(test)]
@@ -583,8 +633,8 @@ mod tests {
     use super::Document;
     // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
-        EndpointUrl, ExchangeMode, IssuerUrl, Operation, ProviderClient, ProviderFailure,
-        client_builder, fixture_acceptor, new_fixture_client,
+        EndpointUrl, IssuerUrl, Operation, Outcome, ProviderClient, ProviderFailure,
+        client_builder, fixture_acceptor, new_fixture_client, receive,
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -593,10 +643,30 @@ mod tests {
         <Operation as enum_map::Enum>::from_usize(0)
     }
 
+    async fn get_untyped(client: &ProviderClient, url: &Url) -> Result<Vec<u8>, ProviderFailure> {
+        let request = client.client.get(url.clone());
+        client
+            .exchange(test_operation(), "GET", url)
+            .run(
+                || Outcome::Cancelled,
+                async move |span| receive(request, false, span).await,
+            )
+            .await
+    }
+
     #[test]
     fn provider_url_retains_exact_spelling_and_rejects_unsafe_destinations() {
-        let url = IssuerUrl::parse("https://provider.example/path").unwrap();
+        let url: IssuerUrl = "https://provider.example/path".parse().unwrap();
         assert_eq!(url.as_str(), "https://provider.example/path");
+        assert_eq!(url.as_ref(), "https://provider.example/path");
+        assert!(
+            std::collections::HashSet::from([url.clone()])
+                .contains("https://provider.example/path")
+        );
+        assert_eq!(
+            IssuerUrl::parse("https://provider.example/path").unwrap(),
+            url
+        );
         for invalid in [
             "http://provider.example",
             "https://user@provider.example",
@@ -607,17 +677,23 @@ mod tests {
             "https://@provider.example",
             "https://provider.example/\u{a0}tenant",
         ] {
-            assert!(IssuerUrl::parse(invalid).is_err(), "{invalid:?}");
+            assert_eq!(
+                IssuerUrl::parse(invalid),
+                Err(crate::InvalidUrl),
+                "{invalid:?}"
+            );
         }
     }
 
     #[test]
     fn endpoint_spelling_is_preserved_and_provider_debug_is_redacted() {
         let raw = "https://provider.example/keys?token=private%2Fvalue&x=1&x=2";
-        let endpoint = EndpointUrl::parse(raw).unwrap();
+        let endpoint: EndpointUrl = raw.parse().unwrap();
         assert_eq!(endpoint.as_str(), raw);
+        assert_eq!(endpoint.as_ref(), raw);
+        assert!(std::collections::HashSet::from([endpoint.clone()]).contains(raw));
         assert_eq!(endpoint.url().as_str(), raw);
-        assert!(IssuerUrl::parse(raw).is_err());
+        assert_eq!(IssuerUrl::parse(raw), Err(crate::InvalidUrl));
         assert!(!format!("{endpoint:?}").contains("private"));
         for invalid in [
             "http://provider.example?token=private",
@@ -765,28 +841,15 @@ mod tests {
         .unwrap();
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         let started = tokio::time::Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_millis(2500),
-            client.exchange(test_operation(), "GET", &url).run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            ),
-        )
-        .await
-        .expect("the connection budget must expire before the three-second total");
+        let result = tokio::time::timeout(Duration::from_millis(2500), get_untyped(&client, &url))
+            .await
+            .expect("the connection budget must expire before the three-second total");
         assert_eq!(result, Err(ProviderFailure::Timeout));
         assert!(started.elapsed() >= Duration::from_secs(2));
         assert!(started.elapsed() < Duration::from_millis(2500));
 
         tokio::time::resume();
-        let body = client
-            .exchange(test_operation(), "GET", &url)
-            .run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            )
-            .await
-            .unwrap();
+        let body = get_untyped(&client, &url).await.unwrap();
         assert_eq!(body, b"{}");
         assert!(server.await.unwrap().starts_with(b"GET /keys HTTP/1.1\r\n"));
     }
@@ -826,25 +889,9 @@ mod tests {
         )
         .unwrap();
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
+        assert_eq!(get_untyped(&old_client, &url).await.unwrap(), b"{}");
         assert_eq!(
-            old_client
-                .exchange(test_operation(), "GET", &url)
-                .run(
-                    old_client.client.get(url.clone()),
-                    ExchangeMode::Document { deadline: None }
-                )
-                .await
-                .unwrap(),
-            b"{}"
-        );
-        assert_eq!(
-            old_client
-                .exchange(test_operation(), "GET", &url)
-                .run(
-                    old_client.client.get(url.clone()),
-                    ExchangeMode::Document { deadline: None }
-                )
-                .await,
+            get_untyped(&old_client, &url).await,
             Err(ProviderFailure::Connect)
         );
 
@@ -854,17 +901,7 @@ mod tests {
                 .tls_certs_only([reqwest::Certificate::from_der(&root_b).unwrap()]),
         )
         .unwrap();
-        assert_eq!(
-            rebuilt_client
-                .exchange(test_operation(), "GET", &url)
-                .run(
-                    rebuilt_client.client.get(url.clone()),
-                    ExchangeMode::Document { deadline: None }
-                )
-                .await
-                .unwrap(),
-            b"{}"
-        );
+        assert_eq!(get_untyped(&rebuilt_client, &url).await.unwrap(), b"{}");
         let (first, replacement) = server.await.unwrap();
         assert!(first.starts_with(b"GET /keys HTTP/1.1\r\n"));
         assert!(replacement.starts_with(b"GET /keys HTTP/1.1\r\n"));
@@ -880,13 +917,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         let url = fixture_url(address);
         let client = fixture_client(address, &root);
-        let result = client
-            .exchange(test_operation(), "GET", &url)
-            .run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            )
-            .await;
+        let result = get_untyped(&client, &url).await;
         assert_eq!(result, Err(ProviderFailure::Status(302)));
         assert!(
             server
@@ -897,6 +928,10 @@ mod tests {
     }
 
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
+    fn far_deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(60)
+    }
+
     #[tokio::test]
     async fn jwt_fixture_transport_uses_trusted_private_tls_and_enforces_body_and_time_bounds() {
         for content_type in ["", "text/plain", "application/json"] {
@@ -908,7 +943,7 @@ mod tests {
             ))
             .unwrap();
             let body = fixture_client(address, &root)
-                .get_document(endpoint.url(), Document::Jwks, None)
+                .get_document(endpoint.url(), Document::Jwks, far_deadline())
                 .await
                 .unwrap();
             assert_eq!(
@@ -928,7 +963,7 @@ mod tests {
         let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks, None)
+                .get_document(&fixture_url(address), Document::Jwks, far_deadline())
                 .await,
             Err(ProviderFailure::TooLarge)
         );
@@ -938,7 +973,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks, None)
+                .get_document(&fixture_url(address), Document::Jwks, far_deadline())
                 .await,
             Err(ProviderFailure::Status(404))
         );
@@ -948,7 +983,7 @@ mod tests {
         let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks, None)
+                .get_document(&fixture_url(address), Document::Jwks, far_deadline())
                 .await,
             Err(ProviderFailure::Timeout),
         );
@@ -959,10 +994,13 @@ mod tests {
     // template:begin oidc-introspection:authn-provider-post-form-tls-test
     #[tokio::test]
     async fn introspection_fixture_transport_uses_trusted_private_tls_for_form_posts() {
+        use operation_context::OperationContext;
         use tracing::instrument::WithSubscriber as _;
 
+        use super::StopProbe;
         use crate::test_metrics::Diagnostics;
 
+        let context = OperationContext::unbounded();
         let response = http_ok("application/json", r#"{"active":false}"#);
         let (address, root, server) = tls_server(response, false).await;
         let body = fixture_client(address, &root)
@@ -971,7 +1009,7 @@ mod tests {
                 "a:b",
                 "c d",
                 &[("token", "opaque")],
-                &|| None,
+                StopProbe::Context(&context),
             )
             .await
             .unwrap();
@@ -994,7 +1032,7 @@ mod tests {
                         "fixture",
                         "secret",
                         &[("token", "opaque")],
-                        &|| None,
+                        StopProbe::Context(&context),
                     )
                     .with_subscriber(dispatch.clone())
                     .await,
@@ -1042,13 +1080,7 @@ mod tests {
         let pending = tokio::spawn({
             let client = client.clone();
             let url = url.clone();
-            async move {
-                let request = client.client.get(url.clone());
-                client
-                    .exchange(test_operation(), "GET", &url)
-                    .run(request, ExchangeMode::Document { deadline: None })
-                    .await
-            }
+            async move { get_untyped(&client, &url).await }
         });
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
@@ -1063,14 +1095,7 @@ mod tests {
         assert_eq!(result, Err(ProviderFailure::Timeout));
         tokio::time::resume();
 
-        let body = client
-            .exchange(test_operation(), "GET", &url)
-            .run(
-                client.client.get(url.clone()),
-                ExchangeMode::Document { deadline: None },
-            )
-            .await
-            .unwrap();
+        let body = get_untyped(&client, &url).await.unwrap();
         assert_eq!(body, b"{}");
         assert!(
             server

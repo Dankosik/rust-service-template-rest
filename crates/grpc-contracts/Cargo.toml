@@ -12,7 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-derive-where = { workspace = true }
 prost = { workspace = true, features = ["std", "derive"] }
 prost-types = { workspace = true }
 tonic = { workspace = true, features = ["codegen"] }

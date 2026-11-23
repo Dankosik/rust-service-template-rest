@@ -34,15 +34,14 @@ pub struct Registration<'a> {
     outbound_webhooks: &'a service_config::WebhooksConfig,
     // template:end webhooks:worker-registration-outbound-webhooks
     // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints
-    inbound_webhook_endpoints: &'a std::collections::BTreeSet<String>,
+    inbound_webhook_endpoints: &'a [String],
     // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints
-    background: &'a background::Background,
+    background: &'a mut background::Background,
 }
 
 // template:begin outbox:worker-postgres-messages-factory
-type PostgresMessageFactory = Box<
-    dyn FnOnce(infra_postgres::PgPool, &mut infra_messaging::Registry) -> Result<(), BuildError>,
->;
+type PostgresMessageFactory =
+    Box<dyn FnOnce(infra_postgres::Pool, &mut infra_messaging::Registry) -> Result<(), BuildError>>;
 // template:end outbox:worker-postgres-messages-factory
 
 impl<'a> Registration<'a> {
@@ -52,7 +51,7 @@ impl<'a> Registration<'a> {
     )]
     fn new(
         config: &'a service_config::WorkerConfig,
-        background: &'a background::Background,
+        background: &'a mut background::Background,
     ) -> Self {
         Self {
             // template:begin jobs:worker-bootstrap-register-jobs
@@ -65,10 +64,10 @@ impl<'a> Registration<'a> {
             postgres_messages: None,
             // template:end outbox:worker-bootstrap-postgres-messages-initial
             // template:begin webhooks:worker-registration-outbound-webhooks-value
-            outbound_webhooks: &config.webhooks,
+            outbound_webhooks: config.webhooks(),
             // template:end webhooks:worker-registration-outbound-webhooks-value
             // template:begin inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
-            inbound_webhook_endpoints: &config.inbound_webhook_endpoints,
+            inbound_webhook_endpoints: config.inbound_webhook_endpoints(),
             // template:end inbound-webhooks:worker-registration-inbound-webhook-endpoints-value
             background,
         }
@@ -78,7 +77,7 @@ impl<'a> Registration<'a> {
     pub fn with_postgres_messages(
         &mut self,
         factory: impl FnOnce(
-            infra_postgres::PgPool,
+            infra_postgres::Pool,
             &mut infra_messaging::Registry,
         ) -> Result<(), BuildError>
         + 'static,
@@ -93,18 +92,18 @@ impl<'a> Registration<'a> {
 
     // template:begin webhooks:worker-outbound-webhooks-accessor
     #[must_use]
-    pub fn outbound_webhooks(&self) -> &service_config::WebhooksConfig {
+    pub fn outbound_webhooks(&self) -> &'a service_config::WebhooksConfig {
         self.outbound_webhooks
     }
     // template:end webhooks:worker-outbound-webhooks-accessor
 
     // template:begin inbound-webhooks:worker-inbound-webhook-endpoints-accessor
-    pub fn inbound_webhook_endpoints(&self) -> impl Iterator<Item = &str> {
+    pub fn inbound_webhook_endpoints(&self) -> impl Iterator<Item = &'a str> + use<'a> {
         self.inbound_webhook_endpoints.iter().map(String::as_str)
     }
     // template:end inbound-webhooks:worker-inbound-webhook-endpoints-accessor
 
-    pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
+    pub fn spawn<F>(&mut self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -113,7 +112,7 @@ impl<'a> Registration<'a> {
 
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
-        self.background.cancel.child_token()
+        self.background.child_token()
     }
 }
 
@@ -184,7 +183,7 @@ fn run_worker(
     let (config, runtime) = load_config_and_runtime(options).inspect_err(|error| {
         report_failure(error);
     })?;
-    let grace = config.http.grace_period;
+    let grace = config.http().grace_period;
     let signals = {
         let _entered = runtime.enter();
         signals::Signals::install()
@@ -222,7 +221,7 @@ fn load_config_and_runtime(
 ) -> Result<(service_config::WorkerConfig, tokio::runtime::Runtime), bootstrap::WorkerError> {
     let config = service_config::load_worker(options, BUILD_INFO, shutdown::TAIL)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.effective_worker_threads())
+        .worker_threads(config.runtime().effective_worker_threads())
         .enable_all()
         .build()
         .map_err(bootstrap::WorkerError::Runtime)?;

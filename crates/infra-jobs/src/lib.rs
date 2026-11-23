@@ -14,18 +14,19 @@ mod trace_context;
 
 pub use attempt::ATTEMPT_DURATION_METRIC;
 pub use claim::{CLAIM_DURATION_METRIC, QUEUE_WAIT_METRIC};
-pub use engine::{DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started};
+pub use engine::{DrainEnd, DuplicateKind, Engine, LEASE_RESERVE, POLL_INTERVAL, Started};
 // template:begin outbox:jobs-outbox-export
 pub use enqueue::outbox;
 // template:end outbox:jobs-outbox-export
 pub use enqueue::{
-    EnqueueError, EnqueueOptions, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES,
-    compare_live_payload, enqueue, json_payload_len,
+    EnqueueError, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES, PayloadSizer,
+    compare_live_payload, enqueue, enqueue_delayed, enqueue_unique, json_payload_len,
 };
+pub use infra_postgres::maintenance::CleanupError;
 pub use kind::{
-    DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind, KindError, Kinds,
-    KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy, TransactionalHandler,
-    TransactionalJob, assert_valid_kind_name,
+    DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind, KindError, KindName,
+    Kinds, KindsBuilder, MAX_ATTEMPTS, MAX_DELAY, MAX_TIMEOUT, MIN_TIMEOUT, Policy, RetrySchedule,
+    TransactionalHandler, TransactionalJob,
 };
 pub use session::StartupError;
 

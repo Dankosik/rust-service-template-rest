@@ -6,18 +6,19 @@ use async_nats::jetstream::consumer::{Config as ConsumerConfig, IntoConsumerConf
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
+use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::{
-    Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, PersistenceMode,
-    RetentionPolicy, StorageType, Stream,
+    Config as StreamConfig, ConsumerCreateStrictErrorKind, ConsumerErrorKind, Info as StreamInfo,
+    PersistenceMode, RetentionPolicy, StorageType, Stream,
 };
 // template:begin outbox:messaging-outbox-topology-imports
-use async_nats::jetstream::response::Response;
-use async_nats::jetstream::stream::{DiscardPolicy, Info, SubjectTransform};
+use async_nats::jetstream::stream::{DiscardPolicy, SubjectTransform};
+
+use crate::budget::{BrokerBudget, bounded_with};
 // template:end outbox:messaging-outbox-topology-imports
 use async_nats::jetstream::{Context, ErrorCode};
+use operation_context::OperationContext;
 use sha2::{Digest as _, Sha256};
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::error::MessagingError;
@@ -29,6 +30,9 @@ const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 
 const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
 const DURABLE_CONTRACT: &str = "service.delivery-contract.v1";
+const BROKER_REQUEST_TIMED_OUT: MessagingError = MessagingError::TimedOut {
+    budget: BROKER_OPERATION_BUDGET,
+};
 
 impl Registry {
     #[must_use]
@@ -58,11 +62,11 @@ impl Registry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct TopologyAdmission {
     pub(crate) consumer: Option<ConsumerAdmission>,
     // template:begin outbox:messaging-outbox-topology-field
-    pub(crate) outbox_source: Result<(), Refusal>,
+    pub(crate) outbox_source: Result<(), OutboxSourceRefusal>,
     // template:end outbox:messaging-outbox-topology-field
 }
 
@@ -86,14 +90,6 @@ impl DeadLetterTopology {
         filter: &str,
         server_max_payload_bytes: usize,
     ) -> Result<usize, MessagingError> {
-        let bounds_unavailable = || {
-            report_refusal_failure(
-                "dead_letter_stream",
-                Refusal::DeadLetterBoundsUnavailable,
-                0,
-                None,
-            )
-        };
         let subject_bytes = if filter.contains(['*', '>']) {
             registry
                 .routes()
@@ -108,31 +104,30 @@ impl DeadLetterTopology {
             subject_bytes,
             self.stream.len(),
         )
-        .ok_or_else(bounds_unavailable)?;
-        if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
-            return Err(report_refusal_failure(
+        .ok_or_else(|| {
+            Refusal::DeadLetterBoundsUnavailable.report("dead_letter_stream", 0, None)
+        })?;
+        if bounds.header_bytes > wire::NATIVE_HEADER_LIMIT_BYTES {
+            return Err(Refusal::DeadLetterHeaderSize.report(
                 "dead_letter_stream",
-                Refusal::DeadLetterHeaderSize,
-                bounds.headers,
+                bounds.header_bytes,
                 i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
             ));
         }
-        if bounds.total > server_max_payload_bytes {
-            return Err(report_refusal_failure(
+        if bounds.total_bytes > server_max_payload_bytes {
+            return Err(Refusal::ServerMaxPayload.report(
                 "server",
-                Refusal::ServerMaxPayload,
-                bounds.total,
+                bounds.total_bytes,
                 i64::try_from(server_max_payload_bytes).ok(),
             ));
         }
         if let Some(limit) = self
             .dead_letter_max_message_bytes
-            .filter(|limit| limit.get() < bounds.total)
+            .filter(|limit| limit.get() < bounds.total_bytes)
         {
-            return Err(report_refusal_failure(
+            return Err(Refusal::StreamMessageSize.report(
                 "dead_letter_stream",
-                Refusal::StreamMessageSize,
-                bounds.total,
+                bounds.total_bytes,
                 i64::try_from(limit.get()).ok(),
             ));
         }
@@ -145,29 +140,19 @@ pub(crate) async fn admit_topology(
     envelope_limit_bytes: usize,
     client: &async_nats::Client,
     jetstream: &async_nats::jetstream::Context,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<TopologyAdmission, MessagingError> {
     validate_server(client, envelope_limit_bytes).map_err(|refusal| {
-        report_refusal_failure(
+        refusal.report(
             "server",
-            refusal,
             envelope_limit_bytes,
             i64::try_from(client.server_info().max_payload).ok(),
         )
     })?;
-    let source = get_stream(
-        jetstream,
-        &options.source_stream,
-        "source",
-        deadline,
-        cancel,
-    )
-    .await?;
+    let source = get_stream(jetstream, &options.source_stream, "source", context).await?;
     let source_config = &source.cached_info().config;
-    validate_stream_publication(source_config).map_err(|refusal| {
-        report_refusal_failure("source_stream", refusal, envelope_limit_bytes, None)
-    })?;
+    validate_stream_publication(source_config)
+        .map_err(|refusal| refusal.report("source_stream", envelope_limit_bytes, None))?;
     let consumer = match &options.consumer {
         Some(consumer) => Some(
             admit_consumer_topology(
@@ -176,8 +161,7 @@ pub(crate) async fn admit_topology(
                 source_config.max_message_size,
                 envelope_limit_bytes,
                 jetstream,
-                deadline,
-                cancel,
+                context,
             )
             .await?,
         ),
@@ -191,57 +175,50 @@ pub(crate) async fn admit_topology(
     })
 }
 
+fn dead_letter_subject_covered(config: &StreamConfig, subject: &str) -> bool {
+    wire::valid_subject(subject)
+        && config
+            .subjects
+            .iter()
+            .any(|filter| wire::matches_filter(filter, subject))
+}
+
 async fn admit_consumer_topology(
     consumer: &ConsumerOptions,
     source_stream: &str,
-    raw_source_limit: i32,
+    source_max_message_size: i32,
     envelope_limit_bytes: usize,
     jetstream: &async_nats::jetstream::Context,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<ConsumerAdmission, MessagingError> {
-    let source_max_message_bytes = source_message_limit(raw_source_limit, envelope_limit_bytes)
-        .map_err(|refusal| {
-            report_refusal_failure(
-                "source_stream",
-                refusal,
-                envelope_limit_bytes,
-                Some(raw_source_limit.into()),
-            )
-        })?;
+    let source_max_message_bytes =
+        admit_source_max_message_bytes(source_max_message_size, envelope_limit_bytes).map_err(
+            |refusal| {
+                refusal.report(
+                    "source_stream",
+                    envelope_limit_bytes,
+                    Some(source_max_message_size.into()),
+                )
+            },
+        )?;
     let dead_letter_name = match &consumer.dlq_stream {
         Some(name) => name.clone(),
-        None => stream_name_for_subject(jetstream, &consumer.dlq_subject, deadline, cancel).await?,
+        None => stream_name_for_subject(jetstream, &consumer.dlq_subject, context).await?,
     };
     if dead_letter_name == source_stream {
-        return Err(report_refusal_failure(
+        return Err(Refusal::DeadLetterIsSource.report(
             "dead_letter_stream",
-            Refusal::DeadLetterIsSource,
             envelope_limit_bytes,
             None,
         ));
     }
-    let dead_letter = get_stream(
-        jetstream,
-        &dead_letter_name,
-        "dead_letter",
-        deadline,
-        cancel,
-    )
-    .await?;
+    let dead_letter = get_stream(jetstream, &dead_letter_name, "dead_letter", context).await?;
     let dead_letter_config = &dead_letter.cached_info().config;
-    validate_stream_publication(dead_letter_config).map_err(|refusal| {
-        report_refusal_failure("dead_letter_stream", refusal, envelope_limit_bytes, None)
-    })?;
-    if !wire::valid_subject(&consumer.dlq_subject)
-        || !dead_letter_config
-            .subjects
-            .iter()
-            .any(|filter| wire::matches_filter(filter, &consumer.dlq_subject))
-    {
-        return Err(report_refusal_failure(
+    validate_stream_publication(dead_letter_config)
+        .map_err(|refusal| refusal.report("dead_letter_stream", envelope_limit_bytes, None))?;
+    if !dead_letter_subject_covered(dead_letter_config, &consumer.dlq_subject) {
+        return Err(Refusal::DeadLetterSubjectMismatch.report(
             "dead_letter_stream",
-            Refusal::DeadLetterSubjectMismatch,
             envelope_limit_bytes,
             None,
         ));
@@ -258,7 +235,7 @@ async fn admit_consumer_topology(
     })
 }
 
-fn source_message_limit(raw: i32, envelope_limit_bytes: usize) -> Result<usize, Refusal> {
+fn admit_source_max_message_bytes(raw: i32, envelope_limit_bytes: usize) -> Result<usize, Refusal> {
     match usize::try_from(raw) {
         Ok(limit) if limit > envelope_limit_bytes => Err(Refusal::StreamMessageSize),
         Ok(limit @ 1..) => Ok(limit),
@@ -286,19 +263,62 @@ fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
 }
 
 // template:begin outbox:messaging-outbox-topology-validation
-fn validate_outbox_source(config: &StreamConfig) -> Result<(), Refusal> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OutboxSourceRefusal {
+    DiscardOld,
+    DiscardOldPerSubject,
+    SubjectTransform,
+}
+
+impl OutboxSourceRefusal {
+    const fn error_type(self) -> &'static str {
+        match self {
+            Self::DiscardOld => "outbox_discard_old",
+            Self::DiscardOldPerSubject => "outbox_discard_old_per_subject",
+            Self::SubjectTransform => "outbox_subject_transform",
+        }
+    }
+
+    const fn failure(self) -> MessagingError {
+        match self {
+            Self::DiscardOld => {
+                MessagingError::OutboxSource("bounded message or byte capacity requires DiscardNew")
+            }
+            Self::DiscardOldPerSubject => MessagingError::OutboxSource(
+                "a per-subject message limit requires DiscardNewPerSubject",
+            ),
+            Self::SubjectTransform => MessagingError::OutboxSource(
+                "subject transform must preserve the publication subject",
+            ),
+        }
+    }
+
+    pub(crate) fn report(self, required_bytes: usize) -> MessagingError {
+        let failure = self.failure();
+        log_admission_refusal(
+            "source_stream",
+            failure,
+            self.error_type(),
+            required_bytes,
+            None,
+        );
+        failure
+    }
+}
+
+fn validate_outbox_source(config: &StreamConfig) -> Result<(), OutboxSourceRefusal> {
     if (config.max_messages > 0 || config.max_bytes > 0) && config.discard != DiscardPolicy::New {
-        return Err(Refusal::OutboxDiscardOld);
+        return Err(OutboxSourceRefusal::DiscardOld);
     }
     if config.max_messages_per_subject > 0 && !config.discard_new_per_subject {
-        return Err(Refusal::OutboxDiscardOldPerSubject);
+        return Err(OutboxSourceRefusal::DiscardOldPerSubject);
     }
     if config
         .subject_transform
         .as_ref()
         .is_some_and(|transform| !preserves_subject(transform))
     {
-        return Err(Refusal::OutboxSubjectTransform);
+        return Err(OutboxSourceRefusal::SubjectTransform);
     }
     Ok(())
 }
@@ -323,20 +343,22 @@ fn preserves_subject(transform: &SubjectTransform) -> bool {
             if wildcard_index(output) != Some(capture) {
                 return false;
             }
-        } else if output != token
-            || output
-                .strip_prefix('$')
-                .is_some_and(|value| value.parse::<i64>().is_ok())
-            || (output.len() > 4 && output.starts_with("{{") && output.ends_with("}}"))
-        {
+        } else if output != token || is_transform_reference(output) {
             return false;
         }
     }
     destination.next().is_none()
 }
 
+fn is_transform_reference(output: &str) -> bool {
+    output
+        .strip_prefix('$')
+        .is_some_and(|value| value.parse::<i64>().is_ok())
+        || (output.len() > 4 && output.starts_with("{{") && output.ends_with("}}"))
+}
+
 fn wildcard_index(output: &str) -> Option<usize> {
-    let index = output.strip_prefix('$').or_else(|| {
+    let index_text = output.strip_prefix('$').or_else(|| {
         let function = output.strip_prefix("{{")?.strip_suffix("}}")?.trim_ascii();
         let argument = function
             .strip_prefix("wildcard")
@@ -346,32 +368,20 @@ fn wildcard_index(output: &str) -> Option<usize> {
             .strip_suffix(')')?;
         Some(argument.trim_matches(' '))
     });
-    index.and_then(|value| value.parse::<usize>().ok())
+    index_text.and_then(|digits| digits.parse::<usize>().ok())
 }
 
 pub(crate) async fn recheck_outbox_source(
     shared: &crate::messaging::Shared,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    budget: BrokerBudget<'_>,
 ) -> Result<(), crate::PublishError> {
     use crate::PublishRejection;
 
-    let source = bounded_operation(deadline, cancel, async {
-        let subject = format!("STREAM.INFO.{}", shared.source_stream);
-        let response: Response<Info> = shared
-            .jetstream
-            .request(subject, &())
-            .await
-            .map_err(|error| report_topology_failure("get_stream", Some("source"), &error, None))?;
-        match response {
-            Response::Ok(info) => Ok(info),
-            Response::Err { error } => Err(report_topology_failure(
-                "get_stream",
-                Some("source"),
-                &error,
-                Some(&error),
-            )),
-        }
+    let info = bounded_with(budget, async {
+        map_stream_error(
+            fetch_stream_info(&shared.jetstream, &shared.source_stream_info_subject).await,
+            "source",
+        )
     })
     .await
     .map_err(|error| match error {
@@ -386,13 +396,15 @@ pub(crate) async fn recheck_outbox_source(
         | MessagingError::Unavailable
         | MessagingError::Bounds => PublishRejection::BrokerRefused,
     })?;
-    let config = &source.config;
-    validate_stream_publication(config)
-        .and_then(|()| validate_outbox_source(config))
-        .map_err(|refusal| {
-            report_refusal("source_stream", refusal, shared.envelope_limit_bytes, None);
-            PublishRejection::BrokerRefused
-        })?;
+    let config = &info.config;
+    if let Err(refusal) = validate_stream_publication(config) {
+        let _ = refusal.report("source_stream", shared.envelope_limit_bytes, None);
+        return Err(PublishRejection::BrokerRefused.into());
+    }
+    if let Err(refusal) = validate_outbox_source(config) {
+        let _ = refusal.report(shared.envelope_limit_bytes);
+        return Err(PublishRejection::BrokerRefused.into());
+    }
     if shared.refuses_work() {
         return Err(PublishRejection::Unavailable.into());
     }
@@ -400,18 +412,38 @@ pub(crate) async fn recheck_outbox_source(
 }
 // template:end outbox:messaging-outbox-topology-validation
 
+pub(crate) async fn fetch_stream_info(
+    jetstream: &Context,
+    info_subject: &async_nats::Subject,
+) -> Result<StreamInfo, GetStreamError> {
+    let response: Response<StreamInfo> = jetstream
+        .request(wire::BorrowedSubject(info_subject), &())
+        .await
+        .map_err(|error| GetStreamError::with_source(GetStreamErrorKind::Request, error))?;
+    match response {
+        Response::Err { error } => Err(GetStreamError::new(GetStreamErrorKind::JetStream(error))),
+        Response::Ok(info) => Ok(info),
+    }
+}
+
+fn map_stream_error<T>(
+    result: Result<T, GetStreamError>,
+    role: &'static str,
+) -> Result<T, MessagingError> {
+    result.map_err(|error| {
+        let broker = stream_broker_error(&error);
+        report_topology_failure("get_stream", Some(role), &error, broker.as_ref())
+    })
+}
+
 async fn get_stream(
     jetstream: &async_nats::jetstream::Context,
     name: &str,
     role: &'static str,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<Stream, MessagingError> {
-    bounded_operation(deadline, cancel, async {
-        jetstream.get_stream(name).await.map_err(|error| {
-            let broker = stream_broker_error(&error);
-            report_topology_failure("get_stream", Some(role), &error, broker.as_ref())
-        })
+    bounded_operation(context, async {
+        map_stream_error(jetstream.get_stream(name).await, role)
     })
     .await
 }
@@ -429,17 +461,19 @@ fn stream_broker_error(error: &GetStreamError) -> Option<async_nats::jetstream::
 async fn stream_name_for_subject(
     jetstream: &async_nats::jetstream::Context,
     subject: &str,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<String, MessagingError> {
-    bounded_operation(deadline, cancel, async {
+    bounded_operation(context, async {
         jetstream
             .stream_by_subject(subject.to_owned())
             .await
             .map_err(|error| {
+                #[warn(clippy::wildcard_enum_match_arm)]
                 let broker = match error.kind() {
                     GetStreamByNameErrorKind::JetStream(broker) => Some(broker),
-                    _ => None,
+                    GetStreamByNameErrorKind::Request
+                    | GetStreamByNameErrorKind::NotFound
+                    | GetStreamByNameErrorKind::InvalidSubject => None,
                 };
                 report_topology_failure("stream_by_subject", None, &error, broker.as_ref())
             })
@@ -447,6 +481,7 @@ async fn stream_name_for_subject(
     .await
 }
 
+#[warn(clippy::wildcard_enum_match_arm)]
 async fn find_durable(
     jetstream: &Context,
     stream: &str,
@@ -466,10 +501,13 @@ async fn find_durable(
                 &error,
                 Some(&broker),
             )),
-            ConsumerErrorKind::TimedOut => Err(MessagingError::TimedOut {
-                budget: BROKER_OPERATION_BUDGET,
-            }),
-            _ => Err(report_topology_failure("get_consumer", None, &error, None)),
+            ConsumerErrorKind::TimedOut => Err(BROKER_REQUEST_TIMED_OUT),
+            ConsumerErrorKind::Request
+            | ConsumerErrorKind::InvalidConsumerType
+            | ConsumerErrorKind::InvalidName
+            | ConsumerErrorKind::Other => {
+                Err(report_topology_failure("get_consumer", None, &error, None))
+            }
         },
     }
 }
@@ -487,12 +525,15 @@ pub(crate) async fn bind_durable(
     };
     let expected = config.into_consumer_config();
     if let Some(error_type) = durable_contract_error_type(&expected, &pull.cached_info().config) {
-        tracing::warn!(operation = "bind_consumer", error.type = error_type, expected_contract = expected.metadata.get(DURABLE_CONTRACT).map(String::as_str), reason = %MessagingError::Topology, "messaging_admission_failed");
-        return Err(MessagingError::Topology);
+        return Err(report_bind_refusal(
+            error_type,
+            expected.metadata.get(DURABLE_CONTRACT).map(String::as_str),
+        ));
     }
     Ok(pull)
 }
 
+#[warn(clippy::wildcard_enum_match_arm)]
 async fn create_or_find_durable(
     jetstream: &Context,
     stream: &str,
@@ -516,10 +557,11 @@ async fn create_or_find_durable(
             &error,
             Some(&broker),
         )),
-        ConsumerCreateStrictErrorKind::TimedOut => Err(MessagingError::TimedOut {
-            budget: BROKER_OPERATION_BUDGET,
-        }),
-        _ => Err(report_topology_failure(
+        ConsumerCreateStrictErrorKind::TimedOut => Err(BROKER_REQUEST_TIMED_OUT),
+        ConsumerCreateStrictErrorKind::Request
+        | ConsumerCreateStrictErrorKind::InvalidConsumerType
+        | ConsumerCreateStrictErrorKind::InvalidName
+        | ConsumerCreateStrictErrorKind::Other => Err(report_topology_failure(
             "create_consumer",
             None,
             &error,
@@ -581,6 +623,21 @@ fn report_topology_failure(
     failure
 }
 
+pub(crate) fn report_bind_refusal(
+    error_type: &'static str,
+    expected_contract: Option<&str>,
+) -> MessagingError {
+    let failure = MessagingError::Topology;
+    tracing::warn!(
+        operation = "bind_consumer",
+        error.type = error_type,
+        expected_contract,
+        reason = %failure,
+        "messaging_admission_failed"
+    );
+    failure
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Refusal {
     ServerVersion,
@@ -596,16 +653,28 @@ pub(crate) enum Refusal {
     StreamNoAck,
     StreamInterestRetention,
     StreamSealed,
-    // template:begin outbox:messaging-outbox-topology-refusals
-    OutboxDiscardOld,
-    OutboxDiscardOldPerSubject,
-    OutboxSubjectTransform,
-    // template:end outbox:messaging-outbox-topology-refusals
     DeadLetterBoundsUnavailable,
     DeadLetterHeaderSize,
 }
 
 impl Refusal {
+    fn report(
+        self,
+        component: &'static str,
+        required_bytes: usize,
+        limit_bytes: Option<i64>,
+    ) -> MessagingError {
+        let failure = self.failure();
+        log_admission_refusal(
+            component,
+            failure,
+            self.error_type(),
+            required_bytes,
+            limit_bytes,
+        );
+        failure
+    }
+
     pub(crate) const fn error_type(self) -> &'static str {
         match self {
             Self::ServerVersion => "server_version",
@@ -621,11 +690,6 @@ impl Refusal {
             Self::StreamNoAck => "stream_no_ack",
             Self::StreamInterestRetention => "stream_interest_retention",
             Self::StreamSealed => "stream_sealed",
-            // template:begin outbox:messaging-outbox-topology-refusal-types
-            Self::OutboxDiscardOld => "outbox_discard_old",
-            Self::OutboxDiscardOldPerSubject => "outbox_discard_old_per_subject",
-            Self::OutboxSubjectTransform => "outbox_subject_transform",
-            // template:end outbox:messaging-outbox-topology-refusal-types
             Self::DeadLetterBoundsUnavailable => "dead_letter_bounds_unavailable",
             Self::DeadLetterHeaderSize => "dead_letter_header_bytes",
         }
@@ -633,17 +697,6 @@ impl Refusal {
 
     const fn failure(self) -> MessagingError {
         match self {
-            // template:begin outbox:messaging-outbox-topology-errors
-            Self::OutboxDiscardOld => {
-                MessagingError::OutboxSource("bounded message or byte capacity requires DiscardNew")
-            }
-            Self::OutboxDiscardOldPerSubject => MessagingError::OutboxSource(
-                "a per-subject message limit requires DiscardNewPerSubject",
-            ),
-            Self::OutboxSubjectTransform => MessagingError::OutboxSource(
-                "subject transform must preserve the publication subject",
-            ),
-            // template:end outbox:messaging-outbox-topology-errors
             Self::ServerMaxPayload
             | Self::StreamMessageSizeUnset
             | Self::StreamMessageSize
@@ -663,26 +716,17 @@ impl Refusal {
     }
 }
 
-pub(crate) fn report_refusal_failure(
-    operation: &'static str,
-    refusal: Refusal,
-    required_bytes: usize,
-    limit_bytes: Option<i64>,
-) -> MessagingError {
-    report_refusal(operation, refusal, required_bytes, limit_bytes);
-    refusal.failure()
-}
-
-fn report_refusal(
-    operation: &'static str,
-    refusal: Refusal,
+fn log_admission_refusal(
+    component: &'static str,
+    failure: MessagingError,
+    error_type: &'static str,
     required_bytes: usize,
     limit_bytes: Option<i64>,
 ) {
     tracing::warn!(
-        operation,
-        reason = %refusal.failure(),
-        error.type = refusal.error_type(),
+        operation = component,
+        reason = %failure,
+        error.type = error_type,
         required_bytes,
         limit_bytes,
         "messaging_admission_failed"
@@ -720,28 +764,36 @@ pub(crate) fn classify_topology(error: &(dyn std::error::Error + 'static)) -> Me
         .unwrap_or(MessagingError::Topology)
 }
 
-fn classify_cause(error: &(dyn std::error::Error + 'static)) -> Option<MessagingError> {
-    if let Some(error) = error.downcast_ref::<async_nats::jetstream::context::RequestError>() {
-        match error.kind() {
-            async_nats::jetstream::context::RequestErrorKind::TimedOut => {
-                return Some(MessagingError::TimedOut {
-                    budget: BROKER_OPERATION_BUDGET,
-                });
-            }
-            async_nats::jetstream::context::RequestErrorKind::InvalidSubject => {
-                return Some(MessagingError::Configuration("broker subject is invalid"));
-            }
-            _ => {}
+#[warn(clippy::wildcard_enum_match_arm)]
+fn request_failure(error: &async_nats::jetstream::context::RequestError) -> Option<MessagingError> {
+    use async_nats::jetstream::context::RequestErrorKind;
+
+    match error.kind() {
+        RequestErrorKind::TimedOut => Some(BROKER_REQUEST_TIMED_OUT),
+        RequestErrorKind::InvalidSubject => {
+            Some(MessagingError::Configuration("broker subject is invalid"))
         }
+        RequestErrorKind::NoResponders | RequestErrorKind::Other => None,
     }
-    let stream_error = error
+}
+
+fn classify_cause(error: &(dyn std::error::Error + 'static)) -> Option<MessagingError> {
+    if let Some(failure) = error
+        .downcast_ref::<async_nats::jetstream::context::RequestError>()
+        .and_then(request_failure)
+    {
+        return Some(failure);
+    }
+    let refused = match error
         .downcast_ref::<GetStreamError>()
-        .and_then(stream_broker_error);
-    stream_error
-        .as_ref()
-        .or_else(|| error.downcast_ref::<async_nats::jetstream::Error>())
-        .is_some_and(is_auth_refusal)
-        .then_some(MessagingError::Authentication)
+        .and_then(stream_broker_error)
+    {
+        Some(broker_error) => is_auth_refusal(&broker_error),
+        None => error
+            .downcast_ref::<async_nats::jetstream::Error>()
+            .is_some_and(is_auth_refusal),
+    };
+    refused.then_some(MessagingError::Authentication)
 }
 
 #[cfg(test)]

@@ -1,34 +1,64 @@
-use std::{error::Error as StdError, fmt, sync::Arc, time::Instant};
+use std::{error::Error as StdError, fmt, mem::DropGuard, sync::Arc, time::Instant};
 
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, Method, Request, StatusCode};
 use metrics::{Label, SharedString, Unit};
+use operation_context::OperationContext;
 use tracing::Span;
 
 use shared_rules::{
     error_chain::{self, DisplayErrorChain},
-    otel_http::{OTHER_METHOD, request_method, response_status_code},
+    otel_http::{HttpMethod, response_status_code},
 };
 
-use crate::{Error, RequestContext, policy::Origin};
+use crate::{Error, TransportErrorKind, policy::TargetOrigin};
 
-pub const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
+pub(crate) const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
-pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
+pub(crate) const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DURATION_BUCKETS)];
 
+impl TransportErrorKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tls => "tls",
+            Self::Connect => "connect",
+            Self::Protocol => "protocol",
+            Self::Other => "transport",
+        }
+    }
+
+    const fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Tls => "HTTP transport failed during the TLS exchange",
+            Self::Connect => "HTTP transport failed during connection setup",
+            Self::Protocol => "HTTP transport failed while parsing the response",
+            Self::Other => "HTTP transport failed",
+        }
+    }
+}
+
 impl Error {
+    #[must_use]
+    pub fn transport_kind(&self) -> Option<TransportErrorKind> {
+        match self {
+            Self::Transport { source } => Some(classify_transport_error(&**source)),
+            Self::InvalidTarget | Self::Timeout | Self::Cancelled | Self::ResponseBodyTooLarge => {
+                None
+            }
+        }
+    }
+
     #[must_use]
     pub fn diagnostic_reason(&self) -> &'static str {
         match self {
             Self::InvalidTarget => "target is invalid",
             Self::Timeout => "operation timed out",
             Self::Cancelled => "operation was cancelled",
-            Self::DispatchRefused => "dispatch was refused",
             Self::ResponseBodyTooLarge => "response body is too large",
-            Self::Transport { source } => describe_transport_error(&**source).diagnostic,
+            Self::Transport { source } => classify_transport_error(&**source).diagnostic(),
         }
     }
 }
@@ -36,15 +66,23 @@ impl Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrlTemplate(pub &'static str);
 
+impl UrlTemplate {
+    #[must_use]
+    pub fn attach<B>(self, mut request: Request<B>) -> Request<B> {
+        request.extensions_mut().insert(self);
+        request
+    }
+}
+
 #[derive(Clone, Debug)]
-pub(crate) struct Server {
+pub(crate) struct ServerAttributes {
     address: SharedString,
     port: u16,
     port_label: SharedString,
 }
 
-impl Server {
-    pub(crate) fn new(origin: &Origin) -> Self {
+impl ServerAttributes {
+    pub(crate) fn new(origin: &TargetOrigin) -> Self {
         let port = origin.port();
         let mut buffer = fmt::NumBuffer::new();
         Self {
@@ -67,10 +105,11 @@ impl Outcome {
         match error {
             Error::Cancelled => Self::Cancelled,
             Error::InvalidTarget => Self::Failed("invalid_target"),
-            Error::DispatchRefused => Self::Failed("dispatch_refused"),
             Error::Timeout => Self::Failed("timeout"),
             Error::ResponseBodyTooLarge => Self::Failed("response_body_too_large"),
-            Error::Transport { source } => Self::Failed(describe_transport_error(&**source).label),
+            Error::Transport { source } => {
+                Self::Failed(classify_transport_error(&**source).label())
+            }
         }
     }
 
@@ -83,85 +122,23 @@ impl Outcome {
     }
 }
 
-pub(crate) struct Attempt<'a> {
+struct AttemptInner<'a> {
     started: Instant,
-    method: &'static str,
+    method: HttpMethod,
     template: Option<&'static str>,
-    server: &'a Server,
+    server_attributes: &'a ServerAttributes,
+    context: &'a OperationContext,
     status: Option<StatusCode>,
     span: Span,
 }
 
-impl<'a> Attempt<'a> {
-    pub(crate) fn start(
-        method: &Method,
-        template: Option<UrlTemplate>,
-        server: &'a Server,
-        context: &'a RequestContext,
-    ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
-        let method = request_method(method.as_str());
-        let template = template.map(|UrlTemplate(template)| template);
-        let span = tracing::info_span!(
-            "outbound_http",
-            otel.name = %span_name(method, template),
-            otel.kind = "client",
-            http.request.method = method,
-            url.template = template,
-            server.address = &*server.address,
-            server.port = server.port,
-            http.response.status_code = tracing::field::Empty,
-            error.type = tracing::field::Empty,
-            outbound.outcome = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-        );
-        std::mem::DropGuard::new(
-            Self {
-                started: Instant::now(),
-                method,
-                template,
-                server,
-                status: None,
-                span,
-            },
-            move |attempt| {
-                let outcome = match context.check() {
-                    Ok(()) => Outcome::Cancelled,
-                    Err(reason) => Outcome::from_error(&Error::from(reason)),
-                };
-                attempt.emit(outcome);
-            },
-        )
-    }
-
-    pub(crate) fn span(&self) -> Span {
-        self.span.clone()
-    }
-
-    pub(crate) fn inject_trace_context(&self, headers: &mut HeaderMap) {
-        tracing_opentelemetry_instrumentation_sdk::http::inject_context(
-            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&self.span),
-            headers,
-        );
-    }
-
-    pub(crate) fn record_status(&mut self, status: StatusCode) {
-        self.status = Some(status);
-    }
-
-    pub(crate) fn status(&self) -> Option<StatusCode> {
-        self.status
-    }
-
-    pub(crate) fn finish(self, error: Option<&Error>) {
-        self.emit(error.map_or(Outcome::Response, Outcome::from_error));
-        if let Some(Error::Transport { source }) = error {
-            self.span.in_scope(|| {
-                tracing::warn!(
-                    error = %DisplayErrorChain(&**source),
-                    "outbound_http_transport_failed"
-                );
-            });
-        }
+impl AttemptInner<'_> {
+    fn abandon(self) {
+        let outcome = match self.context.check() {
+            Ok(()) => Outcome::Cancelled,
+            Err(stopped) => Outcome::from_error(&Error::from(stopped)),
+        };
+        self.emit(outcome);
     }
 
     fn emit(&self, outcome: Outcome) {
@@ -178,7 +155,6 @@ impl<'a> Attempt<'a> {
             outbound.outcome = outcome.as_str(),
             otel.status_code = error_type.is_some().then_some("ERROR"),
         );
-        describe_histogram();
         metrics::histogram!(
             REQUEST_DURATION_METRIC,
             self.labels(outcome, status_label, error_type)
@@ -192,48 +168,111 @@ impl<'a> Attempt<'a> {
         status_label: Option<&'static str>,
         error_type: Option<&'static str>,
     ) -> Vec<Label> {
-        let mut labels = Vec::with_capacity(
-            4 + usize::from(self.template.is_some())
-                + usize::from(status_label.is_some())
-                + usize::from(error_type.is_some()),
-        );
-        labels.extend([
-            Label::new("http.request.method", self.method),
-            Label::new("server.address", self.server.address.clone()),
-            Label::new("server.port", self.server.port_label.clone()),
+        [
+            Label::new("http.request.method", self.method.as_str()),
+            Label::new("server.address", self.server_attributes.address.clone()),
+            Label::new("server.port", self.server_attributes.port_label.clone()),
             Label::new("outbound.outcome", outcome.as_str()),
-        ]);
-        if let Some(template) = self.template {
-            labels.push(Label::new("url.template", template));
-        }
-        if let Some(status_label) = status_label {
-            labels.push(Label::new("http.response.status_code", status_label));
-        }
-        if let Some(error_type) = error_type {
-            labels.push(Label::new("error.type", error_type));
-        }
-        labels
+        ]
+        .into_iter()
+        .chain(
+            self.template
+                .map(|template| Label::new("url.template", template)),
+        )
+        .chain(status_label.map(|label| Label::new("http.response.status_code", label)))
+        .chain(error_type.map(|error_type| Label::new("error.type", error_type)))
+        .collect()
     }
 }
 
-fn describe_histogram() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        metrics::describe_histogram!(
-            REQUEST_DURATION_METRIC,
-            Unit::Seconds,
-            "Outbound HTTP attempt duration in seconds"
+pub(crate) struct Attempt<'a>(DropGuard<AttemptInner<'a>, fn(AttemptInner<'a>)>);
+
+impl<'a> Attempt<'a> {
+    pub(crate) fn start(
+        method: &Method,
+        template: Option<UrlTemplate>,
+        server_attributes: &'a ServerAttributes,
+        context: &'a OperationContext,
+    ) -> Self {
+        let method = HttpMethod::parse(method.as_str());
+        let template = template.map(|UrlTemplate(template)| template);
+        let span = tracing::info_span!(
+            "outbound_http",
+            otel.name = %span_name(method, template),
+            otel.kind = "client",
+            http.request.method = method.as_str(),
+            url.template = template,
+            server.address = &*server_attributes.address,
+            server.port = server_attributes.port,
+            http.response.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            outbound.outcome = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
         );
-    });
+        Self(DropGuard::new(
+            AttemptInner {
+                started: Instant::now(),
+                method,
+                template,
+                server_attributes,
+                context,
+                status: None,
+                span,
+            },
+            AttemptInner::abandon,
+        ))
+    }
+
+    pub(crate) fn span(&self) -> Span {
+        self.0.span.clone()
+    }
+
+    pub(crate) fn inject_trace_context(&self, headers: &mut HeaderMap) {
+        tracing_opentelemetry_instrumentation_sdk::http::inject_context(
+            &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&self.0.span),
+            headers,
+        );
+    }
+
+    pub(crate) fn record_status(&mut self, status: StatusCode) {
+        self.0.status = Some(status);
+    }
+
+    pub(crate) fn finish_response(self) {
+        DropGuard::dismiss(self.0).emit(Outcome::Response);
+    }
+
+    pub(crate) fn finish_error(self, error: &Error) -> Option<StatusCode> {
+        let inner = DropGuard::dismiss(self.0);
+        inner.emit(Outcome::from_error(error));
+        if let Error::Transport { source } = error {
+            inner.span.in_scope(|| {
+                tracing::warn!(
+                    error = %DisplayErrorChain(&**source),
+                    "outbound_http_transport_failed"
+                );
+            });
+        }
+        inner.status
+    }
+
+    pub(crate) fn finish_dispatch_refused(self) {
+        let inner = DropGuard::dismiss(self.0);
+        inner.emit(Outcome::Failed("dispatch_refused"));
+    }
 }
 
-fn span_name(method: &'static str, template: Option<&'static str>) -> impl fmt::Display {
+pub(crate) fn describe() {
+    metrics::describe_histogram!(
+        REQUEST_DURATION_METRIC,
+        Unit::Seconds,
+        "Outbound HTTP attempt duration in seconds"
+    );
+}
+
+fn span_name(method: HttpMethod, template: Option<&'static str>) -> impl fmt::Display {
     fmt::from_fn(move |formatter| {
-        formatter.write_str(if method == OTHER_METHOD {
-            "HTTP"
-        } else {
-            method
-        })?;
+        formatter.write_str(method.span_name_prefix())?;
         match template {
             Some(template) => write!(formatter, " {template}"),
             None => Ok(()),
@@ -249,39 +288,24 @@ fn status_label(status: StatusCode) -> &'static str {
     response_status_code(status.as_u16()).unwrap_or_default()
 }
 
-struct TransportErrorDescription {
-    label: &'static str,
-    diagnostic: &'static str,
-}
-
-fn describe_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorDescription {
+fn classify_transport_error(source: &(dyn StdError + 'static)) -> TransportErrorKind {
     let causes = || error_chain::causes(source);
-    if error_chain::contains::<rustls::Error>(source) {
-        TransportErrorDescription {
-            label: "tls",
-            diagnostic: "HTTP transport failed during the TLS exchange",
-        }
-    } else if causes()
-        .filter_map(<dyn StdError>::downcast_ref::<hyper_util::client::legacy::Error>)
-        .any(hyper_util::client::legacy::Error::is_connect)
-    {
-        TransportErrorDescription {
-            label: "connect",
-            diagnostic: "HTTP transport failed during connection setup",
-        }
-    } else if causes()
-        .filter_map(<dyn StdError>::downcast_ref::<hyper::Error>)
-        .any(hyper::Error::is_parse)
-    {
-        TransportErrorDescription {
-            label: "protocol",
-            diagnostic: "HTTP transport failed while parsing the response",
-        }
+    if causes().any(<dyn StdError>::is::<rustls::Error>) {
+        TransportErrorKind::Tls
+    } else if causes().any(|cause| {
+        cause
+            .downcast_ref::<hyper_util::client::legacy::Error>()
+            .is_some_and(hyper_util::client::legacy::Error::is_connect)
+    }) {
+        TransportErrorKind::Connect
+    } else if causes().any(|cause| {
+        cause
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_parse)
+    }) {
+        TransportErrorKind::Protocol
     } else {
-        TransportErrorDescription {
-            label: "transport",
-            diagnostic: "HTTP transport failed",
-        }
+        TransportErrorKind::Other
     }
 }
 

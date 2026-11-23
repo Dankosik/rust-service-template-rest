@@ -1,13 +1,14 @@
+use std::mem::DropGuard;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use enum_map::EnumMap;
-use metrics::{Histogram, Unit};
+use metrics::{Counter, Histogram, Unit};
 use operation_context::Stopped;
 use tracing::Span;
+use tracing::field::Field;
 
-use crate::error::{CommandError, CommandFailure, ErrorType};
-use crate::namespace::Operation;
+use crate::error::{ErrorType, FailureCause, MutationCommandError, MutationRefusal, ReadFailure};
 use crate::{Namespace, ServerEndpoint};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
@@ -25,75 +26,130 @@ pub(crate) const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total"
 pub(crate) const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
 const LOCAL_SIZE_REFUSALS_METRIC: &str = "cache_local_size_refusals_total";
 
+#[derive(Clone, Copy, enum_map::Enum)]
 pub(super) enum LocalSizeRefusal {
     Key,
     Value,
 }
 
 impl LocalSizeRefusal {
-    pub(super) fn record(self, namespace: Namespace) {
-        let reason = match self {
+    const fn label(self) -> &'static str {
+        match self {
             Self::Key => "key_too_large",
             Self::Value => "value_too_large",
-        };
-        metrics::counter!(
-            LOCAL_SIZE_REFUSALS_METRIC,
-            "cache" => namespace.as_str(),
-            "reason" => reason
-        )
-        .increment(1);
-    }
-}
-
-fn operation_label(operation: Operation) -> &'static str {
-    match operation {
-        Operation::Get => "get",
-        Operation::Set => "set",
-        Operation::Delete => "delete",
+        }
     }
 }
 
 #[derive(Clone, Copy, enum_map::Enum)]
-pub(crate) enum Outcome {
+pub(crate) enum Operation {
+    Get,
+    Set,
+    Delete,
+}
+
+impl Operation {
+    const fn db_operation_name(self) -> &'static str {
+        match self {
+            Self::Get => "MULTI",
+            Self::Set => "SET",
+            Self::Delete => "DEL",
+        }
+    }
+
+    const fn db_operation_batch_size(self) -> Option<i64> {
+        match self {
+            Self::Get => Some(2),
+            Self::Set | Self::Delete => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Set => "set",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
+pub(crate) enum SuccessOutcome {
     Hit,
     Miss,
     Ok,
+}
+
+impl SuccessOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Ok => "ok",
+        }
+    }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
+enum FailureOutcome {
+    Error(ErrorType),
+    ValueTooLarge,
+}
+
+impl FailureOutcome {
+    fn error_label(self) -> &'static str {
+        match self {
+            Self::Error(error_type) => error_type.label(),
+            Self::ValueTooLarge => "value_too_large",
+        }
+    }
+
+    const fn outcome_label(self) -> &'static str {
+        match self {
+            Self::Error(ErrorType::Timeout) => "timeout",
+            Self::Error(_) | Self::ValueTooLarge => "error",
+        }
+    }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
+enum Outcome {
+    Success(SuccessOutcome),
     Cancelled,
-    Failed(ErrorType),
+    Failed(FailureOutcome),
 }
 
 impl Outcome {
     fn error_label(self) -> Option<&'static str> {
         match self {
-            Self::Failed(error_type) => Some(error_type.label()),
-            Self::Hit | Self::Miss | Self::Ok | Self::Cancelled => None,
+            Self::Failed(failure) => Some(failure.error_label()),
+            Self::Success(_) | Self::Cancelled => None,
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Hit => "hit",
-            Self::Miss => "miss",
-            Self::Ok => "ok",
+            Self::Success(outcome) => outcome.label(),
             Self::Cancelled => "cancelled",
-            Self::Failed(ErrorType::Timeout) => "timeout",
-            Self::Failed(_) => "error",
+            Self::Failed(failure) => failure.outcome_label(),
         }
     }
 }
 
 #[derive(derive_more::Debug)]
-#[debug("NamespaceHistograms({:?}, ..)", self.namespace)]
-pub(crate) struct NamespaceHistograms {
+#[debug("NamespaceMetrics({:?}, ..)", self.namespace)]
+pub(crate) struct NamespaceMetrics {
     namespace: Namespace,
-    entries: EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>,
+    durations: EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>,
+    local_size_refusals: EnumMap<LocalSizeRefusal, OnceLock<Counter>>,
 }
 
-impl NamespaceHistograms {
+impl NamespaceMetrics {
     pub(crate) fn new(namespace: Namespace) -> Self {
         Self {
             namespace,
-            entries: EnumMap::default(),
+            durations: EnumMap::default(),
+            local_size_refusals: EnumMap::default(),
         }
     }
 
@@ -101,14 +157,26 @@ impl NamespaceHistograms {
         self.namespace
     }
 
+    pub(crate) fn record_size_refusal(&self, refusal: LocalSizeRefusal) {
+        self.local_size_refusals[refusal]
+            .get_or_init(|| {
+                metrics::counter!(
+                    LOCAL_SIZE_REFUSALS_METRIC,
+                    "cache" => self.namespace.as_str(),
+                    "reason" => refusal.label(),
+                )
+            })
+            .increment(1);
+    }
+
     fn histogram(&self, operation: Operation, outcome: Outcome) -> &Histogram {
-        self.entries[operation][outcome].get_or_init(|| {
+        self.durations[operation][outcome].get_or_init(|| {
             let namespace = self.namespace.as_str();
             if let Some(error_label) = outcome.error_label() {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
-                    "operation" => operation_label(operation),
+                    "operation" => operation.label(),
                     "outcome" => outcome.label(),
                     "error_type" => error_label,
                 )
@@ -116,7 +184,7 @@ impl NamespaceHistograms {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
-                    "operation" => operation_label(operation),
+                    "operation" => operation.label(),
                     "outcome" => outcome.label(),
                 )
             }
@@ -124,29 +192,72 @@ impl NamespaceHistograms {
     }
 }
 
-pub(crate) struct OperationGuard<'a> {
+struct SpanFields {
+    outcome: Field,
+    mutation_outcome: Field,
+    error_reason: Field,
+    error_type: Field,
+    status_code: Field,
+}
+
+impl SpanFields {
+    fn for_span(span: &Span) -> Option<&'static Self> {
+        static FIELDS: OnceLock<Option<SpanFields>> = OnceLock::new();
+        let metadata = span.metadata()?;
+        FIELDS
+            .get_or_init(|| {
+                let fields = metadata.fields();
+                Some(Self {
+                    outcome: fields.field("cache.outcome")?,
+                    mutation_outcome: fields.field("cache.mutation.outcome")?,
+                    error_reason: fields.field("cache.error.reason")?,
+                    error_type: fields.field("error.type")?,
+                    status_code: fields.field("otel.status_code")?,
+                })
+            })
+            .as_ref()
+    }
+}
+
+struct OperationInner<'a> {
     started: Instant,
-    histograms: &'a NamespaceHistograms,
+    metrics: &'a NamespaceMetrics,
     operation: Operation,
     span: Span,
-    finalized: bool,
 }
+
+impl OperationInner<'_> {
+    fn abandon(self) {
+        self.finish(Outcome::Cancelled);
+    }
+
+    fn finish(&self, outcome: Outcome) {
+        if let Some(fields) = SpanFields::for_span(&self.span) {
+            self.span.record(&fields.outcome, outcome.label());
+        }
+        self.metrics
+            .histogram(self.operation, outcome)
+            .record(self.started.elapsed());
+    }
+}
+
+pub(crate) struct OperationGuard<'a>(DropGuard<OperationInner<'a>, fn(OperationInner<'a>)>);
 
 impl<'a> OperationGuard<'a> {
     pub(crate) fn start(
-        histograms: &'a NamespaceHistograms,
+        metrics: &'a NamespaceMetrics,
         operation: Operation,
         server: &ServerEndpoint,
     ) -> Self {
         let span = tracing::info_span!(
             "cache",
-            otel.name = operation.redis_name(),
+            otel.name = operation.db_operation_name(),
             otel.kind = "client",
             db.system.name = "redis",
             db.namespace = %server.database_index,
-            db.operation.name = operation.redis_name(),
-            db.operation.batch.size = operation.redis_batch_size(),
-            cache.name = histograms.namespace().as_str(),
+            db.operation.name = operation.db_operation_name(),
+            db.operation.batch.size = operation.db_operation_batch_size(),
+            cache.name = metrics.namespace().as_str(),
             server.address = server.host.as_str(),
             server.port = server.port,
             cache.outcome = tracing::field::Empty,
@@ -155,73 +266,93 @@ impl<'a> OperationGuard<'a> {
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        Self {
-            started: Instant::now(),
-            histograms,
-            operation,
-            span,
-            finalized: false,
-        }
+        Self(DropGuard::new(
+            OperationInner {
+                started: Instant::now(),
+                metrics,
+                operation,
+                span,
+            },
+            OperationInner::abandon,
+        ))
     }
 
-    pub(crate) fn succeed(mut self, outcome: Outcome) {
-        self.finish(outcome);
+    pub(crate) fn succeed(self, outcome: SuccessOutcome) {
+        DropGuard::dismiss(self.0).finish(Outcome::Success(outcome));
     }
 
-    pub(crate) fn fail(mut self, error: CommandError) {
-        if matches!(self.operation, Operation::Set | Operation::Delete) {
-            let effect = match error {
-                CommandError::NotApplied(_) => "not_applied",
-                CommandError::OutcomeUnknown(_) => "outcome_unknown",
-            };
-            self.span.record("cache.mutation.outcome", effect);
-        }
-        match error.failure() {
-            CommandFailure::Stopped(Stopped::Cancelled) => self.finish(Outcome::Cancelled),
-            CommandFailure::Stopped(Stopped::Deadline) => {
-                self.record_error(ErrorType::Timeout, None);
-            }
-            CommandFailure::Failed(error) => self.record_error(error, None),
-            CommandFailure::PermissionDenied => {
+    pub(crate) fn fail_read(self, failure: ReadFailure) {
+        match failure {
+            ReadFailure::Cause(cause) => self.record_cause(cause),
+            ReadFailure::PermissionDenied => {
                 self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
             }
-            CommandFailure::InvalidTtl => self.record_error(ErrorType::ServerErrorReply, None),
+            ReadFailure::ValueTooLarge => {
+                self.record_failure(FailureOutcome::ValueTooLarge, None);
+            }
         }
     }
 
-    pub(crate) fn record_error(mut self, error_type: ErrorType, reason: Option<&'static str>) {
-        let label = error_type.label();
-        self.span.record("error.type", label);
-        if let Some(reason) = reason {
-            self.span.record("cache.error.reason", reason);
+    pub(crate) fn fail_mutation(self, error: MutationCommandError) {
+        let mutation_outcome = match error {
+            MutationCommandError::NotApplied(_) => "not_applied",
+            MutationCommandError::OutcomeUnknown(_) => "outcome_unknown",
+        };
+        if let Some(fields) = SpanFields::for_span(&self.0.span) {
+            self.0
+                .span
+                .record(&fields.mutation_outcome, mutation_outcome);
         }
-        self.span.record("otel.status_code", "ERROR");
-        self.finish(Outcome::Failed(error_type));
-        self.span.in_scope(|| {
+        match error {
+            MutationCommandError::OutcomeUnknown(cause)
+            | MutationCommandError::NotApplied(MutationRefusal::Cause(cause)) => {
+                self.record_cause(cause);
+            }
+            MutationCommandError::NotApplied(MutationRefusal::PermissionDenied) => {
+                self.record_error(ErrorType::ServerErrorReply, Some("permission_denied"));
+            }
+            MutationCommandError::NotApplied(MutationRefusal::InvalidTtl) => {
+                self.record_error(ErrorType::ServerErrorReply, None);
+            }
+        }
+    }
+
+    fn record_cause(self, cause: FailureCause) {
+        match cause {
+            FailureCause::Stopped(Stopped::Cancelled) => {
+                DropGuard::dismiss(self.0).finish(Outcome::Cancelled);
+            }
+            FailureCause::Stopped(Stopped::Deadline) => {
+                self.record_error(ErrorType::Timeout, None);
+            }
+            FailureCause::Failed(error) => self.record_error(error, None),
+        }
+    }
+
+    pub(crate) fn record_error(self, error_type: ErrorType, reason: Option<&'static str>) {
+        self.record_failure(FailureOutcome::Error(error_type), reason);
+    }
+
+    fn record_failure(self, failure: FailureOutcome, reason: Option<&'static str>) {
+        let label = failure.error_label();
+        let inner = DropGuard::dismiss(self.0);
+        if let Some(fields) = SpanFields::for_span(&inner.span) {
+            inner.span.record(&fields.error_type, label);
+            if let Some(reason) = reason {
+                inner.span.record(&fields.error_reason, reason);
+            }
+            inner.span.record(&fields.status_code, "ERROR");
+        }
+        inner.finish(Outcome::Failed(failure));
+        inner.span.in_scope(|| {
             tracing::debug!(
-                cache.name = self.histograms.namespace().as_str(),
-                cache.operation = operation_label(self.operation),
+                cache.name = inner.metrics.namespace().as_str(),
+                cache.operation = inner.operation.label(),
                 cache.error.reason = reason,
                 error.type = label,
                 "cache_operation_failed"
             );
         });
-    }
-
-    fn finish(&mut self, outcome: Outcome) {
-        self.finalized = true;
-        self.span.record("cache.outcome", outcome.label());
-        self.histograms
-            .histogram(self.operation, outcome)
-            .record(self.started.elapsed());
-    }
-}
-
-impl Drop for OperationGuard<'_> {
-    fn drop(&mut self) {
-        if !self.finalized {
-            self.finish(Outcome::Cancelled);
-        }
     }
 }
 

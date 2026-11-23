@@ -21,15 +21,13 @@ service-failure = { workspace = true }
 shared-rules = { workspace = true }
 infra-http-transport = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
-axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json"] }
+axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing"] }
 bytes = { workspace = true, features = ["std"] }
 derive-where = { workspace = true }
 mediatype = { workspace = true }
-pin-project-lite = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 # template:begin authn:http-authn-dependency
-delegate = { workspace = true }
 infra-bearerauthn = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin object-storage:http-object-storage-dependencies
@@ -64,24 +62,36 @@ tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["request-id", "set-header", "catch-panic"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
-tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["tracing_level_info"] }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http", "tracing_level_info"] }
 tracing-opentelemetry = { workspace = true }
 utoipa = { workspace = true, features = ["macros"] }
 utoipa-axum = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
+# template:begin http-idempotency:http-idempotency-test-dependencies
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end http-idempotency:http-idempotency-test-dependencies
 # template:begin grpc:http-tls-test-dependencies
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
-tls-test-support = { workspace = true }
 # template:end grpc:http-tls-test-dependencies
+# template:begin http-tls-fixtures:http-tls-fixtures-test-dependency
+tls-test-support = { workspace = true }
+# template:end http-tls-fixtures:http-tls-fixtures-test-dependency
+# template:begin oidc-introspection:http-introspection-test-dependencies
+infra-bearerauthn = { workspace = true, features = ["test-support"] }
+secrecy = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+# template:end oidc-introspection:http-introspection-test-dependencies
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "io-util", "test-util"] }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 metrics-util = { workspace = true, features = ["debugging"] }
+observe-test-support = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
 regex = { workspace = true, features = ["std"] }
 tracing-subscriber = { workspace = true, features = ["registry"] }

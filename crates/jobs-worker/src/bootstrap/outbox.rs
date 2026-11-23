@@ -1,29 +1,28 @@
 use std::num::NonZeroU32;
 
-use infra_jobs::Engine;
-use infra_messaging::MessagingError;
+use infra_jobs::{Engine, KindError};
+use infra_messaging::{MessagingError, OutboxProducer};
+use infra_postgres::Pool;
 
 use super::WorkerError;
 use super::messaging::RetainedMessages;
-use crate::resources::Resources;
 
 pub(super) fn with_publisher(
-    resources: &Resources,
+    pool: Option<&Pool>,
+    outbox: Option<OutboxProducer>,
     ordinary: Option<Engine>,
 ) -> Result<Engine, WorkerError> {
-    let messaging = resources
-        .admitted_messaging()
-        .ok_or(MessagingError::Connection)?;
-    let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer()?)?;
+    let outbox = outbox.ok_or(MessagingError::Connection)?;
+    let kinds = infra_messaging::outbox::kinds(outbox)?;
     match ordinary {
         Some(mut engine) => {
             engine
                 .add_group(kinds, NonZeroU32::MIN)
-                .map_err(|_| WorkerError::PublisherKindConflict)?;
+                .map_err(|duplicate| KindError::Duplicate(duplicate.kind))?;
             Ok(engine)
         }
         None => Ok(Engine::new(
-            super::postgres::admitted_pool(resources)?,
+            pool.cloned().ok_or(WorkerError::PostgresDisabled)?,
             kinds,
             NonZeroU32::MIN,
         )),
@@ -33,10 +32,10 @@ pub(super) fn with_publisher(
 impl RetainedMessages {
     pub(super) fn register_postgres_messages(
         &mut self,
-        resources: &Resources,
+        pool: Option<&Pool>,
     ) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
-            let pool = super::postgres::admitted_pool(resources)?;
+            let pool = pool.cloned().ok_or(WorkerError::PostgresDisabled)?;
             factory(pool, &mut self.registry)?;
             self.registry.require_handlers()?;
         }
@@ -50,20 +49,19 @@ mod tests {
     use crate::background::Background;
     use crate::bootstrap::WorkerError;
     use crate::bootstrap::messaging::RetainedMessages;
-    use crate::resources::{PoolResource, Resources};
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
         let config =
-            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+            service_config::test_support::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
-        let background = Background::new();
+        let mut background = Background::new();
         let result = crate::bootstrap::register_capabilities(
             &config,
             Box::new(|registration| {
                 registration.with_postgres_messages(|_, _| panic!("must not run before admission"))
             }),
-            &background,
+            &mut background,
         );
         assert!(matches!(result, Err(WorkerError::Config(_))));
     }
@@ -71,10 +69,10 @@ mod tests {
     #[tokio::test]
     async fn postgres_message_factory_is_single_and_an_empty_consumer_refuses() {
         let config =
-            service_config::fixtures::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
+            service_config::test_support::worker(&[], crate::BUILD_INFO, crate::shutdown::TAIL)
                 .unwrap();
-        let background = Background::new();
-        let mut registration = crate::Registration::new(&config, &background);
+        let mut background = Background::new();
+        let mut registration = crate::Registration::new(&config, &mut background);
         let (handed, received) = tokio::sync::oneshot::channel();
         registration
             .with_postgres_messages(move |pool, _| {
@@ -83,39 +81,26 @@ mod tests {
             })
             .unwrap();
         assert!(registration.with_postgres_messages(|_, _| Ok(())).is_err());
-        let dsn =
-            infra_postgres::Dsn::admit("postgres://test:test@127.0.0.1:1/test?sslmode=verify-full")
-                .unwrap();
-        let pool = infra_postgres::prepare_pool(
-            &dsn,
-            &infra_postgres::PoolOptions {
-                max_connections: std::num::NonZeroU32::MIN,
-                application_name: "factory-composition-test",
-                default_isolation: infra_postgres::Isolation::ReadCommitted,
-                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
-                wait_order: infra_postgres::WaitOrder::Arrival,
-            },
-        );
-        let resources = Resources {
-            pool: Some(PoolResource::Admitted(pool.clone())),
-            ..Resources::default()
-        };
+        let pool = infra_postgres::test_support::connect_lazy(
+            "postgres://test:test@127.0.0.1:1/test?sslmode=verify-full",
+        )
+        .unwrap();
         let mut messages = RetainedMessages {
             registry: registration.messages,
             postgres_messages: registration.postgres_messages,
         };
         std::assert_matches!(
-            messages.register_postgres_messages(&resources),
+            messages.register_postgres_messages(Some(&pool)),
             Err(WorkerError::MessagingRegistry(
                 infra_messaging::RegistryError::Empty
             ))
         );
         let received = received.await.unwrap();
-        pool.close().await;
+        let _ = pool.close(std::time::Duration::from_secs(1)).await;
         assert!(
             received.is_closed(),
             "factory uses the retained native pool"
         );
-        messages.register_postgres_messages(&resources).unwrap();
+        messages.register_postgres_messages(Some(&pool)).unwrap();
     }
 }

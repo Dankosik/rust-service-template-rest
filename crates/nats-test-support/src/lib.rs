@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 pub async fn eventually<T>(
     budget: Duration,
-    what: &str,
+    diagnostic: &str,
     mut probe: impl AsyncFnMut() -> Option<T>,
 ) -> T {
     timeout(budget, async {
@@ -25,7 +25,7 @@ pub async fn eventually<T>(
         }
     })
     .await
-    .expect(what)
+    .expect(diagnostic)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,36 +67,13 @@ impl AuthObservingRelay {
         let close_first = CancellationToken::new();
         let stop = CancellationToken::new();
         let observations = watch::Sender::<AuthObservations>::default();
-        let observations_for_task = observations.clone();
-        let close_for_task = close_first.clone();
-        let stop_for_task = stop.clone();
-        let task = tokio::spawn(async move {
-            let never_close = CancellationToken::new();
-            let mut first = true;
-            loop {
-                let accepted = tokio::select! {
-                    () = stop_for_task.cancelled() => break,
-                    accepted = listener.accept() => accepted,
-                };
-                let (client, _) = accepted.expect("authentication relay accepts client");
-                let broker = TcpStream::connect(&target)
-                    .await
-                    .expect("authentication relay reaches broker");
-                let close = if first { &close_for_task } else { &never_close };
-                relay_authenticated_connection(
-                    client,
-                    broker,
-                    &stop_for_task,
-                    close,
-                    &observations_for_task,
-                )
-                .await;
-                if first {
-                    observations_for_task.send_modify(|state| state.first_closed = true);
-                    first = false;
-                }
-            }
-        });
+        let task = tokio::spawn(accept_authenticated_clients(
+            listener,
+            target,
+            stop.clone(),
+            close_first.clone(),
+            observations.clone(),
+        ));
         Self {
             url: format!("nats://{address}"),
             close_first,
@@ -136,12 +113,12 @@ impl AuthObservingRelay {
 
     async fn wait_for(
         &self,
-        bound: Duration,
+        budget: Duration,
         predicate: impl FnMut(&AuthObservations) -> bool,
         diagnostic: &'static str,
     ) {
         let mut updates = self.observations.subscribe();
-        timeout(bound, updates.wait_for(predicate))
+        timeout(budget, updates.wait_for(predicate))
             .await
             .expect(diagnostic)
             .expect("relay holds the observation sender");
@@ -161,6 +138,39 @@ impl AuthObservingRelay {
     }
 }
 
+async fn accept_authenticated_clients(
+    listener: TcpListener,
+    target: String,
+    stop: CancellationToken,
+    close_first: CancellationToken,
+    observations: watch::Sender<AuthObservations>,
+) {
+    let never_close = CancellationToken::new();
+    let mut close_first = Some(close_first);
+    loop {
+        let accepted = tokio::select! {
+            () = stop.cancelled() => break,
+            accepted = listener.accept() => accepted,
+        };
+        let (client, _) = accepted.expect("authentication relay accepts client");
+        let broker = TcpStream::connect(&target)
+            .await
+            .expect("authentication relay reaches broker");
+        let first_close = close_first.take();
+        relay_authenticated_connection(
+            client,
+            broker,
+            &stop,
+            first_close.as_ref().unwrap_or(&never_close),
+            &observations,
+        )
+        .await;
+        if first_close.is_some() {
+            observations.send_modify(|state| state.first_closed = true);
+        }
+    }
+}
+
 enum ReplyAckState {
     WaitingForRequest,
     WaitingForReply(String),
@@ -174,26 +184,26 @@ impl ReplyAckState {
         }
     }
 
-    fn should_drop_reply(&mut self, header: &PayloadHeader<'_>, payload: &[u8]) -> bool {
-        let matched = matches!(
+    fn consume_awaited_reply(&mut self, header: &PayloadHeader<'_>, payload: &[u8]) -> bool {
+        let consumed = matches!(
             self,
             Self::WaitingForReply(expected)
                 if payload.is_empty() && header.subject == expected
         );
-        if matched {
+        if consumed {
             *self = Self::Dropped;
         }
-        matched
+        consumed
     }
 }
 
 impl AckDroppingRelay {
     pub async fn start(stream: &str) -> Self {
         let stream = stream.to_owned();
-        let mut dropped = false;
+        let mut ack_dropped = false;
         Self::start_filtering(move |payload| {
-            if !dropped && is_stream_publish_ack(payload, &stream) {
-                dropped = true;
+            if !ack_dropped && is_stream_publish_ack(payload, &stream) {
+                ack_dropped = true;
                 true
             } else {
                 false
@@ -237,20 +247,21 @@ impl AckDroppingRelay {
         (relay, pull_rx)
     }
 
-    pub async fn start_source_ack(stream: &str, durable: &str, dropped: DroppedAck) -> Self {
+    pub async fn start_source_ack(stream: &str, durable: &str, ack_to_drop: DroppedAck) -> Self {
         let stream_durable_segment = format!(".{stream}.{durable}.");
-        match dropped {
+        match ack_to_drop {
             DroppedAck::Request => {
-                let mut dropped_request = false;
+                let mut request_dropped = false;
                 Self::start_withholding(
                     move |header, payload| {
-                        if !dropped_request
+                        if !request_dropped
                             && source_ack_reply(header, payload, &stream_durable_segment).is_some()
                         {
-                            dropped_request = true;
-                            return true;
+                            request_dropped = true;
+                            true
+                        } else {
+                            false
                         }
-                        false
                     },
                     |_, _| false,
                 )
@@ -275,7 +286,7 @@ impl AckDroppingRelay {
                         state
                             .lock()
                             .expect("ACK reply lock")
-                            .should_drop_reply(header, payload)
+                            .consume_awaited_reply(header, payload)
                     },
                 )
                 .await
@@ -293,21 +304,23 @@ impl AckDroppingRelay {
         let address = listener.local_addr().expect("relay address");
         let target = relay_target(&std::env::var("NATS_URL").expect("NATS_URL"));
         let dropped_ack = CancellationToken::new();
-        let dropped = dropped_ack.clone();
-        let task = tokio::spawn(async move {
-            let (client, _) = listener.accept().await.expect("relay client");
-            let broker = TcpStream::connect(target).await.expect("relay broker");
-            let (client_read, client_write) = client.into_split();
-            let (broker_read, broker_write) = broker.into_split();
-            let requests = relay_frames(client_read, broker_write, |frame| {
-                decide_frame_action(frame, &dropped, &mut withhold_to_broker)
-            });
-            let replies = relay_frames(broker_read, client_write, |frame| {
-                decide_frame_action(frame, &dropped, &mut withhold_to_client)
-            });
-            tokio::select! {
-                result = requests => result.expect("relay requests"),
-                result = replies => result.expect("relay replies"),
+        let task = tokio::spawn({
+            let dropped_ack = dropped_ack.clone();
+            async move {
+                let (client, _) = listener.accept().await.expect("relay client");
+                let broker = TcpStream::connect(target).await.expect("relay broker");
+                let (client_read, client_write) = client.into_split();
+                let (broker_read, broker_write) = broker.into_split();
+                let requests = relay_frames(client_read, broker_write, |frame| {
+                    decide_frame_action(frame, &dropped_ack, &mut withhold_to_broker)
+                });
+                let replies = relay_frames(broker_read, client_write, |frame| {
+                    decide_frame_action(frame, &dropped_ack, &mut withhold_to_client)
+                });
+                tokio::select! {
+                    result = requests => result.expect("relay requests"),
+                    result = replies => result.expect("relay replies"),
+                }
             }
         });
         Self {
@@ -341,6 +354,7 @@ pub fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
         .is_ok_and(|reply| reply["stream"] == stream && reply["seq"].is_u64())
 }
 
+#[track_caller]
 #[must_use]
 pub fn relay_target(url: &str) -> String {
     let after_scheme = url
@@ -373,13 +387,13 @@ enum RelayFrame<'a> {
 
 fn decide_frame_action(
     frame: RelayFrame<'_>,
-    dropped: &CancellationToken,
+    dropped_ack: &CancellationToken,
     withhold: &mut impl FnMut(&PayloadHeader<'_>, &[u8]) -> bool,
 ) -> FrameAction {
     if let RelayFrame::Payload { header, payload } = frame
         && withhold(header, payload)
     {
-        dropped.cancel();
+        dropped_ack.cancel();
         FrameAction::Drop
     } else {
         FrameAction::Forward
@@ -545,17 +559,15 @@ fn parse_payload_header(line: &[u8]) -> Option<PayloadHeader<'_>> {
         _ => return None,
     };
     let subject = fields.next()?;
-    let rest = std::array::from_fn::<_, 5, _>(|_| fields.next());
-    let (reply, length) = match (verb, rest) {
-        (PayloadVerb::Pub, [Some(length), None, ..])
-        | (PayloadVerb::Hpub | PayloadVerb::Msg, [Some(_), Some(length), None, ..])
-        | (PayloadVerb::Hmsg, [Some(_), Some(_), Some(length), None, ..]) => (None, length),
-        (PayloadVerb::Pub, [Some(reply), Some(length), None, ..])
-        | (PayloadVerb::Hpub, [Some(reply), Some(_), Some(length), None, ..])
-        | (PayloadVerb::Msg, [Some(_), Some(reply), Some(length), None, ..])
-        | (PayloadVerb::Hmsg, [Some(_), Some(reply), Some(_), Some(length), None]) => {
-            (Some(reply), length)
-        }
+    let rest: Vec<&str> = fields.collect();
+    let (reply, length) = match (verb, rest.as_slice()) {
+        (PayloadVerb::Pub, &[length])
+        | (PayloadVerb::Hpub | PayloadVerb::Msg, &[_, length])
+        | (PayloadVerb::Hmsg, &[_, _, length]) => (None, length),
+        (PayloadVerb::Pub, &[reply, length])
+        | (PayloadVerb::Hpub, &[reply, _, length])
+        | (PayloadVerb::Msg, &[_, reply, length])
+        | (PayloadVerb::Hmsg, &[_, reply, _, length]) => (Some(reply), length),
         _ => return None,
     };
     Some(PayloadHeader {

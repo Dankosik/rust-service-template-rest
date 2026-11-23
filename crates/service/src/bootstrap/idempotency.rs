@@ -1,6 +1,6 @@
 use super::background::Background;
 use infra_idempotency_store::Store;
-use infra_postgres::PgPool;
+use infra_postgres::Pool;
 use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 
 use super::BootstrapError;
@@ -15,16 +15,16 @@ pub(super) struct PreparedStore {
 pub(super) fn prepare(
     operation_count: usize,
     config: &Config,
-    postgres_pool: Option<&PgPool>,
+    postgres_pool: Option<&Pool>,
 ) -> Result<Option<PreparedStore>, BootstrapError> {
     let Some(operations) = std::num::NonZeroUsize::new(operation_count) else {
         return Ok(None);
     };
     let retention = config
-        .http_idempotency
-        .required_retention(config.postgres.is_some())?;
+        .http_idempotency()
+        .required_retention(config.postgres().is_some())?;
     let pool = postgres_pool.ok_or(infra_idempotency_store::StartupError::Unavailable)?;
-    let store = Store::new(pool.clone(), retention).map_err(|error| {
+    let store = Store::try_new(pool.clone(), retention).map_err(|error| {
         ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
     })?;
     Ok(Some(PreparedStore {

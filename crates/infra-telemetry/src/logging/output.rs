@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::metrics::static_counter_key;
-
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 const QUEUE_RECORDS: usize = 512;
 const DEEP_QUEUE_RECORDS: usize = QUEUE_RECORDS / 4;
@@ -19,20 +17,22 @@ const JOIN_POLL: Duration = Duration::from_millis(1);
 const DRAINING_BIT: u32 = 1 << 31;
 const DROPPED_METRIC: &str = "telemetry_log_records_dropped_total";
 const SINK_ERRORS_METRIC: &str = "telemetry_log_sink_errors_total";
+static METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 static TOTALS: Counters = Counters::new();
 
 thread_local! {
-    static WRITER_CONTEXT: Cell<bool> = const { Cell::new(false) };
+    static ON_WRITER_THREAD: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(super) fn on_writer_thread() -> bool {
-    WRITER_CONTEXT.try_with(Cell::get).unwrap_or(false)
+    ON_WRITER_THREAD.try_with(Cell::get).unwrap_or(false)
 }
 
 pub(super) type Record = Vec<u8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-pub enum DropReason {
+pub(super) enum DropReason {
     QueueFull,
     Oversize,
     SpanCapacity,
@@ -44,18 +44,28 @@ pub enum DropReason {
 impl DropReason {
     fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::QueueFull => static_counter_key!(DROPPED_METRIC, "reason" => "queue_full"),
-            Self::Oversize => static_counter_key!(DROPPED_METRIC, "reason" => "oversize"),
-            Self::SpanCapacity => static_counter_key!(DROPPED_METRIC, "reason" => "span_capacity"),
-            Self::Busy => static_counter_key!(DROPPED_METRIC, "reason" => "busy"),
-            Self::Reentrant => static_counter_key!(DROPPED_METRIC, "reason" => "reentrant"),
-            Self::Closed => static_counter_key!(DROPPED_METRIC, "reason" => "closed"),
+            Self::QueueFull => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "queue_full"))
+            }
+            Self::Oversize => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "oversize"))
+            }
+            Self::SpanCapacity => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "span_capacity"))
+            }
+            Self::Busy => crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "busy")),
+            Self::Reentrant => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "reentrant"))
+            }
+            Self::Closed => {
+                crate::metrics::static_metric_key!(DROPPED_METRIC, ("reason", "closed"))
+            }
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-pub enum SinkOperation {
+enum SinkOperation {
     Write,
     Flush,
     Worker,
@@ -64,27 +74,32 @@ pub enum SinkOperation {
 impl SinkOperation {
     fn metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::Write => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "write"),
-            Self::Flush => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "flush"),
-            Self::Worker => static_counter_key!(SINK_ERRORS_METRIC, "operation" => "worker"),
+            Self::Write => {
+                crate::metrics::static_metric_key!(SINK_ERRORS_METRIC, ("operation", "write"))
+            }
+            Self::Flush => {
+                crate::metrics::static_metric_key!(SINK_ERRORS_METRIC, ("operation", "flush"))
+            }
+            Self::Worker => {
+                crate::metrics::static_metric_key!(SINK_ERRORS_METRIC, ("operation", "worker"))
+            }
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LogSnapshot {
+pub(super) struct LogSnapshot {
     pub(super) dropped: EnumMap<DropReason, u64>,
     sink_errors: EnumMap<SinkOperation, u64>,
 }
 
+#[cfg(test)]
 impl LogSnapshot {
-    #[must_use]
-    pub fn dropped(&self, reason: DropReason) -> u64 {
+    pub(super) fn dropped(&self, reason: DropReason) -> u64 {
         self.dropped[reason]
     }
 
-    #[must_use]
-    pub fn sink_errors(&self, operation: SinkOperation) -> u64 {
+    fn sink_errors(&self, operation: SinkOperation) -> u64 {
         self.sink_errors[operation]
     }
 }
@@ -102,13 +117,11 @@ bitflags::bitflags! {
 
 const _: () = assert!(LoggerShutdownReasons::all().bits() & DRAINING_BIT == 0);
 
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoggerShutdown {
-    Completed(LogSnapshot),
-    Incomplete {
-        reasons: LoggerShutdownReasons,
-        snapshot: LogSnapshot,
-    },
+    Completed,
+    Incomplete(LoggerShutdownReasons),
 }
 
 #[derive(Debug)]
@@ -141,6 +154,7 @@ impl Counters {
 struct Shared {
     shutdown_gate: RwLock<Option<crossbeam_channel::Sender<()>>>,
     drain_state: AtomicU32,
+    #[cfg(test)]
     counters: Counters,
 }
 
@@ -158,6 +172,7 @@ impl Shared {
     }
 
     fn record_sink_error(&self, operation: SinkOperation) {
+        #[cfg(test)]
         self.counters.sink_errors[operation].fetch_add(1, Ordering::Relaxed);
         TOTALS.sink_errors[operation].fetch_add(1, Ordering::Relaxed);
         match operation {
@@ -181,23 +196,28 @@ pub(super) struct Output {
 impl Output {
     pub(super) fn submit(&self, record: Record) {
         let gate = self.shared.shutdown_gate.read();
-        match gate.is_some().then(|| self.sender.try_send(record)) {
-            Some(Ok(())) => {
+        if gate.is_none() {
+            self.record_drop(DropReason::Closed);
+            return;
+        }
+        match self.sender.try_send(record) {
+            Ok(()) => {
                 drop(gate);
                 if self.sender.len() >= DEEP_QUEUE_RECORDS {
                     self.worker_thread.unpark();
                 }
             }
-            Some(Err(crossbeam_channel::TrySendError::Full(_))) => {
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
                 self.record_drop(DropReason::QueueFull);
             }
-            None | Some(Err(crossbeam_channel::TrySendError::Disconnected(_))) => {
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
                 self.record_drop(DropReason::Closed);
             }
         }
     }
 
     pub(super) fn record_drop(&self, reason: DropReason) {
+        #[cfg(test)]
         self.shared.counters.dropped[reason].fetch_add(1, Ordering::Relaxed);
         TOTALS.dropped[reason].fetch_add(1, Ordering::Relaxed);
         self.shared
@@ -220,12 +240,11 @@ impl LoggerGuard {
             .fetch_or(DRAINING_BIT, Ordering::Relaxed);
     }
 
-    #[must_use]
-    pub fn snapshot(&self) -> LogSnapshot {
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> LogSnapshot {
         self.shared.counters.snapshot()
     }
 
-    #[must_use]
     pub fn shutdown(mut self, deadline: Instant) -> LoggerShutdown {
         self.begin_shutdown();
         self.shared.close();
@@ -236,12 +255,27 @@ impl LoggerGuard {
         reasons |= LoggerShutdownReasons::from_bits_truncate(
             self.shared.drain_state.load(Ordering::Relaxed),
         );
-        let snapshot = self.snapshot();
         if reasons.is_empty() {
-            LoggerShutdown::Completed(snapshot)
+            LoggerShutdown::Completed
         } else {
-            LoggerShutdown::Incomplete { reasons, snapshot }
+            LoggerShutdown::Incomplete(reasons)
         }
+    }
+
+    pub async fn shutdown_async(self, deadline: tokio::time::Instant) -> LoggerShutdown {
+        let close = tokio::task::spawn_blocking(move || self.shutdown(deadline.into_std()));
+        match tokio::time::timeout_at(deadline, close).await {
+            Ok(Ok(shutdown)) => shutdown,
+            Ok(Err(_)) => LoggerShutdown::Incomplete(LoggerShutdownReasons::WORKER),
+            Err(_) => LoggerShutdown::Incomplete(LoggerShutdownReasons::DEADLINE),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn shutdown_with_snapshot(self, deadline: Instant) -> (LoggerShutdown, LogSnapshot) {
+        let shared = Arc::clone(&self.shared);
+        let outcome = self.shutdown(deadline);
+        (outcome, shared.counters.snapshot())
     }
 
     fn wait_for_worker(&mut self, deadline: Instant) -> LoggerShutdownReasons {
@@ -290,6 +324,7 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
     let shared = Arc::new(Shared {
         shutdown_gate: RwLock::new(Some(shutdown_tx)),
         drain_state: AtomicU32::new(0),
+        #[cfg(test)]
         counters: Counters::new(),
     });
     let (records_tx, records_rx) = crossbeam_channel::bounded(QUEUE_RECORDS);
@@ -298,15 +333,15 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
     let worker = thread::Builder::new()
         .name("telemetry-writer".into())
         .spawn(move || {
-            WRITER_CONTEXT.set(true);
+            ON_WRITER_THREAD.set(true);
             let shared: &Shared = &worker_shared;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 write_records(writer, records_rx, &shutdown_rx, shared);
-            }));
-            if result.is_err() {
+            }))
+            .is_err()
+            {
                 worker_shared.record_sink_error(SinkOperation::Worker);
             }
-            drop(result);
             let _ = completion_tx.try_send(());
         })?;
     Ok((
@@ -368,54 +403,47 @@ fn write_records<W: Write>(
     shutdown: &crossbeam_channel::Receiver<()>,
     shared: &Shared,
 ) {
-    let mut dirty = false;
+    let mut unflushed = false;
     let mut batch = Batch::default();
     let mut carried: Option<Record> = None;
     let mut last_write: Option<Instant> = None;
     loop {
-        let first = if let Some(record) = carried.take() {
-            record
-        } else {
-            let record = match wait_for_record(&records, shutdown, dirty.then_some(FLUSH_INTERVAL))
-            {
-                NextRecord::Record(record) => record,
-                NextRecord::Flush => {
-                    flush_sink(&mut writer, shared);
-                    dirty = false;
-                    continue;
+        let first = match carried.take() {
+            Some(record) => record,
+            None => {
+                match wait_for_record(&records, shutdown, unflushed.then_some(FLUSH_INTERVAL)) {
+                    NextRecord::Record(record) => {
+                        if last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
+                            wait_for_backlog(&records, BATCH_WINDOW);
+                        }
+                        record
+                    }
+                    NextRecord::Flush => {
+                        flush_sink(&mut writer, shared);
+                        unflushed = false;
+                        continue;
+                    }
+                    NextRecord::Closed => break,
                 }
-                NextRecord::Closed => break,
-            };
-            if last_write.is_some_and(|at| at.elapsed() < BATCH_WINDOW) {
-                gather(&records, BATCH_WINDOW);
             }
-            record
         };
-        batch.clear();
-        batch.push(&first);
-        while let Ok(record) = records.try_recv() {
-            if !batch.fits(record.len()) {
-                carried = Some(record);
-                break;
-            }
-            batch.push(&record);
-        }
+        carried = batch.refill(&first, &records);
         batch.write(&mut writer, shared);
         last_write = Some(Instant::now());
-        dirty = true;
+        unflushed = true;
     }
     flush_sink(&mut writer, shared);
     drop(records);
 }
 
-fn gather(records: &crossbeam_channel::Receiver<Record>, window: Duration) {
-    let until = Instant::now() + window;
+fn wait_for_backlog(records: &crossbeam_channel::Receiver<Record>, window: Duration) {
+    let window_end = Instant::now() + window;
     while records.len() < DEEP_QUEUE_RECORDS {
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
+        let remaining = window_end.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             break;
         }
-        thread::park_timeout(left);
+        thread::park_timeout(remaining);
     }
 }
 
@@ -434,6 +462,22 @@ impl Batch {
 
     fn fits(&self, record_bytes: usize) -> bool {
         self.bytes.len() + record_bytes <= MAX_BATCH_BYTES
+    }
+
+    fn refill(
+        &mut self,
+        first: &[u8],
+        records: &crossbeam_channel::Receiver<Record>,
+    ) -> Option<Record> {
+        self.clear();
+        self.push(first);
+        while let Ok(record) = records.try_recv() {
+            if !self.fits(record.len()) {
+                return Some(record);
+            }
+            self.push(&record);
+        }
+        None
     }
 
     fn push(&mut self, record: &[u8]) {
@@ -530,635 +574,14 @@ pub(super) fn describe_metrics() {
 }
 
 pub(super) fn publish() {
-    static METADATA: metrics::Metadata<'static> =
-        metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
-        metrics::with_recorder(|recorder| {
-            recorder.register_counter(reason.metric_key(), &METADATA)
-        })
-        .absolute(dropped);
+        crate::metrics::static_counter(reason.metric_key(), &METRIC_METADATA).absolute(dropped);
     }
     for (operation, &errors) in &snapshot.sink_errors {
-        metrics::with_recorder(|recorder| {
-            recorder.register_counter(operation.metric_key(), &METADATA)
-        })
-        .absolute(errors);
+        crate::metrics::static_counter(operation.metric_key(), &METRIC_METADATA).absolute(errors);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc::{self, Receiver, SyncSender};
-
-    const TEST_TIMEOUT: Duration = Duration::from_secs(3);
-
-    fn record(bytes: &[u8]) -> Record {
-        bytes.into()
-    }
-
-    struct GatedWriter {
-        entered: SyncSender<()>,
-        release: Option<Receiver<()>>,
-        bytes: Arc<Mutex<Vec<u8>>>,
-        released: Arc<AtomicBool>,
-        destroyed: Arc<AtomicBool>,
-        fail_first: bool,
-        written: SyncSender<()>,
-    }
-
-    impl Write for GatedWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if let Some(release) = self.release.take() {
-                self.entered.send(()).expect("signal first write");
-                release
-                    .recv_timeout(TEST_TIMEOUT)
-                    .expect("release blocked test writer");
-                self.released.store(true, Ordering::SeqCst);
-                if self.fail_first {
-                    return Err(io::Error::other("private test sink failure"));
-                }
-            }
-            self.bytes
-                .lock()
-                .expect("test output mutex")
-                .extend_from_slice(bytes);
-            let _ = self.written.try_send(());
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Drop for GatedWriter {
-        fn drop(&mut self) {
-            self.destroyed.store(true, Ordering::SeqCst);
-        }
-    }
-
-    struct Gate {
-        entered: Receiver<()>,
-        release: SyncSender<()>,
-        bytes: Arc<Mutex<Vec<u8>>>,
-        released: Arc<AtomicBool>,
-        destroyed: Arc<AtomicBool>,
-        written: Receiver<()>,
-    }
-
-    fn gated(fail_first: bool) -> (GatedWriter, Gate) {
-        let (entered_tx, entered) = mpsc::sync_channel(1);
-        let (release, release_rx) = mpsc::sync_channel(1);
-        let (written_tx, written) = mpsc::sync_channel(1);
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let released = Arc::new(AtomicBool::new(false));
-        let destroyed = Arc::new(AtomicBool::new(false));
-        (
-            GatedWriter {
-                entered: entered_tx,
-                release: Some(release_rx),
-                bytes: Arc::clone(&bytes),
-                released: Arc::clone(&released),
-                destroyed: Arc::clone(&destroyed),
-                fail_first,
-                written: written_tx,
-            },
-            Gate {
-                entered,
-                release,
-                bytes,
-                released,
-                destroyed,
-                written,
-            },
-        )
-    }
-
-    #[test]
-    fn stopped_sink_bounds_the_queue_and_resumes_fifo_without_retrying_losses() {
-        let (writer, gate) = gated(false);
-        let (output, guard) = start(writer).expect("start writer");
-        output.submit(record(b"first\n"));
-        gate.entered
-            .recv_timeout(TEST_TIMEOUT)
-            .expect("writer entered sink");
-
-        for index in 0..512 {
-            output.submit(record(format!("{index}\n").as_bytes()));
-        }
-        output.submit(record(b"lost\n"));
-        assert!(
-            !gate.released.load(Ordering::SeqCst),
-            "admission did not wait for sink"
-        );
-        assert_eq!(guard.snapshot().dropped.into_array(), [1, 0, 0, 0, 0, 0]);
-
-        guard.begin_shutdown();
-        gate.release.send(()).expect("resume sink");
-        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(
-            result,
-            LoggerShutdown::Completed(_),
-            "historical loss: {result:?}"
-        );
-        assert!(
-            gate.destroyed.load(Ordering::SeqCst),
-            "ack follows sink destruction"
-        );
-        let expected = std::iter::once("first\n".to_owned())
-            .chain((0..512).map(|index| format!("{index}\n")))
-            .collect::<String>();
-        assert_eq!(
-            *gate.bytes.lock().expect("test output mutex"),
-            expected.as_bytes()
-        );
-        output.submit(record(b"after closure\n"));
-        assert_eq!(
-            *gate.bytes.lock().expect("test output mutex"),
-            expected.as_bytes()
-        );
-    }
-
-    #[test]
-    fn in_flight_failure_is_final_only_when_it_finishes_after_the_marker() {
-        for during_drain in [false, true] {
-            let (writer, gate) = gated(true);
-            let (output, guard) = start(writer).expect("start writer");
-            output.submit(record(b"failed\n"));
-            gate.entered
-                .recv_timeout(TEST_TIMEOUT)
-                .expect("writer entered sink");
-            output.submit(record(b"recovered\n"));
-            if during_drain {
-                guard.begin_shutdown();
-            }
-            gate.release.send(()).expect("resume sink");
-            gate.written
-                .recv_timeout(TEST_TIMEOUT)
-                .expect("later record written");
-            guard.begin_shutdown();
-            let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-            let snapshot = if during_drain {
-                let LoggerShutdown::Incomplete { reasons, snapshot } = result else {
-                    panic!("in-flight failure cannot be hidden by recovery: {result:?}");
-                };
-                assert_eq!(reasons, LoggerShutdownReasons::WRITE);
-                snapshot
-            } else {
-                let LoggerShutdown::Completed(snapshot) = result else {
-                    panic!("historical write failure cannot poison clean drain: {result:?}");
-                };
-                snapshot
-            };
-            assert_eq!(snapshot.sink_errors.into_array(), [1, 0, 0]);
-            assert_eq!(
-                &*gate.bytes.lock().expect("test output mutex"),
-                b"recovered\n"
-            );
-        }
-    }
-
-    struct TornWriter {
-        bytes: Arc<Mutex<Vec<u8>>>,
-        writes: usize,
-    }
-
-    impl Write for TornWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.writes += 1;
-            let accepted = match self.writes {
-                1 => 3.min(bytes.len()),
-                2 => return Err(io::Error::other("private test sink failure")),
-                _ => bytes.len(),
-            };
-            self.bytes
-                .lock()
-                .expect("test output mutex")
-                .extend_from_slice(&bytes[..accepted]);
-            Ok(accepted)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn a_line_after_a_partly_written_one_starts_on_its_own_line() {
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let writer = TornWriter {
-            bytes: Arc::clone(&bytes),
-            writes: 0,
-        };
-        let (output, guard) = start(writer).expect("start writer");
-        output.submit(record(b"first\n"));
-        output.submit(record(b"second\n"));
-        guard.begin_shutdown();
-        let (LoggerShutdown::Completed(snapshot) | LoggerShutdown::Incomplete { snapshot, .. }) =
-            guard.shutdown(Instant::now() + TEST_TIMEOUT);
-
-        assert_eq!(snapshot.sink_errors.into_array(), [1, 0, 0]);
-        assert_eq!(&*bytes.lock().expect("test output mutex"), b"fir\nsecond\n");
-    }
-
-    #[test]
-    fn final_record_loss_survives_successful_sink_cleanup() {
-        let (writer, gate) = gated(false);
-        let (output, guard) = start(writer).expect("start writer");
-        output.submit(record(b"first\n"));
-        gate.entered
-            .recv_timeout(TEST_TIMEOUT)
-            .expect("writer entered sink");
-        let queued = numbered(QUEUE_RECORDS);
-        for line in &queued {
-            output.submit(record(line.as_bytes()));
-        }
-        guard.begin_shutdown();
-        output.submit(record(b"terminal\n"));
-        gate.release.send(()).expect("resume sink");
-        let LoggerShutdown::Incomplete { reasons, snapshot } =
-            guard.shutdown(Instant::now() + TEST_TIMEOUT)
-        else {
-            panic!("a lost final record makes the drain incomplete");
-        };
-        assert_eq!(reasons, LoggerShutdownReasons::DROPPED);
-        assert_eq!(snapshot.dropped.into_array(), [1, 0, 0, 0, 0, 0]);
-        assert!(gate.destroyed.load(Ordering::SeqCst));
-        assert_eq!(
-            *gate.bytes.lock().expect("test output mutex"),
-            format!("first\n{}", queued.concat()).as_bytes()
-        );
-    }
-
-    #[test]
-    fn deadline_and_guard_drop_return_while_the_sink_is_still_blocked() {
-        for explicit_shutdown in [false, true] {
-            let (writer, gate) = gated(false);
-            let (output, mut guard) = start(writer).expect("start writer");
-            output.submit(record(b"blocked\n"));
-            gate.entered
-                .recv_timeout(TEST_TIMEOUT)
-                .expect("writer entered sink");
-            let worker = guard.worker.take().expect("owned writer thread");
-            let began = Instant::now();
-            if explicit_shutdown {
-                let result = guard.shutdown(began + Duration::from_millis(20));
-                let LoggerShutdown::Incomplete { reasons, .. } = result else {
-                    panic!("blocked writer cannot complete: {result:?}");
-                };
-                assert_eq!(reasons, LoggerShutdownReasons::DEADLINE);
-            } else {
-                drop(guard);
-            }
-            assert!(
-                began.elapsed() < Duration::from_secs(1),
-                "bounded control wait"
-            );
-            assert!(
-                !gate.released.load(Ordering::SeqCst),
-                "sink remains blocked"
-            );
-            assert!(!worker.is_finished());
-            output.submit(record(b"rejected after close\n"));
-            gate.release.send(()).expect("release fixture for cleanup");
-            drop(output);
-            worker.join().expect("join released fixture");
-            assert_eq!(
-                &*gate.bytes.lock().expect("test output mutex"),
-                b"blocked\n"
-            );
-        }
-    }
-
-    #[test]
-    fn final_flush_failure_and_worker_panic_have_finite_receipts() {
-        struct FailingWriter(bool);
-        impl Write for FailingWriter {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                assert!(!self.0, "private writer panic payload");
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Err(io::Error::other("private flush error"))
-            }
-        }
-        for panics in [false, true] {
-            let (output, guard) = start(FailingWriter(panics)).expect("start writer");
-            guard.begin_shutdown();
-            output.submit(record(b"terminal\n"));
-            let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-            let LoggerShutdown::Incomplete { reasons, snapshot } = result else {
-                panic!("sink failure cannot complete: {result:?}");
-            };
-            if panics {
-                assert_eq!(reasons, LoggerShutdownReasons::WORKER);
-                assert_eq!(snapshot.sink_errors.into_array(), [0, 0, 1]);
-            } else {
-                assert_eq!(reasons, LoggerShutdownReasons::FLUSH);
-                assert_eq!(snapshot.sink_errors(SinkOperation::Write), 0);
-                assert!(snapshot.sink_errors(SinkOperation::Flush) >= 1);
-                assert_eq!(snapshot.sink_errors(SinkOperation::Worker), 0);
-            }
-            assert!(!format!("{result:?}").contains("private"));
-        }
-    }
-
-    struct CountingWriter {
-        sizes: mpsc::Sender<usize>,
-        bytes: Arc<Mutex<Vec<u8>>>,
-        first_write: Option<(SyncSender<()>, Receiver<()>)>,
-    }
-
-    impl Write for CountingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if let Some((entered, release)) = self.first_write.take() {
-                entered.send(()).expect("signal first write");
-                release
-                    .recv_timeout(TEST_TIMEOUT)
-                    .expect("release blocked test writer");
-            }
-            self.sizes.send(bytes.len()).expect("report sink write");
-            self.bytes
-                .lock()
-                .expect("test output mutex")
-                .extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct Counted {
-        sizes: Receiver<usize>,
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    type TestGate = Option<(Receiver<()>, SyncSender<()>)>;
-
-    fn counting(block_first: bool) -> (CountingWriter, Counted, TestGate) {
-        let (sizes_tx, sizes) = mpsc::channel();
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let (writer_gate, test_gate) = if block_first {
-            let (entered_tx, entered) = mpsc::sync_channel(1);
-            let (release, release_rx) = mpsc::sync_channel(1);
-            (Some((entered_tx, release_rx)), Some((entered, release)))
-        } else {
-            (None, None)
-        };
-        (
-            CountingWriter {
-                sizes: sizes_tx,
-                bytes: Arc::clone(&bytes),
-                first_write: writer_gate,
-            },
-            Counted { sizes, bytes },
-            test_gate,
-        )
-    }
-
-    fn numbered(count: usize) -> Vec<String> {
-        (0..count).map(|index| format!("{index}\n")).collect()
-    }
-
-    #[test]
-    fn queued_burst_reaches_the_sink_in_few_ordered_bounded_writes() {
-        let (writer, counted, gate) = counting(true);
-        let (entered, release) = gate.expect("blocking gate");
-        let (output, guard) = start(writer).expect("start writer");
-        output.submit(record(b"first\n"));
-        entered
-            .recv_timeout(TEST_TIMEOUT)
-            .expect("writer entered sink");
-        let lines = numbered(QUEUE_RECORDS);
-        let padded = [b'x'; 10 * 1024];
-        for line in &lines {
-            let mut bytes = padded.to_vec();
-            bytes.extend_from_slice(line.as_bytes());
-            output.submit(bytes);
-        }
-        assert_eq!(guard.snapshot().dropped.into_array(), [0; 6]);
-        release.send(()).expect("resume sink");
-        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
-
-        let expected = std::iter::once(b"first\n".to_vec())
-            .chain(lines.iter().map(|line| {
-                let mut bytes = padded.to_vec();
-                bytes.extend_from_slice(line.as_bytes());
-                bytes
-            }))
-            .flatten()
-            .collect::<Vec<u8>>();
-        assert_eq!(*counted.bytes.lock().expect("test output mutex"), expected);
-        let sizes: Vec<_> = counted.sizes.try_iter().collect();
-        assert!(
-            sizes.iter().all(|&size| size <= MAX_BATCH_BYTES),
-            "{sizes:?}"
-        );
-        assert!(
-            sizes.len() <= 1 + QUEUE_RECORDS / 4,
-            "{} writes for {} records",
-            sizes.len(),
-            QUEUE_RECORDS + 1
-        );
-    }
-
-    #[test]
-    #[warn(clippy::let_underscore_must_use)]
-    fn records_further_apart_than_the_window_are_written_one_by_one() {
-        let (writer, counted, _) = counting(false);
-        let (output, guard) = start(writer).expect("start writer");
-        for index in 0..3 {
-            output.submit(record(format!("{index}\n").as_bytes()));
-            assert_eq!(counted.sizes.recv_timeout(TEST_TIMEOUT), Ok(2));
-            assert_eq!(
-                counted.sizes.recv_timeout(BATCH_WINDOW * 5),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            );
-        }
-        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
-        assert_eq!(counted.sizes.try_iter().count(), 0);
-    }
-
-    #[test]
-    fn a_shallow_queue_is_gathered_for_the_whole_window() {
-        let (sender, records) = crossbeam_channel::bounded(QUEUE_RECORDS);
-        sender.send(record(b"one\n")).expect("queue a record");
-        let window = Duration::from_millis(20);
-        let started = Instant::now();
-
-        gather(&records, window);
-
-        assert!(started.elapsed() >= window);
-    }
-
-    #[test]
-    fn a_queue_that_grows_deep_ends_the_gathering_before_its_window() {
-        let (sender, records) = crossbeam_channel::bounded(QUEUE_RECORDS);
-        let (open, _closed) = crossbeam_channel::bounded(0);
-        let (gathered_tx, gathered) = mpsc::sync_channel(1);
-        let waiter = thread::spawn(move || {
-            gather(&records, Duration::from_secs(3600));
-            gathered_tx.send(records.len()).expect("report the queue");
-        });
-        let output = Output {
-            sender,
-            shared: Arc::new(Shared {
-                shutdown_gate: RwLock::new(Some(open)),
-                drain_state: AtomicU32::new(0),
-                counters: Counters::new(),
-            }),
-            worker_thread: waiter.thread().clone(),
-        };
-
-        for _ in 0..DEEP_QUEUE_RECORDS {
-            output.submit(record(b"line\n"));
-        }
-
-        assert_eq!(gathered.recv_timeout(TEST_TIMEOUT), Ok(DEEP_QUEUE_RECORDS));
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    enum WriteStep {
-        Accept(usize),
-        Fail,
-    }
-
-    struct ScriptedSink {
-        steps: std::collections::VecDeque<WriteStep>,
-        bytes: Vec<u8>,
-    }
-
-    impl Write for ScriptedSink {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let accepted = match self.steps.pop_front() {
-                Some(WriteStep::Fail) => return Err(io::Error::other("private test sink failure")),
-                Some(WriteStep::Accept(limit)) => limit.min(bytes.len()),
-                None => bytes.len(),
-            };
-            self.bytes.extend_from_slice(&bytes[..accepted]);
-            Ok(accepted)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn a_batch_cut_short_loses_one_record_and_keeps_later_ones_on_their_own_lines() {
-        use WriteStep::{Accept, Fail};
-        type Case = (bool, &'static [WriteStep], &'static [u8]);
-        let cases: [Case; 6] = [
-            (false, &[Fail], b"bb\ncc\ndd\n"),
-            (false, &[Accept(3), Fail], b"aa\ncc\ndd\n"),
-            (false, &[Accept(4), Fail], b"aa\nb\ncc\ndd\n"),
-            (false, &[Accept(7), Fail], b"aa\nbb\nc\ndd\n"),
-            (true, &[Fail], b"\nbb\ncc\ndd\n"),
-            (true, &[Accept(1), Fail], b"\nbb\ncc\ndd\n"),
-        ];
-        for (after_torn_line, steps, expected) in cases {
-            let shared = Shared {
-                shutdown_gate: RwLock::new(None),
-                drain_state: AtomicU32::new(0),
-                counters: Counters::new(),
-            };
-            let mut sink = ScriptedSink {
-                steps: steps.iter().copied().collect(),
-                bytes: Vec::new(),
-            };
-            let mut batch = Batch {
-                torn: after_torn_line,
-                ..Batch::default()
-            };
-
-            for line in [b"aa\n", b"bb\n", b"cc\n"] {
-                batch.push(line);
-            }
-            batch.write(&mut sink, &shared);
-            batch.clear();
-            batch.push(b"dd\n");
-            batch.write(&mut sink, &shared);
-
-            assert_eq!(
-                sink.bytes.as_slice(),
-                expected,
-                "after_torn_line={after_torn_line} steps={steps:?}"
-            );
-            assert_eq!(
-                shared.counters.snapshot().sink_errors.into_array(),
-                [1, 0, 0],
-                "after_torn_line={after_torn_line} steps={steps:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn shutdown_writes_every_accepted_record_in_order() {
-        let (writer, counted, _) = counting(false);
-        let (output, guard) = start(writer).expect("start writer");
-        let lines = numbered(400);
-        for line in &lines {
-            output.submit(record(line.as_bytes()));
-        }
-        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_), "{result:?}");
-        assert_eq!(
-            *counted.bytes.lock().expect("test output mutex"),
-            lines.concat().as_bytes()
-        );
-        assert!(counted.sizes.try_iter().count() <= lines.len());
-    }
-
-    #[test]
-    fn loss_before_recorder_installation_is_published_without_double_counting() {
-        use metrics::{Key, Level, Metadata, Recorder as _};
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-
-        const RESTORE_METADATA: Metadata<'static> =
-            Metadata::new(module_path!(), Level::INFO, None);
-
-        let (output, guard) = start(io::sink()).expect("start writer");
-        let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        std::assert_matches!(result, LoggerShutdown::Completed(_));
-        output.submit(record(b"closed\n"));
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let target = Key::from_parts(DROPPED_METRIC, &[("reason", "closed")]);
-        metrics::with_local_recorder(&recorder, || {
-            for _ in 0..2 {
-                let before = TOTALS.snapshot().dropped(DropReason::Closed);
-                publish();
-                let after = TOTALS.snapshot().dropped(DropReason::Closed);
-                let snapshot = snapshotter.snapshot().into_vec();
-                let mut closed = None;
-                for (composite, _, _, value) in &snapshot {
-                    let DebugValue::Counter(count) = value else {
-                        continue;
-                    };
-                    if *count != 0 {
-                        recorder
-                            .register_counter(composite.key(), &RESTORE_METADATA)
-                            .increment(*count);
-                    }
-                    if composite.key() == &target {
-                        closed = Some(*count);
-                    }
-                }
-                let value = closed.expect("pre-recorder loss has a finite metric");
-                assert!(
-                    (before..=after).contains(&value),
-                    "{value}; expected {before}..={after}"
-                );
-            }
-        });
-    }
-}
+mod tests;

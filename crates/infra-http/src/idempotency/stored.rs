@@ -5,7 +5,9 @@ use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use bytes::{BufMut as _, BytesMut};
-use infra_idempotency_store::{CaptureError, MAX_STORED_BODY_BYTES, Record};
+use infra_idempotency_store::{
+    CaptureError, MAX_STORED_BODY_BYTES, Record, SuccessRecord, TerminalRefusal,
+};
 use serde::Serialize;
 use utoipa::openapi::{Content, RefOr, Response as ApiResponse, Schema};
 use utoipa::{IntoResponses, PartialSchema};
@@ -14,8 +16,8 @@ use crate::problem::{Code, PROBLEM_MEDIA_TYPE, Problem, http_status};
 
 pub(super) use infra_idempotency_store::is_replayable_header_name;
 
-const JSON: &str = "application/json";
-const TEXT: &str = "text/plain";
+const JSON_MEDIA_TYPE: &str = "application/json";
+const TEXT_MEDIA_TYPE: &str = "text/plain";
 
 pub trait ReplaySuccess: IntoResponses {
     #[must_use]
@@ -28,8 +30,12 @@ pub trait ReplaySuccess: IntoResponses {
 
 #[doc(hidden)]
 #[must_use]
-pub fn created_json_responses(schema: RefOr<Schema>) -> BTreeMap<String, RefOr<ApiResponse>> {
-    created_response(JSON, schema)
+pub fn json_responses(
+    status: StatusCode,
+    description: &str,
+    schema: RefOr<Schema>,
+) -> BTreeMap<String, RefOr<ApiResponse>> {
+    typed_response(status, description, JSON_MEDIA_TYPE, schema)
 }
 
 #[derive(Debug)]
@@ -38,92 +44,156 @@ pub struct CreatedText {
     pub headers: HeaderMap,
 }
 
+impl CreatedText {
+    #[must_use]
+    pub fn new(body: impl Into<String>) -> Self {
+        Self::with_headers(body, HeaderMap::new())
+    }
+
+    #[must_use]
+    pub fn with_headers(body: impl Into<String>, headers: HeaderMap) -> Self {
+        Self {
+            body: body.into(),
+            headers,
+        }
+    }
+}
+
+impl From<String> for CreatedText {
+    fn from(body: String) -> Self {
+        Self::new(body)
+    }
+}
+
 impl IntoResponses for CreatedText {
     fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
-        created_response(TEXT, String::schema())
+        typed_response(
+            StatusCode::CREATED,
+            "created",
+            TEXT_MEDIA_TYPE,
+            String::schema(),
+        )
     }
 }
 
 impl ReplaySuccess for CreatedText {
     fn capture(mut self) -> Result<ReplayableResponse, ReplayError> {
-        set_uncoded_content_type(&mut self.headers, TEXT)?;
+        set_uncoded_content_type(&mut self.headers, TEXT_MEDIA_TYPE)?;
         ReplayableResponse::bytes(StatusCode::CREATED, &self.headers, self.body.into())
     }
 }
 
-fn created_response(
+#[derive(Debug, Default)]
+pub struct NoContent {
+    pub headers: HeaderMap,
+}
+
+impl NoContent {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_headers(headers: HeaderMap) -> Self {
+        Self { headers }
+    }
+}
+
+impl IntoResponses for NoContent {
+    fn responses() -> BTreeMap<String, RefOr<ApiResponse>> {
+        let response = ApiResponse::builder().description("no content").build();
+        BTreeMap::from([(StatusCode::NO_CONTENT.as_str().to_owned(), response.into())])
+    }
+}
+
+impl ReplaySuccess for NoContent {
+    fn capture(self) -> Result<ReplayableResponse, ReplayError> {
+        ReplayableResponse::empty(StatusCode::NO_CONTENT, &self.headers)
+    }
+}
+
+fn typed_response(
+    status: StatusCode,
+    description: &str,
     media_type: &str,
     schema: RefOr<Schema>,
 ) -> BTreeMap<String, RefOr<ApiResponse>> {
     let response = ApiResponse::builder()
-        .description("created")
+        .description(description)
         .content(media_type, Content::new(Some(schema)))
         .build();
-    BTreeMap::from([(StatusCode::CREATED.as_str().to_owned(), response.into())])
+    BTreeMap::from([(status.as_str().to_owned(), response.into())])
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReplayError {
+#[error(transparent)]
+pub struct ReplayError(ReplayErrorKind);
+
+impl ReplayError {
+    const fn from_capture(error: CaptureError) -> Self {
+        Self(ReplayErrorKind::Capture(error))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ReplayErrorKind {
     #[error(transparent)]
-    Capture(#[from] CaptureError),
+    Capture(CaptureError),
     #[error("content_encoding")]
     ContentEncoding,
     #[error("serialization")]
     Serialization,
 }
 
-#[derive(Debug)]
-pub struct TerminalProblem(Box<Problem>);
+#[derive(Clone, Debug)]
+pub struct TerminalProblem(Problem);
 
 impl TerminalProblem {
-    pub(super) fn capture(&self) -> Result<Record, ReplayError> {
-        let problem = self.0.as_ref();
+    pub(super) fn capture(&self) -> Result<TerminalRefusal, ReplayError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_MEDIA_TYPE));
-        Record::capture_terminal_refusal(http_status(problem.code()), &headers, json_body(problem)?)
-            .map_err(ReplayError::from)
+        TerminalRefusal::capture(http_status(self.0.code()), &headers, json_body(&self.0)?)
+            .map_err(ReplayError::from_capture)
     }
 
     #[must_use]
-    pub fn conflict() -> Self {
-        Self(Box::new(Problem::new(Code::Conflict)))
+    pub const fn conflict() -> Self {
+        Self(Problem::new(Code::Conflict))
     }
 
     #[must_use]
-    pub fn already_exists() -> Self {
-        Self(Box::new(Problem::new(Code::AlreadyExists)))
+    pub const fn already_exists() -> Self {
+        Self(Problem::new(Code::AlreadyExists))
     }
 
     #[must_use]
-    pub fn unprocessable_content() -> Self {
-        Self(Box::new(Problem::new(Code::UnprocessableContent)))
+    pub const fn unprocessable_content() -> Self {
+        Self(Problem::new(Code::UnprocessableContent))
     }
 
     #[must_use]
-    pub fn detail(mut self, detail: impl Into<compact_str::CompactString>) -> Self {
-        *self.0 = self.0.detail(detail);
-        self
+    pub fn detail(self, detail: impl Into<compact_str::CompactString>) -> Self {
+        Self(self.0.detail(detail))
     }
 
     #[must_use]
-    pub fn instance(mut self, instance: impl Into<compact_str::CompactString>) -> Self {
-        *self.0 = self.0.instance(instance);
-        self
+    pub fn instance(self, instance: impl Into<compact_str::CompactString>) -> Self {
+        Self(self.0.instance(instance))
     }
 
     #[must_use]
     pub fn invalid_param(
-        mut self,
+        self,
         name: impl Into<compact_str::CompactString>,
         reason: impl Into<compact_str::CompactString>,
     ) -> Self {
-        *self.0 = self.0.invalid_param(name, reason);
-        self
+        Self(self.0.invalid_param(name, reason))
     }
 }
 
 #[derive(Debug)]
-pub struct ReplayableResponse(Record);
+pub struct ReplayableResponse(SuccessRecord);
 
 impl ReplayableResponse {
     pub fn bytes(
@@ -131,9 +201,9 @@ impl ReplayableResponse {
         headers: &HeaderMap,
         body: Bytes,
     ) -> Result<Self, ReplayError> {
-        Record::capture(status, headers, body)
+        SuccessRecord::capture(status, headers, body)
             .map(Self)
-            .map_err(ReplayError::from)
+            .map_err(ReplayError::from_capture)
     }
 
     pub fn json<T: Serialize + ?Sized>(
@@ -141,7 +211,7 @@ impl ReplayableResponse {
         mut headers: HeaderMap,
         value: &T,
     ) -> Result<Self, ReplayError> {
-        set_uncoded_content_type(&mut headers, JSON)?;
+        set_uncoded_content_type(&mut headers, JSON_MEDIA_TYPE)?;
         Self::bytes(status, &headers, json_body(value)?)
     }
 
@@ -149,14 +219,19 @@ impl ReplayableResponse {
         Self::bytes(status, headers, Bytes::new())
     }
 
-    pub(super) fn into_record(self) -> Record {
+    pub(super) fn into_success(self) -> SuccessRecord {
         self.0
     }
 }
 
 pub(super) fn response_from_record(record: Record) -> Response {
     let (status, headers, body) = record.into_parts();
-    let mut response = Response::new(Body::from(body));
+    let body = if body.is_empty() {
+        Body::empty()
+    } else {
+        Body::from(body)
+    };
+    let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
@@ -172,7 +247,7 @@ fn set_uncoded_content_type(
         .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
         .any(|coding| !coding.trim_ascii().eq_ignore_ascii_case(b"identity"))
     {
-        return Err(ReplayError::ContentEncoding);
+        return Err(ReplayError(ReplayErrorKind::ContentEncoding));
     }
     headers.remove(CONTENT_ENCODING);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(media_type));
@@ -184,9 +259,9 @@ fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, ReplayError> {
     let mut writer = (&mut body).limit(MAX_STORED_BODY_BYTES).writer();
     serde_json::to_writer(&mut writer, value).map_err(|error| {
         if error.io_error_kind() == Some(std::io::ErrorKind::WriteZero) {
-            CaptureError::BodyLimit.into()
+            ReplayError::from_capture(CaptureError::BodyLimit)
         } else {
-            ReplayError::Serialization
+            ReplayError(ReplayErrorKind::Serialization)
         }
     })?;
     Ok(body.freeze())
@@ -195,13 +270,14 @@ fn json_body<T: Serialize + ?Sized>(value: &T) -> Result<Bytes, ReplayError> {
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderName;
+    use http_body::Body as _;
     use http_body_util::BodyExt as _;
     use utoipa::ToSchema;
 
     use super::*;
 
-    #[test]
-    fn created_json_registers_the_payloads_of_boxed_recursive_and_list_responses() {
+    #[tokio::test]
+    async fn created_json_registers_the_payloads_of_boxed_recursive_and_list_responses() {
         #[derive(Serialize, ToSchema)]
         struct Address {
             street: String,
@@ -216,6 +292,11 @@ mod tests {
         crate::created_json_response!(CreatedAddress(Box<Address>));
         crate::created_json_response!(CreatedCustomer(Box<Customer>));
         crate::created_json_response!(CreatedCustomers(Vec<Customer>));
+        crate::json_response!(
+            UpdatedAddress(Address),
+            status = StatusCode::OK,
+            description = "updated",
+        );
 
         fn document<R: ReplaySuccess>() -> serde_json::Value {
             serde_json::json!({
@@ -223,6 +304,50 @@ mod tests {
                 "components": {"schemas": R::schemas().into_iter().collect::<BTreeMap<_, _>>()},
             })
         }
+
+        let updated = document::<UpdatedAddress>();
+        assert_eq!(updated["responses"]["200"]["description"], "updated");
+        assert_eq!(
+            updated
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .unwrap(),
+            "#/components/schemas/Address"
+        );
+        let captured = UpdatedAddress::with_headers(
+            Address {
+                street: "Main".to_owned(),
+            },
+            header_map(&[("etag", "\"addr-1\"")]),
+        )
+        .capture()
+        .unwrap();
+        let response = response_from_record(Record::from(captured.into_success()));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()["etag"], "\"addr-1\"");
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            Bytes::from_static(br#"{"street":"Main"}"#)
+        );
+
+        let no_content = document::<NoContent>();
+        assert_eq!(no_content["responses"]["204"]["description"], "no content");
+        assert!(no_content["responses"]["204"].get("content").is_none());
+        let captured = NoContent::with_headers(header_map(&[("etag", "\"deleted-1\"")]))
+            .capture()
+            .unwrap();
+        let response = response_from_record(Record::from(captured.into_success()));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.headers()["etag"], "\"deleted-1\"");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
 
         let root = "/responses/201/content/application~1json/schema";
         assert_eq!(
@@ -251,6 +376,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn response_constructors_default_to_empty_headers_and_support_from() {
+        #[derive(Serialize, ToSchema)]
+        struct Item {
+            id: u32,
+        }
+
+        crate::created_json_response!(CreatedItem(Item));
+
+        for json in [
+            CreatedItem::new(Item { id: 7 }),
+            CreatedItem::from(Item { id: 7 }),
+        ] {
+            let captured = json.capture().unwrap();
+            let response = response_from_record(Record::from(captured.into_success()));
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(response.headers().len(), 1);
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                Bytes::from_static(br#"{"id":7}"#)
+            );
+        }
+
+        for text in [
+            CreatedText::new("ok"),
+            CreatedText::from("ok".to_owned()),
+            CreatedText::with_headers("ok", HeaderMap::new()),
+        ] {
+            let captured = text.capture().unwrap();
+            let response = response_from_record(Record::from(captured.into_success()));
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                Bytes::from_static(b"ok")
+            );
+        }
+
+        let empty = NoContent::new().capture().unwrap();
+        let response = response_from_record(Record::from(empty.into_success()));
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response.headers().is_empty());
+        assert!(response.body().is_end_stream());
+        assert_eq!(response.body().size_hint().exact(), Some(0));
+    }
+
     fn header_map(headers: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in headers {
@@ -266,7 +438,9 @@ mod tests {
     fn admission_reports_invalid_status_and_oversized_headers_as_rollback() {
         std::assert_matches!(
             ReplayableResponse::empty(StatusCode::CONFLICT, &HeaderMap::new()),
-            Err(ReplayError::Capture(CaptureError::InvalidStatus))
+            Err(ReplayError(ReplayErrorKind::Capture(
+                CaptureError::InvalidStatus
+            )))
         );
         let large = "x".repeat(8192);
         std::assert_matches!(
@@ -274,7 +448,9 @@ mod tests {
                 StatusCode::OK,
                 &header_map(&[("content-type", large.as_str())])
             ),
-            Err(ReplayError::Capture(CaptureError::HeaderLimit))
+            Err(ReplayError(ReplayErrorKind::Capture(
+                CaptureError::HeaderLimit
+            )))
         );
     }
 
@@ -283,7 +459,9 @@ mod tests {
         for status in [StatusCode::NO_CONTENT, StatusCode::RESET_CONTENT] {
             std::assert_matches!(
                 ReplayableResponse::bytes(status, &HeaderMap::new(), Bytes::from_static(b"body")),
-                Err(ReplayError::Capture(CaptureError::BodyForbidden))
+                Err(ReplayError(ReplayErrorKind::Capture(
+                    CaptureError::BodyForbidden
+                )))
             );
         }
     }
@@ -297,7 +475,7 @@ mod tests {
         ] {
             std::assert_matches!(
                 ReplayableResponse::json(StatusCode::OK, headers, &1),
-                Err(ReplayError::ContentEncoding)
+                Err(ReplayError(ReplayErrorKind::ContentEncoding))
             );
         }
 
@@ -307,7 +485,7 @@ mod tests {
             &1,
         )
         .unwrap();
-        let response = response_from_record(captured.into_record());
+        let response = response_from_record(Record::from(captured.into_success()));
         assert!(!response.headers().contains_key(CONTENT_ENCODING));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
         assert_eq!(
@@ -342,7 +520,7 @@ mod tests {
             let captured = ReplayableResponse::bytes(
                 StatusCode::from_u16(status).unwrap(), &header_map(&pairs), Bytes::from(body.clone())
             ).unwrap();
-            let response = response_from_record(captured.into_record());
+            let response = response_from_record(Record::from(captured.into_success()));
 
             proptest::prop_assert_eq!(response.status().as_u16(), status);
             let allowed = [
@@ -362,6 +540,11 @@ mod tests {
                     response.headers().get_all(name).iter().map(HeaderValue::as_bytes).collect();
                 proptest::prop_assert_eq!(returned, sent, "{}", name);
             }
+            proptest::prop_assert_eq!(response.body().is_end_stream(), body.is_empty());
+            proptest::prop_assert_eq!(
+                response.body().size_hint().exact(),
+                Some(body.len() as u64)
+            );
             let returned_body = runtime
                 .block_on(response.into_body().collect())
                 .unwrap()

@@ -5,16 +5,16 @@ callable Task fields outrank public prose.
 
 ## Native Map
 
-- For each preparation phase, start a fresh writable general-purpose Task
-  from the callable subagent catalog and omit `resume`. Pass the phase brief
-  and use the workspace containing its input files.
+- Keep preparation (Intake through Planning) in the root session, using fresh
   [Cursor subagents](https://cursor.com/docs/subagents#how-subagents-work)
-  start without prior conversation history.
+  (omit `resume`) for wide scans, bounded specialists / `Design It Twice`, and
+  `Design Review` / `Plan Review` / adjudication.
 - [Implementation](../spec-first-workflow/phases/implementation.md#carrier)
   binds the session as Ledger Orchestrator; Cursor reads `.agents/skills`
   directly.
 - Dispatch ready units via Task (`subagent_type: "acceptance-unit-lead"`) within
-  capacity, consuming [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+  capacity, consuming [Implementation
+  Result](../spec-first-workflow/phases/implementation/unit.md#implementation-result).
   Never substitute `generalPurpose`, `explore`, `shell`, or generic workers;
   report missing `acceptance-unit-lead` or missing agent identity as a carrier
   gap before dispatch.
@@ -45,8 +45,8 @@ through Task (`subagent_type`, `prompt`, `description`, `model`, `resume`,
 [Context And Lifetime](../agent-harness.md#context-and-lifetime) and [Nested
 Execution](../agent-harness.md#nested-execution): retain every returned agent
 ID before waiting (missing identity is a carrier failure), omit `resume` on new
-lanes and initial reviews, and use `resume` only for permitted continuations.
+lanes and every review (including Delta Recheck), and use `resume` only for
+permitted continuations.
 
-At final delivery, use [Review](../spec-first-workflow/shared/review.md) and
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md);
-raise `reviewer-agent` Task `model` only for highest-consequence boundaries.
+Raise `reviewer-agent` Task `model` only for highest-consequence review
+boundaries.

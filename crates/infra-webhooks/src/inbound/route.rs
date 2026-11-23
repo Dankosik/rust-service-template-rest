@@ -10,15 +10,19 @@ use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use infra_http::extract::Path;
 use infra_http::problem::{body_too_large, caused_by_length_limit, sanitized_problem};
-use infra_http::{Code, Problem, RequestContext, RequestDeadline};
+use infra_http::{Code, Problem, RequestContext};
+use infra_postgres::Pool;
 use metrics::{Counter, SharedString};
-use parking_lot::Mutex;
-use utoipa::{OpenApi, ToResponse};
+use tokio::time::Instant;
+use utoipa::{IntoResponses, OpenApi, ToResponse};
 
-use super::{PAYLOAD_TOO_LARGE, ReceiptOutcome, ReceiveError, Receiver, Verifier};
+use super::{
+    EndpointReceiveError, ReceiptOutcome, ReceiveBody, Receiver, Rejection, RejectionKind,
+    Verifier, receive_for_endpoint,
+};
 use crate::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
 
-const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
+pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
 #[derive(Clone)]
 pub struct WebhookState {
@@ -48,6 +52,83 @@ impl WebhookState {
             state: Arc::new(ReceiverState::active(receiver)),
         }
     }
+
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub async fn receive(&self, endpoint_id: &str, request: Request) -> Response {
+        let state = self.state.as_ref();
+        let Some((pool, ConfiguredEndpoint { verifier, metrics })) = state.endpoint(endpoint_id)
+        else {
+            return state.reject_unknown_endpoint();
+        };
+        let (parts, body) = request.into_parts();
+        let Some((context, deadline)) = parts
+            .extensions
+            .get::<RequestContext>()
+            .and_then(|context| context.deadline().map(|deadline| (context, deadline)))
+        else {
+            tracing::error!(
+                endpoint = endpoint_id,
+                failure = "deadline_missing",
+                "webhook_wiring_failed"
+            );
+            return sanitized_problem().into_response();
+        };
+        let body = match context.read_body_bytes(body, MAX_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(error) if caused_by_length_limit(&error) => {
+                metrics.record_protocol_rejection(ProtocolError::BodyTooLarge);
+                return body_too_large().into_response();
+            }
+            Err(_) => {
+                metrics.record_body_unreadable();
+                return Problem::new(Code::WebhookRejected).into_response();
+            }
+        };
+        let Some(attempt_end) = deadline.attempt_end() else {
+            return receipt_deadline_exceeded(metrics);
+        };
+        let Ok(result) = tokio::time::timeout_at(
+            attempt_end,
+            receive_for_endpoint(
+                pool,
+                endpoint_id,
+                verifier.as_ref(),
+                &parts.headers,
+                ReceiveBody::Owned(body),
+                SystemTime::now(),
+                attempt_end,
+            ),
+        )
+        .await
+        else {
+            return receipt_deadline_exceeded(metrics);
+        };
+        receipt_response(metrics, result, attempt_end)
+    }
+}
+
+fn receipt_response(
+    metrics: &EndpointMetrics,
+    result: Result<ReceiptOutcome, EndpointReceiveError>,
+    attempt_end: Instant,
+) -> Response {
+    match result {
+        Ok(outcome) => {
+            metrics.record(outcome.into());
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(EndpointReceiveError::Rejected(rejection)) => {
+            metrics.record_rejection(rejection);
+            Problem::new(Code::WebhookRejected).into_response()
+        }
+        Err(EndpointReceiveError::Unavailable) if Instant::now() >= attempt_end => {
+            receipt_deadline_exceeded(metrics)
+        }
+        Err(EndpointReceiveError::Unavailable) => {
+            metrics.record(IngressOutcome::Unavailable);
+            Problem::new(Code::ServiceUnavailable).into_response()
+        }
+    }
 }
 
 struct ReceiverState {
@@ -56,7 +137,7 @@ struct ReceiverState {
 }
 
 struct ActiveReceiver {
-    receiver: Receiver,
+    pool: Pool,
     endpoints: HashMap<Arc<str>, ConfiguredEndpoint>,
 }
 
@@ -74,11 +155,11 @@ impl ReceiverState {
     }
 
     fn active(receiver: Receiver) -> Self {
-        let endpoints = receiver
-            .endpoints
+        let Receiver { pool, verifiers } = receiver;
+        let endpoints = verifiers
             .iter()
             .map(|(endpoint_id, verifier)| {
-                let id: Arc<str> = Arc::from(endpoint_id.as_str());
+                let id = Arc::clone(endpoint_id);
                 let metrics = EndpointMetrics::new(SharedString::from(Arc::clone(&id)));
                 let endpoint = ConfiguredEndpoint {
                     verifier: Arc::clone(verifier),
@@ -88,18 +169,15 @@ impl ReceiverState {
             })
             .collect();
         Self {
-            active: Some(ActiveReceiver {
-                receiver,
-                endpoints,
-            }),
+            active: Some(ActiveReceiver { pool, endpoints }),
             unknown_endpoint: OnceLock::new(),
         }
     }
 
-    fn endpoint(&self, endpoint_id: &str) -> Option<(&Receiver, &ConfiguredEndpoint)> {
+    fn endpoint(&self, endpoint_id: &str) -> Option<(&Pool, &ConfiguredEndpoint)> {
         let active = self.active.as_ref()?;
         let endpoint = active.endpoints.get(endpoint_id)?;
-        Some((&active.receiver, endpoint))
+        Some((&active.pool, endpoint))
     }
 
     fn reject_unknown_endpoint(&self) -> Response {
@@ -117,38 +195,40 @@ impl ReceiverState {
 
 /// webhook endpoint is unknown
 #[derive(Debug, ToResponse)]
-#[expect(
-    dead_code,
-    reason = "The response body exists only for the OpenAPI derive"
-)]
 #[response(content_type = "application/problem+json")]
-struct NotFound(Problem);
+pub struct NotFound(pub Problem);
 
 /// webhook body, message identity, or signature evidence is unacceptable
 #[derive(Debug, ToResponse)]
-#[expect(
-    dead_code,
-    reason = "The response body exists only for the OpenAPI derive"
-)]
 #[response(content_type = "application/problem+json")]
-struct WebhookRejected(Problem);
+pub struct WebhookRejected(pub Problem);
 
 /// durable webhook receipt storage is unavailable
 #[derive(Debug, ToResponse)]
-#[expect(
-    dead_code,
-    reason = "The response body exists only for the OpenAPI derive"
-)]
 #[response(content_type = "application/problem+json")]
-struct ServiceUnavailable(Problem);
+pub struct ServiceUnavailable(pub Problem);
+
+#[derive(Debug, IntoResponses)]
+pub enum ReceiveResponses {
+    /// webhook receipt is durable
+    #[response(status = 204)]
+    Durable,
+    #[response(status = 400)]
+    Rejected(#[ref_response] WebhookRejected),
+    #[response(status = 404)]
+    NotFound(#[ref_response] NotFound),
+    #[response(status = 503)]
+    Unavailable(#[ref_response] ServiceUnavailable),
+}
 
 #[derive(OpenApi)]
 #[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
 struct WebhookComponents;
 
-pub fn router<S>() -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
+pub fn with_webhook_responses<S>(
+    contract: infra_http::HttpContract<S>,
+) -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
 where
-    WebhookState: FromRef<S>,
     S: Clone + Send + Sync + 'static,
 {
     metrics::describe_counter!(
@@ -156,8 +236,15 @@ where
         metrics::Unit::Count,
         "Inbound webhook deliveries by admission outcome."
     );
-    infra_http::http_route!(receive)?
-        .with_components(WebhookComponents::openapi().components.unwrap_or_default())
+    contract.with_components(WebhookComponents::openapi().components.unwrap_or_default())
+}
+
+pub fn router<S>() -> Result<infra_http::HttpContract<S>, infra_http::FinalizeError>
+where
+    WebhookState: FromRef<S>,
+    S: Clone + Send + Sync + 'static,
+{
+    with_webhook_responses(infra_http::http_route!(receive)?)
 }
 
 #[utoipa::path(
@@ -175,126 +262,58 @@ where
     ),
     request_body(content(("*/*")), description = format!("Original signed binary body, at most {} KiB. No JSON decoding or payload schema is required.", MAX_BODY_BYTES / 1024)),
     security(),
-    responses(
-        (status = 204, description = "webhook receipt is durable"),
-        (status = 400, response = WebhookRejected),
-        (status = 404, response = NotFound),
-        (status = 503, response = ServiceUnavailable),
-    )
+    responses(ReceiveResponses)
 )]
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn receive(
     Path(endpoint_id): Path<CompactString>,
     State(state): State<WebhookState>,
     request: Request,
 ) -> Response {
-    let state = state.state.as_ref();
-    let Some((receiver, ConfiguredEndpoint { verifier, metrics })) = state.endpoint(&endpoint_id)
-    else {
-        return state.reject_unknown_endpoint();
-    };
-    let (parts, body) = request.into_parts();
-    let (Some(deadline), Some(context)) = (
-        parts.extensions.get::<RequestDeadline>(),
-        parts.extensions.get::<RequestContext>(),
-    ) else {
-        tracing::error!(
-            endpoint = %endpoint_id,
-            failure = "deadline_missing",
-            "webhook_wiring_failed"
-        );
-        return sanitized_problem().into_response();
-    };
-    let body = match context.read_body_bytes(body, MAX_BODY_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(error) if caused_by_length_limit(&error) => {
-            metrics.record_protocol_rejection(ProtocolError::BodyTooLarge);
-            return body_too_large().into_response();
-        }
-        Err(_) => {
-            metrics.record(OutcomeSlot::BodyUnreadable);
-            return Problem::new(Code::WebhookRejected).into_response();
-        }
-    };
-    let Some(attempt_end) = deadline.attempt_end() else {
-        return receipt_deadline_exceeded(metrics);
-    };
-    let receipt = receiver.receive_configured_bytes(
-        &endpoint_id,
-        verifier.as_ref(),
-        &parts.headers,
-        body,
-        SystemTime::now(),
-        attempt_end,
-    );
-    let Ok(result) = tokio::time::timeout_at(attempt_end, receipt).await else {
-        return receipt_deadline_exceeded(metrics);
-    };
-    match result {
-        Ok(outcome) => {
-            let slot = match outcome {
-                ReceiptOutcome::Accepted => OutcomeSlot::Accepted,
-                ReceiptOutcome::Duplicate => OutcomeSlot::Duplicate,
-            };
-            metrics.record(slot);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(ReceiveError::UnknownEndpoint) => state.reject_unknown_endpoint(),
-        Err(ReceiveError::Rejected(rejection)) => {
-            metrics.record_rejection(rejection.reason());
-            Problem::new(Code::WebhookRejected).into_response()
-        }
-        Err(ReceiveError::Unavailable) if tokio::time::Instant::now() >= attempt_end => {
-            receipt_deadline_exceeded(metrics)
-        }
-        Err(ReceiveError::Unavailable) => {
-            metrics.record(OutcomeSlot::Unavailable);
-            Problem::new(Code::ServiceUnavailable).into_response()
-        }
-    }
+    state.receive(&endpoint_id, request).await
 }
 
 fn receipt_deadline_exceeded(metrics: &EndpointMetrics) -> Response {
-    metrics.record(OutcomeSlot::DeadlineExceeded);
+    metrics.record(IngressOutcome::DeadlineExceeded);
     Problem::new(Code::GatewayTimeout)
         .detail("request budget for durable webhook receipt was exhausted")
         .into_response()
 }
 
 #[derive(Clone, Copy, Debug, Enum)]
-enum OutcomeSlot {
+enum IngressOutcome {
     Accepted,
     Duplicate,
     Unavailable,
     DeadlineExceeded,
-    BodyUnreadable,
-    PayloadTooLarge,
 }
 
-enum OutcomeLabel {
-    Outcome(&'static str),
-    Rejected(&'static str),
+impl From<ReceiptOutcome> for IngressOutcome {
+    fn from(outcome: ReceiptOutcome) -> Self {
+        match outcome {
+            ReceiptOutcome::Accepted => Self::Accepted,
+            ReceiptOutcome::Duplicate => Self::Duplicate,
+        }
+    }
 }
 
-impl OutcomeSlot {
-    const fn label(self) -> OutcomeLabel {
+impl IngressOutcome {
+    const fn as_str(self) -> &'static str {
         match self {
-            Self::Accepted => OutcomeLabel::Outcome("accepted"),
-            Self::Duplicate => OutcomeLabel::Outcome("duplicate"),
-            Self::Unavailable => OutcomeLabel::Outcome("unavailable"),
-            Self::DeadlineExceeded => OutcomeLabel::Outcome("deadline_exceeded"),
-            Self::BodyUnreadable => OutcomeLabel::Rejected("body_unreadable"),
-            Self::PayloadTooLarge => OutcomeLabel::Rejected(PAYLOAD_TOO_LARGE.reason()),
+            Self::Accepted => "accepted",
+            Self::Duplicate => "duplicate",
+            Self::Unavailable => "unavailable",
+            Self::DeadlineExceeded => "deadline_exceeded",
         }
     }
 }
 
 struct EndpointMetrics {
     endpoint: SharedString,
-    outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
+    outcomes: EnumMap<IngressOutcome, OnceLock<Counter>>,
     protocol_rejections: EnumMap<ProtocolError, OnceLock<Counter>>,
+    body_unreadable: OnceLock<Counter>,
+    payload_too_large: OnceLock<Counter>,
     custom_rejections: ArcSwap<HashMap<&'static str, Counter>>,
-    custom_rejections_lock: Mutex<()>,
 }
 
 impl EndpointMetrics {
@@ -303,20 +322,20 @@ impl EndpointMetrics {
             endpoint,
             outcomes: EnumMap::default(),
             protocol_rejections: EnumMap::default(),
+            body_unreadable: OnceLock::new(),
+            payload_too_large: OnceLock::new(),
             custom_rejections: ArcSwap::default(),
-            custom_rejections_lock: Mutex::new(()),
         }
     }
 
-    fn record(&self, slot: OutcomeSlot) {
-        self.outcomes[slot]
-            .get_or_init(|| match slot.label() {
-                OutcomeLabel::Outcome(outcome) => metrics::counter!(
+    fn record(&self, outcome: IngressOutcome) {
+        self.outcomes[outcome]
+            .get_or_init(|| {
+                metrics::counter!(
                     WEBHOOK_INGRESS_OUTCOMES_METRIC,
                     "endpoint" => self.endpoint.clone(),
-                    "outcome" => outcome
-                ),
-                OutcomeLabel::Rejected(reason) => self.rejection_counter(reason),
+                    "outcome" => outcome.as_str()
+                )
             })
             .increment(1);
     }
@@ -327,24 +346,23 @@ impl EndpointMetrics {
             .increment(1);
     }
 
-    fn record_rejection(&self, reason: &'static str) {
-        if let Some((error, _)) = self
-            .protocol_rejections
-            .iter()
-            .find(|(error, _)| error.reason() == reason)
-        {
-            self.record_protocol_rejection(error);
-            return;
+    fn record_body_unreadable(&self) {
+        self.record_fixed_rejection(&self.body_unreadable, "body_unreadable");
+    }
+
+    fn record_rejection(&self, rejection: Rejection) {
+        match rejection.kind() {
+            RejectionKind::Protocol(error) => self.record_protocol_rejection(error),
+            RejectionKind::PayloadTooLarge => {
+                self.record_fixed_rejection(&self.payload_too_large, rejection.reason());
+            }
+            RejectionKind::Custom(reason) => self.record_custom_rejection(reason),
         }
-        if let Some((slot, _)) = self
-            .outcomes
-            .iter()
-            .find(|(slot, _)| matches!(slot.label(), OutcomeLabel::Rejected(r) if r == reason))
-        {
-            self.record(slot);
-            return;
-        }
-        self.record_custom_rejection(reason);
+    }
+
+    fn record_fixed_rejection(&self, slot: &OnceLock<Counter>, reason: &'static str) {
+        slot.get_or_init(|| self.rejection_counter(reason))
+            .increment(1);
     }
 
     fn record_custom_rejection(&self, reason: &'static str) {
@@ -354,19 +372,15 @@ impl EndpointMetrics {
             return;
         }
         drop(snapshot);
-        let guard = self.custom_rejections_lock.lock();
-        let current = self.custom_rejections.load();
-        if let Some(counter) = current.get(reason) {
-            let counter = counter.clone();
-            drop(guard);
-            counter.increment(1);
-            return;
-        }
         let counter = self.rejection_counter(reason);
-        let mut next = (**current).clone();
-        next.insert(reason, counter.clone());
-        self.custom_rejections.store(Arc::new(next));
-        drop(guard);
+        self.custom_rejections.rcu(|current| {
+            if current.contains_key(reason) {
+                return Arc::clone(current);
+            }
+            let mut next = (**current).clone();
+            next.insert(reason, counter.clone());
+            Arc::new(next)
+        });
         counter.increment(1);
     }
 
@@ -382,14 +396,14 @@ impl EndpointMetrics {
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::http::header::CONTENT_TYPE;
-    use http_body_util::BodyExt as _;
     use metrics::Label;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::inbound::{MessageId, Verifiers};
     use crate::protocol::KeyRing;
 
     fn inert_app() -> infra_http::Application {
@@ -413,12 +427,9 @@ mod tests {
     }
 
     async fn body_text(response: Response) -> String {
-        let bytes = response
-            .into_body()
-            .collect()
+        let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response body")
-            .to_bytes();
+            .expect("response body");
         String::from_utf8(bytes.to_vec()).expect("UTF-8 body")
     }
 
@@ -428,23 +439,28 @@ mod tests {
 
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
         let keys = KeyRing::from_encoded("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", None)
             .expect("key");
-        let state = WebhookState::active(Receiver::new(
-            pool,
-            [("partner".to_owned(), Arc::new(keys) as Arc<dyn Verifier>)],
-        ));
+        let mut verifiers = Verifiers::new();
+        verifiers.bind("partner", keys);
+        let state = WebhookState::active(verifiers.into_receiver(pool));
         let cloned = state.clone();
         metrics::with_local_recorder(&recorder, || {
             let (_, partner) = state.state.endpoint("partner").expect("partner endpoint");
-            partner.metrics.record(OutcomeSlot::Accepted);
+            partner.metrics.record(IngressOutcome::Accepted);
             let (_, cloned_partner) = cloned.state.endpoint("partner").expect("partner endpoint");
-            cloned_partner.metrics.record(OutcomeSlot::Accepted);
-            partner.metrics.record_rejection("invalid_signature");
-            partner.metrics.record_rejection("invalid_token");
-            partner.metrics.record_rejection("invalid_token");
+            cloned_partner.metrics.record(IngressOutcome::Accepted);
+            partner
+                .metrics
+                .record_rejection(Rejection::from(ProtocolError::InvalidSignature));
+            partner
+                .metrics
+                .record_rejection(Rejection::new("invalid_token"));
+            partner
+                .metrics
+                .record_rejection(Rejection::new("invalid_token"));
             let _ = state.state.reject_unknown_endpoint();
             let _ = cloned.state.reject_unknown_endpoint();
         });
@@ -509,9 +525,9 @@ mod tests {
             "WebhookState {\n    active: false,\n}"
         );
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://127.0.0.1:1/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unused")
             .expect("lazy pool opens no connection");
-        let active = WebhookState::active(Receiver::new(pool, []));
+        let active = WebhookState::active(Verifiers::new().into_receiver(pool));
         assert_eq!(format!("{active:?}"), "WebhookState { active: true }");
         assert_eq!(
             format!("{active:#?}"),
@@ -564,6 +580,161 @@ mod tests {
         assert!(
             problem.contains(r#""name":"path.endpoint_id""#),
             "{problem}"
+        );
+    }
+
+    #[utoipa::path(
+        post,
+        path = "/webhooks/provider",
+        security(),
+        responses(ReceiveResponses)
+    )]
+    async fn receive_provider(
+        State(state): State<WebhookState>,
+        request: axum::extract::Request,
+    ) -> Response {
+        state.receive("provider", request).await
+    }
+
+    #[tokio::test]
+    async fn custom_provider_route_reuses_webhook_state_receive() {
+        use std::time::Duration;
+
+        struct TokenVerifier;
+        impl Verifier for TokenVerifier {
+            fn authenticate(
+                &self,
+                headers: &http::HeaderMap,
+                _body: &[u8],
+                _now: SystemTime,
+            ) -> Result<MessageId, Rejection> {
+                if headers
+                    .get("x-provider-token")
+                    .and_then(|value| value.to_str().ok())
+                    != Some("expected")
+                {
+                    return Err(Rejection::new("invalid_token"));
+                }
+                Ok(bytes::Bytes::from_static(b"delivery-1"))
+            }
+        }
+
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unused")
+            .expect("lazy pool opens no connection");
+        let mut verifiers = Verifiers::new();
+        verifiers.bind("provider", Arc::new(TokenVerifier));
+        let state = WebhookState::active(verifiers.into_receiver(pool));
+        let contract = with_webhook_responses(
+            infra_http::http_route!(receive_provider).expect("custom provider route registers"),
+        )
+        .expect("webhook response components attach");
+        let merged = router::<WebhookState>()
+            .expect("standard webhook route registers")
+            .merge(contract.clone())
+            .expect("custom provider route merges without component conflicts");
+        assert!(merged.into_openapi().is_ok());
+        let app = contract
+            .build(
+                state,
+                infra_http::Authentication::Public,
+                &infra_http::HardenOptions {
+                    max_body_bytes: MAX_BODY_BYTES + 1,
+                    request_timeout: Duration::from_secs(1),
+                    max_in_flight: None,
+                    admission_wait: Duration::ZERO,
+                    log_health_probes: false,
+                    trust_trace_context: false,
+                    draining: None,
+                },
+            )
+            .expect("custom provider route is public");
+
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::post("/webhooks/provider")
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            body_text(rejected)
+                .await
+                .contains(r#""code":"webhook_rejected""#)
+        );
+
+        let oversized = app
+            .oneshot(
+                Request::post("/webhooks/provider")
+                    .body(Body::from(vec![b'x'; MAX_BODY_BYTES + 1]))
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            body_text(oversized)
+                .await
+                .contains(r#""code":"request_entity_too_large""#)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unfinished_webhook_upload_returns_the_declared_timeout() {
+        use std::time::Duration;
+
+        let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let mut verifiers = Verifiers::new();
+        verifiers.bind(
+            "partner/a?#",
+            KeyRing::from_encoded("whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=", None)
+                .expect("key"),
+        );
+        let app = router()
+            .expect("webhook operation registers")
+            .build(
+                WebhookState::active(verifiers.into_receiver(pool)),
+                infra_http::Authentication::Public,
+                &infra_http::HardenOptions {
+                    max_body_bytes: MAX_BODY_BYTES + 1,
+                    request_timeout: Duration::from_secs(1),
+                    max_in_flight: None,
+                    admission_wait: Duration::from_secs(1),
+                    log_health_probes: false,
+                    trust_trace_context: false,
+                    draining: None,
+                },
+            )
+            .expect("webhook operation is public");
+        let upload = Body::from_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let response = app
+            .oneshot(
+                Request::post("/webhooks/partner%2Fa%3F%23")
+                    .body(upload)
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+        let bytes = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("problem body");
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("problem JSON");
+        assert_eq!(problem["code"], "request_timeout");
+        let document = router::<WebhookState>()
+            .expect("webhook operation registers")
+            .into_openapi()
+            .expect("valid webhook contract");
+        let document = serde_json::to_value(document).expect("document");
+        assert_eq!(
+            document["paths"]["/webhooks/{endpoint_id}"]["post"]["responses"]["408"]["$ref"],
+            "#/components/responses/RequestTimeout"
         );
     }
 }

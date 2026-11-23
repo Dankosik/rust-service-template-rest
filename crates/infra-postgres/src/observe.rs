@@ -1,14 +1,16 @@
-use std::sync::{Arc, OnceLock};
+use std::borrow::Cow;
+use std::mem::DropGuard;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use enum_map::{Enum, EnumMap};
 use metrics::{SharedString, Unit};
-use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
 use crate::maintenance::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
+use crate::pool::Pool;
 use crate::transaction::TxError;
 
 const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
@@ -105,45 +107,47 @@ pub(crate) fn describe() {
     );
 }
 
-pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
-    let size = f64::from(pool.size());
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a metric gauge is f64; counts stay far below 2^52"
-    )]
-    let idle = pool.num_idle() as f64;
-    metrics::gauge!(
-        CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => pool_name,
-        "db.client.connection.state" => "idle"
-    )
-    .set(idle);
-    metrics::gauge!(
-        CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => pool_name,
-        "db.client.connection.state" => "used"
-    )
-    .set((size - idle).max(0.0));
-    metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => pool_name)
-        .set(f64::from(pool.options().get_max_connections()));
-}
+impl Pool {
+    pub fn record_metrics(&self, pool_name: &'static str) {
+        let size = f64::from(self.size());
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a metric gauge is f64; counts stay far below 2^52"
+        )]
+        let idle = self.num_idle() as f64;
+        metrics::gauge!(
+            CONNECTION_COUNT_METRIC,
+            "db.client.connection.pool.name" => pool_name,
+            "db.client.connection.state" => "idle"
+        )
+        .set(idle);
+        metrics::gauge!(
+            CONNECTION_COUNT_METRIC,
+            "db.client.connection.pool.name" => pool_name,
+            "db.client.connection.state" => "used"
+        )
+        .set((size - idle).max(0.0));
+        metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => pool_name)
+            .set(f64::from(self.options().get_max_connections()));
+    }
 
-pub async fn record_metrics_periodically(
-    pool: PgPool,
-    pool_name: &'static str,
-    interval: Duration,
-    cancel: CancellationToken,
-) {
-    let _ = cancel
-        .run_until_cancelled(async {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                record_metrics(&pool, pool_name);
-            }
-        })
-        .await;
+    pub async fn record_metrics_periodically(
+        self,
+        pool_name: &'static str,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) {
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    self.record_metrics(pool_name);
+                }
+            })
+            .await;
+    }
 }
 
 pub(crate) async fn observe_acquisition<T>(
@@ -178,69 +182,42 @@ const CANCELLED: &str = "cancelled";
 
 #[macro_export]
 macro_rules! observed {
-    ($summary:literal, $statement:expr $(,)?) => {
-        $crate::__statement_observation::observed_with_success_key(
-            $summary,
-            Some({
+    ($summary:expr, $statement:expr $(,)?) => {{
+        const __OBSERVED_SUMMARY: &str = $summary;
+        $crate::__statement_observation::observed_statement(
+            __OBSERVED_SUMMARY,
+            {
                 use $crate::__statement_observation::{Key, Label, OPERATION_DURATION_METRIC};
 
                 static LABELS: [Label; 2] = [
                     Label::from_static_parts("db.system.name", "postgresql"),
-                    Label::from_static_parts("db.query.summary", $summary),
+                    Label::from_static_parts("db.query.summary", __OBSERVED_SUMMARY),
                 ];
                 static SUCCESS_KEY: Key =
                     Key::from_static_parts(OPERATION_DURATION_METRIC, &LABELS);
                 &SUCCESS_KEY
-            }),
+            },
             $statement,
         )
-    };
+    }};
 }
 
-pub fn observed<T>(
+pub async fn observed_statement<T>(
     summary: &'static str,
-    statement: impl Future<Output = Result<T, sqlx::Error>>,
-) -> impl Future<Output = Result<T, sqlx::Error>> {
-    observed_with_success_key(summary, None, statement)
-}
-
-pub async fn observed_with_success_key<T>(
-    summary: &'static str,
-    success_key: Option<&'static metrics::Key>,
+    success_key: &'static metrics::Key,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
 ) -> Result<T, sqlx::Error> {
-    let span = if Span::current().is_none() {
-        Span::none()
-    } else {
-        tracing::info_span!(
-            "postgres_statement",
-            otel.name = summary,
-            otel.kind = "client",
-            db.system.name = "postgresql",
-            db.query.summary = summary,
-            db.response.status_code = tracing::field::Empty,
-            error.type = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-        )
-    };
-    let guard = std::mem::DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
+    let span = statement_span(summary);
+    let guard = DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
         record_statement_error(started, &span, summary, SharedString::const_str(CANCELLED));
     });
     let result = statement.instrument(span).await;
-    let (started, span) = std::mem::DropGuard::dismiss(guard);
+    let (started, span) = DropGuard::dismiss(guard);
     match &result {
         Ok(_) => {
-            let histogram = if let Some(key) = success_key {
-                metrics::with_recorder(|recorder| {
-                    recorder.register_histogram(key, &OPERATION_METADATA)
-                })
-            } else {
-                metrics::histogram!(
-                    OPERATION_DURATION_METRIC,
-                    "db.system.name" => "postgresql",
-                    "db.query.summary" => summary
-                )
-            };
+            let histogram = metrics::with_recorder(|recorder| {
+                recorder.register_histogram(success_key, &OPERATION_METADATA)
+            });
             histogram.record(started.elapsed());
         }
         Err(error) => {
@@ -255,6 +232,24 @@ pub async fn observed_with_success_key<T>(
         }
     }
     result
+}
+
+fn statement_span(summary: &'static str) -> Span {
+    let has_parent =
+        tracing::dispatcher::get_default(|dispatch| dispatch.current_span().id().is_some());
+    if !has_parent {
+        return Span::none();
+    }
+    tracing::info_span!(
+        "postgres_statement",
+        otel.name = summary,
+        otel.kind = "client",
+        db.system.name = "postgresql",
+        db.query.summary = summary,
+        db.response.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    )
 }
 
 fn record_statement_error(
@@ -274,41 +269,34 @@ fn record_statement_error(
     .record(started.elapsed());
 }
 
-macro_rules! transaction_outcomes {
-    ($($variant:ident => $label:literal),* $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
-        pub(crate) enum TransactionOutcome { $($variant),* }
-
-        impl TransactionOutcome {
-            pub(crate) const fn label(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $label,)*
-                }
-            }
-
-            fn duration_histogram(self) -> metrics::Histogram {
-                match self {
-                    $(Self::$variant => metrics::histogram!(
-                        TRANSACTION_DURATION_METRIC,
-                        "outcome" => $label
-                    ),)*
-                }
-            }
-        }
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+enum TransactionOutcome {
+    Committed,
+    RolledBack,
+    AcquireFailed,
+    BeginFailed,
+    CommitFailed,
+    CommitUnknown,
+    Cancelled,
 }
 
-transaction_outcomes!(
-    Committed => "committed",
-    RolledBack => "rolled_back",
-    AcquireFailed => "acquire_failed",
-    BeginFailed => "begin_failed",
-    CommitFailed => "commit_failed",
-    CommitUnknown => "commit_unknown",
-    Cancelled => "cancelled",
-);
-
 impl TransactionOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::RolledBack => "rolled_back",
+            Self::AcquireFailed => "acquire_failed",
+            Self::BeginFailed => "begin_failed",
+            Self::CommitFailed => "commit_failed",
+            Self::CommitUnknown => "commit_unknown",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn duration_histogram(self) -> metrics::Histogram {
+        metrics::histogram!(TRANSACTION_DURATION_METRIC, "outcome" => self.label())
+    }
+
     const fn of(error: &TxError) -> Self {
         match error {
             TxError::Acquire(_) => Self::AcquireFailed,
@@ -340,97 +328,96 @@ impl PoolMetrics {
     }
 }
 
-pub(crate) fn transaction_span(pool: &PgPool) -> Span {
-    let target = pool.connect_options();
+pub(crate) fn transaction_span(pool: &Pool) -> Span {
+    let target = pool.target();
     tracing::info_span!(
         "postgres_transaction",
         otel.kind = "client",
         db.system.name = "postgresql",
-        db.namespace = target.get_database(),
-        server.address = target.get_host(),
-        server.port = target.get_port(),
+        db.namespace = target.database(),
+        server.address = target.host(),
+        server.port = target.port(),
         postgres.transaction.outcome = tracing::field::Empty,
         error.type = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
     )
 }
 
-pub(crate) struct TransactionObservation {
+struct TransactionInner<'a> {
     started: Instant,
     span: Span,
-    metrics: Option<Arc<PoolMetrics>>,
-    phase: TransactionPhase,
+    metrics: &'a PoolMetrics,
+    committing: bool,
 }
 
-enum TransactionPhase {
-    Running,
-    Committing,
-    Finished(TransactionOutcome),
-}
-
-impl TransactionObservation {
-    pub(crate) fn start(span: Span, metrics: Option<Arc<PoolMetrics>>) -> Self {
-        Self {
-            started: Instant::now(),
-            span,
-            metrics,
-            phase: TransactionPhase::Running,
+impl TransactionInner<'_> {
+    fn abandon(self) {
+        if self.committing {
+            tracing::warn!(
+                parent: &self.span,
+                phase = "commit",
+                commit_outcome = "unknown",
+                "postgres_transaction_cancelled"
+            );
         }
+        self.finish(TransactionOutcome::Cancelled);
+    }
+
+    fn finish(self, outcome: TransactionOutcome) {
+        self.span
+            .record("postgres.transaction.outcome", outcome.label());
+        self.metrics
+            .transaction_duration(outcome)
+            .record(self.started.elapsed());
+    }
+
+    fn fail(self, error: &TxError) {
+        let source = error.driver();
+        let error_type = sqlstate(source).unwrap_or_else(|| Cow::Borrowed(failure_cause(source)));
+        self.span.record("error.type", error_type.as_ref());
+        self.span.record("otel.status_code", "ERROR");
+        self.finish(TransactionOutcome::of(error));
+    }
+}
+
+pub(crate) struct TransactionObservation<'a>(
+    DropGuard<TransactionInner<'a>, fn(TransactionInner<'a>)>,
+);
+
+impl<'a> TransactionObservation<'a> {
+    pub(crate) fn start(span: Span, metrics: &'a PoolMetrics) -> Self {
+        Self(DropGuard::new(
+            TransactionInner {
+                started: Instant::now(),
+                span,
+                metrics,
+                committing: false,
+            },
+            TransactionInner::abandon,
+        ))
     }
 
     pub(crate) fn record_connection_wait(&self) {
-        let elapsed = self.started.elapsed();
-        match &self.metrics {
-            Some(metrics) => metrics.connection_wait().record(elapsed),
-            None => metrics::histogram!(
-                CONNECTION_WAIT_METRIC,
-                "db.client.connection.pool.name" => "postgres"
-            )
-            .record(elapsed),
-        }
+        self.0
+            .metrics
+            .connection_wait()
+            .record(self.0.started.elapsed());
     }
 
     pub(crate) fn begin_commit(&mut self) {
-        self.phase = TransactionPhase::Committing;
+        self.0.committing = true;
     }
 
-    pub(crate) fn end(&mut self, outcome: TransactionOutcome) {
-        self.phase = TransactionPhase::Finished(outcome);
+    pub(crate) fn commit(self) {
+        DropGuard::dismiss(self.0).finish(TransactionOutcome::Committed);
     }
 
-    pub(crate) fn record_failure(&mut self, error: &TxError) {
-        let source = error.driver();
-        match sqlstate(source) {
-            Some(code) => self.span.record("error.type", code.as_ref()),
-            None => self.span.record("error.type", failure_cause(source)),
-        };
-        self.span.record("otel.status_code", "ERROR");
-        self.end(TransactionOutcome::of(error));
+    pub(crate) fn roll_back(self) {
+        DropGuard::dismiss(self.0).finish(TransactionOutcome::RolledBack);
     }
-}
 
-impl Drop for TransactionObservation {
-    fn drop(&mut self) {
-        let outcome = match self.phase {
-            TransactionPhase::Running => TransactionOutcome::Cancelled,
-            TransactionPhase::Committing => {
-                tracing::warn!(
-                    parent: &self.span,
-                    phase = "commit",
-                    commit_outcome = "unknown",
-                    "postgres_transaction_cancelled"
-                );
-                TransactionOutcome::Cancelled
-            }
-            TransactionPhase::Finished(outcome) => outcome,
-        };
-        self.span
-            .record("postgres.transaction.outcome", outcome.label());
-        let elapsed = self.started.elapsed();
-        match &self.metrics {
-            Some(metrics) => metrics.transaction_duration(outcome).record(elapsed),
-            None => outcome.duration_histogram().record(elapsed),
-        }
+    pub(crate) fn fail(self, error: &TxError) {
+        DropGuard::dismiss(self.0).fail(error);
     }
 }
 

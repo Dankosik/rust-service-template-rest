@@ -7,15 +7,30 @@ use utoipa::openapi::schema::{AnyOfBuilder, Schema};
 use utoipa::openapi::{Components, OpenApi, Ref, RefOr};
 use utoipa::{OpenApi as _, ToResponse};
 
-use super::{FinalizeError, fixed_path_operations};
+use super::components::ComponentKind;
+use super::document::{path_operations_mut, resolve};
+use super::{FinalizeError, FinalizeKind};
 // template:begin authn:http-outcomes-policy-import
-use super::{Access, Policy};
+use super::Policy;
 // template:end authn:http-outcomes-policy-import
 use crate::probes::ProbeRoutes;
-use crate::problem::{PROBLEM_MEDIA_TYPE, responses};
+use crate::problem::{Code, PROBLEM_MEDIA_TYPE, http_status, responses};
 
-const RESPONSE_REFERENCE_PREFIX: &str = "#/components/responses/";
-const MEDIA_TYPE_REFERENCE_PREFIX: &str = "#/components/mediaTypes/";
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ResponseFault {
+    #[error("shared response could not be resolved")]
+    SharedResponse,
+    #[error("existing response must resolve within the service document")]
+    ExistingResponse,
+    #[error("existing media type must resolve within the service document")]
+    ExistingMediaType,
+    #[error("shared media type could not be resolved")]
+    SharedMediaType,
+    #[error("existing header must resolve within the service document")]
+    ExistingHeader,
+    #[error("shared header could not be resolved")]
+    SharedHeader,
+}
 
 pub(super) fn compose(
     document: &mut OpenApi,
@@ -30,23 +45,9 @@ pub(super) fn compose(
     }
     for (path, item) in &mut document.paths.paths {
         let path = path.as_str();
-        let fixed = fixed_path_operations!(item, as_mut)
-            .into_iter()
-            .filter_map(|(method, operation)| operation.map(|operation| (method, operation)));
-        for (method, operation) in fixed.chain(
-            item.additional_operations
-                .iter_mut()
-                .map(|(method, operation)| (method.as_str(), operation)),
-        ) {
+        for (method, operation) in path_operations_mut(item) {
             // template:begin authn:http-outcomes-operation-policy
-            let protected = matches!(
-                policy
-                    .0
-                    .routes
-                    .get(path)
-                    .and_then(|route| route.get(method)),
-                Some(Access::Protected(..))
-            );
+            let protected = policy.is_protected(path, method);
             // template:end authn:http-outcomes-operation-policy
             add_outcomes(
                 operation,
@@ -56,11 +57,13 @@ pub(super) fn compose(
                 // template:end authn:http-outcomes-operation-argument
                 probes.contains_method(method, path),
             )
-            .map_err(|(status, fault)| FinalizeError::InvalidResponse {
-                path: path.to_owned(),
-                method: method.to_owned(),
-                status,
-                fault,
+            .map_err(|(status, fault)| {
+                FinalizeError::new(FinalizeKind::InvalidResponse {
+                    path: path.to_owned(),
+                    method: method.to_owned(),
+                    status,
+                    fault,
+                })
             })?;
         }
     }
@@ -74,43 +77,59 @@ fn add_outcomes(
     protected: bool,
     // template:end authn:http-outcomes-protected-parameter
     probe: bool,
-) -> Result<(), (String, &'static str)> {
-    let declares_request_body = operation.request_body.is_some();
-    let declares_json_body = declares_json_body(operation, components);
-    let responses = &mut operation.responses.responses;
-    if declares_json_body
-        && responses
-            .get("415")
+) -> Result<(), (String, ResponseFault)> {
+    let json_body = declares_json_body(operation, components);
+    let operation_responses = &mut operation.responses.responses;
+    let unsupported_media_type = http_status(Code::UnsupportedMediaType);
+    if json_body
+        && operation_responses
+            .get(unsupported_media_type.as_str())
             .is_none_or(|response| can_merge_json_media_type_outcome(response, components))
     {
-        let (_, common) = responses::UnsupportedMediaType::response();
-        merge_response(responses, components, "415", common)
-            .map_err(|fault| ("415".to_owned(), fault))?;
+        let (_, shared) = responses::UnsupportedMediaType::response();
+        merge_status(
+            operation_responses,
+            components,
+            unsupported_media_type.as_str(),
+            shared,
+        )?;
     }
-    let mut add = |status: &str, (name, _): (&str, RefOr<Response>)| {
+    let mut add = |code: Code, (name, _): (&str, RefOr<Response>)| {
         let reference = Ref::from_response_name(name).into();
-        merge_response(responses, components, status, reference)
-            .map_err(|fault| (status.to_owned(), fault))
+        merge_status(
+            operation_responses,
+            components,
+            http_status(code).as_str(),
+            reference,
+        )
     };
-    add("413", responses::RequestEntityTooLarge::response())?;
-    add("500", responses::InternalServerError::response())?;
-    add("504", responses::GatewayTimeout::response())?;
-    if declares_request_body {
-        add("408", responses::RequestTimeout::response())?;
+    add(
+        Code::RequestEntityTooLarge,
+        responses::RequestEntityTooLarge::response(),
+    )?;
+    add(
+        Code::InternalServerError,
+        responses::InternalServerError::response(),
+    )?;
+    add(Code::GatewayTimeout, responses::GatewayTimeout::response())?;
+    if operation.request_body.is_some() {
+        add(Code::RequestTimeout, responses::RequestTimeout::response())?;
     }
     if !probe {
-        add("503", responses::AdmissionUnavailable::response())?;
+        add(
+            Code::ServiceUnavailable,
+            responses::AdmissionUnavailable::response(),
+        )?;
     }
     // template:begin authn:http-protected-response-composition
     if protected {
         use utoipa::IntoResponses as _;
 
         for (status, reference) in crate::authn::ProtectedOperationProblemResponses::responses() {
-            if status == "504" {
+            if status == http_status(Code::GatewayTimeout).as_str() {
                 continue;
             }
-            merge_response(responses, components, &status, reference)
-                .map_err(|fault| (status, fault))?;
+            merge_status(operation_responses, components, &status, reference)?;
         }
     }
     // template:end authn:http-protected-response-composition
@@ -125,7 +144,7 @@ fn declares_json_body(operation: &Operation, components: &Components) -> bool {
             resolve(
                 body,
                 &components.request_bodies,
-                "#/components/requestBodies/",
+                ComponentKind::RequestBodies,
             )
         })
         .is_some_and(|body| {
@@ -138,40 +157,44 @@ fn declares_json_body(operation: &Operation, components: &Components) -> bool {
 }
 
 fn can_merge_json_media_type_outcome(response: &RefOr<Response>, components: &Components) -> bool {
-    resolve(response, &components.responses, RESPONSE_REFERENCE_PREFIX).is_some_and(|response| {
+    resolve(response, &components.responses, ComponentKind::Responses).is_some_and(|response| {
         response
             .content
             .get(PROBLEM_MEDIA_TYPE)
             .is_none_or(|content| {
-                resolve(
-                    content,
-                    &components.media_types,
-                    MEDIA_TYPE_REFERENCE_PREFIX,
-                )
-                .is_some()
+                resolve(content, &components.media_types, ComponentKind::MediaTypes).is_some()
             })
     })
+}
+
+fn merge_status(
+    responses: &mut BTreeMap<String, RefOr<Response>>,
+    components: &Components,
+    status: &str,
+    shared: RefOr<Response>,
+) -> Result<(), (String, ResponseFault)> {
+    merge_response(responses, components, status, shared)
+        .map_err(|fault| (status.to_owned(), fault))
 }
 
 fn merge_response(
     responses: &mut BTreeMap<String, RefOr<Response>>,
     components: &Components,
     status: &str,
-    common: RefOr<Response>,
-) -> Result<(), &'static str> {
+    shared_ref: RefOr<Response>,
+) -> Result<(), ResponseFault> {
     let slot = match responses.entry(status.to_owned()) {
         Entry::Vacant(slot) => {
-            slot.insert(common);
+            slot.insert(shared_ref);
             return Ok(());
         }
-        Entry::Occupied(slot) if slot.get() == &common => return Ok(()),
+        Entry::Occupied(slot) if slot.get() == &shared_ref => return Ok(()),
         Entry::Occupied(slot) => slot.into_mut(),
     };
-    let Some(common) = resolve(&common, &components.responses, RESPONSE_REFERENCE_PREFIX) else {
-        return Err("shared response could not be resolved");
-    };
-    let mut merged = resolve(slot, &components.responses, RESPONSE_REFERENCE_PREFIX)
-        .ok_or("existing response must resolve within the service document")?
+    let shared = resolve(&shared_ref, &components.responses, ComponentKind::Responses)
+        .ok_or(ResponseFault::SharedResponse)?;
+    let mut merged = resolve(slot, &components.responses, ComponentKind::Responses)
+        .ok_or(ResponseFault::ExistingResponse)?
         .clone();
     if let RefOr::Ref(reference) = slot {
         if !reference.description.is_empty() {
@@ -181,19 +204,19 @@ fn merge_response(
             merged.summary = Some(reference.summary.clone());
         }
     }
-    append_description(&mut merged.description, &common.description);
-    merge_response_content(&mut merged, common, components)?;
-    merge_response_headers(&mut merged, common, components)?;
+    append_description(&mut merged.description, &shared.description);
+    merge_response_content(&mut merged, shared, components)?;
+    merge_response_headers(&mut merged, shared, components)?;
     *slot = RefOr::T(merged);
     Ok(())
 }
 
 fn merge_response_content(
     merged: &mut Response,
-    common: &Response,
+    shared: &Response,
     components: &Components,
-) -> Result<(), &'static str> {
-    for (media_type, content) in &common.content {
+) -> Result<(), ResponseFault> {
+    for (media_type, content) in &shared.content {
         let Some(slot) = merged.content.get_mut(media_type) else {
             merged.content.insert(media_type.clone(), content.clone());
             continue;
@@ -201,16 +224,13 @@ fn merge_response_content(
         if slot == content {
             continue;
         }
-        let mut existing = resolve(slot, &components.media_types, MEDIA_TYPE_REFERENCE_PREFIX)
-            .ok_or("existing media type must resolve within the service document")?
+        let mut existing = resolve(slot, &components.media_types, ComponentKind::MediaTypes)
+            .ok_or(ResponseFault::ExistingMediaType)?
             .clone();
-        let other = resolve(
-            content,
-            &components.media_types,
-            MEDIA_TYPE_REFERENCE_PREFIX,
-        )
-        .ok_or("shared media type could not be resolved")?;
-        union_schema(&mut existing.schema, other.schema.as_ref());
+        let shared_media_type =
+            resolve(content, &components.media_types, ComponentKind::MediaTypes)
+                .ok_or(ResponseFault::SharedMediaType)?;
+        union_schema(&mut existing.schema, shared_media_type.schema.as_ref());
         *slot = RefOr::T(existing);
     }
     Ok(())
@@ -218,10 +238,10 @@ fn merge_response_content(
 
 fn merge_response_headers(
     merged: &mut Response,
-    common: &Response,
+    shared: &Response,
     components: &Components,
-) -> Result<(), &'static str> {
-    for (name, header) in &common.headers {
+) -> Result<(), ResponseFault> {
+    for (name, header) in &shared.headers {
         let Some((_, slot)) = merged
             .headers
             .iter_mut()
@@ -233,13 +253,13 @@ fn merge_response_headers(
         if slot == header {
             continue;
         }
-        let mut existing = resolve(slot, &components.headers, "#/components/headers/")
-            .ok_or("existing header must resolve within the service document")?
+        let mut existing = resolve(slot, &components.headers, ComponentKind::Headers)
+            .ok_or(ResponseFault::ExistingHeader)?
             .clone();
-        let other = resolve(header, &components.headers, "#/components/headers/")
-            .ok_or("shared header could not be resolved")?;
-        union_schema(&mut existing.schema, other.schema.as_ref());
-        if let Some(description) = &other.description {
+        let shared_header = resolve(header, &components.headers, ComponentKind::Headers)
+            .ok_or(ResponseFault::SharedHeader)?;
+        union_schema(&mut existing.schema, shared_header.schema.as_ref());
+        if let Some(description) = &shared_header.description {
             append_description(existing.description.get_or_insert_default(), description);
         }
         *slot = RefOr::T(existing);
@@ -269,30 +289,4 @@ fn union_schema(existing: &mut Option<RefOr<Schema>>, addition: Option<&RefOr<Sc
                 .into(),
         );
     }
-}
-
-pub(super) fn resolve<'a, T>(
-    value: &'a RefOr<T>,
-    components: &'a BTreeMap<String, RefOr<T>>,
-    prefix: &str,
-) -> Option<&'a T> {
-    resolve_when(value, components, prefix, |_| true)
-}
-
-pub(super) fn resolve_when<'a, T>(
-    mut value: &'a RefOr<T>,
-    components: &'a BTreeMap<String, RefOr<T>>,
-    prefix: &str,
-    accept: impl Fn(&Ref) -> bool,
-) -> Option<&'a T> {
-    for _ in 0..=components.len() {
-        match value {
-            RefOr::T(resolved) => return Some(resolved),
-            RefOr::Ref(reference) if accept(reference) => {
-                value = components.get(reference.ref_location.strip_prefix(prefix)?)?;
-            }
-            RefOr::Ref(_) => return None,
-        }
-    }
-    None
 }

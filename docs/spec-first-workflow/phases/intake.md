@@ -1,222 +1,190 @@
 # Intake
 
-Use when new structured work lacks a confirmed [Intent](../interfaces/intent.md)
-at `status: ready`, or outcome, scope, authority, observable success, or first
-owner is unresolved.
-
-Own framing the request and driving **shared understanding** before autonomous
-preparation starts. Every downstream phase runs in a fresh session with zero
-chat history, so accuracy here governs the entire pipeline.
+Align with the user on **what** we are building (and *why*) before autonomous
+preparation starts. Keep technical mechanisms, crate layout, and implementation
+choices off the user's frontier—the agent owns those autonomously once
+requirements settle.
 
 ## Steps
 
-1. **Ground in source truth and map the design tree.**
-   - Check whether `specs/<task>/intent.md` (`draft` or `ready`) or prior
-     `/grilling` / `/idea-refine` outputs already exist; carry settled branches
-     forward without re-asking them.
-   - Separate the requester's underlying problem from any proposed mechanism
-     (**XY check**): test whether a literal reading would satisfy the prompt as
-     worded while leaving the real problem unresolved.
-   - Wait for fast local grounding before Round 1: inspect external contracts
-     (`api/openapi/service.yaml`, `api/proto/`, config, CLI), current callers,
-     [Repository Architecture](../../repo-architecture.md) (including `Domain
-     Vocabulary`), and relevant `docs/decisions/`. Dispatch a fresh
-     `evidence-agent` via [Read-Only
-     Delegation](../shared/read-only-delegation.md) for read-heavy sweeps so
-     this session stays in the **smart zone**.
-   - **Entry modes & early exits:**
-     - *Premise or decision conflict:* if primary sources contradict the
-       prompt's premise or a request reverses a rejected choice in
-       `docs/decisions/`, put that verified discrepancy (with the recorded `Why`
-       / `Reopen if`) at the root of Round 1; if every requested obligation
-       already holds, present the verified evidence before interviewing.
-     - *Raw product bet:* when no primary operator or MVP cutline is chosen, put
-       operator selection, MVP boundary, and excluded directions at the root of
-       the **design tree**.
-     - *Pre-authored spec or ticket:* extract already-settled decisions into
-       draft `I<n>`, verify them against primary code, and grill strictly on the
-       delta (code contradictions, unclosed blind spots, unbound qualifiers, and
-       missing `Non-goals`).
-     - *Behavior-preserving change (performance / refactor / hardening):* grill
-       on preserved external invariants, quantitative target + workload
-       envelope, and permitted blast radius / trade-offs rather than new user
-       flows.
-     - *Downgrade to Direct Work:* if grounding and any brief clarification
-       prove the change is clear, local, reversible, single-owner, and free of
-       open architectural forks, confirm understanding and execute under [Direct
-       Work](../../../AGENTS.md#direct-work) instead of launching preparation
-       phases.
-   - Map unresolved branches across [Blind-Spot Coverage](#blind-spot-coverage)
-     and classify every branch using [Grilling](../shared/grilling.md)'s four
-     buckets (**facts**, **technical choices**, **low-stakes reversible
-     conventions**, **requester-owned decisions**). Route deeper
-     external-contract or baseline evidence gaps to [Research](research.md).
-   - *Done when* fast local codebase facts and relevant `docs/decisions/`
-     constraints are verified and every branch is classified with zero technical
-     mechanisms or lookupable facts on the user's **frontier**.
+1. **Ground fast, run the XY check, and adapt entry.**
+   - Carry forward settled decisions, rejected alternatives, constraints, `A<n>`
+     assumptions, and delegated boundaries from any prior `/grilling`,
+     `/idea-refine`, or `specs/<task>/intent.md` without re-asking them.
+   - **XY check (problem vs mechanism vs constraint):** when the requester
+     proposes a mechanism (cache, table, queue, worker, crate, or wire shape),
+     test whether literal compliance could leave the real user or operator
+     problem unsolved. Lift suggested mechanisms into observable goals
+     (freshness, latency, failure tolerance, scope) and check whether the named
+     mechanism is a **hard external/business constraint** (for example, an
+     external consumer already bound to that contract) or a **mechanism guess**
+     owned by [Technical Design](technical-design.md).
+   - **Ground repository anchors** under [Grilling](../shared/grilling.md)
+     (opening with 1 problem-framing question first when the request is foggy,
+     and offloading wide scans to `evidence-agent`): inspect affected external
+     contracts (`api/`, config, CLI), current callers, [Domain
+     Vocabulary](../../repo-architecture.md#domain-vocabulary), and relevant
+     `docs/decisions/`. Load [Research](research.md) only when an unknown
+     external contract or empirical fact gates a requester decision.
+   - **Adapt entry by situation:**
+     - *Premise conflict or already-satisfied request:* put the verified code
+       or `docs/decisions/` contradiction (with its `Why` / `Reopen if`) at the
+       top of Round 1. If every requested outcome already holds, show primary
+       evidence first to test whether a different underlying problem remains;
+       if the user confirms zero coding delta remains, verify via [Zero-Delta
+       Check](plan-review.md#zero-delta-check) before closing without launching
+       [Specification](specification.md).
+     - *Raw product bet* (no primary operator or MVP cutline yet): put primary
+       operator, core value bet / MVP cutline, and biggest exclusions at the
+       root of Round 1.
+     - *Pre-authored spec or ticket:* verify claims against live code and grill
+       strictly on contradictions, blind spots, unbound qualifiers, and missing
+       `Must not` / `Non-goals`.
+     - *Behavior-preserving change* (perf / refactor / hardening): grill on
+       preserved external guarantees, measurable target + workload envelope,
+       and permitted blast radius rather than new user flows.
+     - *Small, local, reversible, single-owner change:* confirm understanding
+       and execute directly under [Direct Work](../../../AGENTS.md#direct-work).
+   - Map open branches across [Product And Risk Blind
+     Spots](#product-and-risk-blind-spots) and filter through
+     [Grilling](../shared/grilling.md) so zero lookupable facts or technical
+     choices enter the frontier.
+   - *Done when:* XY framing separates problem from mechanism guesses, primary
+     code and `docs/decisions/` anchors are verified (for any non-foggy entry),
+     and the frontier holds strictly requester-owned product or risk forks.
 
-2. **Grill relentlessly until the frontier is empty.**
-   - Run [Grilling](../shared/grilling.md) in paced **rounds** over the
-     requester-owned **design tree**.
-   - On multi-round interviews (3+ rounds), persist `specs/<task>/intent.md`
-     incrementally at `status: draft` (keeping unasked branches and verified
-     grounding locators under a temporary `Remaining frontier` section) so
-     compaction or interruption preserves both settled decisions and open
-     questions.
-   - On non-trivial changes, once main behavior and scope settle, probe the
-     sharpest surviving user-visible failure, replay/conflict, or compatibility
-     edge cases before closing the frontier.
-   - *Done when* the **frontier** is empty: every requester-owned branch is
-     answered, repository-resolved, explicitly delegated with guiding limits, or
-     converted to a labeled assumption (`A<n>`) under user steering.
+2. **Grill the product tree and sharpen domain language.**
+   - Work the requester-owned design tree in paced rounds under
+     [Grilling](../shared/grilling.md).
+   - **Active domain modeling:** challenge terms immediately when they conflict
+     with live code or [Domain
+     Vocabulary](../../repo-architecture.md#domain-vocabulary) or overload
+     distinct concepts (`cancel` vs `void` vs `delete`, `account` vs `user` vs
+     `tenant`). Tag each newly settled term as **task-local** (`spec.md`) or
+     **cross-task** (to add to `Domain Vocabulary`).
+   - **Probe sharp edge cases inside grilling:** on behavior-changing work,
+     once core behavior settles, test at least the sharpest surviving
+     user-visible failure, conflict/replay, authorization, or existing-data
+     case with a concrete scenario before closing the frontier.
+   - Persist `specs/<task>/intent.md` (`status: draft`, using [Optional
+     `intent.md` Format](#optional-intentmd-format)) **only** if a multi-round
+     interview must pause, hand off, or compact before `spec.md` is written.
+   - *Done when:* the frontier is empty, vague qualifiers are bound to
+     observable thresholds or explicit delegations, at least one sharpest
+     unhappy or existing-data scenario has been tested on behavior-changing
+     work, and remaining non-critical choices are tracked as labeled `A<n>`
+     assumptions (with objective `Reopen if`) or delegated boundaries.
 
-3. **Synthesize `specs/<task>/intent.md` (`status: draft`) and run verification
-   checks.**
-   - Write `specs/<task>/intent.md` at `status: draft` using
-     [Intent](../interfaces/intent.md) through [Artifacts](../shared/artifacts.md),
-     recording every closed interview branch as an addressable `I<n>` entry
-     (**Binding**, **Decision**, **Rejected**, **Why**), adding 1–3 user-aligned
-     `Concrete scenarios` on non-trivial changes, preserving requester-supplied
-     examples, edge cases, and numeric thresholds verbatim, and removing any
-     draft-only `Remaining frontier` section.
-   - **Author Cold-Start Self-Check:** re-read **only** `intent.md` with zero
-     chat history and close every gap in place:
-     - **Cold-start completeness:** a fresh Definition session can act without
-       guessing requester intent, re-asking closed branches, or resurrecting a
-       `Rejected` option.
-     - **Verbatim, binding & de-mechanization fidelity:** user-pinned numbers,
-       status codes, ordering rules, `Concrete scenarios`, and `Must not` rules
-       appear verbatim with accurate `Binding: hard | default`; casual mechanism
-       hints sit under `Suggested mechanisms (non-binding context)`.
-     - **Qualifier & boundary hygiene:** every vague qualifier (`fast`, `safe`,
-       `graceful`, `reliable`) binds to a concrete policy, threshold, or
-       delegated guardrail; `Open questions` carry zero unanswered
-       requester-owned questions; internal design, crate placement, and task
-       slicing stay out of `intent.md`.
-   - **Triggered Cold-Start Intent Review (before Gate 1):** dispatch one fresh
-     read-only `reviewer-agent` running [Cold-Start Intent
-     Review](#cold-start-intent-review) under [Review](../shared/review.md)
-     whenever **any** trigger holds: `≥3` grilling rounds, pre-authored external
-     spec/ticket input, or high-risk scope (breaking external contract,
-     auth/security/PII, money, destructive/irreversible migration, or `≥2`
-     external actors/services). Pass strictly `specs/<task>/intent.md` and the
-     adapter path (omit chat summaries or author rationale). Repair confirmed
-     local defects in place, and ask one surgical follow-up round if a real
-     requester fork surfaces.
-   - *Done when* `intent.md` (`status: draft`) passes Cold-Start Self-Check and
-     any triggered Cold-Start Intent Review with zero chat-dependent meaning.
-
-4. **Confirm shared understanding (Gate 1) and mark `ready`.**
-   - Present a compact one-screen confirmation brief in the user's language with
-     a link to `specs/<task>/intent.md`:
-     - problem and target outcome;
-     - **1–2 concrete `Given -> When -> Then` scenarios** (happy path plus the
-       sharpest failure, conflict, or existing-data case) so misreadings surface
-       concretely;
-     - settled interview decisions (`I1..In`: `Binding`, chosen, rejected, why);
-     - hard constraints, `Must not` rules, and the **biggest intentional
-       `Non-goal`**;
-     - labeled assumptions (`A1..An` with `Reopen if`, highlighting the single
-       riskiest assumption), delegated choices, and priority tie-breakers;
+3. **Confirm shared understanding and cross into [Specification](specification.md).**
+   - Present a compact one-screen summary in the user's language:
+     - problem, primary actor/operator, and target outcome;
+     - 1–2 concrete `Given -> When -> Then` scenarios (happy path + sharpest
+       failure, conflict, or existing-data case);
+     - settled product choices (including **rejected alternatives and *why***)
+       and settled domain terms;
+     - hard constraints, `Must not` prohibitions, and biggest `Non-goals`;
+     - labeled `A<n>` assumptions (`Reopen if`), delegated boundaries (with
+       limits), priority tie-breakers, and any residual risks;
      - observable success signal.
-   - Wait for explicit user confirmation before flipping `status: ready` and
-     starting [Cross-Phase
-     Continuation](../shared/transition.md#cross-phase-continuation) (for a
-     clear brief with zero open questions, this reflection is the only round).
-     Skip waiting only when the user explicitly instructed to proceed without
-     confirmation and zero high-risk branches or material assumptions remain.
-   - On user corrections, reconcile `intent.md` in place under
-     [Artifacts](../shared/artifacts.md) and re-confirm if the delta is material.
-   - *Done when* the user confirms **shared understanding**, `intent.md` is at
-     `status: ready`, and the intent locator, first owner, and any
-     routing-relevant assumptions or non-blocking open questions are ready.
+   - **Confirmation gate:** wait for explicit user confirmation. Skip waiting
+     **only** when the user already explicitly instructed to proceed without
+     confirmation **and** zero high-risk/authority forks, unshown `A<n>`
+     assumptions, unconfirmed `Must not` rules, or newly introduced delegated
+     boundaries remain—still emitting the compact summary above so the settled
+     baseline is explicit in the transcript.
+   - **Phase boundary (`Continue` vs `intent.md`):**
+     - If `specs/<task>/intent.md` already exists on disk (`status: draft`),
+       always update it in place with confirmed decisions, remove `Remaining
+       frontier`, and flip to `status: ready` so resumed or reviewing contexts
+       never read a stale draft.
+     - *Inside the **smart zone** (default):* create no new `intent.md`, keep
+       the live conversation as the **primary source**, and continue
+       autonomously into [Specification](specification.md), where `spec.md`
+       distills every durable rule and *why* for downstream fresh contexts.
+     - *Pausing, handing off, or near the **smart zone** edge:* persist
+       `specs/<task>/intent.md` (`status: ready`) using [Optional `intent.md`
+       Format](#optional-intentmd-format), then compact or resume around
+       `intent.md` before starting [Specification](specification.md).
+   - *Done when:* either Intake exited cleanly via [Direct
+     Work](../../../AGENTS.md#direct-work) or [Zero-Delta
+     Check](plan-review.md#zero-delta-check), or shared understanding is
+     confirmed with zero unresolved product/risk forks, no stale `draft`
+     `intent.md` remains, and work enters [Specification](specification.md)
+     inside the smart zone (or with `intent.md` at `status: ready`).
 
-5. **Handle mid-pipeline reopens.**
-   - Flip `specs/<task>/intent.md` back to `status: draft` under [Artifact
-     Lifecycle V1](../shared/artifacts.md#artifact-lifecycle-v1) before grilling
-     so downstream phases cannot consume a stale `ready` artifact if
-     interrupted.
-   - When reopened with `Blocked decisions` (`B1..Bn`)—from
-     `specs/<task>/spec.md` or `specs/<task>/design/design.md` at
-     `status: blocked`, or inline from a blocked handoff—translate its root
-     frontier into the first [Grilling](../shared/grilling.md) round in plain
-     user terms, holding back any `Follow-up if <option>` lines until the
-     requester's answer takes that branch. Ask triggered follow-ups and any
-     newly revealed requester uncertainty until the frontier closes. On any
-     other reopen, grill strictly on what changed.
-   - Reconcile settled answers into `specs/<task>/intent.md` in place while
-     preserving `I<n>` and `A<n>` ID stability (never renumber surviving IDs;
-     mark overturned `I<k>` explicitly `Superseded by I<m>` or updated in
-     place), run Cold-Start Self-Check (and [Cold-Start Intent
-     Review](#cold-start-intent-review) if the delta hits a high-risk trigger),
-     confirm material deltas with the user, flip back to `status: ready`, and
-     return control via [Cross-Phase
-     Continuation](../shared/transition.md#cross-phase-continuation) to the
-     earliest phase invalidated by the updated `intent.md` (reopening Definition
-     when `spec.md` exists and observable behavior or baseline changed; resuming
-     the blocked phase directly only when `spec.md` is unaffected or Definition
-     was skipped).
+## Product And Risk Blind Spots
 
-## Blind-Spot Coverage
+Consult only the branches this request reaches, and ask a branch **only** when
+it is a genuine product or risk fork not already fixed by repo conventions
+(`docs/decisions/`, [Production Contract](../../production-contract.md), or
+sibling endpoints). Protocol and behavioral edge cases belong autonomously to
+[Specification](specification.md); rollout mechanics and optional profile
+invariants belong to [Technical Design](technical-design.md).
 
-Consult only the branches this change reaches when building the **design tree**
-in step 1:
+- **Problem vs mechanism (XY):** real user/operator situation behind any
+  suggested mechanism, and whether a named mechanism is a hard external
+  constraint vs an implementation guess.
+- **Actors & visibility:** affected users, operators, and callers (legacy,
+  retrying, concurrent, unauthorized)—and whether unauthorized callers may
+  learn that a resource exists.
+- **Freshness & completion promise:** whether callers must see the effect
+  immediately after the response or can tolerate bounded async lag.
+- **Existing data & compatibility:** what happens to pre-existing records and
+  in-flight work once this ships (keep old rule, follow new rule immediately, or
+  reject on next action), and whether breaking callers or a maintenance window
+  is permitted.
+- **User-visible failure & conflict policy:** partial success vs all-or-nothing
+  rejection, duplicate/retry outcomes, and whether a missing dependency stops
+  the operation or degrades with a user-visible fallback.
+- **Forbidden outcomes (`Must not`) & authority:** security, auth/tenant
+  isolation, PII/secrets, money, data loss, irreversible actions, external
+  effects, overturning rejected `docs/decisions/` choices, and SLA/cost
+  ceilings.
+- **Scope cutline & `Non-goals`:** plausible adjacent work explicitly excluded.
+- **Terminology, qualifiers & tie-breakers:** overloaded domain terms, vague
+  adjectives (`fast`, `safe`, `reliable`) bound to concrete thresholds, and
+  priority order breaking ties for downstream autonomous choices.
 
-- **Problem vs mechanism (XY):** concrete user or operator situation behind any
-  proposed mechanism.
-- **Actors & external surfaces:** affected users, operators, and callers
-  (including legacy, retrying, concurrent, and unauthorized callers) and their
-  external touchpoints.
-- **Consistency & durability expectation (sync vs async):** whether a relied-on
-  response must already reflect durable, immediately readable state
-  (read-after-write) or may complete asynchronously with bounded lag.
-- **Compatibility, existing state & blast radius:** existing consumers,
-  **pre-existing persisted data and in-flight work at deploy time** (`backfill`,
-  `lazy upgrade`, `grandfather`, or `reject`), breaking-change permission,
-  mixed-version overlap, and affected optional profiles
-  (`template/profiles.json`).
-- **User-visible failure & precedence policy:** partial failure vs atomic
-  rejection, duplicate/replay/conflict outcomes, auth vs existence (`401`/`403`
-  vs `404`), and startup fail-fast vs runtime degradation (strictly black-box).
-- **Forbidden outcomes (`Must not`), prior decisions & authority:** security,
-  auth, PII/secrets, money, data loss, destructive or irreversible actions,
-  external side effects, conflicts with rejected `docs/decisions/` choices, and
-  workload/cost/SLA ceilings.
-- **Scope cutline & `Non-goals`:** plausible adjacent work explicitly excluded
-  now.
-- **Terminology & vague qualifiers:** overloaded terms (`cancel` vs `delete`,
-  `accepted` vs `completed`) and unbound adjectives (`fast`, `safe`,
-  `graceful`, `reliable`).
-- **Trade-off compass (`Priority / tie-breakers`) & delegation bounds:** which
-  outcome wins when downstream phases resolve unenumerated trade-offs.
+## Optional `intent.md` Format
 
-## Cold-Start Intent Review
+Persist `specs/<task>/intent.md` **only** on pause, handoff, or compaction
+before `spec.md` is written:
 
-Read-only review adapter for a fixed `specs/<task>/intent.md` (`status: draft`)
-before Gate 1. Return [Review Result
-V1](../interfaces/review-result-v1.md) without rewriting `intent.md` or
-inventing requester decisions. Complete Checks 1–4 strictly from `intent.md`
-with zero chat history before opening cited primary files for Check 5.
+- **Header:** `# Intent: <short outcome>` and `status: draft | ready`.
+- **Problem & success signal:** problem, primary actor/operator, and observable
+  success signal.
+- **Settled product choices:** confirmed decisions with **rejected alternatives
+  and *why***.
+- **Concrete scenarios:** `Given -> When -> Then` (happy path + sharpest
+  failure, conflict, or existing-data case).
+- **Hard constraints, `Must not` & `Non-goals`:** external constraints,
+  forbidden outcomes, and excluded scope.
+- **Delegated boundaries & tie-breakers:** explicit user-authorized choice
+  limits, priority order, and residual risks.
+- **Labeled assumptions:** `A<n>` + objective `Reopen if` (`spec.md` preserves
+  surviving IDs).
+- **Domain terms:** settled definitions, tagging cross-task terms for [Domain
+  Vocabulary](../../repo-architecture.md#domain-vocabulary).
+- **Verified baseline locators:** inspected `api/`, code, callers, and
+  `docs/decisions/` paths.
+- **Remaining frontier:** *(include only while `status: draft`; remove at
+  `status: ready`)*.
 
-1. **Two-reader divergence (cold):** find any clause where two fresh Definition
-   sessions reading only `intent.md` would choose materially different
-   observable behavior, scope, or failure outcomes.
-2. **Internal contradictions:** check for conflicts across `I<n>`, `Rejected`,
-   `Concrete scenarios`, `Hard constraints & Must not`, `Scope & non-goals`,
-   `A<n>`, and `Success signal`.
-3. **Hidden requester forks & qualifiers:** flag unbound adjectives (`fast`,
-   `safe`, `reliable`), unanswered requester questions in `Open questions`
-   (missing non-requester `Owner`, `Fallback`, or `Reopen if`), or undelegated
-   one-way product choices disguised as `A<n>` or `Binding: default`.
-4. **Mechanism leak vs mandate:** flag internal design, crate placement, task
-   slicing, or casual mechanisms recorded under `Hard constraints` instead of
-   `Suggested mechanisms (non-binding context)`.
-5. **Premise anchor check:** inspect repository locators cited in `intent.md`
-   and relevant `docs/decisions/` entries; `FAIL` (`UPSTREAM_GAP` or
-   `PHASE_DEFECT`) if a baseline premise contradicts primary code or overturns a
-   rejected `docs/decisions/` choice without an explicit `I<n>`.
+## Calibration Bar
 
-Return `PASS` when all five checks clear (recording `none — attacked <target>`
-per check and inspected locators in `evidence_boundary`), `CONCERNS` only for
-non-blocking external risks already paired with `Reopen if`, or `FAIL` with
-concrete witness and smallest owner (`Intake`) for any surviving gap.
+- **XY lift vs mechanism leakage:**
+  - *Strong:* *"You mentioned a Redis cache with 60s TTL — is up to 60s of
+    stale reads acceptable to callers, and is Redis itself a hard external
+    constraint? If only freshness and latency matter, I'll own the caching
+    mechanism in Technical Design."*
+  - *Weak:* *"What Redis key prefix, TTL jitter, and eviction policy should we
+    use?"*
+- **User product fork vs autonomous spec/tech detail:**
+  - *Strong:* *"When this ships, should existing unpaid orders follow the new
+    expiry rule immediately or keep the rule they were created under?"*
+  - *Weak:* *"How should we handle mixed-version rollout overlap and inert
+    `template/profiles.json` profiles?"*
+- **Concrete edge probe vs abstract reassurance:**
+  - *Strong:* *"Scenario check: Tenant B requests `GET /orders/<tenant-A-id>` —
+    should they see 'not found' (hiding existence) or 'forbidden'?"*
+  - *Weak:* *"We'll enforce tenant authorization and safe error handling."*

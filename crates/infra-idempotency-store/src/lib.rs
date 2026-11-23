@@ -2,17 +2,21 @@ mod attempt;
 mod maintenance;
 mod record;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use infra_postgres::{Isolation, TxOptions};
-use sqlx::postgres::PgPool;
+use infra_postgres::{Isolation, Pool, TxOptions};
 
 pub use attempt::{
-    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, RequestFingerprint, ScopeKey,
+    AttemptError, Attempted, CallerIdentity, CallerKind, Digest, RefusalMode, RequestFingerprint,
+    ScopeKey, WriteOutcome,
 };
-pub use infra_postgres::CleanupError;
+pub use infra_postgres::maintenance::CleanupError;
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, StartupError};
-pub use record::{CaptureError, MAX_STORED_BODY_BYTES, Record, is_replayable_header_name};
+pub use record::{
+    CaptureError, MAX_STORED_BODY_BYTES, Record, SuccessRecord, TerminalRefusal,
+    is_replayable_header_name,
+};
 
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
@@ -24,9 +28,13 @@ const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    pool: PgPool,
+    inner: Arc<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    pool: Pool,
     retention: Duration,
-    terminal_refusals: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -34,22 +42,21 @@ pub struct Store {
 pub struct InvalidRetention;
 
 impl Store {
-    pub fn new(pool: PgPool, retention: Duration) -> Result<Self, InvalidRetention> {
+    pub fn try_new(pool: Pool, retention: Duration) -> Result<Self, InvalidRetention> {
         if !(Duration::from_micros(1)..=MAX_RETENTION).contains(&retention) {
             return Err(InvalidRetention);
         }
         Ok(Self {
-            pool,
-            retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
-            terminal_refusals: false,
+            inner: Arc::new(Inner {
+                pool,
+                retention: whole_microseconds(retention),
+            }),
         })
     }
+}
 
-    #[must_use]
-    pub fn with_terminal_refusals(mut self, enabled: bool) -> Self {
-        self.terminal_refusals = enabled;
-        self
-    }
+fn whole_microseconds(duration: Duration) -> Duration {
+    Duration::new(duration.as_secs(), duration.subsec_micros() * 1_000)
 }
 
 #[cfg(test)]
@@ -58,12 +65,11 @@ mod tests {
 
     #[tokio::test]
     async fn retention_is_bounded_before_the_store_can_run_work() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let max = Duration::from_hours(36_500 * 24);
-        assert!(Store::new(pool.clone(), max).is_ok());
-        assert!(Store::new(pool.clone(), Duration::from_micros(1)).is_ok());
+        assert!(Store::try_new(pool.clone(), max).is_ok());
+        assert!(Store::try_new(pool.clone(), Duration::from_micros(1)).is_ok());
         for invalid in [
             Duration::ZERO,
             Duration::from_nanos(999),
@@ -71,9 +77,9 @@ mod tests {
             Duration::from_micros(i64::MAX.unsigned_abs()),
             Duration::from_secs(10_000_000_000_000),
         ] {
-            let rejected = Store::new(pool.clone(), invalid);
+            let rejected = Store::try_new(pool.clone(), invalid);
             assert_eq!(rejected.unwrap_err(), InvalidRetention);
         }
-        pool.close().await;
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 }

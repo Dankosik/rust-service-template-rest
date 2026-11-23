@@ -1,10 +1,15 @@
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::Extension;
 use axum::http::{Request, StatusCode};
 use infra_http::{HttpContract, RequestContext};
-use infra_oauth2_client_credentials::{Algorithm, Options, Registration, ServiceTokenTarget};
+use infra_oauth2_client_credentials::{
+    Algorithm, IssuerUrl, PrivateKeyJwt, ServiceTokenTarget, ServiceTokens,
+    test_support::{HttpOptions, prepare_http},
+};
+use infra_outbound_http::Origin;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -13,7 +18,7 @@ use super::*;
 
 #[derive(Clone)]
 enum Resource {
-    Http(Arc<infra_oauth2_client_credentials::AuthenticatedClient>),
+    Http(Arc<infra_oauth2_client_credentials::ServiceHttpClient>),
     // template:begin outbound-auth-grpc:service-test-grpc-resource
     Grpc(Arc<infra_oauth2_client_credentials::grpc::AuthenticatedClient>),
     // template:end outbound-auth-grpc:service-test-grpc-resource
@@ -30,16 +35,15 @@ enum Resource {
 async fn resource(Extension(resource): Extension<Resource>, context: RequestContext) -> StatusCode {
     let resource_unavailable = match resource {
         Resource::Http(client) => {
-            let request = Request::get("https://127.0.0.1:0/value")
+            let request = Request::get(client.uri("/value").unwrap())
                 .body(infra_outbound_http::Bytes::new())
                 .unwrap();
             matches!(
-                client
-                    .with_context(context.operation())
-                    .execute(request)
-                    .await,
+                client.execute(context.operation(), request).await,
                 Err(infra_oauth2_client_credentials::Error::Resource(
-                    infra_outbound_http::Error::Transport { .. }
+                    infra_outbound_http::ExchangeError::BeforeResponse(
+                        infra_outbound_http::Error::Transport { .. }
+                    )
                 ))
             )
         }
@@ -58,16 +62,12 @@ pub(crate) fn route() -> Result<HttpContract<crate::AppState>, infra_http::Final
     infra_http::http_route!(resource)
 }
 
-type Build = fn(&infra_oauth2_client_credentials::ServiceTokens) -> Resource;
+type Build = fn(&ServiceTokens, &Origin) -> Resource;
 
-fn http(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
+fn http(tokens: &ServiceTokens, origin: &Origin) -> Resource {
     let transport = infra_outbound_http::Client::try_new(
-        &"https://127.0.0.1:0".parse().unwrap(),
-        infra_outbound_http::Limits {
-            operation_timeout: Duration::from_secs(5),
-            response_header_count: 16,
-            response_body_bytes: 1024,
-        },
+        origin.clone(),
+        infra_outbound_http::Limits::new(Duration::from_secs(5), 16, 1024),
     )
     .unwrap();
     Resource::Http(Arc::new(tokens.http(transport).unwrap()))
@@ -88,14 +88,15 @@ async fn grpc_unavailable(
         .is_err_and(|status| status.code() == tonic::Code::Unavailable && status.source().is_none())
 }
 
-fn grpc(tokens: &infra_oauth2_client_credentials::ServiceTokens) -> Resource {
-    use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial};
+fn grpc(tokens: &ServiceTokens, origin: &Origin) -> Resource {
+    use infra_outbound_grpc::{Client, ClientSecurity};
 
-    let transport = Client::try_new(
-        "https://127.0.0.1:0",
-        ClientSecurity::Tls(ClientTlsMaterial::default()),
+    let transport = Client::builder(
+        &origin.to_string(),
+        ClientSecurity::tls(),
         Duration::from_secs(5),
     )
+    .build()
     .unwrap();
     Resource::Grpc(Arc::new(tokens.grpc(transport).unwrap()))
 }
@@ -117,7 +118,7 @@ async fn serve_token_peer(
             async move {
                 let (response, receive) = oneshot::channel();
                 requests.send(response).await.unwrap();
-                axum::Json(receive.await.unwrap())
+                infra_http::extract::Json(receive.await.unwrap())
             }
         }),
     );
@@ -141,15 +142,17 @@ async fn assert_resource_unavailable(address: SocketAddr) {
     assert!(status.starts_with("HTTP/1.1 502 "), "{status}");
 }
 
-fn token_options(peer_addr: SocketAddr) -> Options {
-    Options {
+fn token_options(peer_addr: SocketAddr) -> HttpOptions {
+    HttpOptions {
         token_url: format!("http://{peer_addr}/token"),
-        assertion_audience: format!("https://{peer_addr}"),
         client_id: "service".to_owned(),
-        key_id: "test-key".to_owned(),
-        algorithm: Algorithm::Es256,
-        private_key: tls_test_support::new_issuer().key().serialize_pem().into(),
-        provider_concurrency: 1,
+        auth: PrivateKeyJwt {
+            private_key: tls_test_support::new_issuer().key().serialize_pem().into(),
+            key_id: "test-key".to_owned(),
+            algorithm: Algorithm::Es256,
+            audience: IssuerUrl::parse(&format!("https://{peer_addr}")).unwrap(),
+        },
+        provider_concurrency: NonZeroU32::MIN,
     }
 }
 
@@ -168,16 +171,15 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let peer = tokio::spawn(serve_token_peer(token_peer, requests, stop_peer.clone()));
         let (installed, lifetime) = oneshot::channel();
         let registration = crate::ServiceRegistration::for_http_resource(move |_, background| {
-            let registration = Arc::new(Registration::prepare_for_test_http(token_options(
-                peer_addr,
-            ))?);
+            let registration = Arc::new(prepare_http(token_options(peer_addr))?);
             let lifetime = Arc::downgrade(&registration);
+            let origin = Origin::parse_https("https://127.0.0.1:0").unwrap();
             let tokens = background.service_tokens(
                 registration,
                 ServiceTokenTarget::default(),
-                "https://127.0.0.1:0".parse().unwrap(),
+                origin.clone(),
             );
-            let resource = build(&tokens);
+            let resource = build(&tokens, &origin);
             installed.send((lifetime, tokens)).unwrap();
             Ok(resource)
         });
@@ -192,7 +194,7 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            registration.into(),
+            registration,
             &tests::shared_metrics(),
             &mut background,
             &mut dependencies,
@@ -201,16 +203,19 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         .await
         .unwrap();
         let mut signals = Signals::install().unwrap();
-        finish_startup(
-            Ok(Some(prepared)),
-            &mut signals,
-            &mut background,
-            &mut serving,
-        )
-        .unwrap();
+        assert_eq!(
+            finish_startup(
+                Ok(Some(prepared)),
+                &mut signals,
+                &mut background,
+                &mut serving,
+            )
+            .unwrap(),
+            StartupOutcome::Admitted
+        );
         let (registration, retained_client) = lifetime.await.unwrap();
         assert!(registration.upgrade().is_some());
-        let address = serving.http_server.as_ref().unwrap().local_addr();
+        let address = serving.traffic.http.as_ref().unwrap().local_addr();
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(assert_resource_unavailable(address), async {
                 tokens
@@ -237,14 +242,13 @@ async fn served_handlers_use_the_registered_grant_until_process_shutdown_joins_i
         assert!(!refresh.is_closed());
 
         let outcome = shutdown::run(shutdown::Plan {
-            http_config: &config.http,
+            http_config: config.http(),
             signals: &mut signals,
-            deadline: Instant::now() + config.http.grace_period,
+            deadline: Instant::now() + config.http().grace_period,
             serving,
             background,
             dependencies,
-            tracer_provider: None,
-            logger: None,
+            telemetry: shutdown::Telemetry::default(),
         })
         .await;
         assert_eq!(outcome, Outcome::Graceful);

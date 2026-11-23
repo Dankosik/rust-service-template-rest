@@ -45,14 +45,12 @@ enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
 operation-context = { workspace = true }
 async-nats = { workspace = true, features = ["jetstream", "server_2_10", "aws-lc-rs", "nkeys"] }
-async-trait = { workspace = true }
 # template:begin outbox:messaging-outbox-dependencies
 # The outbox adapter prepares jobs through the canonical jobs transaction and
 # deliberately has no direct queue SQL or pool ownership.
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
-base64 = { workspace = true }
-serde_with = { workspace = true, features = ["std", "base64"] }
+base64 = { workspace = true, features = ["alloc"] }
 simdutf8 = { workspace = true, features = ["std"] }
 uuid = { workspace = true }
 # template:end outbox:messaging-outbox-dependencies
@@ -90,13 +88,14 @@ nix = { workspace = true, features = ["fs"] }
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
 nats-test-support = { workspace = true }
+observe-test-support = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["crypto", "pem", "aws_lc_rs"] }
 serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
-time = { workspace = true, features = ["macros", "parsing"] }
+time = { workspace = true, features = ["macros"] }
 const-hex = { workspace = true, features = ["alloc"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }

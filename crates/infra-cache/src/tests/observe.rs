@@ -30,18 +30,16 @@ fn redis_errors_map_to_bounded_error_types() {
 #[test]
 fn a_failed_command_names_its_cause_on_the_series() {
     use crate::error::ErrorType;
-    use crate::namespace::Operation;
-    use crate::observe::{NamespaceHistograms, OperationGuard};
+    use crate::observe::{NamespaceMetrics, Operation, OperationGuard};
 
     let recorder = observation_recorder();
     let server = crate::ServerEndpoint {
         host: "cache.example".to_owned(),
         port: 6379,
         database_index: 0,
-        tls: true,
     };
     metrics::with_local_recorder(&recorder, || {
-        let histograms = NamespaceHistograms::new(crate::namespace!("causes"));
+        let metrics = NamespaceMetrics::new(crate::namespace!("causes"));
         for operation in [Operation::Get, Operation::Set, Operation::Delete] {
             for error_type in [
                 ErrorType::Auth,
@@ -51,8 +49,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
                 ErrorType::Parse,
                 ErrorType::Other,
             ] {
-                OperationGuard::start(&histograms, operation, &server)
-                    .record_error(error_type, None);
+                OperationGuard::start(&metrics, operation, &server).record_error(error_type, None);
             }
         }
     });
@@ -80,7 +77,17 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     use operation_context::Stopped;
     use tracing_subscriber::fmt::format::FmtSpan;
 
-    use crate::{MutationError, OperationError, SetError};
+    use crate::observe::{NamespaceMetrics, Operation, OperationGuard, SuccessOutcome};
+    use crate::{MutationError, MutationFailure, UnknownOutcome};
+
+    let disabled_metrics = NamespaceMetrics::new(namespace!("disabled"));
+    let disabled_server = crate::ServerEndpoint {
+        host: "cache.example".to_owned(),
+        port: 6379,
+        database_index: 0,
+    };
+    OperationGuard::start(&disabled_metrics, Operation::Get, &disabled_server)
+        .succeed(SuccessOutcome::Miss);
 
     let captured = super::connection::CapturedLogs::default();
     let writer = captured.clone();
@@ -104,7 +111,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     let expired = OperationContext::with_timeout(Duration::ZERO);
     assert_eq!(
         namespace.delete(&expired, "secret-key").await,
-        Err(MutationError::NotApplied(OperationError::Stopped(
+        Err(MutationError::NotApplied(MutationFailure::Stopped(
             Stopped::Deadline
         )))
     );
@@ -132,9 +139,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     server.hang_up();
     assert_eq!(
         write.await,
-        Err(SetError::Mutation(MutationError::OutcomeUnknown(
-            OperationError::Unavailable
-        )))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
 
     let traces = captured.rendered();
@@ -152,8 +157,14 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
     assert!(!read.contains("cache.mutation.outcome"), "{read}");
     let refused = span("cache.mutation.outcome=\"not_applied\"");
     assert!(refused.contains("db.operation.name=\"DEL\""), "{refused}");
+    assert!(refused.contains("error.type=\"timeout\""), "{refused}");
+    assert!(refused.contains("otel.status_code=\"ERROR\""), "{refused}");
+    assert!(refused.contains("cache.outcome=\"timeout\""), "{refused}");
     let unknown = span("cache.mutation.outcome=\"outcome_unknown\"");
     assert!(unknown.contains("db.operation.name=\"SET\""), "{unknown}");
+    assert!(unknown.contains("error.type=\"io\""), "{unknown}");
+    assert!(unknown.contains("otel.status_code=\"ERROR\""), "{unknown}");
+    assert!(unknown.contains("cache.outcome=\"error\""), "{unknown}");
     let dropped = span("cache.outcome=\"cancelled\"");
     assert!(!dropped.contains("cache.mutation.outcome"), "{dropped}");
     assert!(
@@ -182,13 +193,17 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
     ] {
         assert_eq!(
             namespace.set(&caller, "key", b"value", ttl).await,
-            Err(crate::SetError::InvalidTtl),
+            Err(crate::MutationError::NotApplied(
+                crate::MutationFailure::InvalidTtl
+            )),
             "{ttl:?}"
         );
         let stopped = OperationContext::with_timeout(Duration::ZERO);
         assert_eq!(
             namespace.set(&stopped, "key", b"value", ttl).await,
-            Err(crate::SetError::InvalidTtl),
+            Err(crate::MutationError::NotApplied(
+                crate::MutationFailure::InvalidTtl
+            )),
             "invalid TTL takes precedence over stopped context: {ttl:?}"
         );
     }

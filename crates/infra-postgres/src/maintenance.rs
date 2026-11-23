@@ -7,16 +7,34 @@ mod population;
 
 pub(crate) use cleanup::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
 pub use cleanup::{
-    Cleanup, CleanupBatchOptions, CleanupError, CleanupPass, CleanupPassResult, PassEnd,
+    CleanupBatchOptions, CleanupError, CleanupName, CleanupPass, CleanupPassResult, PassEnd,
 };
 pub use population::{
     MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
-    MaintenancePopulation, PopulationSample, in_observation_tx,
+    MaintenancePopulation, PopulationName, PopulationSample, in_observation_tx,
 };
 
 const LOG_TARGET: &str = module_path!();
 
 const CLEANUP_INTERVAL: Duration = Duration::from_mins(1);
+
+const MAX_LABEL_LEN: usize = 64;
+
+const fn is_valid_label(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_LABEL_LEN || !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
 
 #[derive(Debug)]
 pub struct CleanupSchedule {
@@ -25,8 +43,8 @@ pub struct CleanupSchedule {
 
 impl CleanupSchedule {
     #[must_use]
-    pub fn new(cleanup: Cleanup) -> Self {
-        tracing::info!(cleanup = cleanup.label(), "postgres_cleanup_scheduled");
+    pub fn new(cleanup: CleanupName) -> Self {
+        tracing::info!(cleanup = cleanup.as_str(), "postgres_cleanup_scheduled");
         let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         Self { interval }
@@ -38,11 +56,11 @@ impl CleanupSchedule {
 }
 
 pub async fn run_scheduled_cleanup<E, P, S>(
-    cleanup: Cleanup,
-    runs_metric: &'static str,
+    cleanup: CleanupName,
+    runs_metric: Option<&'static str>,
     cancel: &CancellationToken,
-    mut pass: impl FnMut() -> P,
-    mut sample: impl FnMut() -> S,
+    mut run_pass: impl FnMut() -> P,
+    mut read_sample: impl FnMut() -> S,
 ) where
     P: Future<Output = Result<PassEnd, E>>,
     S: Future<Output = Result<PopulationSample, MaintenanceFailure>>,
@@ -51,24 +69,26 @@ pub async fn run_scheduled_cleanup<E, P, S>(
         return;
     }
     let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(cleanup));
-    let passes = async {
+    let pass_loop = async {
         let mut schedule = CleanupSchedule::new(cleanup);
         while !cancel.is_cancelled() {
             schedule.next().await;
             if cancel.is_cancelled() {
                 return;
             }
-            let outcome = match pass().await {
+            let outcome_label = match run_pass().await {
                 Ok(PassEnd::Cancelled) => return,
                 Ok(PassEnd::Completed) => "completed",
                 Err(_) => "failed",
             };
-            metrics::counter!(runs_metric, "outcome" => outcome).increment(1);
+            if let Some(metric) = runs_metric {
+                metrics::counter!(metric, "outcome" => outcome_label).increment(1);
+            }
         }
     };
-    let observation = async {
+    let observation_loop = async {
         while !cancel.is_cancelled() {
-            observer.sample(sample()).await;
+            observer.sample(read_sample()).await;
             if cancel.is_cancelled() {
                 return;
             }
@@ -76,7 +96,7 @@ pub async fn run_scheduled_cleanup<E, P, S>(
         }
     };
     let _ = Box::pin(cancel.run_until_cancelled(async {
-        tokio::join!(passes, observation);
+        tokio::join!(pass_loop, observation_loop);
     }))
     .await;
 }

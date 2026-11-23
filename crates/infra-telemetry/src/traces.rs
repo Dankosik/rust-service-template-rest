@@ -1,6 +1,10 @@
 mod exporter;
 
-use exporter::{CollectorConfig, CollectorTrust, compression, export_timeout, span_exporter};
+use exporter::{
+    CollectorConfig, CollectorTrust, build_span_exporter, compression_from_env,
+    export_timeout_from_env, non_blank_str,
+};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -18,10 +22,11 @@ use parking_lot::Mutex;
 use secrecy::SecretString;
 use uuid::Uuid;
 
-use crate::metrics::static_counter_key;
-
 const TRACE_EXPORT_SDK_RESULT_SPANS_METRIC: &str =
     "telemetry_trace_exporter_sdk_result_spans_total";
+
+static EXPORT_METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
 pub(crate) const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
@@ -34,21 +39,21 @@ pub enum ResolvedSampler {
 }
 
 #[derive(derive_more::Debug)]
-pub struct TracingOptions {
-    pub service_name: String,
+pub struct TracingOptions<'a> {
+    pub service_name: &'a str,
     #[debug(skip)]
-    pub service_version: String,
+    pub service_version: &'a str,
     #[debug(skip)]
-    pub vcs_revision: String,
+    pub vcs_revision: &'a str,
     #[debug(skip)]
-    pub instance_id: Option<String>,
+    pub instance_id: Option<&'a str>,
     #[debug(skip)]
-    pub deployment_environment: String,
+    pub deployment_environment: &'a str,
     pub sampler: ResolvedSampler,
     #[debug(skip)]
-    pub otlp_endpoint: Option<String>,
+    pub otlp_endpoint: Option<&'a str>,
     #[debug(skip)]
-    pub otlp_headers: Option<SecretString>,
+    pub otlp_headers: Option<&'a SecretString>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +126,11 @@ impl ExporterState {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TracingError {
+#[error(transparent)]
+pub struct TracingError(TracingErrorKind);
+
+#[derive(Debug, thiserror::Error)]
+enum TracingErrorKind {
     #[error(
         "ambient OpenTelemetry header variable {name} is present while a typed \
          OTLP endpoint selects the collector; unset it or configure the \
@@ -171,9 +180,10 @@ pub enum TracingError {
 }
 
 #[derive(Debug)]
+#[must_use = "retain the tracer provider handle and shut it down before process exit"]
 pub struct TracerProviderHandle {
     provider: SdkTracerProvider,
-    pub exporter_state: ExporterState,
+    exporter_state: ExporterState,
     drain: Arc<Mutex<DrainObservation>>,
 }
 
@@ -186,7 +196,7 @@ const EXPORTER_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
 pub async fn install_tracer_provider(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
 ) -> Result<TracerProviderHandle, TracingError> {
     let trust = CollectorTrust::from_env(|name| std::env::var_os(name));
     let handle = prepare_tracer_provider(options, |name| std::env::var_os(name), trust).await?;
@@ -196,11 +206,11 @@ pub async fn install_tracer_provider(
 }
 
 async fn prepare_tracer_provider(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
     env: impl Fn(&str) -> Option<OsString>,
     trust: CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let collector = CollectorConfig::resolve(options, &trust, &env)?;
+    let collector = CollectorConfig::resolve(options, &trust, &env).map_err(TracingError)?;
 
     let builder = SdkTracerProvider::builder()
         .with_resource(resource(options))
@@ -214,32 +224,24 @@ async fn prepare_tracer_provider(
             drain,
         });
     };
-    let timeout = export_timeout(&env);
-    let (compression, ignored_compression) = compression(&env);
-    let (batch_config, invalid_batch_sizes) = batch_config(&env);
+    let export_timeout = export_timeout_from_env(&env);
+    let (compression, ignored_compression) = compression_from_env(&env);
+    let (batch_config, invalid_batch_sizes) = batch_config_from_env(&env);
     let has_certificate_file = trust.certificate.is_some();
     let has_client_certificate = trust.client_certificate.is_some();
-    let deadline = tokio::time::Instant::now() + EXPORTER_PREPARATION_TIMEOUT;
-    let preparation = tokio::task::spawn_blocking(move || {
-        span_exporter(
-            collector.url.as_str(),
-            collector.headers,
-            &trust,
-            timeout,
-            compression,
-        )
-    });
-    let span_exporter = match tokio::time::timeout_at(deadline, preparation).await {
-        Ok(result) if tokio::time::Instant::now() < deadline => {
-            result.map_err(|_| TracingError::ClientThread)??
-        }
-        _ => return Err(TracingError::PreparationTimeout),
-    };
+    let span_exporter = span_exporter_within_deadline(
+        collector.url,
+        collector.headers,
+        trust,
+        export_timeout,
+        compression,
+    )
+    .await?;
     let provider = builder
         .with_span_processor(
             sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                 inner: span_exporter,
-                timeout,
+                export_timeout,
                 drain: Arc::clone(&drain),
             })
             .with_batch_config(batch_config)
@@ -260,7 +262,26 @@ async fn prepare_tracer_provider(
     })
 }
 
-fn batch_config(
+async fn span_exporter_within_deadline(
+    url: reqwest::Url,
+    headers: HashMap<String, String>,
+    trust: CollectorTrust,
+    timeout: Duration,
+    compression: Option<opentelemetry_otlp::Compression>,
+) -> Result<opentelemetry_otlp::SpanExporter, TracingError> {
+    let deadline = tokio::time::Instant::now() + EXPORTER_PREPARATION_TIMEOUT;
+    let preparation = tokio::task::spawn_blocking(move || {
+        build_span_exporter(url.as_str(), headers, &trust, timeout, compression)
+    });
+    match tokio::time::timeout_at(deadline, preparation).await {
+        Ok(result) if tokio::time::Instant::now() < deadline => result
+            .map_err(|_| TracingError(TracingErrorKind::ClientThread))?
+            .map_err(TracingError),
+        _ => Err(TracingError(TracingErrorKind::PreparationTimeout)),
+    }
+}
+
+fn batch_config_from_env(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> (sdktrace::BatchConfig, Vec<&'static str>) {
     let mut invalid = Vec::new();
@@ -268,14 +289,14 @@ fn batch_config(
         let Some(value) = env(name).filter(|value| !value.is_empty()) else {
             return default;
         };
-        if let Some(size) = value
+        let Some(size) = value
             .to_str()
             .and_then(|text| text.parse::<std::num::NonZeroUsize>().ok())
-        {
-            return size.get();
-        }
-        invalid.push(name);
-        default
+        else {
+            invalid.push(name);
+            return default;
+        };
+        size.get()
     };
     let queue_size = parse_size(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE, SPAN_QUEUE_CAPACITY);
     let batch_size = parse_size(
@@ -290,6 +311,11 @@ fn batch_config(
 }
 
 impl TracerProviderHandle {
+    #[must_use]
+    pub const fn exporter_state(&self) -> &ExporterState {
+        &self.exporter_state
+    }
+
     #[must_use]
     pub(crate) fn tracer(&self) -> SdkTracer {
         self.provider.tracer(INSTRUMENTATION_SCOPE)
@@ -413,22 +439,22 @@ impl SdkFailure {
         }
     }
 
-    fn metric_key(self) -> &'static metrics::Key {
+    fn export_metric_key(self) -> &'static metrics::Key {
         match self {
-            Self::Timeout => static_counter_key!(
+            Self::Timeout => crate::metrics::static_metric_key!(
                 TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                "outcome" => "error",
-                "error_type" => "timeout",
+                ("outcome", "error"),
+                ("error_type", "timeout"),
             ),
-            Self::AlreadyShutdown => static_counter_key!(
+            Self::AlreadyShutdown => crate::metrics::static_metric_key!(
                 TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                "outcome" => "error",
-                "error_type" => "already_shutdown",
+                ("outcome", "error"),
+                ("error_type", "already_shutdown"),
             ),
-            Self::Internal => static_counter_key!(
+            Self::Internal => crate::metrics::static_metric_key!(
                 TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
-                "outcome" => "error",
-                "error_type" => "internal_failure",
+                ("outcome", "error"),
+                ("error_type", "internal_failure"),
             ),
         }
     }
@@ -448,28 +474,27 @@ pub(crate) fn describe_metrics() {
 #[derive(Debug)]
 struct ObservedExporter<E> {
     inner: E,
-    timeout: Duration,
+    export_timeout: Duration,
     drain: Arc<Mutex<DrainObservation>>,
 }
 
 impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
-        static METADATA: metrics::Metadata<'static> =
-            metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
         let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
         let started = std::time::Instant::now();
         let result = self.inner.export(batch).await;
         let key = match &result {
-            Ok(()) => static_counter_key!(TRACE_EXPORT_SDK_RESULT_SPANS_METRIC, "outcome" => "ok"),
+            Ok(()) => crate::metrics::static_metric_key!(
+                TRACE_EXPORT_SDK_RESULT_SPANS_METRIC,
+                ("outcome", "ok"),
+            ),
             Err(error) => {
-                let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
+                let failure = SdkFailure::classify(error, started.elapsed(), self.export_timeout);
                 DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
-                failure.metric_key()
+                failure.export_metric_key()
             }
         };
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA))
-            .increment(spans);
+        crate::metrics::static_counter(key, &EXPORT_METRIC_METADATA).increment(spans);
         result
     }
 
@@ -495,24 +520,25 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     }
 }
 
-fn resource(options: &TracingOptions) -> Resource {
+fn resource(options: &TracingOptions<'_>) -> Resource {
     static PROCESS_INSTANCE_ID: OnceLock<Uuid> = OnceLock::new();
-    let instance_id = options
-        .instance_id
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(|| PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string());
+    let instance_id = non_blank_str(options.instance_id).map_or_else(
+        || PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string(),
+        str::to_owned,
+    );
     let attributes = [
-        KeyValue::new(attribute::SERVICE_NAME, options.service_name.clone()),
-        KeyValue::new(attribute::SERVICE_VERSION, options.service_version.clone()),
+        KeyValue::new(attribute::SERVICE_NAME, options.service_name.to_owned()),
+        KeyValue::new(
+            attribute::SERVICE_VERSION,
+            options.service_version.to_owned(),
+        ),
         KeyValue::new(
             attribute::VCS_REF_HEAD_REVISION,
-            options.vcs_revision.clone(),
+            options.vcs_revision.to_owned(),
         ),
         KeyValue::new(
             attribute::DEPLOYMENT_ENVIRONMENT_NAME,
-            options.deployment_environment.clone(),
+            options.deployment_environment.to_owned(),
         ),
         KeyValue::new(attribute::SERVICE_INSTANCE_ID, instance_id),
     ];

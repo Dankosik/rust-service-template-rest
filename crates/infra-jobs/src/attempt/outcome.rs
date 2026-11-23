@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use compact_str::{CompactString, format_compact};
+use enum_map::Enum;
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
@@ -6,14 +9,53 @@ use tokio::time::Instant;
 use super::{AttemptId, ClaimFence, execute_before_deadline};
 use crate::engine::{Operation, WorkerGroup, observe_failure};
 use crate::kind::{
-    Completion, Disposition, JobError, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES, Policy,
-    saturating_micros,
+    Completion, Disposition, JobError, KindMode, MAX_ATTEMPTS, MAX_DELAY, MAX_ERROR_SUMMARY_BYTES,
+    Policy, RetrySchedule, saturating_micros,
 };
 use crate::state::FailureReason;
 
-const OUTBOX_MAX_RETRY_BASE_SECONDS: i64 = 54;
 const RETRY_JITTER_HALF_DIVISOR: i64 = 10;
 const RETRY_JITTER_SPAN_DIVISOR: i64 = 5;
+const MICROS_PER_SECOND: i64 = 1_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+pub(super) enum AttemptOutcome {
+    Completed,
+    Timeout,
+    Retry,
+    Snoozed,
+    Cancelled,
+    Permanent,
+    Exhausted,
+}
+
+impl AttemptOutcome {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Timeout => "timeout",
+            Self::Retry => "retry",
+            Self::Snoozed => "snoozed",
+            Self::Cancelled => "cancelled",
+            Self::Permanent => FailureReason::Permanent.as_str(),
+            Self::Exhausted => FailureReason::Exhausted.as_str(),
+        }
+    }
+
+    pub(super) const fn is_span_error(self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::Retry | Self::Permanent | Self::Exhausted
+        )
+    }
+
+    pub(super) const fn of_failure(reason: FailureReason) -> Self {
+        match reason {
+            FailureReason::Permanent => Self::Permanent,
+            FailureReason::Exhausted => Self::Exhausted,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum Transition {
@@ -36,23 +78,25 @@ pub(super) enum Transition {
 }
 
 impl Transition {
-    pub(super) const COMPLETED_LABEL: &str = "completed";
-
-    pub(super) const fn label(&self) -> &'static str {
+    pub(super) const fn outcome(&self) -> AttemptOutcome {
         match self {
-            Self::Complete(_) => Self::COMPLETED_LABEL,
+            Self::Complete(_) => AttemptOutcome::Completed,
             Self::Retry {
                 cause: RetryCause::Timeout,
                 ..
-            } => "timeout",
+            } => AttemptOutcome::Timeout,
             Self::Retry {
                 cause: RetryCause::Failure,
                 ..
-            } => "retry",
-            Self::Fail { reason, .. } => reason.as_str(),
-            Self::Snooze { .. } => "snoozed",
-            Self::Release => "cancelled",
+            } => AttemptOutcome::Retry,
+            Self::Fail { reason, .. } => AttemptOutcome::of_failure(*reason),
+            Self::Snooze { .. } => AttemptOutcome::Snoozed,
+            Self::Release => AttemptOutcome::Cancelled,
         }
+    }
+
+    pub(super) const fn label(&self) -> &'static str {
+        self.outcome().label()
     }
 }
 
@@ -119,24 +163,17 @@ pub(super) struct Unacknowledged;
 pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
     match transition {
         Transition::Complete(Completion::Committed) => None,
-        Transition::Complete(Completion::Pending) => Some(WritePlan::CompleteBatched),
+        Transition::Complete(Completion::Uncommitted) => Some(WritePlan::CompleteBatched),
         Transition::Retry {
             summary,
             base_micros,
             floor_micros,
             ..
-        } => {
-            let minimum_micros =
-                (base_micros - base_micros / RETRY_JITTER_HALF_DIVISOR).max(*floor_micros);
-            let jitter_micros = (base_micros / RETRY_JITTER_SPAN_DIVISOR)
-                .max(floor_micros / RETRY_JITTER_HALF_DIVISOR)
-                .min(saturating_micros(MAX_DELAY) - minimum_micros);
-            Some(WritePlan::Single(Write::Retry {
-                summary,
-                minimum_micros,
-                jitter_micros,
-            }))
-        }
+        } => Some(WritePlan::Single(retry_write(
+            summary,
+            *base_micros,
+            *floor_micros,
+        ))),
         Transition::Snooze { delay_micros, .. } => Some(WritePlan::Single(Write::Snooze {
             delay_micros: *delay_micros,
         })),
@@ -148,7 +185,19 @@ pub(super) fn write_of(transition: &Transition) -> Option<WritePlan<'_>> {
     }
 }
 
-pub(super) async fn send_outcome(
+fn retry_write(summary: &str, base_micros: i64, floor_micros: i64) -> Write<'_> {
+    let minimum_micros = (base_micros - base_micros / RETRY_JITTER_HALF_DIVISOR).max(floor_micros);
+    let jitter_micros = (base_micros / RETRY_JITTER_SPAN_DIVISOR)
+        .max(floor_micros / RETRY_JITTER_HALF_DIVISOR)
+        .min(saturating_micros(MAX_DELAY) - minimum_micros);
+    Write::Retry {
+        summary,
+        minimum_micros,
+        jitter_micros,
+    }
+}
+
+pub(super) async fn send_write(
     group: &WorkerGroup,
     fence: ClaimFence,
     write: Write<'_>,
@@ -156,7 +205,7 @@ pub(super) async fn send_outcome(
 ) -> Result<Written, Unacknowledged> {
     let result =
         execute_before_deadline(group, "record job outcome", deadline, async |connection| {
-            execute(connection, fence, write).await
+            execute_write(connection, fence, write).await
         })
         .await;
     result.map(Written::from_rows).map_err(|error| {
@@ -165,7 +214,7 @@ pub(super) async fn send_outcome(
     })
 }
 
-async fn execute(
+async fn execute_write(
     connection: &mut PgConnection,
     fence: ClaimFence,
     write: Write<'_>,
@@ -266,18 +315,18 @@ pub(super) enum HandlerOutcome {
     Cancelled,
 }
 
-pub(super) fn map_outcome(
+pub(super) fn transition_of(
     attempt: &AttemptId,
     policy: Policy,
-    is_outbox: bool,
-    outcome: HandlerOutcome,
+    mode: KindMode,
+    handler_outcome: HandlerOutcome,
 ) -> Transition {
     let number = attempt.number;
-    let exhausted = number >= policy.max_attempts;
-    let retry_budget_spent = exhausted && !is_outbox;
-    let retry_or_exhaust = |spent: bool, summary, cause, floor_micros| {
+    let attempts_used_up = number >= policy.max_attempts;
+    let transient_retries_spent = attempts_used_up && mode.exhausts_transient();
+    let retry_or_exhaust = |exhaust: bool, summary, cause, floor_micros| {
         let summary = sanitize_summary(summary);
-        if spent {
+        if exhaust {
             return Transition::Fail {
                 reason: FailureReason::Exhausted,
                 summary,
@@ -285,12 +334,12 @@ pub(super) fn map_outcome(
         }
         Transition::Retry {
             summary,
-            base_micros: retry_base_micros(number, is_outbox),
+            base_micros: retry_base_micros(number, policy.retry),
             floor_micros,
             cause,
         }
     };
-    match outcome {
+    match handler_outcome {
         HandlerOutcome::Success(completion) => Transition::Complete(completion),
         HandlerOutcome::Cancelled => Transition::Release,
         HandlerOutcome::Error(JobError {
@@ -306,34 +355,30 @@ pub(super) fn map_outcome(
                 summary: sanitize_summary(summary),
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
-                retry_budget_spent,
+                transient_retries_spent,
                 summary,
                 RetryCause::Failure,
                 floor_micros,
             ),
             Disposition::Retry => {
-                retry_or_exhaust(retry_budget_spent, summary, RetryCause::Failure, 0)
+                retry_or_exhaust(transient_retries_spent, summary, RetryCause::Failure, 0)
             }
         },
         HandlerOutcome::Panic => retry_or_exhaust(
-            exhausted,
+            attempts_used_up,
             CompactString::const_new("handler panicked"),
             RetryCause::Failure,
             0,
         ),
         HandlerOutcome::PayloadDecode(error) => retry_or_exhaust(
-            exhausted,
+            attempts_used_up,
             payload_summary(attempt.kind, &error),
             RetryCause::Failure,
             0,
         ),
         HandlerOutcome::Timeout => retry_or_exhaust(
-            retry_budget_spent,
-            format_compact!(
-                "attempt timed out after {}",
-                jiff::fmt::friendly::SpanPrinter::new()
-                    .unsigned_duration_to_string(&policy.timeout)
-            ),
+            transient_retries_spent,
+            timeout_summary(policy.timeout),
             RetryCause::Timeout,
             0,
         ),
@@ -346,15 +391,21 @@ pub(super) enum RetryCause {
     Timeout,
 }
 
-fn retry_base_micros(number: u16, is_outbox: bool) -> i64 {
-    let base_seconds = if is_outbox {
-        2_i64
+fn retry_base_micros(number: u16, schedule: RetrySchedule) -> i64 {
+    match schedule {
+        RetrySchedule::Quartic => i64::from(number).pow(4) * MICROS_PER_SECOND,
+        RetrySchedule::Exponential { max_base } => 2_i64
             .saturating_pow(u32::from(number.max(1)))
-            .min(OUTBOX_MAX_RETRY_BASE_SECONDS)
-    } else {
-        i64::from(number).pow(4)
-    };
-    base_seconds * 1_000_000
+            .saturating_mul(MICROS_PER_SECOND)
+            .min(saturating_micros(max_base)),
+    }
+}
+
+fn timeout_summary(timeout: Duration) -> CompactString {
+    format_compact!(
+        "attempt timed out after {}",
+        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&timeout)
+    )
 }
 
 fn payload_summary(kind: &str, error: &serde_json::Error) -> CompactString {
@@ -387,8 +438,6 @@ fn sanitize_summary(text: CompactString) -> CompactString {
 }
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::kind::JobId;
 
@@ -400,7 +449,12 @@ mod tests {
             kind: "sample",
             number,
         };
-        map_outcome(&attempt, Policy::default(), false, handler_outcome)
+        transition_of(
+            &attempt,
+            Policy::default(),
+            KindMode::Ordinary,
+            handler_outcome,
+        )
     }
 
     #[test]
@@ -416,8 +470,8 @@ mod tests {
     #[test]
     fn dispositions_preserve_cap_and_snooze() {
         std::assert_matches!(
-            outcome(HandlerOutcome::Success(Completion::Pending), 25),
-            Transition::Complete(Completion::Pending)
+            outcome(HandlerOutcome::Success(Completion::Uncommitted), 25),
+            Transition::Complete(Completion::Uncommitted)
         );
         std::assert_matches!(
             outcome(HandlerOutcome::Error(JobError::retryable("fail")), 25),
@@ -499,17 +553,24 @@ mod tests {
     }
 
     #[test]
-    fn outbox_timeouts_remain_retryable_after_the_budget_and_invalid_work_exhausts() {
+    fn persistent_exponential_timeouts_remain_retryable_and_invalid_work_exhausts() {
         let attempt = AttemptId {
             job_id: ID,
             kind: "sample",
             number: 25,
         };
+        let policy = Policy {
+            retry: RetrySchedule::Exponential {
+                max_base: Duration::from_secs(54),
+            },
+            ..Policy::default()
+        };
         let outcome =
-            |handler_outcome| map_outcome(&attempt, Policy::default(), true, handler_outcome);
+            |handler_outcome| transition_of(&attempt, policy, KindMode::Outbox, handler_outcome);
         std::assert_matches!(
             outcome(HandlerOutcome::Timeout),
             Transition::Retry {
+                base_micros: 54_000_000,
                 floor_micros: 0,
                 cause: RetryCause::Timeout,
                 ..
@@ -533,7 +594,7 @@ mod tests {
     #[test]
     fn a_completed_attempt_selects_the_completion_write_plan() {
         std::assert_matches!(
-            write_of(&Transition::Complete(Completion::Pending)),
+            write_of(&Transition::Complete(Completion::Uncommitted)),
             Some(WritePlan::CompleteBatched)
         );
         std::assert_matches!(write_of(&Transition::Complete(Completion::Committed)), None);

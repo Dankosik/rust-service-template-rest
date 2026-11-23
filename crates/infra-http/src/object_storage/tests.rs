@@ -10,7 +10,7 @@ use axum::response::IntoResponse as _;
 use axum::routing::{MethodRouter, get, put};
 use axum_test::TestServer;
 use futures_util::stream;
-use infra_object_storage::{CredentialSource, ObjectStorageOptions, Provider, PutOptions};
+use infra_object_storage::{AccessKey, ObjectStorageOptions, Provider, PutOptions};
 use operation_context::Stopped;
 use tokio::sync::{Notify, oneshot, watch};
 use tower::ServiceExt as _;
@@ -58,7 +58,7 @@ async fn pre_header_problems_preserve_route_policy_and_uncertain_writes() {
     }
 
     let refused = write_problem(NotApplied(F::Unavailable)).into_response();
-    let unknown = write_problem(OutcomeUnknown(F::Unavailable)).into_response();
+    let unknown = write_problem(OutcomeUnknown(UnknownOutcome::Unavailable)).into_response();
     assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(unknown.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!unknown.headers().contains_key(RETRY_AFTER));
@@ -110,13 +110,13 @@ fn file_route(
                 .unwrap()
                 .origin()
                 .ascii_serialization(),
-            region: String::new(),
+            region: None,
+            credentials: AccessKey {
+                access_key_id: "example".to_owned(),
+                secret_access_key: "example".into(),
+            },
         },
         bucket: "file-bucket".to_owned(),
-        credentials: CredentialSource::AccessKey {
-            access_key_id: "example".to_owned(),
-            secret_access_key: "example".into(),
-        },
         max_object_bytes: 1024,
         max_concurrency: 2,
         operation_timeout: Duration::from_mins(2),

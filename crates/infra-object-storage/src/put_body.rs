@@ -1,4 +1,3 @@
-use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,6 +8,7 @@ use bytes::Bytes;
 use http_body::{Body, Frame, SizeHint};
 use sync_wrapper::SyncWrapper;
 
+use crate::byte_progress::{BodyEndedEarly, ByteProgress};
 use crate::error::UploadFailure;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -16,13 +16,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const SOURCE_POLLS_PER_YIELD: usize = 64;
 
 #[derive(derive_more::Debug)]
+#[debug("PutBody {{ len: {}, .. }}", payload.len())]
 pub struct PutBody {
-    pub(crate) len: u64,
-    #[debug(skip)]
-    pub(crate) stream: ByteStream,
-    #[debug(skip)]
-    pub(crate) source: UploadSource,
-    #[debug(skip)]
+    pub(crate) payload: Payload,
     pub(crate) outcomes: Option<PutOutcomes>,
 }
 
@@ -41,77 +37,93 @@ impl PutOutcomes {
         self.0.load(Ordering::Acquire) != 0
     }
 
-    pub(super) fn dispatched(&self) {
+    #[must_use]
+    pub(super) fn begin_dispatch(&self) -> DispatchedPut<'_> {
         self.0.fetch_add(1, Ordering::Release);
-    }
-
-    pub(super) fn settled(&self) {
-        self.0.fetch_sub(1, Ordering::Release);
+        DispatchedPut(self)
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum UploadSource {
-    InMemory,
-    Streamed { mismatch: Arc<AtomicBool> },
+pub(super) struct DispatchedPut<'a>(&'a PutOutcomes);
+
+impl DispatchedPut<'_> {
+    pub(super) fn settle(self) {
+        self.0.0.fetch_sub(1, Ordering::Release);
+    }
 }
 
-impl UploadSource {
-    pub(crate) fn mismatched(&self) -> bool {
+pub(crate) enum Payload {
+    InMemory(Bytes),
+    Streamed {
+        len: u64,
+        stream: ByteStream,
+        mismatch: Arc<AtomicBool>,
+    },
+}
+
+impl Payload {
+    pub(crate) fn len(&self) -> u64 {
         match self {
-            Self::InMemory => false,
-            Self::Streamed { mismatch } => mismatch.load(Ordering::Acquire),
+            Self::InMemory(bytes) => bytes.len() as u64,
+            Self::Streamed { len, .. } => *len,
+        }
+    }
+
+    pub(crate) async fn verify_empty_stream(
+        mut stream: ByteStream,
+        mismatch: Arc<AtomicBool>,
+    ) -> Result<Self, UploadFailure> {
+        match stream.next().await {
+            Some(_) if mismatch.load(Ordering::Acquire) => Err(UploadFailure::Length),
+            Some(_) => Err(UploadFailure::Body),
+            None => Ok(Self::InMemory(Bytes::new())),
+        }
+    }
+
+    pub(crate) fn into_stream(self) -> (u64, ByteStream, Option<Arc<AtomicBool>>) {
+        match self {
+            Self::InMemory(bytes) => (bytes.len() as u64, ByteStream::from(bytes), None),
+            Self::Streamed {
+                len,
+                stream,
+                mismatch,
+            } => (len, stream, Some(mismatch)),
         }
     }
 }
 
 impl PutBody {
-    pub fn stream<B, E>(len: u64, body: B) -> Self
+    pub fn stream<B>(len: u64, body: B) -> Self
     where
-        B: Body<Data = Bytes, Error = E> + Send + 'static,
-        E: Into<BoxError> + 'static,
+        B: Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<BoxError> + 'static,
     {
         let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
         Self {
-            len,
-            stream: ByteStream::from_body_1_x(body),
-            source: UploadSource::Streamed { mismatch },
+            payload: Payload::Streamed {
+                len,
+                stream: ByteStream::from_body_1_x(body),
+                mismatch,
+            },
             outcomes: None,
         }
     }
 
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.len
+        self.payload.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, UploadFailure> {
-        if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
-            return Ok(self);
-        }
-        match self.stream.next().await {
-            Some(_) if self.source.mismatched() => Err(UploadFailure::Length),
-            Some(_) => Err(UploadFailure::Body),
-            None => Ok(Self {
-                stream: ByteStream::from(Bytes::new()),
-                source: UploadSource::InMemory,
-                ..self
-            }),
-        }
+        self.len() == 0
     }
 }
 
 impl From<Bytes> for PutBody {
     fn from(bytes: Bytes) -> Self {
         Self {
-            len: bytes.len() as u64,
-            stream: ByteStream::from(bytes),
-            source: UploadSource::InMemory,
+            payload: Payload::InMemory(bytes),
             outcomes: None,
         }
     }
@@ -127,96 +139,47 @@ impl From<Vec<u8>> for PutBody {
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
 
-pub(crate) enum ByteProgress {
-    Reading(NonZeroU64),
-    AwaitingEof(Option<Bytes>),
-}
-
-impl ByteProgress {
-    pub(crate) fn new(len: u64) -> Self {
-        NonZeroU64::new(len).map_or(Self::AwaitingEof(None), Self::Reading)
-    }
-
-    pub(crate) fn remaining(&self) -> u64 {
-        match self {
-            Self::Reading(remaining) => remaining.get(),
-            Self::AwaitingEof(held) => held.as_ref().map_or(0, |bytes| bytes.len() as u64),
-        }
-    }
-
-    pub(crate) fn accept(&mut self, chunk: Bytes) -> Result<Option<Bytes>, Bytes> {
-        let Self::Reading(remaining) = self else {
-            return Err(chunk);
-        };
-        let Some(next) = remaining.get().checked_sub(chunk.len() as u64) else {
-            return Err(chunk);
-        };
-        if let Some(remaining) = NonZeroU64::new(next) {
-            *self = Self::Reading(remaining);
-            Ok(Some(chunk))
-        } else {
-            *self = Self::AwaitingEof(Some(chunk));
-            Ok(None)
-        }
-    }
-
-    pub(crate) fn finish(&mut self) -> Result<Option<Bytes>, ()> {
-        match self {
-            Self::AwaitingEof(held) => Ok(held.take()),
-            Self::Reading(_) => Err(()),
-        }
-    }
+#[derive(Default)]
+struct Drained {
+    held: Option<Bytes>,
+    trailers: Option<Frame<Bytes>>,
 }
 
 enum ExactLengthPhase {
     Streaming(ByteProgress),
-    Draining {
-        held: Option<Bytes>,
-        trailers: Option<Frame<Bytes>>,
-    },
+    Draining(Drained),
 }
 
-enum PhaseStep {
+enum StreamStep {
     Continue,
     Yield(Result<Frame<Bytes>, BoxError>),
+    Drain(Drained),
     Mismatch,
 }
 
-impl ExactLengthPhase {
-    fn advance<E: Into<BoxError>>(&mut self, polled: Option<Result<Frame<Bytes>, E>>) -> PhaseStep {
-        match polled {
-            Some(Err(error)) => PhaseStep::Yield(Err(error.into())),
-            Some(Ok(frame)) => match frame.into_data() {
-                Ok(data) => self.on_data(data),
-                Err(trailers) => self.finish_data(Some(trailers)),
+fn drain(progress: &mut ByteProgress, trailers: Option<Frame<Bytes>>) -> StreamStep {
+    match progress.finish() {
+        Ok(held) => StreamStep::Drain(Drained { held, trailers }),
+        Err(BodyEndedEarly) => StreamStep::Mismatch,
+    }
+}
+
+fn advance_stream<E: Into<BoxError>>(
+    progress: &mut ByteProgress,
+    polled: Option<Result<Frame<Bytes>, E>>,
+) -> StreamStep {
+    match polled {
+        Some(Err(error)) => StreamStep::Yield(Err(error.into())),
+        Some(Ok(frame)) => match frame.into_data() {
+            Ok(data) if data.is_empty() => StreamStep::Continue,
+            Ok(data) => match progress.accept(data) {
+                Ok(Some(data)) => StreamStep::Yield(Ok(Frame::data(data))),
+                Ok(None) => StreamStep::Continue,
+                Err(_rejected) => StreamStep::Mismatch,
             },
-            None => self.finish_data(None),
-        }
-    }
-
-    fn on_data(&mut self, data: Bytes) -> PhaseStep {
-        if data.is_empty() {
-            return PhaseStep::Continue;
-        }
-        let Self::Streaming(progress) = self else {
-            return PhaseStep::Mismatch;
-        };
-        match progress.accept(data) {
-            Ok(Some(data)) => PhaseStep::Yield(Ok(Frame::data(data))),
-            Ok(None) => PhaseStep::Continue,
-            Err(_rejected) => PhaseStep::Mismatch,
-        }
-    }
-
-    fn finish_data(&mut self, trailers: Option<Frame<Bytes>>) -> PhaseStep {
-        let Self::Streaming(progress) = self else {
-            return PhaseStep::Mismatch;
-        };
-        let Ok(held) = progress.finish() else {
-            return PhaseStep::Mismatch;
-        };
-        *self = Self::Draining { held, trailers };
-        PhaseStep::Continue
+            Err(trailers) => drain(progress, Some(trailers)),
+        },
+        None => drain(progress, None),
     }
 }
 
@@ -242,10 +205,10 @@ impl<B> ExactLength<B> {
     }
 }
 
-impl<B, E> Body for ExactLength<B>
+impl<B> Body for ExactLength<B>
 where
-    B: Body<Data = Bytes, Error = E>,
-    E: Into<BoxError>,
+    B: Body<Data = Bytes>,
+    B::Error: Into<BoxError>,
 {
     type Data = Bytes;
     type Error = BoxError;
@@ -257,27 +220,30 @@ where
         let mut this = self.project();
         let mut polls_remaining = SOURCE_POLLS_PER_YIELD;
         loop {
-            if let ExactLengthPhase::Draining { held, trailers } = this.phase {
-                if let Some(data) = held.take() {
-                    return Poll::Ready(Some(Ok(Frame::data(data))));
+            let progress = match this.phase {
+                ExactLengthPhase::Draining(Drained { held, trailers }) => {
+                    if let Some(data) = held.take() {
+                        return Poll::Ready(Some(Ok(Frame::data(data))));
+                    }
+                    return Poll::Ready(trailers.take().map(Ok));
                 }
-                return Poll::Ready(trailers.take().map(Ok));
-            }
+                ExactLengthPhase::Streaming(progress) => progress,
+            };
             if polls_remaining == 0 {
                 context.waker().wake_by_ref();
                 return Poll::Pending;
             }
             polls_remaining -= 1;
             let polled = std::task::ready!(this.inner.as_mut().get_pin_mut().poll_frame(context));
-            match this.phase.advance(polled) {
-                PhaseStep::Continue => {}
-                PhaseStep::Yield(item) => return Poll::Ready(Some(item)),
-                PhaseStep::Mismatch => {
+            match advance_stream(progress, polled) {
+                StreamStep::Continue => {}
+                StreamStep::Yield(item) => return Poll::Ready(Some(item)),
+                StreamStep::Drain(drained) => {
+                    *this.phase = ExactLengthPhase::Draining(drained);
+                }
+                StreamStep::Mismatch => {
                     this.mismatch.store(true, Ordering::Release);
-                    *this.phase = ExactLengthPhase::Draining {
-                        held: None,
-                        trailers: None,
-                    };
+                    *this.phase = ExactLengthPhase::Draining(Drained::default());
                     return Poll::Ready(Some(Err(Box::new(LengthMismatch))));
                 }
             }
@@ -287,17 +253,17 @@ where
     fn is_end_stream(&self) -> bool {
         matches!(
             self.phase,
-            ExactLengthPhase::Draining {
+            ExactLengthPhase::Draining(Drained {
                 held: None,
                 trailers: None,
-            }
+            })
         )
     }
 
     fn size_hint(&self) -> SizeHint {
         let exact = match &self.phase {
             ExactLengthPhase::Streaming(progress) => progress.remaining(),
-            ExactLengthPhase::Draining { held, .. } => {
+            ExactLengthPhase::Draining(Drained { held, .. }) => {
                 held.as_ref().map_or(0, |data| data.len() as u64)
             }
         };

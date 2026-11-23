@@ -200,30 +200,20 @@ async fn proxy_one(mut inbound: TcpStream, upstream: SocketAddr, acceptor: Optio
     }
 }
 
-fn tls_acceptor(material: &TlsMaterial) -> TlsAcceptor {
-    acceptor(material, None)
-}
-
-fn acceptor(material: &TlsMaterial, client_ca: Option<&[u8]>) -> TlsAcceptor {
+fn mtls_acceptor(material: &TlsMaterial, client_ca: &[u8]) -> TlsAcceptor {
     let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
-    let builder = ServerConfig::builder_with_provider(provider.clone())
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(client_ca.to_vec()))
+        .expect("fixture client CA");
+    let config = ServerConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
-        .expect("fixture TLS protocol versions");
-    let builder = match client_ca {
-        None => builder.with_no_client_auth(),
-        Some(client_ca) => {
-            let mut roots = RootCertStore::empty();
-            roots
-                .add(CertificateDer::from(client_ca.to_vec()))
-                .expect("fixture client CA");
-            builder.with_client_cert_verifier(
-                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-                    .build()
-                    .expect("fixture client verifier"),
-            )
-        }
-    };
-    let config = builder
+        .expect("fixture TLS protocol versions")
+        .with_client_cert_verifier(
+            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .expect("fixture client verifier"),
+        )
         .with_single_cert(
             vec![CertificateDer::from(material.cert.clone())],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key.clone())),
@@ -365,7 +355,9 @@ async fn a_ttl_that_overflows_server_time_is_invalid_and_preserves_the_value() {
                 Duration::from_millis(i64::MAX.cast_unsigned())
             )
             .await,
-        Err(infra_cache::SetError::InvalidTtl)
+        Err(infra_cache::MutationError::NotApplied(
+            infra_cache::MutationFailure::InvalidTtl
+        ))
     );
     assert_eq!(
         namespace.get(&caller, &key).await.unwrap().as_deref(),
@@ -472,7 +464,7 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
-    let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
+    let proxy = Proxy::tls(upstream, material.acceptor()).await;
     let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         Duration::from_secs(1),
@@ -498,7 +490,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
-    let mut proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
+    let mut proxy = Proxy::tls(upstream, material.acceptor()).await;
     let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         Duration::from_secs(1),
@@ -519,7 +511,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
         bind_port(Ipv6Addr::LOCALHOST.into(), port).await,
         port,
         upstream,
-        Some(tls_acceptor(&material)),
+        Some(material.acceptor()),
     );
 
     wait_for_recovered_value(
@@ -542,7 +534,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
     let first = TlsMaterial::new("localhost");
     let ca = write_pem(&first.root);
     let upstream = upstream_addr(&cache_url());
-    let mut proxy = Proxy::tls(upstream, tls_acceptor(&first)).await;
+    let mut proxy = Proxy::tls(upstream, first.acceptor()).await;
     let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,
@@ -561,9 +553,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
     std::fs::write(ca.path(), pem_block("CERTIFICATE", &replacement.root))
         .expect("replace CA file");
     proxy.stop().await;
-    proxy
-        .restart_tls(upstream, tls_acceptor(&replacement))
-        .await;
+    proxy.restart_tls(upstream, replacement.acceptor()).await;
 
     std::assert_matches!(
         namespace.get(&caller, &key).await,
@@ -595,7 +585,7 @@ async fn an_untrusted_ca_is_unavailable() {
     let material = TlsMaterial::new("localhost");
     let ca = write_pem(new_issuer().der());
     let upstream = upstream_addr(&cache_url());
-    let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
+    let proxy = Proxy::tls(upstream, material.acceptor()).await;
     let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,
@@ -618,7 +608,7 @@ async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
     let ca = write_pem(&material.root);
     let identity = ClientIdentity::new();
     let upstream = upstream_addr(&cache_url());
-    let proxy = Proxy::tls(upstream, acceptor(&material, Some(&identity.ca))).await;
+    let proxy = Proxy::tls(upstream, mtls_acceptor(&material, &identity.ca)).await;
     let cache = Cache::start(CacheOptions {
         client_certificate: Some(identity.paths()),
         ..options(
@@ -648,7 +638,7 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
     let ca = write_pem(&material.root);
     let identity = ClientIdentity::new();
     let upstream = upstream_addr(&cache_url());
-    let proxy = Proxy::tls(upstream, acceptor(&material, Some(&identity.ca))).await;
+    let proxy = Proxy::tls(upstream, mtls_acceptor(&material, &identity.ca)).await;
     let cache = Cache::start(options(
         format!("rediss://localhost:{}", proxy.port),
         COMMAND_TIMEOUT,

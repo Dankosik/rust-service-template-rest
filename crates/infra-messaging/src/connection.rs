@@ -3,15 +3,14 @@ use std::time::Duration;
 use async_nats::rustls::crypto::{GetRandomFailed, SecureRandom};
 use async_nats::{ConnectErrorKind, ToServerAddrs as _};
 use futures_util::FutureExt as _;
+use operation_context::OperationContext;
 use secrecy::ExposeSecret as _;
 use tokio::sync::watch;
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
-use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation, within_operation_budget};
+use crate::budget::{BROKER_OPERATION_BUDGET, BrokerBudget, bounded_operation, bounded_with};
 use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
-use crate::messaging::{CloseOutcome, Credentials, MessagingOptions};
+use crate::messaging::{CloseOutcome, Credentials, MessagingOptions, TransportSecurity};
 
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(4);
 const RECONNECT_CAP_ATTEMPT: usize = 13;
@@ -26,33 +25,35 @@ pub(crate) struct NativeConnection {
 impl NativeConnection {
     pub(crate) async fn open(
         options: &MessagingOptions,
-        deadline: Instant,
-        cancel: &CancellationToken,
+        context: &OperationContext,
     ) -> Result<Self, MessagingError> {
-        let (closed_event_tx, closed_event) = watch::channel(false);
         let servers: Vec<_> = options
             .servers
             .to_server_addrs()
             .map_err(|_| MessagingError::Configuration("broker server address is invalid"))?
             .collect();
-        let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
-        if options.tls_first && !all_tls {
+        let (require_tls, tls_first) = match options.security {
+            TransportSecurity::Tls => (true, false),
+            TransportSecurity::TlsFirst => (true, true),
+            TransportSecurity::AllowPlaintext => (false, false),
+        };
+        if tls_first && !servers.iter().all(async_nats::ServerAddr::tls_required) {
             return Err(MessagingError::Configuration(
                 "TLS-first requires every configured server to use TLS",
             ));
         }
         let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
-        let connect_deadline = within_operation_budget(deadline);
-        let connect_budget = connect_deadline.saturating_duration_since(Instant::now());
-        let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-        let mut connect = connect_options(options.credentials.as_ref(), deadline, cancel)
+        let connect_budget = BrokerBudget::from_context(context);
+        let connect_remaining = connect_budget.remaining();
+        let secure_random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
+        let (closed_event_tx, closed_event) = watch::channel(false);
+        let mut builder = connect_options(options.credentials.as_ref(), context)
             .await?
             .name(&options.connection_name)
             .connection_timeout(BROKER_OPERATION_BUDGET)
-            .initial_connect_deadline(connect_deadline)
             .request_timeout(Some(BROKER_OPERATION_BUDGET))
-            .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
-            .require_tls(!options.allow_plaintext)
+            .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, secure_random))
+            .require_tls(require_tls)
             .event_callback(move |event| {
                 report_connection_event(&event);
                 if matches!(event, async_nats::Event::Closed) {
@@ -60,19 +61,22 @@ impl NativeConnection {
                 }
                 std::future::ready(())
             });
-        if options.tls_first {
-            connect = connect.tls_first();
+        if let Some(instant) = connect_budget.deadline().instant() {
+            builder = builder.initial_connect_deadline(instant);
+        }
+        if tls_first {
+            builder = builder.tls_first();
         } else if any_tls {
-            connect = connect.ignore_discovered_servers();
+            builder = builder.ignore_discovered_servers();
         }
         if let Some(root_ca) = options.root_ca_path.clone() {
-            connect = connect.add_root_certificates(root_ca);
+            builder = builder.add_root_certificates(root_ca);
         }
-        let client = bounded_operation(connect_deadline, cancel, async {
-            connect
+        let client = bounded_with(connect_budget, async {
+            builder
                 .connect(servers)
                 .await
-                .map_err(|error| connect_failure(&error, connect_budget))
+                .map_err(|error| report_connect_failure(&error, connect_remaining))
         })
         .await?;
         Ok(Self {
@@ -81,12 +85,8 @@ impl NativeConnection {
         })
     }
 
-    pub(crate) async fn close(
-        &self,
-        deadline: Instant,
-        cancel: &CancellationToken,
-    ) -> CloseOutcome {
-        let deadline = within_operation_budget(deadline);
+    pub(crate) async fn close(&self, context: &OperationContext) -> CloseOutcome {
+        let budget = BrokerBudget::from_context(context);
         let client = &self.client;
         let mut closed_event = self.closed_event.clone();
         let closed_now = || client.wait_closed().now_or_never() == Some(true);
@@ -106,27 +106,21 @@ impl NativeConnection {
                 CloseOutcome::UnobservedClose
             }
         };
-        let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
+        let outcome = if budget.stopped().is_some() {
             CloseOutcome::WaitInterrupted
         } else {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => CloseOutcome::WaitInterrupted,
-                () = tokio::time::sleep_until(deadline) => CloseOutcome::WaitInterrupted,
-                result = drain => result,
-            }
+            budget
+                .run_until_stopped(drain)
+                .await
+                .unwrap_or(CloseOutcome::WaitInterrupted)
         };
         match outcome {
             CloseOutcome::Complete => {}
             CloseOutcome::WaitInterrupted => client.force_close(),
             CloseOutcome::UnobservedClose => {
                 client.force_close();
-                if Instant::now() < deadline {
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => {}
-                        _ = tokio::time::timeout_at(deadline, client.wait_closed()) => {}
-                    }
+                if budget.stopped().is_none() {
+                    let _ = budget.run_until_stopped(client.wait_closed()).await;
                 }
             }
         }
@@ -136,19 +130,18 @@ impl NativeConnection {
 
 async fn connect_options(
     credentials: Option<&Credentials>,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<async_nats::ConnectOptions, MessagingError> {
     match credentials {
         None => Ok(async_nats::ConnectOptions::new()),
         Some(Credentials::Inline(credentials)) => async_nats::ConnectOptions::new()
             .credentials(credentials.expose_secret())
-            .map_err(|_| credentials_failure(CredentialsFileError::Malformed)),
+            .map_err(|_| report_credentials_failure(CredentialsFileError::Malformed)),
         Some(Credentials::File(path)) => {
-            let file = bounded_operation(deadline, cancel, async {
+            let file = bounded_operation(context, async {
                 CredentialsFile::admit(path)
                     .await
-                    .map_err(credentials_failure)
+                    .map_err(report_credentials_failure)
             })
             .await?;
             Ok(async_nats::ConnectOptions::with_auth_callback(
@@ -186,7 +179,7 @@ fn spread_reconnect_delay(base: Duration, sample: Result<u16, GetRandomFailed>) 
     base.saturating_sub(spread)
 }
 
-fn credentials_failure(error: CredentialsFileError) -> MessagingError {
+fn report_credentials_failure(error: CredentialsFileError) -> MessagingError {
     let failure = match error {
         CredentialsFileError::Unreadable(_) => {
             MessagingError::Configuration("credentials file is unreadable")
@@ -203,7 +196,7 @@ fn credentials_failure(error: CredentialsFileError) -> MessagingError {
     failure
 }
 
-fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
+fn report_connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
     let (failure, error_type) = match error.kind() {
         ConnectErrorKind::Authentication => (MessagingError::Authentication, "authentication"),
         ConnectErrorKind::AuthorizationViolation => {
@@ -284,9 +277,8 @@ pub(crate) fn describe_metrics() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use async_nats::{ClientError, ConnectError, Event, ServerError};
+    use observe_test_support::{CapturedEvent, EventCapture};
 
     use super::*;
 
@@ -322,52 +314,13 @@ mod tests {
         }
     }
 
-    type Logged = Vec<(&'static str, String)>;
-
-    #[derive(Clone, Default)]
-    struct Events(Arc<Mutex<Vec<Logged>>>);
-
-    struct Fields(Logged);
-
-    impl tracing::field::Visit for Fields {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push((field.name(), format!("{value:?}")));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.0.push((field.name(), value.to_owned()));
-        }
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            let mut fields = Fields(Vec::new());
-            event.record(&mut fields);
-            self.0.lock().expect("event lock").push(fields.0);
-        }
-    }
-
-    fn logged(test: impl FnOnce()) -> Vec<Logged> {
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        let events = Events::default();
-        let subscriber = tracing_subscriber::registry().with(events.clone());
-        tracing::subscriber::with_default(subscriber, || {
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    fn logged(test: impl FnOnce()) -> Vec<CapturedEvent> {
+        let events = EventCapture::new();
+        {
+            let _guard = events.install_default();
             test();
-        });
-        events.0.lock().expect("event lock").clone()
-    }
-
-    fn field<'a>(event: &'a Logged, name: &str) -> Option<&'a str> {
-        event
-            .iter()
-            .find(|(field, _)| *field == name)
-            .map(|(_, value)| value.as_str())
+        }
+        events.snapshot()
     }
 
     #[test]
@@ -380,7 +333,7 @@ mod tests {
         let events = logged(|| {
             for (kind, _) in stages {
                 let source = std::io::Error::other("nats://user:sentinel@broker.invalid");
-                let failure = connect_failure(
+                let failure = report_connect_failure(
                     &ConnectError::with_source(kind, source),
                     BROKER_OPERATION_BUDGET,
                 );
@@ -390,10 +343,15 @@ mod tests {
 
         assert_eq!(events.len(), stages.len());
         for (event, (_, error_type)) in events.iter().zip(stages) {
-            assert_eq!(field(event, "message"), Some("messaging_admission_failed"));
-            assert_eq!(field(event, "operation"), Some("connect"));
-            assert_eq!(field(event, "error.type"), Some(error_type));
-            assert!(event.iter().all(|(_, value)| !value.contains("sentinel")));
+            assert_eq!(event.message(), Some("messaging_admission_failed"));
+            assert_eq!(event.unquoted("operation"), Some("connect"));
+            assert_eq!(event.unquoted("error.type"), Some(error_type));
+            assert!(
+                event
+                    .fields
+                    .values()
+                    .all(|value| !value.contains("sentinel"))
+            );
         }
     }
 
@@ -429,11 +387,16 @@ mod tests {
         let logged: Vec<_> = events
             .iter()
             .map(|event| {
-                assert_eq!(field(event, "message"), Some("messaging_connection"));
-                assert!(event.iter().all(|(_, value)| !value.contains("sentinel")));
+                assert_eq!(event.message(), Some("messaging_connection"));
+                assert!(
+                    event
+                        .fields
+                        .values()
+                        .all(|value| !value.contains("sentinel"))
+                );
                 (
-                    field(event, "result").expect("result"),
-                    field(event, "error.type"),
+                    event.unquoted("result").expect("result"),
+                    event.unquoted("error.type"),
                 )
             })
             .collect();

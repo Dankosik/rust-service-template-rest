@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures_util::future::{BoxFuture, Either};
 use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
+use operation_context::OperationContext;
 use tonic::body::Body;
 
-use crate::{Client, ClientError, PreparedCall};
+use crate::transport::PreparedCall;
+use crate::{Client, ClientError, ResponseFuture, WithContext};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -35,50 +36,53 @@ impl Client {
 }
 
 impl ServiceTokenClient {
+    #[must_use]
+    pub fn with_context(&self, context: &OperationContext) -> WithContext<Self> {
+        WithContext::new(self.clone(), context)
+    }
+
     fn prepare(&self, request: http::Request<Body>) -> Result<PreparedCall, tonic::Status> {
-        let mut prepared = self.client.prepare_call(request)?;
-        if prepared.headers_mut().contains_key(AUTHORIZATION) {
-            return Err(prepared.refuse(tonic::Status::internal(
-                "authorization conflicts with the service token",
-            )));
-        }
-        Ok(prepared)
+        PreparedCall::prepare(&self.client, request)?.try_step(|_, headers| {
+            if headers.contains_key(AUTHORIZATION) {
+                return Err(tonic::Status::internal(
+                    "authorization conflicts with the service token",
+                ));
+            }
+            Ok(())
+        })
     }
 }
 
 impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Response = http::Response<Body>;
     type Error = tonic::Status;
-    type Future = Either<
-        std::future::Ready<Result<Self::Response, Self::Error>>,
-        BoxFuture<'static, Result<Self::Response, Self::Error>>,
-    >;
+    type Future = ResponseFuture;
 
-    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let prepared = match self.prepare(request) {
-            Ok(prepared) => prepared,
-            Err(status) => return Either::Left(std::future::ready(Err(status))),
-        };
-        let tokens = self.tokens.clone();
-        Either::Right(Box::pin(prepared.send_inner(
-            move |headers| {
-                let authorization = tokens.authorization().map_err(|error| {
-                    let mut status = tonic::Status::unavailable("service token unavailable");
-                    status.set_source(Arc::new(error));
-                    status
-                })?;
-                if let Some(value) = authorization {
-                    headers.insert(AUTHORIZATION, value);
-                }
-                Ok(())
-            },
-            None,
-        )))
+        ResponseFuture::from_prepared(self.prepare(request), |prepared| {
+            let tokens = self.tokens.clone();
+            prepared.send_with_dispatch(move |headers| insert_service_token(&tokens, headers))
+        })
     }
+}
+
+fn insert_service_token(
+    tokens: &ReceiverTokens,
+    headers: &mut http::HeaderMap,
+) -> Result<(), tonic::Status> {
+    let authorization = tokens.authorization().map_err(|error| {
+        let mut status = tonic::Status::unavailable("service token unavailable");
+        status.set_source(Arc::new(error));
+        status
+    })?;
+    if let Some(value) = authorization {
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -86,8 +90,7 @@ mod tests {
     use std::assert_matches;
     use std::time::Duration;
 
-    use infra_serviceauth::{TokenSource, test_support::TestKey};
-    use operation_context::OperationContext;
+    use infra_serviceauth::{ServiceName, TokenSource, test_support::TestKey};
     use tower::ServiceExt as _;
 
     use super::*;
@@ -98,29 +101,35 @@ mod tests {
         let key = TestKey::new("orders/2026-10");
         let source =
             TokenSource::try_new(key.signing_options("orders", "example-svc+jwt")).unwrap();
+        let catalog: ServiceName = "catalog".parse().unwrap();
         let origin = http::Uri::from_static("https://peer.example:443");
-        let tokens = source.receiver("catalog", origin.clone()).unwrap();
-        let plain = Client::try_new(
+        let tokens = source.receiver(catalog.clone(), origin.clone()).unwrap();
+        let plain = Client::builder(
             "http://127.0.0.1:1",
             ClientSecurity::Plaintext,
             Duration::from_secs(1),
         )
+        .build()
         .unwrap();
         assert_matches!(
             plain.with_service_tokens(tokens.clone()).unwrap_err(),
             ClientError::ServiceTokensRequireTls
         );
-        let disabled = TokenSource::disabled().receiver("catalog", origin).unwrap();
+        let disabled = TokenSource::disabled()
+            .receiver(catalog.clone(), origin)
+            .unwrap();
         assert!(plain.with_service_tokens(disabled).is_ok());
         let ca = rcgen::generate_simple_self_signed(["peer.example".to_owned()]).unwrap();
-        let client = Client::try_new(
+        let ca_pem = ca.cert.pem();
+        let client = Client::builder(
             "https://PEER.example",
             ClientSecurity::Tls(crate::ClientTlsMaterial {
-                ca_certificate_pem: Some(ca.cert.pem()),
+                ca_certificate_pem: Some(&ca_pem),
                 identity: None,
             }),
             Duration::from_secs(1),
         )
+        .build()
         .unwrap();
         for wrong in [
             "https://other.example",
@@ -131,7 +140,9 @@ mod tests {
             "https://user@peer.example",
             "https://peer.example:65536",
         ] {
-            let elsewhere = source.receiver("catalog", wrong.parse().unwrap()).unwrap();
+            let elsewhere = source
+                .receiver(catalog.clone(), wrong.parse().unwrap())
+                .unwrap();
             assert_matches!(
                 client.with_service_tokens(elsewhere).unwrap_err(),
                 ClientError::ServiceTokenOriginMismatch

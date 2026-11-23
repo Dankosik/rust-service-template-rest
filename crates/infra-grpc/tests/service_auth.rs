@@ -9,7 +9,6 @@
 )]
 
 use std::{
-    fmt::Write as _,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
@@ -24,9 +23,12 @@ use grpc_contracts::example::v1::{
     echo_service_server::{EchoService, EchoServiceServer},
 };
 use health::{Readiness, RefreshPolicy};
-use infra_grpc::{Authentication, Caller, Error, Limits, Services, require_caller, server_options};
+use infra_grpc::{
+    Authentication, Caller, Limits, RequestExt as _, ServerOptions, ServiceRegistration, Services,
+    TlsRequiredError, server_options,
+};
 use infra_http_transport::{BoundListener, ConnectionLimits, Drained, Server, TlsOptions};
-use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
+use infra_outbound_grpc::{Client, ClientSecurity, ClientTlsMaterial, transport::PreparedCall};
 use infra_serviceauth::{
     JwtType, ServiceName, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, has_cached_authorization, now_secs, registry},
@@ -84,7 +86,7 @@ impl EchoService for Echo {
         self.observe(&request);
         if request.get_ref().message == "verified-caller" {
             return Ok(Response::new(UnaryResponse {
-                message: require_caller(&request)?.name().as_str().to_owned(),
+                message: request.caller()?.name().as_str().to_owned(),
             }));
         }
         Ok(Response::new(UnaryResponse {
@@ -181,28 +183,37 @@ fn described_echo(echo: &Echo) -> Services {
     services
 }
 
-fn echo_services(echo: &Echo) -> Services {
-    let mut services = described_echo(echo);
-    for method in ["Unary", "ClientStream", "BidiStream"] {
-        services
-            .allow_callers(&format!("{ECHO}/{method}"), &["orders"])
-            .unwrap();
-    }
+fn register_echo<'a>(services: &'a mut Services, echo: &Echo) -> ServiceRegistration<'a> {
     services
-        .allow_callers(&format!("{ECHO}/ServerStream"), &["billing"])
+        .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .unwrap();
+    let mut registration = services.add(EchoServiceServer::new(echo.clone())).unwrap();
+    for method in ["Unary", "ClientStream", "BidiStream"] {
+        registration.allow_callers(method, &["orders"]).unwrap();
+    }
+    registration
+        .allow_callers("ServerStream", &["billing"])
+        .unwrap();
+    registration
+}
+
+fn echo_services(echo: &Echo) -> Services {
+    let mut services = Services::new();
+    register_echo(&mut services, echo);
     services
 }
 
 fn serve(services: Services, authentication: Authentication) -> (Server, SocketAddr) {
-    let app = infra_grpc::router(
-        services,
-        readiness().reader(),
-        authentication,
-        limits(),
-        false,
-    )
-    .unwrap();
+    let app = services
+        .build(
+            readiness().reader(),
+            authentication,
+            ServerOptions {
+                limits: limits(),
+                trust_trace_context: false,
+            },
+        )
+        .unwrap();
     let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let options = server_options(ConnectionLimits {
         max_connections: NonZeroU32::new(64),
@@ -240,15 +251,16 @@ fn resource(address: SocketAddr) -> Client {
 }
 
 fn resource_with_limit(address: SocketAddr, limit: Option<NonZeroUsize>) -> Client {
-    Client::with_opening_limit(
+    Client::builder(
         &format!("https://{address}"),
         ClientSecurity::Tls(ClientTlsMaterial {
-            ca_certificate_pem: Some(certificate().root_pem.clone()),
+            ca_certificate_pem: Some(&certificate().root_pem),
             identity: None,
         }),
-        ClientTimeout::FullRpc(Duration::from_secs(10)),
-        limit,
+        Duration::from_secs(10),
     )
+    .opening_limit(limit)
+    .build()
     .unwrap()
 }
 
@@ -317,7 +329,7 @@ fn reason(status: &Status) -> String {
 
 #[test]
 fn a_handler_requiring_a_caller_reports_a_missing_identity_as_internal() {
-    let status = require_caller(&Request::new(())).unwrap_err();
+    let status = Request::new(()).caller().unwrap_err();
     assert_eq!(status.code(), Code::Internal);
     assert_eq!(reason(&status), "INTERNAL_ERROR");
 }
@@ -326,16 +338,16 @@ fn a_handler_requiring_a_caller_reports_a_missing_identity_as_internal() {
 async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     let keys = Keys::new();
     let echo = Echo::default();
+    let mut services = Services::new();
     #[allow(
         unused_mut,
+        unused_variables,
         reason = "the bearer profile adds explicit empty scope rules"
     )]
-    let mut services = echo_services(&echo);
+    let mut registration = register_echo(&mut services, &echo);
     // template:begin authn:grpc-service-auth-test-empty-scope-rules
     for method in ["Unary", "ServerStream"] {
-        services
-            .require_scopes(&format!("{ECHO}/{method}"), &[])
-            .unwrap();
+        registration.require_scopes(method, &[]).unwrap();
     }
     // template:end authn:grpc-service-auth-test-empty-scope-rules
     let (server, address) = serve(services, Authentication::ServiceTokens(keys.verifier()));
@@ -408,20 +420,23 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     let source = TokenSource::try_new(keys.orders.signing_options("orders", TYPE)).unwrap();
     let origin: http::Uri = format!("https://{address}").parse().unwrap();
     let resource = resource_with_limit(address, Some(NonZeroUsize::MIN));
-    let bound = |source: &TokenSource, receiver| {
-        let tokens = source.receiver(receiver, origin.clone()).unwrap();
+    let bound = |source: &TokenSource, receiver: &str| {
+        let tokens = source
+            .receiver(receiver.parse().unwrap(), origin.clone())
+            .unwrap();
         EchoServiceClient::new(resource.with_service_tokens(tokens).unwrap())
     };
-    let catalog_tokens = source.receiver("catalog", origin.clone()).unwrap();
+    let catalog_tokens = source
+        .receiver("catalog".parse().unwrap(), origin.clone())
+        .unwrap();
     let mut catalog = EchoServiceClient::new(
         resource
             .with_service_tokens(catalog_tokens.clone())
             .unwrap(),
     );
     assert!(!has_cached_authorization(&catalog_tokens));
-    let held = resource
-        .prepare_call(http::Request::new(tonic::body::Body::empty()))
-        .unwrap();
+    let held =
+        PreparedCall::prepare(&resource, http::Request::new(tonic::body::Body::empty())).unwrap();
     let status = tokio::time::timeout(
         Duration::from_secs(3),
         catalog.unary(UnaryRequest::default()),
@@ -502,35 +517,36 @@ fn bearer_retained() -> bool {
 
 #[tokio::test]
 async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_the_handler() {
-    let refused = infra_grpc::router(
-        echo_services(&Echo::default()),
-        readiness().reader(),
-        Authentication::None,
-        limits(),
-        false,
+    let options = ServerOptions {
+        limits: limits(),
+        trust_trace_context: false,
+    };
+    let refused =
+        echo_services(&Echo::default()).build(readiness().reader(), Authentication::None, options);
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "gRPC caller rules require service token authentication"
     );
-    std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
     // template:begin oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     let verifier = infra_bearerauthn::test_support::JwtFixture::shared().verifier();
-    let refused = infra_grpc::router(
-        echo_services(&Echo::default()),
+    let refused = echo_services(&Echo::default()).build(
         readiness().reader(),
         Authentication::Bearer(verifier),
-        limits(),
-        false,
+        options,
     );
-    std::assert_matches!(refused, Err(Error::CallerRulesRequireServiceTokens));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "gRPC caller rules require service token authentication"
+    );
     // template:end oidc-jwt:grpc-service-auth-test-caller-rules-bearer
     // template:begin authn:grpc-service-auth-test-without-verifier-bearer
     let readiness = readiness();
-    let refused = infra_grpc::router(
-        described_echo(&Echo::default()),
-        readiness.reader(),
-        Authentication::None,
-        limits(),
-        false,
+    let refused =
+        described_echo(&Echo::default()).build(readiness.reader(), Authentication::None, options);
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        infra_grpc::Error::unauthenticated_business_calls().to_string()
     );
-    std::assert_matches!(refused, Err(Error::UnauthenticatedBusinessCalls));
     // template:end authn:grpc-service-auth-test-without-verifier-bearer
     if bearer_retained() {
         return;
@@ -559,15 +575,17 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
 #[tokio::test]
 async fn service_token_authentication_requires_a_tls_listener() {
     let mut services = echo_services(&Echo::default());
-    services.set_listener_layer(tower::layer::util::Identity::new());
-    let app = infra_grpc::router(
-        services,
-        readiness().reader(),
-        Authentication::ServiceTokens(Keys::new().verifier()),
-        limits(),
-        false,
-    )
-    .unwrap();
+    services.add_listener_layer(tower::layer::util::Identity::new());
+    let app = services
+        .build(
+            readiness().reader(),
+            Authentication::ServiceTokens(Keys::new().verifier()),
+            ServerOptions {
+                limits: limits(),
+                trust_trace_context: false,
+            },
+        )
+        .unwrap();
     let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let options = server_options(ConnectionLimits {
         max_connections: NonZeroU32::new(1),
@@ -575,7 +593,7 @@ async fn service_token_authentication_requires_a_tls_listener() {
     });
     std::assert_matches!(
         app.serve(listener, options, None).err(),
-        Some(Error::ServiceTokensRequireTls)
+        Some(TlsRequiredError)
     );
 }
 
@@ -584,22 +602,30 @@ async fn service_token_authentication_requires_a_tls_listener() {
 async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
     let keys = Keys::new();
     let readiness = readiness();
-    let path = format!("{ECHO}/Unary");
     for delegate in [false, true] {
-        let mut services = echo_services(&Echo::default());
+        let mut services = Services::new();
+        let mut registration = register_echo(&mut services, &Echo::default());
         if delegate {
-            services.require_scopes_for_delegation(&path, &[]).unwrap();
+            registration
+                .require_scopes_for_delegation("Unary", &[])
+                .unwrap();
         } else {
-            services.require_scopes(&path, &["echo.read"]).unwrap();
+            registration
+                .require_scopes("Unary", &["echo.read"])
+                .unwrap();
         }
-        let refused = infra_grpc::router(
-            services,
+        let refused = services.build(
             readiness.reader(),
             Authentication::ServiceTokens(keys.verifier()),
-            limits(),
-            false,
+            ServerOptions {
+                limits: limits(),
+                trust_trace_context: false,
+            },
         );
-        std::assert_matches!(refused, Err(Error::ScopesWithServiceTokens));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "gRPC required scopes or bearer delegation cannot be enforced when service tokens replace bearer authentication"
+        );
     }
 }
 // template:end authn:grpc-service-auth-test-scopes-refused
@@ -607,15 +633,17 @@ async fn required_scopes_and_delegation_cannot_be_dropped_for_service_tokens() {
 #[tokio::test]
 async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     let keys = Keys::new();
-    let build = |services, authentication| {
-        infra_grpc::router(
-            services,
-            readiness().reader(),
-            authentication,
-            limits(),
-            false,
-        )
-        .map(|_| ())
+    let build = |services: Services, authentication| {
+        services
+            .build(
+                readiness().reader(),
+                authentication,
+                ServerOptions {
+                    limits: limits(),
+                    trust_trace_context: false,
+                },
+            )
+            .map(|_| ())
     };
     let mut services = Services::new();
     services
@@ -624,9 +652,11 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
     services
         .add(EchoServiceServer::new(Echo::default()))
         .unwrap();
-    std::assert_matches!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(path)) if path == format!("{ECHO}/BidiStream"),
+    assert_eq!(
+        build(services, Authentication::ServiceTokens(keys.verifier()))
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC method {ECHO}/BidiStream has no caller rule"),
         "a verifier without any rule"
     );
     let mut services = Services::new();
@@ -635,27 +665,31 @@ async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
         .unwrap();
     services
         .add(EchoServiceServer::new(Echo::default()))
+        .unwrap()
+        .allow_callers("BidiStream", &["orders"])
         .unwrap();
-    services
-        .allow_callers(&format!("{ECHO}/BidiStream"), &["orders"])
-        .unwrap();
-    std::assert_matches!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(path)) if path == format!("{ECHO}/ClientStream"),
+    assert_eq!(
+        build(services, Authentication::ServiceTokens(keys.verifier()))
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC method {ECHO}/ClientStream has no caller rule"),
         "every method requires an explicit rule"
     );
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.add_reflection().unwrap();
-    std::assert_matches!(
-        build(services, Authentication::ServiceTokens(keys.verifier())),
-        Err(Error::MissingCallerRule(path)) if path == "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
+    assert_eq!(
+        build(services, Authentication::ServiceTokens(keys.verifier()))
+            .unwrap_err()
+            .to_string(),
+        "gRPC method /grpc.reflection.v1.ServerReflection/ServerReflectionInfo has no caller rule"
     );
     let mut services = echo_services(&echo);
-    services.add_reflection().unwrap();
-    for path in infra_grpc::REFLECTION_PATHS {
-        services.allow_callers(path, &[]).unwrap();
-    }
+    services
+        .add_reflection()
+        .unwrap()
+        .allow_callers(&[])
+        .unwrap();
     build(services, Authentication::ServiceTokens(keys.verifier())).unwrap();
 }
 
@@ -665,75 +699,59 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .unwrap();
-    std::assert_matches!(
-        services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
-        Err(Error::UnregisteredCallerRule(path)) if path == format!("{ECHO}/Unary"),
-        "before the service is added"
-    );
-    services
+    let mut registration = services
         .add(EchoServiceServer::new(Echo::default()))
         .unwrap();
-    for path in [
-        "example.v1.EchoService/Unary",
-        "/example.v1.EchoService/unary",
-        "/example.v1.EchoService/Unary/extra",
-        "/example.v1.Other/Unary",
-        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+    for method in [
+        "unary",
+        "Missing",
+        "Unary/extra",
+        "/example.v1.EchoService/Unary",
     ] {
-        std::assert_matches!(
-            services.allow_callers(path, &["orders"]),
-            Err(Error::UnregisteredCallerRule(rejected)) if rejected == path,
-            "{path}"
+        let expected_path = format!("{ECHO}/{method}");
+        assert_eq!(
+            registration
+                .allow_callers(method, &["orders"])
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "gRPC caller rule for {expected_path} must name a described method of a registered service"
+            ),
+            "{method}"
         );
     }
     let unary = format!("{ECHO}/Unary");
     for callers in [&["Orders"], &["a b"]] {
-        std::assert_matches!(
-            services.allow_callers(&unary, callers),
-            Err(Error::InvalidCallerRule {
-                path,
-                source: infra_serviceauth::InvalidServiceName,
-            }) if path == unary,
+        let error = registration.allow_callers("Unary", callers).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("gRPC caller rule for {unary} is invalid"),
+            "{callers:?}"
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .is::<infra_serviceauth::InvalidServiceName>(),
             "{callers:?}"
         );
     }
-    std::assert_matches!(
-        services.allow_callers(&unary, &["orders", "orders"]),
-        Err(Error::DuplicateCallerName(path)) if path == unary
+    assert_eq!(
+        registration
+            .allow_callers("Unary", &["orders", "orders"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC caller rule for {unary} names the same caller twice")
     );
-    services
-        .allow_callers(&unary, &["orders", "billing"])
+    registration
+        .allow_callers("Unary", &["orders", "billing"])
         .unwrap();
-    std::assert_matches!(
-        services.allow_callers(&unary, &["orders"]),
-        Err(Error::DuplicateCallerRule(path)) if path == unary
+    assert_eq!(
+        registration
+            .allow_callers("Unary", &["orders"])
+            .unwrap_err()
+            .to_string(),
+        format!("gRPC caller rule is declared twice for {unary}")
     );
-}
-
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<String>>);
-
-struct Fields<'a>(&'a mut String);
-
-impl tracing::field::Visit for Fields<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let _ = write!(self.0, "{}={value:?};", field.name());
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
-    fn on_new_span(
-        &self,
-        attributes: &tracing::span::Attributes<'_>,
-        _: &tracing::span::Id,
-        _: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        attributes.record(&mut Fields(&mut self.0.lock()));
-    }
-
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        event.record(&mut Fields(&mut self.0.lock()));
-    }
 }
 
 #[tokio::test]
@@ -742,12 +760,13 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .build();
-    let capture = Capture::default();
+    let captured_events = observe_test_support::EventCapture::new();
+    let captured_spans = observe_test_support::SpanCapture::new();
     let subscriber = tracing_subscriber::registry()
-        .with(capture.clone())
+        .with(captured_events.clone())
+        .with(captured_spans.clone())
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-    let _registration_anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let _guard = observe_test_support::install_default(&tracing::Dispatch::new(subscriber));
 
     let keys = Keys::new();
     let echo = Echo::default();
@@ -768,7 +787,11 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
         Drained::Complete
     );
 
-    let logged = capture.0.lock().clone();
+    let logged = format!(
+        "{:?}{:?}",
+        captured_events.snapshot(),
+        captured_spans.snapshot()
+    );
     assert!(
         logged.contains("service_auth_caller_not_admitted"),
         "{logged}"

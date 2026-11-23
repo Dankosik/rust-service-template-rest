@@ -1,22 +1,18 @@
-use std::mem::DropGuard;
 use std::sync::{Arc, LazyLock, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use foldhash::HashMap;
+use infra_grpc_core::observe::{
+    CallMetrics, DIAGNOSTIC_BYTES, HANDLING_SECONDS_BUCKETS, StatusCounters, open_rpc_span,
+};
+use infra_grpc_core::protocol::{RpcName, split_method_path};
 use metrics::SharedString;
 use opentelemetry::Value;
-use opentelemetry::trace::{SpanKind, Status as SpanStatus};
+use opentelemetry::trace::SpanKind;
 use parking_lot::Mutex;
-use shared_rules::grpc::{
-    DIAGNOSTIC_BYTES, ERROR_TYPE_ATTR, FALLBACK_SPAN_NAME, HANDLING_SECONDS_BUCKETS,
-    RPC_METHOD_ATTR, RPC_METHOD_ORIGINAL_ATTR, RPC_METHOD_OTHER, RPC_STATUS_CODE_ATTR,
-    RPC_SYSTEM_GRPC, RPC_SYSTEM_NAME_ATTR, RpcName, STATUS_CODE_COUNT,
-    diagnostic_rpc_method_original, split_method_path, status_code_names,
-};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
-use tracing_opentelemetry_instrumentation_sdk::otel_trace_span;
 
 pub(crate) const CLIENT_STARTED_METRIC: &str = "grpc_client_started_total";
 pub(crate) const CLIENT_HANDLED_METRIC: &str = "grpc_client_handled_total";
@@ -31,18 +27,20 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(CLIENT_HANDLING_METRIC, HANDLING_SE
 static DESCRIBE: Once = Once::new();
 static CLIENT_SERIES: LazyLock<Series> = LazyLock::new(Series::new);
 
-#[derive(Clone, Debug)]
-pub(crate) struct Destination {
+pub(crate) type Call = infra_grpc_core::observe::Call<MethodMetrics>;
+
+#[derive(Debug)]
+pub(crate) struct ServerAddress {
     address: Arc<str>,
     port: Option<u16>,
 }
 
-impl Destination {
+impl ServerAddress {
     pub(crate) fn from_uri(uri: &http::Uri) -> Option<Self> {
         let host = uri
             .host()
             .filter(|host| !host.is_empty() && host.len() <= DIAGNOSTIC_BYTES)?;
-        let address = crate::protocol::unbracket_host(host);
+        let address = crate::client::unbracket_host(host);
         Some(Self {
             address: Arc::from(address),
             port: uri.port_u16(),
@@ -50,100 +48,48 @@ impl Destination {
     }
 }
 
-struct CallInner {
-    metrics: Arc<MethodMetrics>,
-    span: tracing::Span,
-    started: Instant,
-}
-
-impl CallInner {
-    fn record(&self, code: tonic::Code) {
-        let span_code = status_code_names(code as usize).span;
-        self.span.set_attribute(RPC_STATUS_CODE_ATTR, span_code);
-        if otel_http::grpc::status_is_error(code as u16, false) {
-            self.span.set_attribute(ERROR_TYPE_ATTR, span_code);
-            self.span.set_status(SpanStatus::error(""));
-        }
-        self.metrics.record_handled(code, self.started.elapsed());
-    }
-
-    fn cancel(self) {
-        self.record(tonic::Code::Cancelled);
-    }
-}
-
-pub(crate) struct Call(DropGuard<CallInner, fn(CallInner)>);
-
-impl Call {
-    pub(crate) fn start<B>(
-        series: &Series,
-        request: &http::Request<B>,
-        destination: Option<&Destination>,
-    ) -> Self {
-        let started = Instant::now();
-        let metrics = series.resolve(request);
-        let span = make_client_span(request, &metrics, destination);
-        metrics.started.increment(1);
-        Self(DropGuard::new(
-            CallInner {
-                metrics,
-                span,
-                started,
-            },
-            CallInner::cancel,
-        ))
-    }
-
-    pub(crate) fn span(&self) -> &tracing::Span {
-        &self.0.span
-    }
-
-    pub(crate) fn finish(self, code: tonic::Code) {
-        DropGuard::dismiss(self.0).record(code);
-    }
-
-    pub(crate) fn refuse(self, status: tonic::Status) -> tonic::Status {
-        self.finish(status.code());
-        status
-    }
+pub(crate) fn start_call<B>(
+    series: &Series,
+    request: &http::Request<B>,
+    server_address: Option<&ServerAddress>,
+) -> Call {
+    let started = Instant::now();
+    let metrics = series.resolve(request);
+    let span = make_client_span(request, &metrics, server_address);
+    metrics.started.increment(1);
+    Call::start(metrics, span, started)
 }
 
 fn make_client_span<B>(
     request: &http::Request<B>,
     metrics: &MethodMetrics,
-    destination: Option<&Destination>,
+    server_address: Option<&ServerAddress>,
 ) -> tracing::Span {
-    let span = otel_trace_span!(
-        "GRPC request",
-        otel.name = metrics.span_name(),
-        otel.kind = ?SpanKind::Client,
+    let span = open_rpc_span(
+        &SpanKind::Client,
+        metrics.rpc_method.as_ref(),
+        request.uri().path(),
     );
-    span.set_attribute(RPC_SYSTEM_NAME_ATTR, RPC_SYSTEM_GRPC);
-    if let Some(method) = &metrics.rpc_method {
-        span.set_attribute(RPC_METHOD_ATTR, Arc::clone(method));
-    } else {
-        span.set_attribute(RPC_METHOD_ATTR, RPC_METHOD_OTHER);
-        if let Some(original) = diagnostic_rpc_method_original(request.uri().path()) {
-            span.set_attribute(RPC_METHOD_ORIGINAL_ATTR, DiagnosticAttribute(original));
-        }
+    if span.is_disabled() {
+        return span;
     }
-    if let Some(destination) = destination {
-        span.set_attribute("server.address", Arc::clone(&destination.address));
-        if let Some(port) = destination.port {
+    if let Some(server_address) = server_address {
+        span.set_attribute("server.address", Arc::clone(&server_address.address));
+        if let Some(port) = server_address.port {
             span.set_attribute("server.port", i64::from(port));
         }
     }
     let user_agent = otel_http::user_agent(request);
     if !user_agent.is_empty() && user_agent.len() <= DIAGNOSTIC_BYTES {
-        span.set_attribute("user_agent.original", DiagnosticAttribute(user_agent));
+        span.set_attribute("user_agent.original", LazyAttribute(user_agent));
     }
     span
 }
 
-struct DiagnosticAttribute<'a>(&'a str);
+struct LazyAttribute<'a>(&'a str);
 
-impl From<DiagnosticAttribute<'_>> for Value {
-    fn from(attribute: DiagnosticAttribute<'_>) -> Self {
+impl From<LazyAttribute<'_>> for Value {
+    fn from(attribute: LazyAttribute<'_>) -> Self {
         attribute.0.to_owned().into()
     }
 }
@@ -156,13 +102,29 @@ pub(crate) struct Series {
     unknown: OnceLock<Arc<MethodMetrics>>,
 }
 
-struct MethodMetrics {
+pub(crate) struct MethodMetrics {
     rpc_method: Option<Arc<str>>,
     service: SharedString,
     method: SharedString,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
-    handled: [OnceLock<metrics::Counter>; STATUS_CODE_COUNT],
+    handled: StatusCounters,
+}
+
+impl CallMetrics for MethodMetrics {
+    const IS_SERVER: bool = false;
+
+    fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
+        self.handling_seconds.record(elapsed);
+        self.handled.increment(code, |metric_code| {
+            metrics::counter!(
+                CLIENT_HANDLED_METRIC,
+                "grpc_service" => self.service.clone(),
+                "grpc_method" => self.method.clone(),
+                "grpc_code" => metric_code,
+            )
+        });
+    }
 }
 
 impl Series {
@@ -257,26 +219,8 @@ impl MethodMetrics {
             method,
             started,
             handling_seconds,
-            handled: Default::default(),
+            handled: StatusCounters::new(),
         }
-    }
-
-    fn span_name(&self) -> &str {
-        self.rpc_method.as_deref().unwrap_or(FALLBACK_SPAN_NAME)
-    }
-
-    fn record_handled(&self, code: tonic::Code, elapsed: Duration) {
-        self.handling_seconds.record(elapsed);
-        self.handled[code as usize]
-            .get_or_init(|| {
-                metrics::counter!(
-                    CLIENT_HANDLED_METRIC,
-                    "grpc_service" => self.service.clone(),
-                    "grpc_method" => self.method.clone(),
-                    "grpc_code" => status_code_names(code as usize).metric,
-                )
-            })
-            .increment(1);
     }
 }
 
@@ -310,6 +254,8 @@ fn describe_client_metrics() {
 
 #[cfg(test)]
 mod tests {
+    use infra_grpc_core::observe::status_code_names;
+
     use super::*;
 
     fn test_request(
@@ -347,19 +293,19 @@ mod tests {
             "/example.v1.EchoService/Unary",
             Some(("example.v1.EchoService", "Unary")),
         );
-        let destination = Destination::from_uri(&"http://[::1]:50051".parse().unwrap());
-        Call::start(&series, &known, destination.as_ref()).finish(tonic::Code::Unauthenticated);
+        let server_address = ServerAddress::from_uri(&"http://[::1]:50051".parse().unwrap());
+        start_call(&series, &known, server_address.as_ref()).finish(tonic::Code::Unauthenticated);
         let mut raw = test_request("/example.v1.Raw/Unary", None);
         raw.headers_mut().insert(
             http::header::USER_AGENT,
             "grpc-client-test".parse().unwrap(),
         );
-        Call::start(&series, &raw, None).finish(tonic::Code::Ok);
+        start_call(&series, &raw, None).finish(tonic::Code::Ok);
         let overlong = "a".repeat(DIAGNOSTIC_BYTES + 1);
         let mut raw = test_request(&format!("/{overlong}"), None);
         raw.headers_mut()
             .insert(http::header::USER_AGENT, overlong.parse().unwrap());
-        Call::start(&series, &raw, None).finish(tonic::Code::Ok);
+        start_call(&series, &raw, None).finish(tonic::Code::Ok);
         drop(guard);
 
         let spans = exporter.get_finished_spans().unwrap();
@@ -417,7 +363,7 @@ mod tests {
             Some(("example.v1.EchoService", "Unary")),
         ] {
             let request = test_request("/example.v1.EchoService/Unary", declared);
-            Call::start(&series, &request, None).finish(tonic::Code::Ok);
+            start_call(&series, &request, None).finish(tonic::Code::Ok);
         }
         let rendered = recorder.handle().render();
         assert!(rendered.lines().any(|line| line
@@ -428,11 +374,11 @@ mod tests {
 
     #[test]
     fn destination_strips_ipv6_brackets_and_caps_overlong_hosts() {
-        let ipv6 = Destination::from_uri(&"https://[::1]:50051".parse().unwrap()).unwrap();
+        let ipv6 = ServerAddress::from_uri(&"https://[::1]:50051".parse().unwrap()).unwrap();
         assert_eq!(ipv6.address.as_ref(), "::1");
         assert_eq!(ipv6.port, Some(50051));
 
-        let named = Destination::from_uri(&"https://grpc.example.test".parse().unwrap()).unwrap();
+        let named = ServerAddress::from_uri(&"https://grpc.example.test".parse().unwrap()).unwrap();
         assert_eq!(named.address.as_ref(), "grpc.example.test");
         assert_eq!(named.port, None);
 
@@ -440,7 +386,7 @@ mod tests {
             format!("https://{}.test:50051", "a".repeat(DIAGNOSTIC_BYTES))
                 .parse()
                 .unwrap();
-        assert!(Destination::from_uri(&overlong_uri).is_none());
+        assert!(ServerAddress::from_uri(&overlong_uri).is_none());
     }
 
     #[test]
@@ -461,12 +407,12 @@ mod tests {
             ),
             (Code::Unauthenticated, "UNAUTHENTICATED", "Unauthenticated"),
         ] {
-            let names = status_code_names(code as usize);
+            let names = status_code_names(code);
             assert_eq!(names.span, span);
             assert_eq!(names.metric, metric);
         }
         for raw in 0..17 {
-            let names = status_code_names(Code::from_i32(raw) as usize);
+            let names = status_code_names(Code::from_i32(raw));
             assert!(!names.span.is_empty() && !names.metric.is_empty());
         }
     }

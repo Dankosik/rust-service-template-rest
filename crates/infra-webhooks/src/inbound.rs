@@ -2,6 +2,7 @@ mod processing;
 pub mod route;
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -10,22 +11,15 @@ use compact_str::CompactString;
 use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
-use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobKind, enqueue};
-use infra_postgres::{
-    Isolation, TxError, TxOptions, failure_cause, in_tx_with_deadline, observed, sqlstate,
-};
+use infra_jobs::{EnqueueError, JobKind, KindName, enqueue};
+use infra_postgres::{Isolation, Pool, TxError, TxOptions, failure_cause, observed, sqlstate};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use smallvec::SmallVec;
-use sqlx::postgres::PgPool;
 use tokio::time::Instant;
 
-use crate::StreamingBase64;
 use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
-
-pub use async_trait::async_trait;
 
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
@@ -42,32 +36,93 @@ pub enum ReceiptOutcome {
 pub enum ReceiveError {
     #[error("inbound webhook endpoint is not configured")]
     UnknownEndpoint,
-    #[error("inbound webhook delivery was rejected: {}", .0.reason())]
+    #[error("inbound webhook delivery was rejected: {0}")]
     Rejected(Rejection),
     #[error("inbound webhook receipt storage is unavailable")]
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rejection(&'static str);
+#[derive(Clone, Copy)]
+pub struct Rejection(RejectionKind);
+
+#[derive(Clone, Copy)]
+enum RejectionKind {
+    Protocol(ProtocolError),
+    PayloadTooLarge,
+    Custom(&'static str),
+}
 
 impl Rejection {
     #[must_use]
     pub const fn new(reason: &'static str) -> Self {
-        Self(reason)
+        Self(RejectionKind::Custom(reason))
     }
 
     #[must_use]
     pub const fn reason(self) -> &'static str {
+        match self.0 {
+            RejectionKind::Protocol(error) => error.reason(),
+            RejectionKind::PayloadTooLarge => "payload_too_large",
+            RejectionKind::Custom(reason) => reason,
+        }
+    }
+
+    const fn kind(self) -> RejectionKind {
         self.0
     }
 }
 
-const PAYLOAD_TOO_LARGE: Rejection = Rejection::new("payload_too_large");
+impl PartialEq for Rejection {
+    fn eq(&self, other: &Self) -> bool {
+        self.reason() == other.reason()
+    }
+}
+
+impl Eq for Rejection {}
+
+impl fmt::Debug for Rejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("Rejection")
+            .field(&self.reason())
+            .finish()
+    }
+}
+
+impl fmt::Display for Rejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for Rejection {}
+
+impl Hash for Rejection {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.reason().hash(state);
+    }
+}
+
+const PAYLOAD_TOO_LARGE: Rejection = Rejection(RejectionKind::PayloadTooLarge);
 
 impl From<ProtocolError> for Rejection {
     fn from(error: ProtocolError) -> Self {
-        Self(error.reason())
+        Self(RejectionKind::Protocol(error))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EndpointReceiveError {
+    Rejected(Rejection),
+    Unavailable,
+}
+
+impl From<EndpointReceiveError> for ReceiveError {
+    fn from(error: EndpointReceiveError) -> Self {
+        match error {
+            EndpointReceiveError::Rejected(rejection) => Self::Rejected(rejection),
+            EndpointReceiveError::Unavailable => Self::Unavailable,
+        }
     }
 }
 
@@ -82,6 +137,17 @@ pub trait Verifier: Send + Sync + 'static {
     ) -> Result<MessageId, Rejection>;
 }
 
+impl<V: Verifier> Verifier for Arc<V> {
+    fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+        now: SystemTime,
+    ) -> Result<MessageId, Rejection> {
+        (**self).authenticate(headers, body, now)
+    }
+}
+
 impl Verifier for KeyRing {
     fn authenticate(
         &self,
@@ -93,34 +159,47 @@ impl Verifier for KeyRing {
     }
 }
 
+#[derive(Default)]
+pub struct Verifiers {
+    bindings: HashMap<Arc<str>, Arc<dyn Verifier>>,
+}
+
+impl Verifiers {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bind(&mut self, endpoint_id: impl Into<Arc<str>>, verifier: impl Verifier) -> &mut Self {
+        self.bindings.insert(endpoint_id.into(), Arc::new(verifier));
+        self
+    }
+
+    #[must_use]
+    pub fn into_receiver(self, pool: Pool) -> Receiver {
+        Receiver {
+            pool,
+            verifiers: Arc::new(self.bindings),
+        }
+    }
+}
+
+impl fmt::Debug for Verifiers {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Verifiers")
+            .field("binding_count", &self.bindings.len())
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct Receiver {
-    pool: PgPool,
-    endpoints: Arc<HashMap<String, Arc<dyn Verifier>>>,
+    pool: Pool,
+    verifiers: Arc<HashMap<Arc<str>, Arc<dyn Verifier>>>,
 }
 
 impl Receiver {
-    #[must_use]
-    pub fn new(
-        pool: PgPool,
-        endpoints: impl IntoIterator<Item = (String, Arc<dyn Verifier>)>,
-    ) -> Self {
-        Self {
-            pool,
-            endpoints: Arc::new(endpoints.into_iter().collect()),
-        }
-    }
-
-    #[must_use]
-    pub fn has_endpoint(&self, endpoint_id: &str) -> bool {
-        self.endpoints.contains_key(endpoint_id)
-    }
-
-    pub fn endpoint_ids(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.endpoints.keys().map(String::as_str)
-    }
-
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
         &self,
         endpoint_id: &str,
@@ -129,10 +208,8 @@ impl Receiver {
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        let verifier = self.verifier(endpoint_id)?;
-        self.receive_inner(
+        self.receive_body(
             endpoint_id,
-            verifier,
             headers,
             ReceiveBody::Borrowed(body),
             now,
@@ -141,7 +218,6 @@ impl Receiver {
         .await
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive_bytes(
         &self,
         endpoint_id: &str,
@@ -150,10 +226,8 @@ impl Receiver {
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        let verifier = self.verifier(endpoint_id)?;
-        self.receive_inner(
+        self.receive_body(
             endpoint_id,
-            verifier,
             headers,
             ReceiveBody::Owned(body),
             now,
@@ -162,88 +236,87 @@ impl Receiver {
         .await
     }
 
-    fn verifier(&self, endpoint_id: &str) -> Result<&dyn Verifier, ReceiveError> {
-        self.endpoints
-            .get(endpoint_id)
-            .map(AsRef::as_ref)
-            .ok_or(ReceiveError::UnknownEndpoint)
-    }
-
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn receive_configured_bytes(
+    async fn receive_body(
         &self,
         endpoint_id: &str,
-        verifier: &dyn Verifier,
-        headers: &HeaderMap,
-        body: Bytes,
-        now: SystemTime,
-        deadline: Instant,
-    ) -> Result<ReceiptOutcome, ReceiveError> {
-        self.receive_inner(
-            endpoint_id,
-            verifier,
-            headers,
-            ReceiveBody::Owned(body),
-            now,
-            deadline,
-        )
-        .await
-    }
-
-    async fn receive_inner(
-        &self,
-        endpoint_id: &str,
-        verifier: &dyn Verifier,
         headers: &HeaderMap,
         body: ReceiveBody<'_>,
         now: SystemTime,
         deadline: Instant,
     ) -> Result<ReceiptOutcome, ReceiveError> {
-        let admitted = admit(verifier, headers, body, now)
-            .map_err(|rejection| rejected(endpoint_id, rejection))?;
-        let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-        in_tx_with_deadline(
+        let verifier = self.verifier(endpoint_id)?;
+        receive_for_endpoint(
             &self.pool,
+            endpoint_id,
+            verifier,
+            headers,
+            body,
+            now,
             deadline,
-            READ_COMMITTED,
-            async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
-                let inserted = observed!(
-                    "insert webhook receipt",
-                    sqlx::query!(
-                        "INSERT INTO webhook_receipts (endpoint_id, message_id) \
-                         VALUES ($1, $2) \
-                         ON CONFLICT (endpoint_id, message_id) DO NOTHING",
-                        endpoint_id,
-                        admitted.message_id.as_ref(),
-                    )
-                    .execute(&mut *tx),
-                )
-                .await?;
-                if inserted.rows_affected() == 0 {
-                    return Ok(ReceiptOutcome::Duplicate);
-                }
-                let incoming = Incoming::new(endpoint_id, admitted, content_type);
-                match enqueue(tx, &incoming, EnqueueOptions::default()).await? {
-                    Enqueued::Created(_) => Ok(ReceiptOutcome::Accepted),
-                    Enqueued::Duplicate => Err(ReceiptFailure::UnexpectedDuplicate),
-                }
-            },
         )
         .await
-        .map_err(|error| match error {
-            ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {
-                rejected(endpoint_id, PAYLOAD_TOO_LARGE)
-            }
-            error => receipt_unavailable(endpoint_id, &error),
-        })
+        .map_err(ReceiveError::from)
     }
+
+    fn verifier(&self, endpoint_id: &str) -> Result<&dyn Verifier, ReceiveError> {
+        self.verifiers
+            .get(endpoint_id)
+            .map(AsRef::as_ref)
+            .ok_or(ReceiveError::UnknownEndpoint)
+    }
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+async fn receive_for_endpoint(
+    pool: &Pool,
+    endpoint_id: &str,
+    verifier: &dyn Verifier,
+    headers: &HeaderMap,
+    body: ReceiveBody<'_>,
+    now: SystemTime,
+    deadline: Instant,
+) -> Result<ReceiptOutcome, EndpointReceiveError> {
+    let admitted = admit(verifier, headers, body, now)
+        .map_err(|rejection| log_rejection(endpoint_id, rejection))?;
+    let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
+    Box::pin(pool.in_tx_with_deadline(
+        deadline,
+        READ_COMMITTED,
+        async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
+            let inserted = observed!(
+                "insert webhook receipt",
+                sqlx::query!(
+                    "INSERT INTO webhook_receipts (endpoint_id, message_id) \
+                     VALUES ($1, $2) \
+                     ON CONFLICT (endpoint_id, message_id) DO NOTHING",
+                    endpoint_id,
+                    admitted.message_id.as_ref(),
+                )
+                .execute(&mut *tx),
+            )
+            .await?;
+            if inserted.rows_affected() == 0 {
+                return Ok(ReceiptOutcome::Duplicate);
+            }
+            let incoming = Incoming::new(endpoint_id, admitted, content_type);
+            enqueue(tx, &incoming).await?;
+            Ok(ReceiptOutcome::Accepted)
+        },
+    ))
+    .await
+    .map_err(|error| match error {
+        ReceiptFailure::Enqueue(EnqueueError::PayloadTooLarge { .. }) => {
+            log_rejection(endpoint_id, PAYLOAD_TOO_LARGE)
+        }
+        error => log_receipt_unavailable(endpoint_id, &error),
+    })
 }
 
 impl fmt::Debug for Receiver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Receiver")
-            .field("endpoint_count", &self.endpoints.len())
+            .field("endpoint_count", &self.verifiers.len())
             .finish_non_exhaustive()
     }
 }
@@ -258,27 +331,24 @@ enum ReceiptFailure {
     Enqueue(#[from] EnqueueError),
     #[error("webhook receipt transaction failed")]
     Transaction(#[from] TxError),
-    #[error("webhook receipt enqueue unexpectedly deduplicated")]
-    UnexpectedDuplicate,
 }
 
-fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
+fn log_rejection(endpoint_id: &str, rejection: Rejection) -> EndpointReceiveError {
     tracing::info!(
         webhook.endpoint = endpoint_id,
         webhook.reason = rejection.reason(),
         "webhook_delivery_rejected"
     );
-    ReceiveError::Rejected(rejection)
+    EndpointReceiveError::Rejected(rejection)
 }
 
-fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveError {
+fn log_receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> EndpointReceiveError {
     let (stage, reason, driver) = match error {
         ReceiptFailure::Query(err) => ("insert_receipt", "unavailable", Some(err)),
         ReceiptFailure::Enqueue(EnqueueError::Database(err)) => {
             ("enqueue", "unavailable", Some(err))
         }
         ReceiptFailure::Enqueue(_) => ("enqueue", "unavailable", None),
-        ReceiptFailure::UnexpectedDuplicate => ("enqueue", "integrity", None),
         ReceiptFailure::Transaction(err @ TxError::CommitUnknown(_)) => {
             ("transaction", "commit_unknown", Some(err.driver()))
         }
@@ -293,7 +363,7 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
         cause = driver.map(failure_cause),
         "webhook_receipt_unavailable"
     );
-    ReceiveError::Unavailable
+    EndpointReceiveError::Unavailable
 }
 
 struct AdmittedBody<'a> {
@@ -336,20 +406,52 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
     }
 }
 
-#[serde_as]
+const CONTENT_TYPE_INLINE_BYTES: usize = 32;
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ContentType(
+    #[serde(
+        serialize_with = "crate::base64_bytes::serialize",
+        deserialize_with = "deserialize_content_type"
+    )]
+    SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>,
+);
+
+fn deserialize_content_type<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>, D::Error> {
+    crate::base64_bytes::deserialize_with(deserializer, decode_content_type)
+}
+
+fn decode_content_type(
+    encoded: &str,
+) -> Result<SmallVec<[u8; CONTENT_TYPE_INLINE_BYTES]>, base64::DecodeError> {
+    if crate::base64_bytes::exact_decoded_len(encoded.as_bytes())
+        .is_some_and(|len| len <= CONTENT_TYPE_INLINE_BYTES)
+    {
+        let mut decoded = [0; CONTENT_TYPE_INLINE_BYTES];
+        match crate::base64_bytes::decode_slice(encoded, &mut decoded) {
+            Ok(len) => return Ok(SmallVec::from_buf_and_len(decoded, len)),
+            Err(base64::DecodeSliceError::DecodeError(error)) => return Err(error),
+            Err(base64::DecodeSliceError::OutputSliceTooSmall) => {}
+        }
+    }
+    crate::base64_bytes::decode_vec(encoded).map(SmallVec::from)
+}
+
 #[derive(Clone, derive_more::Debug, Deserialize, Serialize)]
 pub struct Incoming {
     #[serde(skip_deserializing, default = "incoming_version")]
     version: u8,
     endpoint_id: CompactString,
     #[debug("{:?}", "[REDACTED]")]
-    #[serde_as(as = "StreamingBase64")]
+    #[serde(with = "crate::base64_bytes")]
     message_id: MessageId,
     #[debug("{:?}", content_type.is_some())]
-    #[serde_as(as = "Option<StreamingBase64>")]
-    content_type: Option<SmallVec<[u8; 32]>>,
+    #[serde(default)]
+    content_type: Option<ContentType>,
     #[debug("{:?}", "[REDACTED]")]
-    #[serde_as(as = "StreamingBase64")]
+    #[serde(with = "crate::base64_bytes")]
     body: Bytes,
 }
 
@@ -364,7 +466,7 @@ impl Incoming {
             version: incoming_version(),
             endpoint_id: CompactString::from(endpoint_id),
             message_id: admitted.message_id,
-            content_type: content_type.map(SmallVec::from_slice),
+            content_type: content_type.map(|bytes| ContentType(SmallVec::from_slice(bytes))),
             body: admitted.body.into_bytes(),
         }
     }
@@ -381,7 +483,7 @@ impl Incoming {
 
     #[must_use]
     pub fn content_type(&self) -> Option<&[u8]> {
-        self.content_type.as_deref()
+        self.content_type.as_ref().map(|bytes| bytes.0.as_slice())
     }
 
     #[must_use]
@@ -391,10 +493,8 @@ impl Incoming {
 }
 
 impl JobKind for Incoming {
-    const NAME: &'static str = "webhooks.process";
+    const NAME: KindName = KindName::new("webhooks.process");
 }
-
-const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 
 #[cfg(test)]
 mod tests {
@@ -414,11 +514,12 @@ mod tests {
                 panic!("an oversized body never reaches the verifier")
             }
         }
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://127.0.0.1:1/unreachable")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");
-        let verifier: Arc<dyn Verifier> = Arc::new(MustNotAuthenticate);
-        let receiver = Receiver::new(pool, [("provider".to_owned(), verifier)]);
+        let mut verifiers = Verifiers::new();
+        verifiers.bind("provider", Arc::new(MustNotAuthenticate));
+        assert_eq!(format!("{verifiers:?}"), "Verifiers { binding_count: 1 }");
+        let receiver = verifiers.into_receiver(pool);
         let outcome = receiver
             .receive(
                 "provider",
@@ -461,5 +562,165 @@ mod tests {
             format!("{without_type:?}"),
             r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: false, body: "[REDACTED]" }"#
         );
+    }
+
+    #[test]
+    fn rejection_equality_hash_display_error_and_debug_preserve_reason_spelling() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let hash = |rejection: Rejection| {
+            let mut hasher = DefaultHasher::new();
+            rejection.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        let protocol = Rejection::from(ProtocolError::InvalidSignature);
+        let custom = Rejection::new("invalid_signature");
+        assert_eq!(protocol, custom);
+        assert_eq!(hash(protocol), hash(custom));
+        assert_eq!(protocol.to_string(), "invalid_signature");
+        assert_eq!(custom.to_string(), "invalid_signature");
+        let error: &dyn std::error::Error = &protocol;
+        assert_eq!(error.to_string(), "invalid_signature");
+        assert!(std::error::Error::source(&ReceiveError::Rejected(protocol)).is_none());
+        assert_eq!(
+            ReceiveError::Rejected(protocol).to_string(),
+            "inbound webhook delivery was rejected: invalid_signature"
+        );
+        assert_eq!(format!("{protocol:?}"), r#"Rejection("invalid_signature")"#);
+        assert_eq!(format!("{custom:?}"), r#"Rejection("invalid_signature")"#);
+        assert_eq!(PAYLOAD_TOO_LARGE, Rejection::new("payload_too_large"));
+    }
+
+    #[test]
+    fn incoming_deserializes_omitted_content_type_and_unpadded_base64() {
+        let omitted: Incoming = serde_json::from_str(
+            r#"{"version":1,"endpoint_id":"partner","message_id":"aWQ","body":"cmF3/w"}"#,
+        )
+        .expect("omitted content_type and unpadded base64");
+        assert_eq!(omitted.endpoint_id(), "partner");
+        assert_eq!(omitted.message_id(), b"id");
+        assert_eq!(omitted.content_type(), None);
+        assert_eq!(omitted.body(), b"raw\xff");
+        assert_eq!(
+            serde_json::to_string(&omitted).expect("serialized"),
+            r#"{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":null,"body":"cmF3/w=="}"#
+        );
+
+        let unpadded_type: Incoming = serde_json::from_str(
+            r#"{"version":1,"endpoint_id":"partner","message_id":"aWQ","content_type":"/w","body":""}"#,
+        )
+        .expect("unpadded content_type");
+        assert_eq!(unpadded_type.content_type(), Some(b"\xff".as_slice()));
+    }
+
+    #[test]
+    fn content_type_decodes_inline_through_32_bytes_and_preserves_base64_errors() {
+        use base64::{
+            Engine as _,
+            engine::general_purpose::{STANDARD, STANDARD_NO_PAD, STANDARD_PAD_INDIFFERENT},
+        };
+
+        let cases: &[(&[u8], bool)] = &[
+            (b"", false),
+            (b"application/json", false),
+            (&[b'a'; 30], false),
+            (b"application/json; charset=utf-8", false),
+            (&[b'b'; 32], false),
+            (b"application/x-www-form-urlencoded", true),
+            (&[b'c'; 34], true),
+            (&[b'd'; 64], true),
+        ];
+        for &(raw, expect_spilled) in cases {
+            let padded = STANDARD.encode(raw);
+            let partial = padded.strip_suffix('=').filter(|s| s.ends_with('='));
+            for encoded in [padded.as_str(), STANDARD_NO_PAD.encode(raw).as_str()]
+                .into_iter()
+                .chain(partial)
+            {
+                let json = format!(
+                    r#"{{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":"{encoded}","body":""}}"#
+                );
+                let incoming: Incoming = serde_json::from_str(&json).expect("valid content_type");
+                assert_eq!(incoming.content_type(), Some(raw));
+                assert_eq!(
+                    incoming.content_type.as_ref().unwrap().0.spilled(),
+                    expect_spilled,
+                    "len {} ({encoded})",
+                    raw.len()
+                );
+            }
+        }
+
+        let boundary_overflow = format!("{}AAA==", "AAAA".repeat(10));
+        let boundary_pad = format!("{}A===", "AAAA".repeat(10));
+        let boundary_trailing_bits = format!("{}AAB=", "AAAA".repeat(10));
+        let long_bad = format!("{}!", "AAAA".repeat(12));
+        for bad in [
+            "!",
+            "A",
+            "AA=A",
+            "AAAA====",
+            boundary_overflow.as_str(),
+            boundary_pad.as_str(),
+            boundary_trailing_bits.as_str(),
+            long_bad.as_str(),
+        ] {
+            let expected = STANDARD_PAD_INDIFFERENT
+                .decode(bad)
+                .unwrap_err()
+                .to_string();
+            let json = format!(
+                r#"{{"version":1,"endpoint_id":"partner","message_id":"aWQ=","content_type":"{bad}","body":""}}"#
+            );
+            let error = serde_json::from_str::<Incoming>(&json)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&expected),
+                "bad {bad:?}: got {error:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incoming_preserves_base64_json_bytes_and_decodes_original_body() {
+        const ENDPOINT: &str = "partner/a?#";
+        for (body, encoded) in [
+            (Vec::new(), String::new()),
+            (vec![0], "AA==".to_owned()),
+            (vec![0, 255], "AP8=".to_owned()),
+            (vec![0, 255, 65], "AP9B".to_owned()),
+            (vec![251, 255], "+/8=".to_owned()),
+            ([0, 255, 65].repeat(21_846), "AP9B".repeat(21_846)),
+            (
+                [[0, 255, 65].repeat(21_846), vec![0]].concat(),
+                format!("{}AA==", "AP9B".repeat(21_846)),
+            ),
+            (
+                [[0, 255, 65].repeat(21_846), vec![0, 255]].concat(),
+                format!("{}AP8=", "AP9B".repeat(21_846)),
+            ),
+        ] {
+            for (content_type, encoded_type) in [
+                (None, "null"),
+                (Some(b"".as_slice()), "\"\""),
+                (Some(b"\xff".as_slice()), "\"/w==\""),
+            ] {
+                let expected = format!(
+                    "{{\"version\":1,\"endpoint_id\":\"partner/a?#\",\"message_id\":\"aWSA/w==\",\"content_type\":{encoded_type},\"body\":\"{encoded}\"}}"
+                );
+                let incoming: Incoming =
+                    serde_json::from_str(&expected).expect("historical payload");
+                assert_eq!(incoming.endpoint_id(), ENDPOINT);
+                assert_eq!(incoming.message_id(), b"id\x80\xff");
+                assert_eq!(incoming.content_type(), content_type);
+                assert_eq!(incoming.body(), body);
+                assert_eq!(
+                    serde_json::to_vec(&incoming).expect("payload bytes"),
+                    expected.as_bytes()
+                );
+            }
+        }
     }
 }

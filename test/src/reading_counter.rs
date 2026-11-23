@@ -1,22 +1,18 @@
 use std::fmt;
 
 use domain_events::{Event, EventPayload};
-use infra_jobs::{EnqueueOptions, Enqueued, JobKind};
-use infra_messaging::{
-    PreparedEvent, PublicationPolicy, PublicationRoute, Registry, RegistryError, Route,
-};
-use infra_postgres::{Tx, TxError, in_tx};
+use infra_jobs::{JobKind, KindName};
+use infra_messaging::outbox::OutboxEvent;
+use infra_messaging::{PublicationRoute, Registry, RegistryError, Route};
+use infra_postgres::{Pool, Tx, TxError, TxMode};
 use infra_webhooks::outbound::{JSON_CONTENT_TYPE, Producer};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 use time::{UtcDateTime, format_description::well_known::Rfc3339};
 
 pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
 pub const MAX_OPERATION_BYTES: usize = 1024;
-const PUBLICATIONS: PublicationPolicy = PublicationPolicy {
-    max_payload_bytes: MAX_OPERATION_BYTES,
-};
 pub const SUBJECT: &str = "reading.accepted";
 const PUBLISHER_ID: uuid::NonNilUuid = uuid::NonNilUuid::new(uuid::Uuid::from_u128(
     0x2a42fbe7_9da4_48ba_a6e9_84447b8d6310,
@@ -27,7 +23,7 @@ pub fn publication(
     registry: &mut Registry,
     subject: &str,
 ) -> Result<PublicationRoute<Operation>, RegistryError> {
-    PUBLICATIONS.declare(registry, &Route::new(subject))
+    registry.declare_publication(&Route::new(subject), MAX_OPERATION_BYTES)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,7 +67,7 @@ impl Operation {
 }
 
 impl JobKind for Operation {
-    const NAME: &'static str = "reading.record";
+    const NAME: KindName = KindName::new("reading.record");
 }
 impl EventPayload for Operation {
     const EVENT_TYPE: &'static str = "reading.accepted";
@@ -116,7 +112,7 @@ pub struct Accepted {
 #[derive(Clone, Debug)]
 pub struct PreparedRequest {
     operation: Operation,
-    event: PreparedEvent,
+    event: OutboxEvent,
     event_time: String,
 }
 impl PreparedRequest {
@@ -194,8 +190,8 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
-    in_tx(pool, async |tx| {
+pub async fn migrate(pool: &Pool) -> Result<(), Error> {
+    pool.in_tx(async |tx| {
         sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
         Ok(())
     })
@@ -203,19 +199,17 @@ pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
 }
 
 pub async fn accept(
-    pool: &PgPool,
+    pool: &Pool,
     prepared: &PreparedRequest,
     outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
-    in_tx(pool, async |tx| {
-        accept_in_tx(tx, prepared, outbound, endpoint).await
-    })
-    .await
+    pool.in_tx(async |tx| accept_in_tx(tx, prepared, outbound, endpoint).await)
+        .await
 }
 
 pub async fn accept_in_tx(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     prepared: &PreparedRequest,
     outbound: &Producer,
     endpoint: &str,
@@ -237,24 +231,21 @@ pub async fn accept_in_tx(
 }
 
 async fn enqueue_intents(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     prepared: &PreparedRequest,
     outbound: &Producer,
     endpoint: &str,
 ) -> Result<Accepted, Error> {
     let operation = &prepared.operation;
-    let local_job_id = match infra_jobs::enqueue(tx, operation, EnqueueOptions::default()).await? {
-        Enqueued::Created(id) => id.to_string(),
-        Enqueued::Duplicate => return Err(Error::MissingIntent),
-    };
-    prepared.event.enqueue(tx).await?;
+    let local_job_id = infra_jobs::enqueue(tx, operation).await?.to_string();
+    let _ = prepared.event.enqueue(tx).await?;
     let outbox_job_id: String = sqlx::query_scalar("SELECT id::text FROM background_jobs WHERE kind='publish_domain_event' AND COALESCE(payload_text::jsonb, payload)->>'message_id'=$1 AND state IN ('pending','running')")
         .bind(prepared.event.message_id()).fetch_one(&mut *tx).await?;
     let webhook_job_id = outbound
         .enqueue(
             tx,
             endpoint,
-            prepared.event.payload().to_vec(),
+            prepared.event.payload().clone(),
             JSON_CONTENT_TYPE,
         )
         .await?
@@ -287,10 +278,11 @@ fn accepted_row(row: &sqlx::postgres::PgRow, operation: &Operation) -> Result<Ac
     })
 }
 
-pub async fn read_request(pool: &PgPool, operation: &Operation) -> Result<Option<Accepted>, Error> {
+pub async fn read_request(pool: &Pool, operation: &Operation) -> Result<Option<Accepted>, Error> {
     operation.validate()?;
+    let mut conn = pool.acquire("read reading request").await?;
     let row = sqlx::query("SELECT operation,event_id,event_time,local_job_id::text,outbox_job_id::text,webhook_job_id::text FROM reading_requests WHERE scope=$1::uuid AND operation_id=$2::uuid")
-        .bind(&operation.scope).bind(&operation.operation_id).fetch_optional(pool).await?;
+        .bind(&operation.scope).bind(&operation.operation_id).fetch_optional(&mut *conn).await?;
     row.as_ref()
         .map(|row| accepted_row(row, operation))
         .transpose()
@@ -305,14 +297,13 @@ fn same_operation(encoded: &str, operation: &Operation) -> Result<(), Error> {
 }
 
 pub async fn apply_effect(
-    pool: &PgPool,
+    pool: &Pool,
     channel: Channel,
     operation: &Operation,
 ) -> Result<Effect, Error> {
-    let result = in_tx(pool, async |tx| {
-        apply_effect_in_tx(tx, channel, operation).await
-    })
-    .await;
+    let result = pool
+        .in_tx(async |tx| apply_effect_in_tx(tx, channel, operation).await)
+        .await;
     match result {
         Err(error)
             if error.commit_unknown()
@@ -325,7 +316,7 @@ pub async fn apply_effect(
 }
 
 pub async fn apply_effect_in_tx(
-    tx: &mut Tx<'_>,
+    tx: &mut Tx<'_, impl TxMode>,
     channel: Channel,
     operation: &Operation,
 ) -> Result<Effect, Error> {
@@ -355,13 +346,14 @@ pub async fn apply_effect_in_tx(
 }
 
 pub async fn read_effect(
-    pool: &PgPool,
+    pool: &Pool,
     channel: Channel,
     operation: &Operation,
 ) -> Result<Option<Effect>, Error> {
     operation.validate()?;
+    let mut conn = pool.acquire("read reading effect").await?;
     let row = sqlx::query("SELECT operation,read_count FROM reading_effects WHERE scope=$1::uuid AND channel=$2 AND operation_id=$3::uuid")
-        .bind(&operation.scope).bind(channel.as_str()).bind(&operation.operation_id).fetch_optional(pool).await?;
+        .bind(&operation.scope).bind(channel.as_str()).bind(&operation.operation_id).fetch_optional(&mut *conn).await?;
     row.map(|row| {
         same_operation(row.try_get("operation")?, operation)?;
         Ok(Effect {

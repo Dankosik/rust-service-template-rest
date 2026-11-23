@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_with::DeserializeAs;
 
-use crate::de::{BlankAsNone, StrictString, decoded_duration};
+use crate::de::{BlankAsNone, decoded_duration};
 use crate::validate::{ValidationError, Violations, duration_range, required};
 
 #[serde_with::serde_as]
@@ -16,7 +16,6 @@ pub struct HttpIdempotencyConfig {
     /// whitespace-only is vacant (`None`). A set value must be between 1
     /// minute and 30 days inclusive; that range is checked whether or not
     /// the pack is active.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone<RetentionDuration>")]
     pub retention: Option<Duration>,
 }
@@ -38,9 +37,9 @@ impl HttpIdempotencyConfig {
         )
     }
 
-    pub(crate) fn validate(&self, violations: &mut Violations) {
+    pub(crate) fn validate(&self, v: &mut Violations) {
         if let Some(retention) = self.retention {
-            violations.check(duration_range(
+            v.check(duration_range(
                 Self::RETENTION_KEY,
                 retention,
                 Duration::from_mins(1)..=Duration::from_hours(30 * 24),
@@ -56,7 +55,7 @@ impl<'de> DeserializeAs<'de, Duration> for RetentionDuration {
     where
         D: serde::Deserializer<'de>,
     {
-        let text: String = StrictString::deserialize_as(deserializer)?;
+        let text = String::deserialize(deserializer)?;
         decoded_duration(&text, "a duration such as 24h")
     }
 }

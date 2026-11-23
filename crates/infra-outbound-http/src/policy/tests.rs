@@ -1,45 +1,110 @@
 use std::time::Duration;
 
-use http::header;
+use http::{Uri, header};
 
 use crate::{
-    BuildError, Client, Error, Limits, MAX_RESPONSE_HEADER_COUNT, policy, test_support::*,
+    Client, Error, InvalidLimits, InvalidOrigin, Limits, MAX_RESPONSE_HEADER_COUNT, Origin, policy,
+    test_support::*,
 };
 
 #[test]
 fn client_binds_one_https_origin() {
-    for origin in [
+    for raw in [
         "https://provider.example",
+        "https://provider.example/",
         "https://provider.example:8443",
-        "https://provider.example/v1/token?ignored=1",
         "https://8.8.8.8/",
         "https://127.0.0.1/",
         "https://[::ffff:127.0.0.1]/",
         "https://169.254.169.254/",
         "https://[fd00:ec2::254]/",
     ] {
-        assert!(
-            Client::try_new(&url(origin), limits()).is_ok(),
-            "{origin} must be admitted"
+        let origin = Origin::parse_https(raw).unwrap_or_else(|_| panic!("{raw} must be admitted"));
+        let client = Client::try_new(origin.clone(), limits())
+            .unwrap_or_else(|error| panic!("{raw} client must build: {error}"));
+        assert_eq!(client.host(), origin.host());
+        assert_eq!(client.port(), origin.port());
+        assert!(client.matches_origin(origin.as_uri()));
+        assert_eq!(
+            client.uri("/items").expect("client uri"),
+            origin.uri("/items").expect("origin uri")
         );
     }
-    for origin in [
+    for raw in [
+        "https://provider.example/v1/token?ignored=1",
+        "https://provider.example/#fragment",
         "http://provider.example/",
         "https://user:secret@provider.example/",
         "https://user@provider.example/",
         "data:text/plain,provider",
+        "https://provider.example/a\nb",
     ] {
         std::assert_matches!(
-            Client::try_new(&url(origin), limits()),
-            Err(BuildError::InvalidOrigin),
-            "{origin} must be refused"
+            Origin::parse_https(raw),
+            Err(InvalidOrigin),
+            "{raw} must be refused"
+        );
+    }
+
+    let extracted = Origin::from_https_uri(&Uri::from_static(
+        "https://PROVIDER.example:443/v1/token?q=1",
+    ))
+    .expect("origin from full HTTPS URI");
+    let parsed: Origin = "https://provider.example".parse().expect("FromStr origin");
+    assert_eq!(extracted, parsed);
+    assert_eq!(
+        Origin::try_from(&Uri::from_static("https://provider.example/v1")),
+        Ok(parsed.clone())
+    );
+    assert_eq!(extracted.host(), "provider.example");
+    assert_eq!(extracted.port(), 443);
+    assert_eq!(extracted.to_string(), "https://provider.example");
+    assert_eq!(&Uri::from(&extracted), extracted.as_uri());
+    assert_eq!(Uri::from(parsed), *extracted.as_uri());
+    assert_eq!(
+        extracted.uri("/items?q=1").expect("origin uri"),
+        Uri::from_static("https://provider.example/items?q=1")
+    );
+    assert_eq!(
+        extracted.uri("").expect("empty path defaults to root"),
+        Uri::from_static("https://provider.example")
+    );
+    assert_eq!(extracted.uri("").expect("empty path").path(), "/");
+    assert_eq!(
+        extracted.uri("/").expect("slash path"),
+        Uri::from_static("https://provider.example/")
+    );
+    assert!(extracted.uri("relative").is_err());
+    assert!(extracted.uri("/bad\npath").is_err());
+    let ipv6_port = Origin::parse_https("https://[fd00:ec2::254]:8443").expect("ipv6 origin");
+    assert_eq!(
+        ipv6_port.uri("/items?q=1").expect("ipv6 origin uri"),
+        Uri::from_static("https://[fd00:ec2::254]:8443/items?q=1")
+    );
+    for raw in [
+        "http://provider.example/v1",
+        "https://user@provider.example/v1",
+        "/relative",
+    ] {
+        let uri: Uri = raw.parse().expect("valid URI");
+        std::assert_matches!(
+            Origin::from_https_uri(&uri),
+            Err(InvalidOrigin),
+            "{raw} must be refused"
+        );
+        std::assert_matches!(
+            Origin::try_from(&uri),
+            Err(InvalidOrigin),
+            "{raw} must be refused via TryFrom"
         );
     }
 }
 
 #[test]
 fn requests_must_name_the_configured_origin() {
-    let origin = policy::admit_origin(&url("https://provider.fixture.test")).expect("origin");
+    let origin = policy::TargetOrigin::Https(
+        Origin::parse_https("https://provider.fixture.test").expect("origin"),
+    );
     for admitted in [
         "https://provider.fixture.test/items",
         "https://provider.fixture.test:/items",
@@ -90,7 +155,7 @@ fn the_host_header_names_the_port_only_when_it_is_not_the_default() {
         ),
         ("https://[::1]:8443", "[::1]:8443"),
     ] {
-        let target = policy::admit_origin(&url(origin)).expect("origin");
+        let target = policy::TargetOrigin::Https(Origin::parse_https(origin).expect("origin"));
         let admitted = policy::admit_request(&target, request_to(&format!("{origin}/items")))
             .expect("admitted request");
         assert_eq!(admitted.headers()[header::HOST], expected, "{origin}");
@@ -99,15 +164,22 @@ fn the_host_header_names_the_port_only_when_it_is_not_the_default() {
 
 #[test]
 fn limits_must_be_positive_and_bounded() {
-    let mutations: [fn(&mut Limits); 4] = [
-        |limits: &mut Limits| limits.operation_timeout = Duration::ZERO,
-        |limits: &mut Limits| limits.response_header_count = 0,
-        |limits: &mut Limits| limits.response_header_count = MAX_RESPONSE_HEADER_COUNT + 1,
-        |limits: &mut Limits| limits.response_body_bytes = 0,
-    ];
-    for mutate in mutations {
-        let mut invalid = limits();
-        mutate(&mut invalid);
-        std::assert_matches!(invalid.validate(), Err(BuildError::InvalidLimits));
+    let valid = Limits::try_new(Duration::from_secs(2), MAX_RESPONSE_HEADER_COUNT, 64)
+        .expect("valid limits");
+    assert_eq!(valid.operation_timeout(), Duration::from_secs(2));
+    assert_eq!(valid.response_header_count(), MAX_RESPONSE_HEADER_COUNT);
+    assert_eq!(valid.response_body_bytes(), 64);
+
+    for invalid in [
+        Limits::try_new(Duration::ZERO, 8, 128),
+        Limits::try_new(Duration::from_secs(1), 0, 128),
+        Limits::try_new(Duration::from_secs(1), MAX_RESPONSE_HEADER_COUNT + 1, 128),
+        Limits::try_new(Duration::from_secs(1), 8, 0),
+        limits().with_operation_timeout(Duration::ZERO),
+        limits().with_response_header_count(0),
+        limits().with_response_header_count(MAX_RESPONSE_HEADER_COUNT + 1),
+        limits().with_response_body_bytes(0),
+    ] {
+        std::assert_matches!(invalid, Err(InvalidLimits));
     }
 }

@@ -11,13 +11,13 @@ pub fn contains<T: Error + 'static>(error: &(dyn Error + 'static)) -> bool {
 pub fn causes<'a>(
     error: &'a (dyn Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
-    bounded_chain(error, |error| {
-        match error
+    bounded_chain(error, |link| {
+        match link
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::get_ref)
         {
             Some(payload) => Some(payload),
-            None => error.source(),
+            None => link.source(),
         }
     })
 }
@@ -32,7 +32,7 @@ fn bounded_chain<'a>(
     error: &'a (dyn Error + 'static),
     mut next: impl FnMut(&'a (dyn Error + 'static)) -> Option<&'a (dyn Error + 'static)>,
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
-    std::iter::successors(Some(error), move |&error| next(error)).take(MAX_CHAIN_ENTRIES)
+    std::iter::successors(Some(error), move |&link| next(link)).take(MAX_CHAIN_ENTRIES)
 }
 
 #[derive(Clone, Copy, Debug)]

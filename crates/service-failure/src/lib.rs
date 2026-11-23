@@ -64,6 +64,12 @@ pub const AT_CAPACITY_RETRY_AFTER: std::time::Duration = std::time::Duration::fr
 pub const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
 // template:end authn:insufficient-scope-detail
 
+impl AsRef<str> for Code {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl std::fmt::Display for Code {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())

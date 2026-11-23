@@ -7,7 +7,7 @@ qwen_model = "inherit"
 cursor_model = "grok-4.6[effort=high]"
 grok_model = "inherit"
 grok_effort = "high"
-output_schema = "specialist-result-v1"
+output_schema = "specialist-result"
 
 instructions = """
 For a bounded domain decision, own only the named discipline and return an

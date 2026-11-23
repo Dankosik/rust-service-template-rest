@@ -42,7 +42,6 @@ futures-util = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
 axum = { workspace = true, features = ["macros"] }
 derive_more = { workspace = true, features = ["debug"] }
-derive-where = { workspace = true }
 health = { workspace = true }
 infra-http = { workspace = true }
 infra-http-transport = { workspace = true }
@@ -58,6 +57,9 @@ infra-cache = { workspace = true }
 # template:begin object-storage:service-object-storage-dependency
 infra-object-storage = { workspace = true }
 # template:end object-storage:service-object-storage-dependency
+# template:begin clickhouse:service-clickhouse-dependency
+infra-clickhouse = { workspace = true }
+# template:end clickhouse:service-clickhouse-dependency
 # template:begin outbound-http:service-outbound-http-dependency
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:service-outbound-http-dependency
@@ -98,6 +100,9 @@ utoipa = { workspace = true, features = ["macros", "yaml"] }
 tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
+# template:begin postgres:service-postgres-test-dependency
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end postgres:service-postgres-test-dependency
 # template:begin inbound-webhooks:service-webhooks-lifecycle-dependencies
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "migrate", "macros"] }
 url = { workspace = true }
@@ -113,25 +118,26 @@ tower = { workspace = true, features = ["util"] }
 similar = { workspace = true, features = ["text"] }
 # template:begin grpc:service-grpc-example-dependencies
 grpc-contracts = { workspace = true }
-service-failure = { workspace = true }
 tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
 # template:end grpc:service-grpc-example-dependencies
 # template:begin runtime-progress:service-runtime-progress-dependencies
 # The non-shipped quota example calls the adopted serializer with a finite
 # primitive event. These are existing workspace versions, not runtime providers.
-serde = { workspace = true, features = ["derive"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
 time = { workspace = true, features = ["std"] }
 # template:end runtime-progress:service-runtime-progress-dependencies
+# template:begin clickhouse:service-clickhouse-test-serde
+serde = { workspace = true, features = ["derive"] }
+# template:end clickhouse:service-clickhouse-test-serde
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies
 # The process test (tests/grpc_process.rs). The runtime-progress proof implies
-# this profile and also uses rcgen and tokio-rustls.
+# this profile and also uses infra-bearerauthn test-support and tokio-rustls.
+infra-bearerauthn = { workspace = true, features = ["test-support"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 tonic-health = { workspace = true }
 opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "trace"] }
 prost = { workspace = true }
-rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
 # template:begin service-auth:service-service-auth-test-dependency

@@ -15,9 +15,13 @@ exclude = [
     "vendor/async-nats",
 # template:end messaging:workspace-messaging-vendor-exclude
 # template:begin object-storage:workspace-object-storage-vendor-exclude
+    "vendor/aws-runtime",
     "vendor/aws-smithy-http-client",
 # template:end object-storage:workspace-object-storage-vendor-exclude
     "vendor/hyper-util",
+# template:begin clickhouse:workspace-clickhouse-vendor-exclude
+    "vendor/clickhouse",
+# template:end clickhouse:workspace-clickhouse-vendor-exclude
 ]
 
 [workspace.package]
@@ -41,6 +45,7 @@ infra-http-transport = { path = "crates/infra-http-transport" }
 service-failure = { path = "crates/service-failure" }
 # template:begin grpc:workspace-grpc-crates
 infra-grpc = { path = "crates/infra-grpc" }
+infra-grpc-core = { path = "crates/infra-grpc-core" }
 infra-outbound-grpc = { path = "crates/infra-outbound-grpc" }
 grpc-contracts = { path = "crates/grpc-contracts" }
 # template:end grpc:workspace-grpc-crates
@@ -83,6 +88,9 @@ infra-cache = { path = "crates/infra-cache" }
 # template:begin object-storage:workspace-object-storage-crate
 infra-object-storage = { path = "crates/infra-object-storage" }
 # template:end object-storage:workspace-object-storage-crate
+# template:begin clickhouse:workspace-clickhouse-crate
+infra-clickhouse = { path = "crates/infra-clickhouse" }
+# template:end clickhouse:workspace-clickhouse-crate
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
@@ -110,6 +118,9 @@ simdutf8 = { version = "0.1.5", default-features = false }
 pem = { version = "=4.0.0", default-features = false }
 redis = { version = "1.7.1", default-features = false }
 # template:end cache:workspace-cache-client
+# template:begin clickhouse:workspace-clickhouse-client
+clickhouse = { version = "0.15.3", default-features = false }
+# template:end clickhouse:workspace-clickhouse-client
 # template:begin object-storage:workspace-object-storage-client
 # The AWS SDK family releases weekly and yanked one release on 2026-09-14:
 # move these pins together in one reviewed change
@@ -165,10 +176,8 @@ rustls-platform-verifier = { version = "0.7.0", default-features = false }
 utoipa = { version = "6.0.0", default-features = false }
 utoipa-axum = { version = "0.3.0", default-features = false }
 
-config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
-serde-untagged = { version = "0.1.9", default-features = false }
 serde_json = { version = "1", default-features = false }
 serde_path_to_error = { version = "0.1.20", default-features = false }
 serde_html_form = { version = "0.2.8", default-features = false }
@@ -190,7 +199,7 @@ opentelemetry-semantic-conventions = { version = "0.33.0", default-features = fa
 # Tests decode captured OTLP export bodies with it; opentelemetry-otlp already resolves it.
 opentelemetry-proto = { version = "0.33.1", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false }
-tracing-opentelemetry-instrumentation-sdk = { version = "=0.42.1", default-features = false, features = ["http"] }
+tracing-opentelemetry-instrumentation-sdk = { version = "=0.42.1", default-features = false }
 metrics = { version = "0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 metrics-process = { version = "2.4.3", default-features = false }
@@ -203,12 +212,10 @@ bitflags = { version = "2.13.2", default-features = false }
 
 url = { version = "2.5", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
-async-trait = { version = "0.1.92", default-features = false }
 serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }
 derive-where = { version = "1.7.0", default-features = false }
 educe = { version = "0.7.6", default-features = false }
-delegate = { version = "0.13.5", default-features = false }
 const_format = { version = "0.2.37", default-features = false }
 fastrand = { version = "2.5.0", default-features = false }
 pin-project-lite = { version = "0.2.17", default-features = false }
@@ -253,9 +260,9 @@ backon = { version = "1.6.0", default-features = false }
 moka = { version = "0.12.16", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
-# template:begin outbound-http:workspace-outbound-http-transport
+# template:begin hyper-rustls:workspace-hyper-rustls
 hyper-rustls = { version = "0.27.9", default-features = false }
-# template:end outbound-http:workspace-outbound-http-transport
+# template:end hyper-rustls:workspace-hyper-rustls
 # template:begin jsonwebtoken:workspace-jsonwebtoken
 jsonwebtoken = { version = "=11.1.0", default-features = false }
 # template:end jsonwebtoken:workspace-jsonwebtoken
@@ -271,6 +278,7 @@ nix = { version = "0.31.3", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
+observe-test-support = { path = "crates/observe-test-support" }
 # template:begin tls-fixtures:workspace-tls-fixtures
 tls-test-support = { path = "crates/tls-test-support" }
 # template:end tls-fixtures:workspace-tls-fixtures
@@ -346,7 +354,6 @@ iter_on_single_items = "warn"
 large_stack_frames = "warn"
 mem_forget = "warn"
 mixed_read_write_in_expression = "warn"
-multiple_unsafe_ops_per_block = "warn"
 mutex_atomic = "warn"
 mutex_integer = "warn"
 needless_collect = "warn"
@@ -374,7 +381,6 @@ todo = "warn"
 trait_duplication_in_bounds = "warn"
 try_err = "warn"
 type_repetition_in_bounds = "warn"
-undocumented_unsafe_blocks = "warn"
 unimplemented = "warn"
 uninhabited_references = "warn"
 unnecessary_safety_comment = "warn"
@@ -429,7 +435,9 @@ sqlx-postgres = { path = "vendor/sqlx-postgres" }
 async-nats = { path = "vendor/async-nats" }
 # template:end messaging:workspace-messaging-patch
 # template:begin object-storage:workspace-object-storage-patch
-# Native TCP timeout propagation; provenance and retirement: vendor/aws-smithy-http-client/PATCHES.md.
+# Single-copy unsigned aws-chunked framing; provenance and retirement: vendor/aws-runtime/PATCHES.md.
+aws-runtime = { path = "vendor/aws-runtime" }
+# Native TCP timeout propagation and pooled request budgets; provenance and retirement: vendor/aws-smithy-http-client/PATCHES.md.
 aws-smithy-http-client = { path = "vendor/aws-smithy-http-client" }
 # template:end object-storage:workspace-object-storage-patch
 # Same-family TCP opportunity repair; provenance and retirement: vendor/hyper-util/PATCHES.md.
@@ -438,3 +446,7 @@ hyper-util = { path = "vendor/hyper-util" }
 # The client dispatcher reports decoded RPC outcomes. See vendor/tonic/PATCHES.md.
 tonic = { path = "vendor/tonic" }
 # template:end grpc:workspace-tonic-patch
+# template:begin clickhouse:workspace-clickhouse-patch
+# Abort detached InsertFormatted tasks and cap error bodies; see vendor/clickhouse/PATCHES.md.
+clickhouse = { path = "vendor/clickhouse" }
+# template:end clickhouse:workspace-clickhouse-patch

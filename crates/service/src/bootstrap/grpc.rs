@@ -20,7 +20,7 @@ pub(super) struct Prepared {
 
 pub(super) fn prepare(
     grpc: &GrpcConfig,
-    registration: Option<crate::GrpcResourceRegistration>,
+    registration: Option<crate::GrpcRegistration>,
     state: &crate::AppState,
     // template:begin grpc-authn:bootstrap-grpc-bearer-parameter
     bearer: Option<&infra_bearerauthn::Verifier>,
@@ -43,7 +43,7 @@ pub(super) fn prepare(
     if matches!(authentication, GrpcAuthentication::None) {
         return Err(ValidationError::new(
             "grpc.enabled",
-            infra_grpc::Error::UnauthenticatedBusinessCalls.to_string(),
+            infra_grpc::Error::unauthenticated_business_calls().to_string(),
         )
         .into());
     }
@@ -58,12 +58,13 @@ pub(super) fn prepare(
         )
         .map_err(BootstrapError::GrpcRegistration)?;
     }
-    let app = infra_grpc::router(
-        services,
+    let app = services.build(
         state.readiness.clone(),
         authentication,
-        limits,
-        grpc.trust_trace_context,
+        infra_grpc::ServerOptions {
+            limits,
+            trust_trace_context: grpc.trust_trace_context,
+        },
     )?;
     Ok(Prepared {
         addr: grpc.addr,

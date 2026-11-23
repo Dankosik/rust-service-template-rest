@@ -1,4 +1,6 @@
-use std::sync::OnceLock;
+use std::mem::DropGuard;
+use std::ops::Deref;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use aws_sdk_s3::operation::{RequestId, RequestIdExt};
@@ -7,7 +9,7 @@ use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
-use crate::error::{Failure, MutationError, MutationFailure, ObjectStorageError};
+use crate::error::{Failure, OutcomeError};
 
 const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
@@ -50,9 +52,7 @@ impl Operation {
 }
 
 #[derive(Clone, Copy, enum_map::Enum)]
-enum Outcome {
-    Ok,
-    Cancelled,
+pub(crate) enum FailureOutcome {
     NotFound,
     AlreadyExists,
     TooLarge,
@@ -63,11 +63,9 @@ enum Outcome {
     Integrity,
 }
 
-impl Outcome {
-    fn label(self) -> &'static str {
+impl FailureOutcome {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Ok => "ok",
-            Self::Cancelled => "cancelled",
             Self::NotFound => "not_found",
             Self::AlreadyExists => "already_exists",
             Self::TooLarge => "too_large",
@@ -76,6 +74,23 @@ impl Outcome {
             Self::Rejected => "rejected",
             Self::Unknown => "outcome_unknown",
             Self::Integrity => "integrity",
+        }
+    }
+}
+
+#[derive(Clone, Copy, enum_map::Enum)]
+enum Outcome {
+    Ok,
+    Cancelled,
+    Failed(FailureOutcome),
+}
+
+impl Outcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Cancelled => "cancelled",
+            Self::Failed(failure) => failure.label(),
         }
     }
 }
@@ -96,29 +111,109 @@ impl Histograms {
     }
 }
 
-#[derive(derive_more::Debug)]
-pub(crate) struct OperationGuard {
-    #[debug(skip)]
-    started: Instant,
-    operation: Operation,
-    #[debug(skip)]
-    span: Span,
-    #[debug(skip)]
-    histograms: std::sync::Arc<Histograms>,
-    #[debug(skip)]
-    request_id: Option<CompactString>,
-    #[debug(skip)]
-    extended_request_id: Option<CompactString>,
-    #[debug(skip)]
-    finalized: bool,
+#[derive(Clone, Copy, Default)]
+struct RequestIds<'a> {
+    request_id: Option<&'a str>,
+    extended_request_id: Option<&'a str>,
 }
 
-impl OperationGuard {
-    pub(crate) fn start(
-        histograms: std::sync::Arc<Histograms>,
-        operation: Operation,
-        cloud_region: Option<&str>,
-    ) -> Self {
+impl<'a> RequestIds<'a> {
+    fn from_reply(reply: &'a (impl RequestId + RequestIdExt)) -> Self {
+        Self {
+            request_id: reply.request_id().and_then(safe_request_id),
+            extended_request_id: reply.extended_request_id().and_then(safe_request_id),
+        }
+    }
+
+    fn record(self, span: &Span) {
+        if let Some(request_id) = self.request_id {
+            span.record("aws.request_id", request_id);
+        }
+        if let Some(extended_request_id) = self.extended_request_id {
+            span.record("aws.extended_request_id", extended_request_id);
+        }
+    }
+}
+
+struct OperationInner<H: Deref<Target = Histograms>> {
+    started: Instant,
+    operation: Operation,
+    span: Span,
+    histograms: H,
+    request_id: Option<CompactString>,
+    extended_request_id: Option<CompactString>,
+}
+
+impl<H: Deref<Target = Histograms>> OperationInner<H> {
+    fn abandon(self) {
+        self.record_outcome(Outcome::Cancelled);
+    }
+
+    fn record_outcome(&self, outcome: Outcome) {
+        self.span.record("object_storage.outcome", outcome.label());
+        self.histograms
+            .get(self.operation, outcome)
+            .record(self.started.elapsed());
+    }
+
+    fn stored_request_ids(&self) -> RequestIds<'_> {
+        RequestIds {
+            request_id: self.request_id.as_deref(),
+            extended_request_id: self.extended_request_id.as_deref(),
+        }
+    }
+
+    fn record_failure<E>(
+        &self,
+        outcome: FailureOutcome,
+        failure: &Failure<E>,
+        ids: RequestIds<'_>,
+    ) {
+        let error_type = failure.error_type.as_str();
+        let timeout_source = failure.timeout_source;
+        self.span.record("error.type", error_type);
+        if let Some(source) = timeout_source {
+            self.span.record("object_storage.timeout_source", source);
+        }
+        self.span.record("otel.status_code", "ERROR");
+        self.record_outcome(Outcome::Failed(outcome));
+        let operation = self.operation.label();
+        self.span.in_scope(|| {
+            macro_rules! emit_failure {
+                ($level:expr) => {
+                    tracing::event!(
+                        $level,
+                        object_storage.operation = operation,
+                        object_storage.outcome = outcome.label(),
+                        object_storage.timeout_source = timeout_source,
+                        error.type = error_type,
+                        aws.request_id = ids.request_id,
+                        aws.extended_request_id = ids.extended_request_id,
+                        "object_storage_operation_failed"
+                    )
+                };
+            }
+
+            match outcome {
+                FailureOutcome::NotFound
+                | FailureOutcome::AlreadyExists
+                | FailureOutcome::TooLarge
+                | FailureOutcome::Busy => emit_failure!(tracing::Level::DEBUG),
+                FailureOutcome::Unavailable
+                | FailureOutcome::Rejected
+                | FailureOutcome::Unknown
+                | FailureOutcome::Integrity => emit_failure!(tracing::Level::WARN),
+            }
+        });
+    }
+}
+
+pub(crate) struct OperationGuard<H: Deref<Target = Histograms> = Arc<Histograms>>(
+    DropGuard<OperationInner<H>, fn(OperationInner<H>)>,
+);
+
+impl<H: Deref<Target = Histograms>> OperationGuard<H> {
+    pub(crate) fn start(histograms: H, operation: Operation, cloud_region: Option<&str>) -> Self {
         let (span_name, rpc_method) = operation.span_and_rpc_method();
         let span = tracing::info_span!(
             "object_storage",
@@ -139,138 +234,93 @@ impl OperationGuard {
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        Self {
-            started: Instant::now(),
-            operation,
-            span,
-            histograms,
-            request_id: None,
-            extended_request_id: None,
-            finalized: false,
-        }
-    }
-
-    pub(crate) fn record_request_ids(&mut self, response: &(impl RequestId + RequestIdExt)) {
-        self.request_id = response.request_id().and_then(bounded_request_id);
-        self.extended_request_id = response.extended_request_id().and_then(bounded_request_id);
-        if let Some(request_id) = self.request_id.as_deref() {
-            self.span.record("aws.request_id", request_id);
-        }
-        if let Some(extended_request_id) = self.extended_request_id.as_deref() {
-            self.span
-                .record("aws.extended_request_id", extended_request_id);
-        }
-    }
-
-    pub(crate) fn succeed(&mut self) {
-        self.finish(Outcome::Ok);
-    }
-
-    pub(crate) fn fail(&mut self, failure: impl Into<Failure>) -> ObjectStorageError {
-        let failure = failure.into();
-        let outcome = match failure.error {
-            ObjectStorageError::NotFound => Outcome::NotFound,
-            ObjectStorageError::TooLarge => Outcome::TooLarge,
-            ObjectStorageError::Busy => Outcome::Busy,
-            ObjectStorageError::Unavailable | ObjectStorageError::Stopped(_) => {
-                Outcome::Unavailable
-            }
-            ObjectStorageError::Rejected => Outcome::Rejected,
-            ObjectStorageError::Integrity => Outcome::Integrity,
-        };
-        self.record_failure(outcome, &failure);
-        failure.error
-    }
-
-    pub(crate) fn fail_mutation(
-        &mut self,
-        failure: impl Into<Failure<MutationError>>,
-    ) -> MutationError {
-        let failure = failure.into();
-        let outcome = match failure.error {
-            MutationError::OutcomeUnknown(_) => Outcome::Unknown,
-            MutationError::NotApplied(reason) => match reason {
-                MutationFailure::AlreadyExists => Outcome::AlreadyExists,
-                MutationFailure::TooLarge => Outcome::TooLarge,
-                MutationFailure::Busy => Outcome::Busy,
-                MutationFailure::Conflict
-                | MutationFailure::Unavailable
-                | MutationFailure::Stopped(_) => Outcome::Unavailable,
-                MutationFailure::Rejected => Outcome::Rejected,
+        Self(DropGuard::new(
+            OperationInner {
+                started: Instant::now(),
+                operation,
+                span,
+                histograms,
+                request_id: None,
+                extended_request_id: None,
             },
-        };
-        self.record_failure(outcome, &failure);
+            OperationInner::abandon,
+        ))
+    }
+
+    pub(crate) fn retain_request_ids(&mut self, response: &(impl RequestId + RequestIdExt)) {
+        let inner = &mut *self.0;
+        let ids = RequestIds::from_reply(response);
+        ids.record(&inner.span);
+        inner.request_id = ids.request_id.map(CompactString::from);
+        inner.extended_request_id = ids.extended_request_id.map(CompactString::from);
+    }
+
+    pub(crate) fn succeed(self) {
+        DropGuard::dismiss(self.0).record_outcome(Outcome::Ok);
+    }
+
+    pub(crate) fn succeed_with_reply(self, reply: &(impl RequestId + RequestIdExt)) {
+        let inner = DropGuard::dismiss(self.0);
+        RequestIds::from_reply(reply).record(&inner.span);
+        inner.record_outcome(Outcome::Ok);
+    }
+
+    pub(crate) fn fail<E: OutcomeError>(self, failure: &Failure<E>) -> E {
+        let inner = DropGuard::dismiss(self.0);
+        let ids = inner.stored_request_ids();
+        inner.record_failure(failure.error.failure_outcome(), failure, ids);
         failure.error
     }
 
-    fn record_failure<E>(&mut self, outcome: Outcome, failure: &Failure<E>) {
-        let error_type = failure.error_type.as_str();
-        let timeout_source = failure.timeout_source;
-        self.span.record("error.type", error_type);
-        if let Some(source) = timeout_source {
-            self.span.record("object_storage.timeout_source", source);
+    pub(crate) fn fail_with_reply<E: OutcomeError>(
+        self,
+        failure: &Failure<E>,
+        reply: &(impl RequestId + RequestIdExt),
+    ) -> E {
+        let inner = DropGuard::dismiss(self.0);
+        let ids = RequestIds::from_reply(reply);
+        ids.record(&inner.span);
+        inner.record_failure(failure.error.failure_outcome(), failure, ids);
+        failure.error
+    }
+
+    pub(crate) fn finish<T, E: OutcomeError>(self, result: Result<T, Failure<E>>) -> Result<T, E> {
+        match result {
+            Ok(value) => {
+                self.succeed();
+                Ok(value)
+            }
+            Err(failure) => Err(self.fail(&failure)),
         }
-        self.span.record("otel.status_code", "ERROR");
-        self.finish(outcome);
-        let operation = self.operation.label();
-        self.span.in_scope(|| {
-            macro_rules! emit_failure {
-                ($level:expr) => {
-                    tracing::event!(
-                        $level,
-                        object_storage.operation = operation,
-                        object_storage.outcome = outcome.label(),
-                        object_storage.timeout_source = timeout_source,
-                        error.type = error_type,
-                        aws.request_id = self.request_id.as_deref(),
-                        aws.extended_request_id = self.extended_request_id.as_deref(),
-                        "object_storage_operation_failed"
-                    )
-                };
+    }
+
+    pub(crate) fn finish_with_reply<T, E: OutcomeError>(
+        self,
+        result: Result<T, Failure<E>>,
+        reply: Option<&(impl RequestId + RequestIdExt)>,
+    ) -> Result<T, E> {
+        match (result, reply) {
+            (Ok(value), Some(reply)) => {
+                self.succeed_with_reply(reply);
+                Ok(value)
             }
-
-            match outcome {
-                Outcome::NotFound | Outcome::AlreadyExists | Outcome::TooLarge | Outcome::Busy => {
-                    emit_failure!(tracing::Level::DEBUG);
-                }
-                Outcome::Unavailable
-                | Outcome::Rejected
-                | Outcome::Unknown
-                | Outcome::Integrity
-                | Outcome::Ok
-                | Outcome::Cancelled => emit_failure!(tracing::Level::WARN),
+            (Ok(value), None) => {
+                self.succeed();
+                Ok(value)
             }
-        });
-    }
-
-    pub(crate) fn cancel(&mut self) {
-        self.finish(Outcome::Cancelled);
-    }
-
-    fn finish(&mut self, outcome: Outcome) {
-        self.finalized = true;
-        self.span.record("object_storage.outcome", outcome.label());
-        self.histograms
-            .get(self.operation, outcome)
-            .record(self.started.elapsed());
-    }
-}
-
-impl Drop for OperationGuard {
-    fn drop(&mut self) {
-        if !self.finalized {
-            self.finish(Outcome::Cancelled);
+            (Err(failure), Some(reply)) => Err(self.fail_with_reply(&failure, reply)),
+            (Err(failure), None) => Err(self.fail(&failure)),
         }
     }
 }
 
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
-fn bounded_request_id(value: &str) -> Option<CompactString> {
+fn safe_request_id(value: &str) -> Option<&str> {
     let bounded = !value.is_empty()
         && value.len() <= MAX_REQUEST_ID_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic());
-    bounded.then(|| CompactString::from(value))
+    bounded.then_some(value)
 }
 
 pub(crate) fn describe() {

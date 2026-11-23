@@ -1,19 +1,18 @@
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use bytesize::{ByteSize, GIB, MIB};
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde_with::DeserializeAs;
 
-use crate::app::local_development_only;
-use crate::de::{
-    BlankSecretAsNone, StrictBool, StrictCount, StrictDuration, StrictEnum, StrictString,
-};
+use crate::app::insecure_development_only;
+use crate::de::{BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
-    Rejected, ValidationError, Violations, duration_range, int_range, non_blank, required,
+    Rejected, ValidationError, Violations, duration_range, non_blank, nonzero_usize_range,
+    out_of_range, required,
 };
 
-const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
+const SINGLE_PUT_MAX_BYTES: u64 = 5 * GIB - 5 * MIB;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -48,34 +47,26 @@ enum CredentialsKind {
 #[educe(Default)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ObjectStorageInput {
-    #[serde_as(as = "StrictEnum")]
     provider: ProviderKind,
     /// S3 bucket name. On Railway, the bucket's `BUCKET` variable.
-    #[serde_as(as = "StrictString")]
     bucket: String,
     /// Signing region. Required for `amazon_s3`; `auto` or empty for
     /// `cloudflare_r2`; optional for `railway`, `s3_compatible`, and `local`.
-    #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     region: Option<String>,
-    #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     #[debug(skip)]
     endpoint: Option<String>,
-    #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     expected_bucket_owner: Option<String>,
     #[serde_as(as = "StrictBool")]
     path_style: bool,
-    #[serde_as(as = "StrictEnum")]
     credentials: CredentialsKind,
-    #[serde(default)]
-    #[serde_as(as = "BlankStringAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     access_key_id: Option<String>,
     /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
     /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.
-    #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     secret_access_key: Option<SecretString>,
     #[educe(Default(expression = ByteSize::mib(8)))]
     max_object_bytes: ByteSize,
@@ -89,49 +80,67 @@ pub(crate) struct ObjectStorageInput {
     operation_timeout: Duration,
 }
 
-#[derive(Clone, derive_more::Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct ObjectStorageAccessKey {
+    pub access_key_id: String,
+    pub secret_access_key: SecretString,
+}
+
+#[derive(Clone, Debug)]
+pub enum ObjectStorageAmazonCredentials {
+    AccessKey(ObjectStorageAccessKey),
+    WorkloadIdentity,
+}
+
+#[derive(Clone, derive_more::Debug)]
 pub enum ObjectStorageProvider {
     AmazonS3 {
         region: String,
         expected_bucket_owner: String,
+        credentials: ObjectStorageAmazonCredentials,
     },
     CloudflareR2 {
         #[debug(skip)]
         endpoint: String,
+        credentials: ObjectStorageAccessKey,
     },
     Railway {
         #[debug(skip)]
         endpoint: String,
         region: Option<String>,
+        credentials: ObjectStorageAccessKey,
     },
     S3Compatible {
         #[debug(skip)]
         endpoint: String,
         region: Option<String>,
         path_style: bool,
+        credentials: ObjectStorageAccessKey,
     },
     Local {
         #[debug(skip)]
         endpoint: String,
         region: Option<String>,
+        credentials: ObjectStorageAccessKey,
     },
 }
 
-#[derive(Clone, Debug)]
-pub enum ObjectStorageCredentials {
-    AccessKey {
-        access_key_id: String,
-        secret_access_key: SecretString,
-    },
-    WorkloadIdentity,
-}
-
-impl ObjectStorageCredentials {
+impl ObjectStorageProvider {
     #[must_use]
-    pub const fn label(&self) -> &'static str {
+    pub const fn credentials_label(&self) -> &'static str {
         match self {
-            Self::AccessKey { .. } => "access_key",
-            Self::WorkloadIdentity => "workload_identity",
+            Self::AmazonS3 {
+                credentials: ObjectStorageAmazonCredentials::WorkloadIdentity,
+                ..
+            } => "workload_identity",
+            Self::AmazonS3 {
+                credentials: ObjectStorageAmazonCredentials::AccessKey(_),
+                ..
+            }
+            | Self::CloudflareR2 { .. }
+            | Self::Railway { .. }
+            | Self::S3Compatible { .. }
+            | Self::Local { .. } => "access_key",
         }
     }
 }
@@ -140,9 +149,8 @@ impl ObjectStorageCredentials {
 pub struct ObjectStorageConfig {
     pub provider: ObjectStorageProvider,
     pub bucket: String,
-    pub credentials: ObjectStorageCredentials,
-    pub max_object_bytes: ByteSize,
-    pub max_concurrency: u64,
+    pub max_object_bytes: NonZeroU64,
+    pub max_concurrency: NonZeroUsize,
     pub operation_timeout: Duration,
 }
 
@@ -153,50 +161,116 @@ struct ProviderFields {
     path_style: bool,
 }
 
+struct CredentialFields {
+    kind: CredentialsKind,
+    access_key_id: Option<String>,
+    secret_access_key: Option<SecretString>,
+}
+
+impl CredentialFields {
+    fn admit_access_key(self, v: &mut Violations) -> Result<ObjectStorageAccessKey, Rejected> {
+        match self.kind {
+            CredentialsKind::AccessKey => {
+                let access_key_id =
+                    required_text(v, "object_storage.access_key_id", self.access_key_id);
+                let secret_access_key = v.record(required(
+                    "object_storage.secret_access_key",
+                    self.secret_access_key,
+                    "object_storage.credentials = access_key",
+                ));
+                Ok(ObjectStorageAccessKey {
+                    access_key_id: access_key_id?,
+                    secret_access_key: secret_access_key?,
+                })
+            }
+            CredentialsKind::WorkloadIdentity => {
+                let rejected = v.reject(ValidationError::new(
+                    "object_storage.credentials",
+                    "workload_identity is accepted only by amazon_s3",
+                ));
+                self.refuse_access_key(v);
+                Err(rejected)
+            }
+        }
+    }
+
+    fn refuse_access_key(&self, v: &mut Violations) {
+        v.reject_present(
+            &[
+                ("object_storage.access_key_id", self.access_key_id.is_some()),
+                (
+                    "object_storage.secret_access_key",
+                    self.secret_access_key.is_some(),
+                ),
+            ],
+            "is not accepted with workload_identity",
+        );
+    }
+
+    fn admit_amazon(self, v: &mut Violations) -> Result<ObjectStorageAmazonCredentials, Rejected> {
+        match self.kind {
+            CredentialsKind::AccessKey => self
+                .admit_access_key(v)
+                .map(ObjectStorageAmazonCredentials::AccessKey),
+            CredentialsKind::WorkloadIdentity => {
+                self.refuse_access_key(v);
+                Ok(ObjectStorageAmazonCredentials::WorkloadIdentity)
+            }
+        }
+    }
+}
+
 impl ProviderFields {
     fn admit(
         self,
         provider: ProviderKind,
+        bucket: &str,
+        credentials: CredentialFields,
         v: &mut Violations,
     ) -> Result<Option<ObjectStorageProvider>, Rejected> {
         let path_style = self.path_style;
-        let admitted = match provider {
+        let provider = match provider {
             ProviderKind::None => return Ok(None),
-            ProviderKind::AmazonS3 => self.admit_amazon_s3(v),
-            ProviderKind::CloudflareR2 => self.admit_cloudflare_r2(v),
+            ProviderKind::AmazonS3 => self.admit_amazon_s3(bucket, credentials, v)?,
+            ProviderKind::CloudflareR2 => self.admit_cloudflare_r2(bucket, credentials, v)?,
             ProviderKind::Railway => {
-                let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
-                refuse_owner(self.expected_bucket_owner.is_some(), v);
-                endpoint.map(|endpoint| ObjectStorageProvider::Railway {
+                let (endpoint, region, credentials) =
+                    self.admit_endpoint(provider, bucket, credentials, v)?;
+                ObjectStorageProvider::Railway {
                     endpoint,
-                    region: self.region,
-                })
+                    region,
+                    credentials,
+                }
             }
             ProviderKind::S3Compatible => {
-                let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
-                refuse_owner(self.expected_bucket_owner.is_some(), v);
-                endpoint.map(|endpoint| ObjectStorageProvider::S3Compatible {
+                let (endpoint, region, credentials) =
+                    self.admit_endpoint(provider, bucket, credentials, v)?;
+                ObjectStorageProvider::S3Compatible {
                     endpoint,
-                    region: self.region,
+                    region,
                     path_style,
-                })
+                    credentials,
+                }
             }
             ProviderKind::Local => {
-                let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
-                refuse_owner(self.expected_bucket_owner.is_some(), v);
-                endpoint.map(|endpoint| ObjectStorageProvider::Local {
+                let (endpoint, region, credentials) =
+                    self.admit_endpoint(provider, bucket, credentials, v)?;
+                ObjectStorageProvider::Local {
                     endpoint,
-                    region: self.region,
-                })
+                    region,
+                    credentials,
+                }
             }
         };
-        if provider != ProviderKind::S3Compatible {
-            refuse_path_style(path_style, v);
-        }
-        admitted.map(Some)
+        Ok(Some(provider))
     }
 
-    fn admit_amazon_s3(self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
+    fn admit_amazon_s3(
+        self,
+        bucket: &str,
+        credentials: CredentialFields,
+        v: &mut Violations,
+    ) -> Result<ObjectStorageProvider, Rejected> {
         v.reject_present(
             &[("object_storage.endpoint", self.endpoint.is_some())],
             "must be empty when object_storage.provider = amazon_s3",
@@ -207,13 +281,22 @@ impl ProviderFields {
             "object_storage.expected_bucket_owner",
             self.expected_bucket_owner,
         );
+        refuse_path_style(self.path_style, v);
+        v.check(non_blank("object_storage.bucket", bucket));
+        let credentials = credentials.admit_amazon(v);
         Ok(ObjectStorageProvider::AmazonS3 {
             region: region?,
             expected_bucket_owner: owner?,
+            credentials: credentials?,
         })
     }
 
-    fn admit_cloudflare_r2(self, v: &mut Violations) -> Result<ObjectStorageProvider, Rejected> {
+    fn admit_cloudflare_r2(
+        self,
+        bucket: &str,
+        credentials: CredentialFields,
+        v: &mut Violations,
+    ) -> Result<ObjectStorageProvider, Rejected> {
         if self
             .region
             .as_deref()
@@ -226,9 +309,30 @@ impl ProviderFields {
         }
         let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
         refuse_owner(self.expected_bucket_owner.is_some(), v);
+        refuse_path_style(self.path_style, v);
+        v.check(non_blank("object_storage.bucket", bucket));
+        let credentials = credentials.admit_access_key(v);
         Ok(ObjectStorageProvider::CloudflareR2 {
             endpoint: endpoint?,
+            credentials: credentials?,
         })
+    }
+
+    fn admit_endpoint(
+        self,
+        provider: ProviderKind,
+        bucket: &str,
+        credentials: CredentialFields,
+        v: &mut Violations,
+    ) -> Result<(String, Option<String>, ObjectStorageAccessKey), Rejected> {
+        let endpoint = required_text(v, "object_storage.endpoint", self.endpoint);
+        refuse_owner(self.expected_bucket_owner.is_some(), v);
+        if provider != ProviderKind::S3Compatible {
+            refuse_path_style(self.path_style, v);
+        }
+        v.check(non_blank("object_storage.bucket", bucket));
+        let credentials = credentials.admit_access_key(v);
+        Ok((endpoint?, self.region, credentials?))
     }
 }
 
@@ -240,12 +344,10 @@ fn refuse_owner(present: bool, v: &mut Violations) {
 }
 
 fn refuse_path_style(path_style: bool, v: &mut Violations) {
-    if path_style {
-        v.reject(ValidationError::new(
-            "object_storage.path_style",
-            "must be false unless object_storage.provider = s3_compatible",
-        ));
-    }
+    v.reject_present(
+        &[("object_storage.path_style", path_style)],
+        "must be false unless object_storage.provider = s3_compatible",
+    );
 }
 
 impl ObjectStorageInput {
@@ -254,106 +356,73 @@ impl ObjectStorageInput {
         local_development: bool,
         v: &mut Violations,
     ) -> Result<Option<ObjectStorageConfig>, Rejected> {
-        v.check(int_range(
-            "object_storage.max_object_bytes",
-            self.max_object_bytes.as_u64(),
-            1..=MAX_OBJECT_BYTES_CEILING,
-        ));
-        v.check(int_range(
+        let Self {
+            provider,
+            bucket,
+            region,
+            endpoint,
+            expected_bucket_owner,
+            path_style,
+            credentials: credentials_kind,
+            access_key_id,
+            secret_access_key,
+            max_object_bytes,
+            max_concurrency,
+            operation_timeout,
+        } = self;
+        let max_object_bytes = v.record(
+            NonZeroU64::new(max_object_bytes.as_u64())
+                .filter(|bytes| bytes.get() <= SINGLE_PUT_MAX_BYTES)
+                .ok_or_else(|| {
+                    out_of_range(
+                        "object_storage.max_object_bytes",
+                        1,
+                        SINGLE_PUT_MAX_BYTES,
+                        max_object_bytes.as_u64(),
+                    )
+                }),
+        );
+        let max_concurrency = v.record(nonzero_usize_range(
             "object_storage.max_concurrency",
-            self.max_concurrency,
+            max_concurrency,
             1..=512,
         ));
         v.check(duration_range(
             "object_storage.operation_timeout",
-            self.operation_timeout,
+            operation_timeout,
             Duration::from_secs(1)..=Duration::from_mins(15),
         ));
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "object_storage.provider",
-            self.provider == ProviderKind::Local,
+            provider == ProviderKind::Local,
             local_development,
         ));
         let Some(provider) = ProviderFields {
-            endpoint: self.endpoint,
-            region: self.region,
-            expected_bucket_owner: self.expected_bucket_owner,
-            path_style: self.path_style,
+            endpoint,
+            region,
+            expected_bucket_owner,
+            path_style,
         }
-        .admit(self.provider, v)
-        .transpose() else {
+        .admit(
+            provider,
+            &bucket,
+            CredentialFields {
+                kind: credentials_kind,
+                access_key_id,
+                secret_access_key,
+            },
+            v,
+        )?
+        else {
             return Ok(None);
         };
-        v.check(non_blank("object_storage.bucket", &self.bucket));
-        let credentials = Self::admit_credentials(
-            self.credentials,
-            self.provider,
-            self.access_key_id,
-            self.secret_access_key,
-            v,
-        );
         Ok(Some(ObjectStorageConfig {
-            provider: provider?,
-            bucket: self.bucket,
-            credentials: credentials?,
-            max_object_bytes: self.max_object_bytes,
-            max_concurrency: self.max_concurrency,
-            operation_timeout: self.operation_timeout,
+            provider,
+            bucket,
+            max_object_bytes: max_object_bytes?,
+            max_concurrency: max_concurrency?,
+            operation_timeout,
         }))
-    }
-
-    fn admit_credentials(
-        credentials: CredentialsKind,
-        provider: ProviderKind,
-        access_key_id: Option<String>,
-        secret_access_key: Option<SecretString>,
-        v: &mut Violations,
-    ) -> Result<ObjectStorageCredentials, Rejected> {
-        match credentials {
-            CredentialsKind::AccessKey => {
-                let access_key_id = required_text(v, "object_storage.access_key_id", access_key_id);
-                let secret_access_key = v.record(required(
-                    "object_storage.secret_access_key",
-                    secret_access_key,
-                    "object_storage.credentials = access_key",
-                ));
-                Ok(ObjectStorageCredentials::AccessKey {
-                    access_key_id: access_key_id?,
-                    secret_access_key: secret_access_key?,
-                })
-            }
-            CredentialsKind::WorkloadIdentity => {
-                if provider != ProviderKind::AmazonS3 {
-                    v.reject(ValidationError::new(
-                        "object_storage.credentials",
-                        "workload_identity is accepted only by amazon_s3",
-                    ));
-                }
-                v.reject_present(
-                    &[
-                        ("object_storage.access_key_id", access_key_id.is_some()),
-                        (
-                            "object_storage.secret_access_key",
-                            secret_access_key.is_some(),
-                        ),
-                    ],
-                    "is not accepted with workload_identity",
-                );
-                Ok(ObjectStorageCredentials::WorkloadIdentity)
-            }
-        }
-    }
-}
-
-struct BlankStringAsNone;
-
-impl<'de> DeserializeAs<'de, Option<String>> for BlankStringAsNone {
-    fn deserialize_as<D>(deserializer: D) -> Result<Option<String>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw: Option<String> = Option::<StrictString>::deserialize_as(deserializer)?;
-        Ok(raw.filter(|value| !value.trim().is_empty()))
     }
 }
 

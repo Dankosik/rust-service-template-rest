@@ -81,9 +81,9 @@ pub(crate) fn capture(
 }
 
 fn drain(guard: LoggerGuard) {
-    std::assert_matches!(
+    assert_eq!(
         guard.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(2)),
-        LoggerShutdown::Completed(_)
+        LoggerShutdown::Completed
     );
 }
 
@@ -115,6 +115,12 @@ fn emit_correlated_event(
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
         .with(layer);
     let dispatch = tracing::Dispatch::new(subscriber);
+    assert!(
+        !dispatch
+            .downcast_ref::<format::FormatLayer>()
+            .expect("format layer present")
+            .has_pinned_global_dispatch()
+    );
 
     let (trace_id, span_id, sampled) = tracing::dispatcher::with_default(&dispatch, || {
         let span = tracing::info_span!("correlation_parent");
@@ -199,6 +205,110 @@ fn json_logs_omit_otel_correlation_without_a_span_or_provider() {
             "{name} must not emit empty or invalid trace ids: {record}"
         );
     }
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "global subscriber pinning test isolates its global default in an owned child process"
+)]
+fn global_subscriber_pins_dispatch_and_correlates_otel_context() {
+    const CHILD: &str = "TELEMETRY_GLOBAL_PIN_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "logging::tests::global_subscriber_pins_dispatch_and_correlates_otel_context",
+                "--no-capture",
+                "--quiet",
+            ])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn isolated global subscriber child");
+        let output = super::wait_for_child(child, std::time::Duration::from_secs(20));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+        let records: Vec<serde_json::Value> = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(records.len(), 2, "stdout={stdout}");
+        for (record, expected_message) in records.iter().zip(["current_parent", "explicit_parent"])
+        {
+            assert_eq!(record["message"], expected_message, "{record}");
+            assert_eq!(record["trace_id"], record["expected_trace"], "{record}");
+            assert_eq!(record["span_id"], record["expected_span"], "{record}");
+            assert_eq!(record["trace_flags"], "01", "{record}");
+        }
+        return;
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("child runtime");
+    let provider = runtime
+        .block_on(crate::install_tracer_provider(&crate::TracingOptions {
+            service_name: "svc",
+            service_version: "1.0.0",
+            vcs_revision: "abc",
+            instance_id: Some("instance-1"),
+            deployment_environment: "test",
+            sampler: crate::ResolvedSampler::AlwaysOn,
+            otlp_endpoint: None,
+            otlp_headers: None,
+        }))
+        .expect("tracer provider installs");
+    let options = LoggingOptions {
+        level: "info",
+        format: LoggingFormat::Json,
+        tracer_provider: Some(&provider),
+    };
+    let guard = install_subscriber(&options).expect("global subscriber installs");
+    assert!(tracing::dispatcher::get_default(|dispatch| {
+        dispatch
+            .downcast_ref::<format::FormatLayer>()
+            .is_some_and(format::FormatLayer::has_pinned_global_dispatch)
+    }));
+    std::assert_matches!(
+        install_subscriber(&options),
+        Err(LoggingError::AlreadyInstalled)
+    );
+
+    let span = tracing::info_span!("global_parent");
+    let context = span.context();
+    let otel_span = context.span();
+    let span_context = otel_span.span_context();
+    assert!(span_context.is_valid() && span_context.is_sampled());
+    let expected_trace = span_context.trace_id().to_string();
+    let expected_span = span_context.span_id().to_string();
+
+    span.in_scope(|| {
+        tracing::info!(
+            expected_trace = expected_trace.as_str(),
+            expected_span = expected_span.as_str(),
+            "current_parent"
+        );
+    });
+    std::thread::spawn(move || {
+        tracing::info!(
+            parent: &span,
+            expected_trace = expected_trace.as_str(),
+            expected_span = expected_span.as_str(),
+            "explicit_parent"
+        );
+    })
+    .join()
+    .expect("explicit-parent thread completes");
+
+    drain(guard);
+    let _ = runtime.block_on(
+        provider.shutdown(tokio::time::Instant::now() + std::time::Duration::from_secs(2)),
+    );
 }
 
 #[test]
@@ -434,6 +544,21 @@ fn emit_denied_diagnostics() {
     assert!(
         tracing::info_span!(target: "tracing_opentelemetry", "SDK_SECRET_SENTINEL").is_disabled()
     );
+    // template:begin clickhouse:telemetry-denied-clickhouse-test
+    tracing::debug!(target: "clickhouse", error = ?NeverFormat, "SDK_SECRET_SENTINEL");
+    tracing::warn!(target: "clickhouse::insert", "SDK_SECRET_SENTINEL");
+    assert!(tracing::info_span!(target: "clickhouse", "SDK_SECRET_SENTINEL").is_disabled());
+    assert!(tracing::info_span!(target: "clickhouse::query", "SDK_SECRET_SENTINEL").is_disabled());
+    assert!(!tracing::info_span!(target: "infra_clickhouse", "clickhouse_query").is_disabled());
+    tracing_log::format_trace(
+        &tracing_log::log::Record::builder()
+            .target("clickhouse::client")
+            .level(tracing_log::log::Level::Error)
+            .args(format_args!("SDK_SECRET_SENTINEL"))
+            .build(),
+    )
+    .expect("bridge diagnostic");
+    // template:end clickhouse:telemetry-denied-clickhouse-test
     for target in [
         "rustls::client",
         "hyper_util::client",

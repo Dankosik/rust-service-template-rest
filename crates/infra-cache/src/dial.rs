@@ -10,12 +10,24 @@ use tokio_util::either::Either;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 use crate::ServerEndpoint;
+use crate::admission::Admitted;
 
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-const USER_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) enum Transport {
+    Plaintext,
+    Tls(Tls),
+}
+
+impl Transport {
+    pub(crate) const fn is_tls(&self) -> bool {
+        matches!(self, Self::Tls(_))
+    }
+}
 
 pub(crate) struct Tls {
     pub(crate) connector: TlsConnector,
@@ -27,18 +39,19 @@ pub(crate) struct Dialed {
     pub(crate) driver: AbortOnDropHandle<()>,
 }
 
-impl ServerEndpoint {
+impl Admitted {
     pub(crate) async fn connect(
         &self,
-        tls: Option<&Tls>,
         settings: &redis::RedisConnectionInfo,
         config: redis::AsyncConnectionConfig,
         tasks: &TaskTracker,
     ) -> redis::RedisResult<Dialed> {
-        let tcp = self.connect_tcp().await?;
-        let stream = match tls {
-            None => Either::Left(tcp),
-            Some(tls) => Either::Right(tls.connector.connect(tls.server_name.clone(), tcp).await?),
+        let tcp = connect_tcp(&self.server).await?;
+        let stream = match &self.transport {
+            Transport::Plaintext => Either::Left(tcp),
+            Transport::Tls(tls) => {
+                Either::Right(tls.connector.connect(tls.server_name.clone(), tcp).await?)
+            }
         };
         let (connection, driver) =
             MultiplexedConnection::new_with_config(settings, stream, config).await?;
@@ -47,20 +60,20 @@ impl ServerEndpoint {
             driver: AbortOnDropHandle::new(tasks.spawn(driver)),
         })
     }
+}
 
-    async fn connect_tcp(&self) -> io::Result<TcpStream> {
-        let mut addresses = tokio::net::lookup_host((self.host.as_str(), self.port))
-            .await?
-            .peekable();
-        if addresses.peek().is_none() {
-            return Err(io::ErrorKind::NotFound.into());
-        }
-        let (stream, _) = futures_util::future::select_ok(
-            addresses.map(|address| Box::pin(connect_address(address))),
-        )
-        .await?;
-        Ok(stream)
+async fn connect_tcp(server: &ServerEndpoint) -> io::Result<TcpStream> {
+    let mut addresses = tokio::net::lookup_host((server.host.as_str(), server.port))
+        .await?
+        .peekable();
+    if addresses.peek().is_none() {
+        return Err(io::ErrorKind::NotFound.into());
     }
+    let (stream, _) = futures_util::future::select_ok(
+        addresses.map(|address| Box::pin(connect_address(address))),
+    )
+    .await?;
+    Ok(stream)
 }
 
 async fn connect_address(address: SocketAddr) -> io::Result<TcpStream> {
@@ -74,6 +87,6 @@ async fn connect_address(address: SocketAddr) -> io::Result<TcpStream> {
             .with_retries(KEEPALIVE_RETRIES),
     )?;
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-    socket.set_tcp_user_timeout(Some(USER_TIMEOUT))?;
+    socket.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
     Ok(stream)
 }

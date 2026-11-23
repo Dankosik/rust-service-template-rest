@@ -31,7 +31,7 @@ const MAX_CACHED_SPANS: usize = 1024;
 const TRACE_ID_FIELD: &str = "trace_id";
 const SPAN_ID_FIELD: &str = "span_id";
 const TRACE_FLAGS_FIELD: &str = "trace_flags";
-const RESERVED: [&str; 7] = [
+const RESERVED_KEYS: [&str; 7] = [
     "level",
     "target",
     "timestamp",
@@ -46,10 +46,40 @@ thread_local! {
     static FORMATTING: Cell<bool> = const { Cell::new(false) };
 }
 
+struct TraceDispatch {
+    global: OnceLock<Dispatch>,
+    registered: OnceLock<WeakDispatch>,
+}
+
+impl TraceDispatch {
+    fn new() -> Self {
+        Self {
+            global: OnceLock::new(),
+            registered: OnceLock::new(),
+        }
+    }
+
+    fn register(&self, subscriber: &Dispatch) {
+        let _ = self.registered.set(subscriber.downgrade());
+    }
+
+    fn pin_global(&self, dispatch: Dispatch) {
+        let _ = self.global.set(dispatch);
+    }
+
+    fn otel_context(&self, id: &Id) -> Option<opentelemetry::Context> {
+        if let Some(dispatch) = self.global.get() {
+            return tracing_opentelemetry::get_otel_context(id, dispatch);
+        }
+        let dispatch = self.registered.get()?.upgrade()?;
+        tracing_opentelemetry::get_otel_context(id, &dispatch)
+    }
+}
+
 pub(super) struct FormatLayer {
     output: Output,
     format: LoggingFormat,
-    trace_dispatch: Option<OnceLock<WeakDispatch>>,
+    trace_dispatch: Option<TraceDispatch>,
 }
 
 impl FormatLayer {
@@ -57,8 +87,21 @@ impl FormatLayer {
         Self {
             output,
             format,
-            trace_dispatch: trace_context.then(OnceLock::new),
+            trace_dispatch: trace_context.then(TraceDispatch::new),
         }
+    }
+
+    pub(super) fn pin_global_dispatch(&self, dispatch: &Dispatch) {
+        if let Some(trace_dispatch) = &self.trace_dispatch {
+            trace_dispatch.pin_global(dispatch.clone());
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn has_pinned_global_dispatch(&self) -> bool {
+        self.trace_dispatch
+            .as_ref()
+            .is_some_and(|dispatch| dispatch.global.get().is_some())
     }
 }
 
@@ -82,10 +125,10 @@ impl Drop for Permit {
 }
 
 fn enter_format() -> Result<impl Drop, DropReason> {
-    let already = FORMATTING
+    let was_formatting = FORMATTING
         .try_with(|active| active.replace(true))
         .unwrap_or(true);
-    if already {
+    if was_formatting {
         return Err(DropReason::Reentrant);
     }
     let formatting = std::mem::DropGuard::new((), |()| {
@@ -104,7 +147,7 @@ struct Bytes<const INLINE: usize = 0> {
 }
 
 impl Bytes<0> {
-    fn new(limit: usize, capacity: usize) -> Self {
+    fn with_capacity(limit: usize, capacity: usize) -> Self {
         Self {
             buf: SmallVec::with_capacity(capacity),
             limit,
@@ -139,6 +182,14 @@ impl<const INLINE: usize> Bytes<INLINE> {
         self.failed = false;
     }
 
+    fn reserving<R>(&mut self, reserved: usize, write: impl FnOnce(&mut Self) -> R) -> R {
+        let limit = self.limit;
+        self.limit = limit - reserved;
+        let written = write(self);
+        self.limit = limit;
+        written
+    }
+
     fn append(&mut self, bytes: &[u8]) {
         if self.failed || bytes.len() > self.room() {
             self.failed = true;
@@ -146,10 +197,12 @@ impl<const INLINE: usize> Bytes<INLINE> {
         }
         let needed = self.buf.len() + bytes.len();
         if needed > self.buf.capacity() {
-            let capacity = needed
-                .max(self.buf.capacity().saturating_mul(2))
-                .min(self.limit);
-            self.buf.reserve_exact(capacity - self.buf.len());
+            self.buf.reserve_exact(bounded_reserve(
+                self.buf.len(),
+                self.buf.capacity(),
+                needed,
+                self.limit,
+            ));
         }
         self.buf.extend_from_slice(bytes);
     }
@@ -192,170 +245,159 @@ struct Entry {
 }
 
 impl Entry {
+    fn from_range(key: &'static str, range: std::ops::Range<usize>) -> Self {
+        let offset = |index: usize| u16::try_from(index).unwrap_or(u16::MAX);
+        Self {
+            key,
+            start: offset(range.start),
+            end: offset(range.end),
+        }
+    }
+
     fn range(self) -> std::ops::Range<usize> {
         usize::from(self.start)..usize::from(self.end)
     }
 }
 
-fn offset(index: usize) -> u16 {
-    u16::try_from(index).unwrap_or(u16::MAX)
-}
-
-struct Scratch {
+struct FieldBuf<const MAX_FIELDS: usize> {
     values: Bytes<SCRATCH_CAPACITY>,
-    fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
-    truncated: bool,
+    fields: ArrayVec<Entry, MAX_FIELDS>,
 }
 
-impl Scratch {
-    fn new(value_limit: usize) -> Self {
+impl<const MAX_FIELDS: usize> FieldBuf<MAX_FIELDS> {
+    fn new(limit: usize) -> Self {
         Self {
-            values: Bytes::inline(value_limit),
+            values: Bytes::inline(limit),
             fields: ArrayVec::new(),
-            truncated: false,
         }
     }
 
     fn add_field(&mut self, key: &'static str, start: usize) {
-        self.fields.push(Entry {
-            key,
-            start: offset(start),
-            end: offset(self.values.len()),
-        });
+        self.fields
+            .push(Entry::from_range(key, start..self.values.len()));
     }
 
-    fn stop(&mut self) {
-        self.values.failed = true;
-        self.truncated = true;
-    }
-
-    fn push_json(
-        &mut self,
-        key: &'static str,
-        value: &(impl serde::Serialize + ?Sized),
-        max_fields: usize,
-    ) {
+    fn begin_field(&mut self) -> Option<usize> {
         if self.values.failed {
-            return;
+            return None;
         }
-        if self.fields.len() == max_fields {
-            self.stop();
-            return;
+        if self.fields.is_full() {
+            self.values.failed = true;
+            return None;
         }
-        let start = self.values.len();
+        Some(self.values.len())
+    }
+
+    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) -> bool {
+        let Some(start) = self.begin_field() else {
+            return false;
+        };
         self.values.append_json(value);
         if self.values.failed {
             self.values.buf.truncate(start);
-            self.truncated = true;
-            return;
+            return false;
         }
         self.add_field(key, start);
+        true
+    }
+
+    fn push_raw(&mut self, key: &'static str, bytes: &[u8]) -> bool {
+        let Some(start) = self.begin_field() else {
+            return false;
+        };
+        self.values.append(bytes);
+        if self.values.failed {
+            return false;
+        }
+        self.add_field(key, start);
+        true
+    }
+}
+
+struct EventScratch {
+    captured: FieldBuf<MAX_EVENT_FIELDS>,
+    truncated: bool,
+}
+
+impl EventScratch {
+    fn new() -> Self {
+        Self {
+            captured: FieldBuf::new(MAX_RECORD_BYTES),
+            truncated: false,
+        }
+    }
+
+    fn truncate_rest(&mut self) {
+        self.captured.values.failed = true;
+        self.truncated = true;
+    }
+
+    fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
+        if !self.captured.push_json(key, value) {
+            self.truncated = true;
+        }
     }
 
     fn push_truncating_str(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
-        if self.values.failed {
+        if self.captured.values.failed {
             return;
         }
-        if self.fields.is_full() || self.values.room() < 2 {
-            self.stop();
+        if self.captured.fields.is_full() || self.captured.values.room() < 2 {
+            self.truncate_rest();
             return;
         }
-        let start = self.values.len();
-        self.values.append(b"\"");
+        let start = self.captured.values.len();
+        self.captured.values.append(b"\"");
         let mut quoted = Quoted {
-            values: &mut self.values,
+            values: &mut self.captured.values,
             cut: false,
         };
         let written = fmt::write(&mut quoted, text);
         let cut = quoted.cut;
         if written.is_err() && !cut {
-            self.values.buf.truncate(start);
+            self.captured.values.buf.truncate(start);
             self.truncated = true;
             return;
         }
-        self.values.append(b"\"");
-        self.add_field(key, start);
+        self.captured.values.append(b"\"");
+        self.captured.add_field(key, start);
         self.truncated |= cut;
     }
 
-    fn copy(&mut self, field: Entry, values: &[u8]) {
-        if self.values.failed {
-            return;
+    fn copy_span_fields(&mut self, span: &SpanFields) -> bool {
+        for field in &span.fields {
+            if !self
+                .captured
+                .push_raw(field.key, &span.values[field.range()])
+            {
+                self.truncated = true;
+            }
         }
-        if self.fields.is_full() {
-            self.stop();
-            return;
-        }
-        let start = self.values.len();
-        self.values.append(&values[field.range()]);
-        if self.values.failed {
-            self.truncated = true;
-            return;
-        }
-        self.add_field(field.key, start);
+        !self.captured.values.failed
     }
 
     fn write_body(&mut self, line: &mut Bytes, event_field_count: usize, format: LoggingFormat) {
-        let values = self.values.as_slice();
-        let (event, spans) = self.fields.split_at_mut(event_field_count);
+        let values = self.captured.values.as_slice();
+        let (event, spans) = self.captured.fields.split_at_mut(event_field_count);
         event.sort_unstable_by_key(|field| (field.key, field.start));
         spans.sort_unstable_by_key(|field| (field.key, field.start));
+        let (event, spans) = (&*event, &*spans);
+        let write_fields = |line: &mut Bytes, truncated: bool| {
+            line.reserving(record_tail(format, truncated).len(), |line| {
+                write_all_fields(line, values, event, spans, format)
+            })
+        };
         let header = line.len();
-        let record_limit = line.limit;
-        let mut tail = record_tail(format, self.truncated);
-        line.limit = record_limit - tail.len();
-        if !write_all_fields(line, values, event, spans, format) && !self.truncated {
-            tail = record_tail(format, true);
-            line.limit = record_limit - tail.len();
+        let fits = write_fields(line, self.truncated);
+        if !fits && !self.truncated {
             line.rewind(header);
-            write_all_fields(line, values, event, spans, format);
+            write_fields(line, true);
         }
-        line.limit = record_limit;
-        line.append(tail);
-    }
-
-    fn compact_into(&self, cache: &mut SpanFields, dedup_field_count: usize) -> bool {
-        if self.values.failed {
-            return false;
-        }
-        cache.values.rewind(0);
-        cache.fields.clear();
-        let (captured, unchanged) = self.fields.split_at(dedup_field_count);
-        let unique = captured.iter().enumerate().filter_map(|(index, field)| {
-            (!captured[index + 1..]
-                .iter()
-                .any(|next| next.key == field.key))
-            .then_some(field)
-        });
-        for field in unique.chain(unchanged) {
-            if cache.fields.len() == MAX_SPAN_FIELDS {
-                return false;
-            }
-            let start = cache.values.len();
-            cache.values.append(&self.values.buf[field.range()]);
-            cache.fields.push(Entry {
-                key: field.key,
-                start: offset(start),
-                end: offset(cache.values.len()),
-            });
-        }
-        !cache.values.failed
-    }
-
-    fn merge_into(&mut self, cache: &mut SpanFields) -> bool {
-        let delta_field_count = self.fields.len();
-        self.values.limit = self.values.len() + cache.values.len();
-        for field in &cache.fields {
-            if !self.fields[..delta_field_count]
-                .iter()
-                .any(|delta| delta.key == field.key)
-            {
-                self.copy(*field, cache.values.as_slice());
-            }
-        }
-        self.compact_into(cache, delta_field_count)
+        line.append(record_tail(format, self.truncated || !fits));
     }
 }
+
+type SpanScratch = FieldBuf<MAX_SPAN_FIELDS>;
 
 struct Quoted<'a, const INLINE: usize> {
     values: &'a mut Bytes<INLINE>,
@@ -420,49 +462,130 @@ fn escape(byte: u8, unit: &mut [u8; 6]) -> &[u8] {
 }
 
 struct SpanFields {
-    values: Bytes,
+    values: Vec<u8>,
     fields: SmallVec<[Entry; 8]>,
-    _slot: Permit,
+    _permit: Permit,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Source {
-    Span,
-    Event,
-    BridgedEvent,
+impl SpanFields {
+    fn from_capture(permit: Permit, capture: &SpanScratch) -> Option<Self> {
+        let (values, fields) = merge_span_fields(&[], &[], capture)?;
+        Some(Self {
+            values,
+            fields,
+            _permit: permit,
+        })
+    }
+
+    fn apply(&mut self, delta: &SpanScratch) -> bool {
+        if delta.values.failed {
+            return false;
+        }
+        if delta.fields.is_empty() {
+            return true;
+        }
+        if let [field] = delta.fields.as_slice()
+            && !self.fields.iter().any(|existing| existing.key == field.key)
+        {
+            return self.insert_new_field(field.key, &delta.values.as_slice()[field.range()]);
+        }
+        let Some((values, fields)) = merge_span_fields(&self.fields, &self.values, delta) else {
+            return false;
+        };
+        self.values = values;
+        self.fields = fields;
+        true
+    }
+
+    fn insert_new_field(&mut self, key: &'static str, value: &[u8]) -> bool {
+        if self.fields.len() == MAX_SPAN_FIELDS
+            || value.len() > MAX_SPAN_BYTES.saturating_sub(self.values.len())
+        {
+            return false;
+        }
+        let start = self.values.len();
+        append_bounded(&mut self.values, value, MAX_SPAN_BYTES);
+        self.fields
+            .insert(0, Entry::from_range(key, start..self.values.len()));
+        true
+    }
 }
 
-struct Capture<'a> {
-    scratch: &'a mut Scratch,
-    source: Source,
+fn bounded_reserve(len: usize, capacity: usize, needed: usize, limit: usize) -> usize {
+    needed.max(capacity.saturating_mul(2)).min(limit) - len
 }
 
-impl Capture<'_> {
-    fn skips(&self, key: &str) -> bool {
-        self.source == Source::BridgedEvent && key.starts_with("log.")
+fn append_bounded(buf: &mut Vec<u8>, bytes: &[u8], limit: usize) {
+    let needed = buf.len() + bytes.len();
+    if needed > buf.capacity() {
+        buf.reserve_exact(bounded_reserve(buf.len(), buf.capacity(), needed, limit));
+    }
+    buf.extend_from_slice(bytes);
+}
+
+fn merge_span_fields(
+    base_fields: &[Entry],
+    base_values: &[u8],
+    update: &SpanScratch,
+) -> Option<(Vec<u8>, SmallVec<[Entry; 8]>)> {
+    if update.values.failed {
+        return None;
+    }
+    let capacity = (update.values.len() + base_values.len()).min(MAX_SPAN_BYTES);
+    let mut next_values = Bytes::with_capacity(MAX_SPAN_BYTES, capacity);
+    let mut next_fields = SmallVec::new();
+    let latest_updates = update
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|&(index, field)| {
+            !update.fields[index + 1..]
+                .iter()
+                .any(|next| next.key == field.key)
+        })
+        .map(|(_, field)| (field.key, &update.values.as_slice()[field.range()]));
+    let unchanged = base_fields
+        .iter()
+        .filter(|field| !update.fields.iter().any(|next| next.key == field.key))
+        .map(|field| (field.key, &base_values[field.range()]));
+    for (key, value) in latest_updates.chain(unchanged) {
+        if next_fields.len() == MAX_SPAN_FIELDS {
+            return None;
+        }
+        let start = next_values.len();
+        next_values.append(value);
+        if next_values.failed {
+            return None;
+        }
+        next_fields.push(Entry::from_range(key, start..next_values.len()));
+    }
+    Some((next_values.buf.into_vec(), next_fields))
+}
+
+struct EventCapture<'a> {
+    scratch: &'a mut EventScratch,
+    bridged: bool,
+}
+
+impl EventCapture<'_> {
+    fn is_bridged_log_field(&self, key: &str) -> bool {
+        self.bridged && key.starts_with("log.")
     }
 
     fn push_json(&mut self, key: &'static str, value: &(impl serde::Serialize + ?Sized)) {
-        if self.skips(key) {
-            return;
+        if !self.is_bridged_log_field(key) {
+            self.scratch.push_json(key, value);
         }
-        let max_fields = if self.source == Source::Span {
-            MAX_SPAN_FIELDS
-        } else {
-            MAX_EVENT_FIELDS
-        };
-        self.scratch.push_json(key, value, max_fields);
     }
 
     fn push_truncating_str(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
-        if self.skips(key) {
-            return;
+        if !self.is_bridged_log_field(key) {
+            self.scratch.push_truncating_str(key, text);
         }
-        self.scratch.push_truncating_str(key, text);
     }
 }
 
-impl Visit for Capture<'_> {
+impl Visit for EventCapture<'_> {
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.push_json(field.name(), &value);
     }
@@ -476,25 +599,42 @@ impl Visit for Capture<'_> {
         self.push_json(field.name(), &value);
     }
     fn record_str(&mut self, field: &Field, value: &str) {
-        if self.source != Source::Span {
-            self.push_truncating_str(field.name(), format_args!("{value}"));
-        } else if value.len() > self.scratch.values.room() {
-            self.scratch.stop();
+        self.push_truncating_str(field.name(), format_args!("{value}"));
+    }
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        self.push_truncating_str(field.name(), format_args!("{value:?}"));
+    }
+}
+
+struct SpanCapture<'a>(&'a mut SpanScratch);
+
+impl Visit for SpanCapture<'_> {
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.push_json(field.name(), &value);
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if value.len() > self.0.values.room() {
+            self.0.values.failed = true;
         } else {
-            self.push_json(field.name(), value);
+            self.0.push_json(field.name(), value);
         }
     }
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         let name = field.name();
-        if self.source == Source::Span {
-            if name.starts_with("log.") {
-                return;
-            }
-            let name = name.trim_prefix("r#");
-            self.push_json(name, &format_args!("{value:?}"));
-        } else {
-            self.push_truncating_str(name, format_args!("{value:?}"));
+        if name.starts_with("log.") {
+            return;
         }
+        let name = name.trim_prefix("r#");
+        self.0.push_json(name, &format_args!("{value:?}"));
     }
 }
 
@@ -518,18 +658,18 @@ impl FormatLayer {
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
-        let mut scratch = Scratch::new(MAX_RECORD_BYTES);
-        let mut line = Bytes::new(MAX_RECORD_BYTES, LINE_CAPACITY);
+        let mut scratch = EventScratch::new();
+        let mut line = Bytes::with_capacity(MAX_RECORD_BYTES, LINE_CAPACITY);
         let normalized = event.normalized_metadata();
-        let (metadata, source) = match &normalized {
-            Some(metadata) => (metadata, Source::BridgedEvent),
-            None => (event.metadata(), Source::Event),
+        let (metadata, bridged) = match &normalized {
+            Some(metadata) => (metadata, true),
+            None => (event.metadata(), false),
         };
-        event.record(&mut Capture {
+        event.record(&mut EventCapture {
             scratch: &mut scratch,
-            source,
+            bridged,
         });
-        let event_field_count = scratch.fields.len();
+        let event_field_count = scratch.captured.fields.len();
         write_record_header(&mut line, metadata, self.format);
         if let Some(event_span) = ctx.event_span(event) {
             self.write_trace_context_fields(&event_span.id(), &mut line);
@@ -539,10 +679,7 @@ impl FormatLayer {
                     scratch.truncated = true;
                     continue;
                 };
-                for field in &cached.fields {
-                    scratch.copy(*field, cached.values.as_slice());
-                }
-                if scratch.values.failed {
+                if !scratch.copy_span_fields(cached) {
                     break;
                 }
             }
@@ -559,15 +696,11 @@ impl FormatLayer {
     }
 
     fn write_trace_context_fields(&self, id: &Id, line: &mut Bytes) {
-        let Some(dispatch) = self
+        let Some(context) = self
             .trace_dispatch
             .as_ref()
-            .and_then(OnceLock::get)
-            .and_then(WeakDispatch::upgrade)
+            .and_then(|dispatch| dispatch.otel_context(id))
         else {
-            return;
-        };
-        let Some(context) = tracing_opentelemetry::get_otel_context(id, &dispatch) else {
             return;
         };
         let span = context.span();
@@ -597,7 +730,7 @@ where
 {
     fn on_register_dispatch(&self, subscriber: &Dispatch) {
         if let Some(dispatch) = &self.trace_dispatch {
-            let _ = dispatch.set(subscriber.downgrade());
+            dispatch.register(subscriber);
         }
     }
 
@@ -605,25 +738,17 @@ where
         let Some(_guard) = self.admit() else {
             return;
         };
-        let Some(slot) = Permit::take(&CACHED_SPANS, MAX_CACHED_SPANS) else {
+        let Some(permit) = Permit::take(&CACHED_SPANS, MAX_CACHED_SPANS) else {
             self.output.record_drop(DropReason::SpanCapacity);
             return;
         };
-        let mut scratch = Scratch::new(MAX_SPAN_BYTES);
-        attrs.record(&mut Capture {
-            scratch: &mut scratch,
-            source: Source::Span,
-        });
-        scratch.push_json("name", attrs.metadata().name(), MAX_SPAN_FIELDS);
-        let mut cache = SpanFields {
-            values: Bytes::new(MAX_SPAN_BYTES, scratch.values.len()),
-            fields: SmallVec::new(),
-            _slot: slot,
-        };
-        if !scratch.compact_into(&mut cache, scratch.fields.len()) {
+        let mut scratch = SpanScratch::new(MAX_SPAN_BYTES);
+        attrs.record(&mut SpanCapture(&mut scratch));
+        scratch.push_json("name", attrs.metadata().name());
+        let Some(cache) = SpanFields::from_capture(permit, &scratch) else {
             self.output.record_drop(DropReason::SpanCapacity);
             return;
-        }
+        };
         let Some(span) = ctx.span(id) else {
             return;
         };
@@ -634,11 +759,8 @@ where
         let Some(_guard) = self.admit() else {
             return;
         };
-        let mut scratch = Scratch::new(MAX_SPAN_BYTES);
-        values.record(&mut Capture {
-            scratch: &mut scratch,
-            source: Source::Span,
-        });
+        let mut scratch = SpanScratch::new(MAX_SPAN_BYTES);
+        values.record(&mut SpanCapture(&mut scratch));
         let Some(span) = ctx.span(id) else {
             return;
         };
@@ -646,7 +768,7 @@ where
         let Some(cached) = extensions.get_mut::<SpanFields>() else {
             return;
         };
-        if !scratch.merge_into(cached) {
+        if !cached.apply(&scratch) {
             extensions.remove::<SpanFields>();
             drop(extensions);
             self.output.record_drop(DropReason::SpanCapacity);
@@ -713,20 +835,20 @@ fn write_all_fields(
                 .is_err()
         });
     for field in event_fields.chain(span_fields) {
-        if RESERVED.contains(&field.key) {
+        if RESERVED_KEYS.contains(&field.key) {
             continue;
         }
-        let kept = line.len();
+        let field_start = line.len();
         let value = &values[field.range()];
         write_key(line, field.key, format);
         line.append(value);
         if line.failed {
-            line.rewind(kept);
+            line.rewind(field_start);
             if let Some(inner) = value.strip_circumfix(b"\"", b"\"") {
                 write_key(line, field.key, format);
                 write_cut_string(line, inner);
                 if line.failed {
-                    line.rewind(kept);
+                    line.rewind(field_start);
                 }
             }
             return false;
@@ -757,11 +879,15 @@ fn write_cut_string(line: &mut Bytes, inner: &[u8]) {
     line.append(b"\"");
 }
 
-fn write_key(line: &mut Bytes, key: &str, format: LoggingFormat) {
-    let (separator, assign) = match format {
+fn field_tokens(format: LoggingFormat) -> (&'static [u8], &'static [u8]) {
+    match format {
         LoggingFormat::Json => (b",", b":"),
         LoggingFormat::Text => (b" ", b"="),
-    };
+    }
+}
+
+fn write_key(line: &mut Bytes, key: &str, format: LoggingFormat) {
+    let (separator, assign) = field_tokens(format);
     line.append(separator);
     line.append_json(key);
     line.append(assign);
@@ -783,13 +909,13 @@ fn write_hex_field<const N: usize>(
     bytes: &[u8; N],
     format: LoggingFormat,
 ) {
-    let (separator, assign) = match format {
-        LoggingFormat::Json => (b",\"", b"\":\""),
-        LoggingFormat::Text => (b" \"", b"\"=\""),
-    };
+    let (separator, assign) = field_tokens(format);
     line.append(separator);
+    line.append(b"\"");
     line.append(key.as_bytes());
+    line.append(b"\"");
     line.append(assign);
+    line.append(b"\"");
     line.append(
         const_hex::Buffer::<N, false>::new()
             .format(bytes)

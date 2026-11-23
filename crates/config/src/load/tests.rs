@@ -24,24 +24,26 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 #[test]
 fn defaults_alone_produce_a_valid_snapshot() {
     let cfg = load_env(&[]);
-    assert_eq!(cfg.app.env, "unspecified");
-    assert!(!cfg.app.is_local_development());
-    assert_eq!(cfg.http.listener().addr, "0.0.0.0:8080".parse().unwrap());
-    assert_eq!(cfg.app.version, "1.2.3");
-    assert_eq!(cfg.app.commit, "abc123");
-    assert_eq!(cfg.log.format, LogFormat::Json);
-    assert_eq!(cfg.app.instance_id, None);
-    assert_eq!(cfg.runtime.worker_threads, None);
+    assert_eq!(cfg.app().env(), "unspecified");
+    assert!(!cfg.app().is_local_development());
+    assert_eq!(cfg.http().listener().addr, "0.0.0.0:8080".parse().unwrap());
+    assert_eq!(cfg.app().version, "1.2.3");
+    assert_eq!(cfg.app().commit, "abc123");
+    assert_eq!(cfg.log().format, LogFormat::Json);
+    assert_eq!(cfg.app().instance_id, None);
+    assert_eq!(cfg.runtime().worker_threads, None);
 }
 
 #[test]
 fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
     let cfg = load_env(&[("APP__RUNTIME__WORKER_THREADS", "4")]);
     assert_eq!(
-        cfg.runtime.worker_threads.map(std::num::NonZeroUsize::get),
+        cfg.runtime()
+            .worker_threads
+            .map(std::num::NonZeroUsize::get),
         Some(4)
     );
-    assert_eq!(cfg.runtime.effective_worker_threads(), 4);
+    assert_eq!(cfg.runtime().effective_worker_threads(), 4);
 
     let err = load_from(
         &LoadOptions::default(),
@@ -49,7 +51,7 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
         env(&[("APP__RUNTIME__WORKER_THREADS", "0")]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     assert!(err.to_string().contains("runtime.worker_threads"), "{err}");
 
     let err = load_from(
@@ -58,14 +60,18 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
         env(&[("APP__RUNTIME__WORKER_THREADS", "513")]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(errors) if errors.names("runtime.worker_threads"), "{err}");
+    assert!(
+        err.validation_errors()
+            .is_some_and(|errors| errors.names("runtime.worker_threads")),
+        "{err}"
+    );
 }
 
 #[test]
 fn log_filter_keeps_spaces_in_a_span_field_value() {
     let filter = "[postgres_statement{db.query.summary=complete jobs}]=debug";
     let config = load_env(&[("APP__LOG__LEVEL", filter)]);
-    assert_eq!(config.log.level, filter);
+    assert_eq!(config.log().level, filter);
 }
 
 #[test]
@@ -81,8 +87,8 @@ fn shipped_local_configuration_loads_without_environment_overrides() {
         env(&[]),
     )
     .unwrap();
-    assert_eq!(cfg.log.format, LogFormat::Text);
-    assert!(cfg.app.is_local_development());
+    assert_eq!(cfg.log().format, LogFormat::Text);
+    assert!(cfg.app().is_local_development());
 }
 
 #[test]
@@ -102,7 +108,11 @@ fn insecure_development_refuses_unrecognized_environment_names() {
             ]),
         )
         .unwrap_err();
-        assert_matches!(&error, Error::Validate(errors) if errors.names("app.allow_insecure_development"));
+        assert!(
+            error
+                .validation_errors()
+                .is_some_and(|errors| errors.names("app.allow_insecure_development"))
+        );
         assert!(!error.to_string().contains("private-environment-value"));
     }
 }
@@ -110,9 +120,9 @@ fn insecure_development_refuses_unrecognized_environment_names() {
 #[test]
 fn empty_instance_id_is_vacant_none() {
     let empty = load_env(&[("APP__APP__INSTANCE_ID", "")]);
-    assert_eq!(empty.app.instance_id, None);
+    assert_eq!(empty.app().instance_id, None);
     let set = load_env(&[("APP__APP__INSTANCE_ID", "  pod-a  ")]);
-    assert_eq!(set.app.instance_id.as_deref(), Some("pod-a"));
+    assert_eq!(set.app().instance_id.as_deref(), Some("pod-a"));
 }
 
 #[test]
@@ -126,10 +136,10 @@ fn empty_dsn_and_otlp_headers_are_vacant_none() {
         ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT", "  "),
     ]);
     // template:begin postgres:load-empty-dsn-assertion
-    assert!(cfg.postgres.is_none());
+    assert!(cfg.postgres().is_none());
     // template:end postgres:load-empty-dsn-assertion
-    assert!(cfg.observability.otel.exporter.otlp_headers.is_none());
-    assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);
+    assert!(cfg.observability().otel.exporter.otlp_headers.is_none());
+    assert_eq!(cfg.observability().otel.exporter.otlp_endpoint, None);
 }
 
 #[test]
@@ -153,7 +163,7 @@ fn rejected_environment_values_are_not_echoed() {
         ] {
             let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, value)])).unwrap_err();
             let rendered = err.to_string();
-            assert_matches!(&err, Error::Deserialize(_), "{name}: {rendered}");
+            assert_matches!(&err.0, ErrorKind::Deserialize(_), "{name}: {rendered}");
             assert!(
                 rendered.contains(&format!("for key `{key}` in the environment")),
                 "{name}: {rendered}"
@@ -244,7 +254,11 @@ fn file_keys_the_environment_cannot_name_are_refused() {
             env(&[]),
         )
         .unwrap_err();
-        assert_matches!(&err, Error::UnaddressableKey { key, .. } if key == expected, "{contents}: {err}");
+        assert_matches!(
+            &err.0,
+            ErrorKind::Input(InputError::UnaddressableKey { key, .. }) if key == expected,
+            "{contents}: {err}"
+        );
     }
 }
 
@@ -262,7 +276,7 @@ fn malformed_toml_reports_its_position_without_echoing_input() {
     let error = load_from(&options, BUILD, env(&[])).unwrap_err();
     let message = error.to_string();
 
-    assert_matches!(&error, Error::ParseFile { .. });
+    assert_matches!(&error.0, ErrorKind::Input(InputError::ParseFile { .. }));
     assert!(message.contains("invalid.toml: invalid TOML at byte"));
     assert!(!message.contains("fixture-value"));
     assert!(!format!("{error:?}").contains("fixture-value"));
@@ -284,7 +298,7 @@ fn independent_input_failures_are_reported_together() {
         secrets_dir: Some(dir.path().join("missing-secrets")),
     };
     let err = load_from(&options, BUILD, env(&[])).unwrap_err();
-    assert_matches!(&err, Error::InputErrors(errors) if errors.len() == 4, "{err}");
+    assert_matches!(&err.0, ErrorKind::Inputs(errors) if errors.len() == 4, "{err}");
     let message = err.to_string();
     for rejected in [
         "missing-secrets",
@@ -312,7 +326,7 @@ fn utf8_bom_loads_once_and_rejects_a_second_bom() {
         ..LoadOptions::default()
     };
     let cfg = load_from(&single, BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.log.level, "debug");
+    assert_eq!(cfg.log().level, "debug");
 
     let double_path = write(
         &dir,
@@ -324,7 +338,11 @@ fn utf8_bom_loads_once_and_rejects_a_second_bom() {
         ..LoadOptions::default()
     };
     let error = load_from(&double, BUILD, env(&[])).unwrap_err();
-    assert_matches!(&error, Error::ParseFile { path, .. } if path == &double_path, "{error}");
+    assert_matches!(
+        &error.0,
+        ErrorKind::Input(InputError::ParseFile { path, .. }) if path == &double_path,
+        "{error}"
+    );
     assert!(
         error
             .to_string()
@@ -341,11 +359,9 @@ fn a_replaced_file_does_not_change_the_admitted_source() {
     let source = scan_file(&path).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
-    let merged = config::Config::builder()
-        .add_source(source)
-        .build()
-        .unwrap();
-    assert_eq!(merged.get_string("log.level").unwrap(), "debug");
+    let merged: ConfigInput = merge_inputs(vec![source], variables::Variables::new()).unwrap();
+    let cfg = merged.admit(BUILD, crate::http::NO_SHUTDOWN_TAIL).unwrap();
+    assert_eq!(cfg.log().level, "debug");
 }
 
 #[rstest::rstest]
@@ -369,7 +385,7 @@ fn configuration_counts_reject_non_integer_toml(
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     assert!(
         err.to_string().contains(&format!("{section}.{key}")),
         "{err}"
@@ -385,11 +401,11 @@ fn only_numeric_zero_disables_the_http_in_flight_cap() {
         env(&[("APP__HTTP__MAX_IN_FLIGHT", "false")]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     assert!(err.to_string().contains("http.max_in_flight"), "{err}");
 
     let cfg = load_from(&options, BUILD, env(&[("APP__HTTP__MAX_IN_FLIGHT", "0")])).unwrap();
-    assert_eq!(cfg.http.listener().max_in_flight, None);
+    assert_eq!(cfg.http().listener().max_in_flight, None);
 }
 
 #[test]
@@ -399,14 +415,14 @@ fn http_can_limit_connections_below_concurrent_requests() {
         ("APP__HTTP__MAX_IN_FLIGHT", "32"),
     ]);
     assert_eq!(
-        cfg.http
+        cfg.http()
             .listener()
             .max_connections
             .map(std::num::NonZeroU32::get),
         Some(4)
     );
     assert_eq!(
-        cfg.http
+        cfg.http()
             .listener()
             .max_in_flight
             .map(std::num::NonZeroU32::get),
@@ -463,16 +479,16 @@ fn precedence_is_defaults_then_files_in_order_then_env() {
     )
     .unwrap();
     assert_eq!(
-        cfg.http.listener().addr,
+        cfg.http().listener().addr,
         "127.0.0.1:3".parse().unwrap(),
         "env wins"
     );
     assert_eq!(
-        cfg.http.listener().request_timeout,
+        cfg.http().listener().request_timeout,
         Duration::from_secs(2),
         "base file survives"
     );
-    assert_eq!(cfg.log.level, "debug");
+    assert_eq!(cfg.log().level, "debug");
 }
 
 #[test]
@@ -519,7 +535,11 @@ fn an_overlay_cannot_hide_keys_inside_arrays() {
         };
 
         let err = load_from(&options, BUILD, env(&[])).unwrap_err();
-        assert_matches!(&err, Error::UnaddressableKey { key, path } if key == expected && path == &base, "{err}");
+        assert_matches!(
+            &err.0,
+            ErrorKind::Input(InputError::UnaddressableKey { key, path }) if key == expected && path == &base,
+            "{err}"
+        );
     }
 }
 
@@ -532,21 +552,20 @@ fn env_parses_durations_sizes_numbers_and_enums() {
         ("APP__HTTP__MAX_CONNECTION_AGE", "1h"),
         ("APP__HTTP__ACCESS_LOG_HEALTH_PROBES", "true"),
         ("APP__LOG__FORMAT", "text"),
-        ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
+        ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "traceidratio"),
         ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", "0.5"),
     ]);
-    let http = cfg.http.listener();
+    let http = cfg.http().listener();
     assert_eq!(http.request_timeout, Duration::from_millis(500));
-    assert_eq!(http.max_body_bytes, bytesize::ByteSize::mib(2));
+    assert_eq!(http.max_body_bytes.get(), 2 * 1024 * 1024);
     assert_eq!(http.max_in_flight.map(std::num::NonZeroU32::get), Some(12));
     assert_eq!(http.max_connection_age, Some(Duration::from_hours(1)));
     assert!(http.access_log_health_probes);
-    assert_eq!(cfg.log.format, LogFormat::Text);
-    assert_eq!(
-        cfg.observability.otel.traces_sampler,
-        crate::TracesSampler::AlwaysOn
+    assert_eq!(cfg.log().format, LogFormat::Text);
+    assert_matches!(
+        cfg.observability().otel.traces_sampler,
+        crate::TracesSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON
     );
-    assert!((cfg.observability.otel.traces_sampler_arg - 0.5).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -582,8 +601,12 @@ fn sampler_ratio_refuses_booleans_and_words() {
         );
         match accepted {
             Some(expected) => {
-                let arg = loaded.unwrap().observability.otel.traces_sampler_arg;
-                assert!((arg - expected).abs() < f64::EPSILON, "{name}: {arg}");
+                assert_matches!(
+                    loaded.unwrap().observability().otel.traces_sampler,
+                    crate::TracesSampler::ParentBasedTraceIdRatio(arg)
+                        if (arg - expected).abs() < f64::EPSILON,
+                    "{name}"
+                );
             }
             None => assert!(
                 loaded
@@ -606,7 +629,7 @@ fn unknown_keys_fail_from_files_and_env() {
     };
     assert_matches!(
         load_from(&options, BUILD, env(&[])),
-        Err(Error::Deserialize(_))
+        Err(Error(ErrorKind::Deserialize(_)))
     );
     assert_matches!(
         load_from(
@@ -614,7 +637,7 @@ fn unknown_keys_fail_from_files_and_env() {
             BUILD,
             env(&[("APP__HTTP__BOGUS", "1")])
         ),
-        Err(Error::Deserialize(_))
+        Err(Error(ErrorKind::Deserialize(_)))
     );
 }
 
@@ -631,7 +654,11 @@ fn malformed_env_names_are_named() {
         "APP__HTTP__ADDR ",
     ] {
         let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, "x")])).unwrap_err();
-        assert_matches!(&err, Error::MalformedEnvName { name: n } if n == name, "{name}: {err}");
+        assert_matches!(
+            &err.0,
+            ErrorKind::Input(InputError::MalformedEnvName { name: n }) if n == name,
+            "{name}: {err}"
+        );
     }
 }
 
@@ -643,7 +670,7 @@ fn empty_env_value_is_an_explicit_override() {
         env(&[("APP__HTTP__ADDR", "")]),
     )
     .unwrap_err();
-    assert_matches!(err, Error::Deserialize(_), "{err}");
+    assert_matches!(err.0, ErrorKind::Deserialize(_), "{err}");
     assert!(err.to_string().contains("http.addr"), "{err}");
 }
 
@@ -660,7 +687,12 @@ fn secrets_in_files_are_refused_and_empty_placeholders_allowed() {
         ..LoadOptions::default()
     };
     let err = load_from(&options, BUILD, env(&[])).unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "observability.otel.exporter.otlp_headers", "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::SecretInFile { key, .. })
+            if key == "observability.otel.exporter.otlp_headers",
+        "{err}"
+    );
 
     let placeholder = write(
         &dir,
@@ -680,7 +712,7 @@ fn secret_from_env_is_accepted_and_redacted() {
         "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS",
         "authorization=Bearer s3cr3t",
     )]);
-    assert!(cfg.observability.otel.exporter.otlp_headers.is_some());
+    assert!(cfg.observability().otel.exporter.otlp_headers.is_some());
     assert!(!format!("{cfg:?}").contains("s3cr3t"));
 }
 
@@ -692,7 +724,7 @@ fn missing_file_is_reported() {
     };
     assert_matches!(
         load_from(&options, BUILD, env(&[])),
-        Err(Error::ReadFile { .. })
+        Err(Error(ErrorKind::Input(InputError::ReadFile { .. })))
     );
 }
 
@@ -707,7 +739,7 @@ fn nonzero_counts_reject_zero_and_boolean_text() {
     for &(name, key) in cases {
         for input in ["0", "yes"] {
             let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, input)])).unwrap_err();
-            assert_matches!(err, Error::Deserialize(_), "{name}: {err}");
+            assert_matches!(err.0, ErrorKind::Deserialize(_), "{name}: {err}");
             assert!(err.to_string().contains(key), "{name}: {err}");
         }
     }
@@ -719,7 +751,7 @@ fn nonzero_counts_reject_zero_and_boolean_text() {
             env(&[("APP__JOBS__MAX_WORKERS", input)]),
         )
         .unwrap_err();
-        assert_matches!(err, Error::Deserialize(_), "{err}");
+        assert_matches!(err.0, ErrorKind::Deserialize(_), "{err}");
         assert!(err.to_string().contains("jobs.max_workers"), "{err}");
     }
     // template:end jobs:load-zero-jobs-count
@@ -729,8 +761,8 @@ fn nonzero_counts_reject_zero_and_boolean_text() {
 #[test]
 fn worker_defaults_load_with_build_info() {
     let cfg = load_worker_from(&LoadOptions::default(), BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.app.version, "1.2.3");
-    assert_eq!(cfg.app.commit, "abc123");
+    assert_eq!(cfg.app().version, "1.2.3");
+    assert_eq!(cfg.app().commit, "abc123");
 }
 // template:end worker:load-worker-defaults
 
@@ -741,15 +773,15 @@ fn drain_timeout_and_probe_budget_load_from_env() {
         ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
         ("APP__HEALTH__PROBE_BUDGET", "3s"),
     ]);
-    assert_eq!(canonical.http.drain_timeout, Duration::from_secs(20));
-    assert_eq!(canonical.health.probe_budget, Duration::from_secs(3));
+    assert_eq!(canonical.http().drain_timeout, Duration::from_secs(20));
+    assert_eq!(canonical.health().probe_budget, Duration::from_secs(3));
 
     for (name, key) in [
         ("APP__HTTP__SHUTDOWN_TIMEOUT", "shutdown_timeout"),
         ("APP__HEALTH__READINESS_TIMEOUT", "readiness_timeout"),
     ] {
         let legacy = load_from(&LoadOptions::default(), BUILD, env(&[(name, "22s")])).unwrap_err();
-        assert_matches!(legacy, Error::Deserialize(_), "{legacy}");
+        assert_matches!(legacy.0, ErrorKind::Deserialize(_), "{legacy}");
         assert!(legacy.to_string().contains(key), "{legacy}");
     }
 }
@@ -784,12 +816,12 @@ fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
     let options = with_secrets(&dir);
     let from_files = load_from(&options, BUILD, env(&[])).unwrap();
     assert_eq!(
-        from_files.http.listener().addr,
+        from_files.http().listener().addr,
         "127.0.0.1:7".parse().unwrap()
     );
     let cfg = load_from(&options, BUILD, env(&[("APP__HTTP__ADDR", "127.0.0.1:9")])).unwrap();
     assert_eq!(
-        cfg.observability
+        cfg.observability()
             .otel
             .exporter
             .otlp_headers
@@ -800,11 +832,11 @@ fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
         "only trailing line breaks are removed"
     );
     assert_eq!(
-        cfg.http.listener().addr,
+        cfg.http().listener().addr,
         "127.0.0.1:9".parse().unwrap(),
         "env wins"
     );
-    assert_eq!(cfg.log.level, "debug");
+    assert_eq!(cfg.log().level, "debug");
     assert!(!format!("{cfg:?}").contains("s3cr3t"));
 }
 
@@ -823,7 +855,7 @@ fn secrets_directory_follows_the_links_of_a_mounted_volume() {
         .unwrap();
 
     let cfg = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.log.level, "warn");
+    assert_eq!(cfg.log().level, "warn");
 }
 
 #[cfg(unix)]
@@ -859,9 +891,9 @@ fn projected_secrets_use_the_active_generation_even_before_its_public_links_are_
     std::fs::rename(&pending, &active).unwrap();
 
     let cfg = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.log.level, "debug");
-    assert_eq!(cfg.log.format, LogFormat::Text);
-    assert_eq!(cfg.http.listener().addr, "0.0.0.0:8080".parse().unwrap());
+    assert_eq!(cfg.log().level, "debug");
+    assert_eq!(cfg.log().format, LogFormat::Text);
+    assert_eq!(cfg.http().listener().addr, "0.0.0.0:8080".parse().unwrap());
 }
 
 #[cfg(unix)]
@@ -884,8 +916,12 @@ fn secrets_directory_refuses_a_symlink_to_a_fifo_without_waiting_for_a_writer() 
         .expect("secret loading must return without opening a blocking FIFO")
         .unwrap_err();
     loader.join().unwrap();
-    assert_matches!(&err, Error::ReadSecret { path, error }
-        if *path == file && error.kind() == std::io::ErrorKind::InvalidInput, "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::ReadSecret { path, error })
+            if *path == file && error.kind() == std::io::ErrorKind::InvalidInput,
+        "{err}"
+    );
 }
 
 #[test]
@@ -896,13 +932,17 @@ fn secrets_directory_accepts_one_mib_and_refuses_larger_files() {
     let options = with_secrets(&dir);
     write(&dir, "APP__LOG__LEVEL", &value);
     let cfg = load_from(&options, BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.log.level, "warn");
+    assert_eq!(cfg.log().level, "warn");
 
     value.push('\n');
     let file = write(&dir, "APP__LOG__LEVEL", &value);
     let err = load_from(&options, BUILD, env(&[])).unwrap_err();
-    assert_matches!(&err, Error::ReadSecret { path, error }
-        if *path == file && error.kind() == std::io::ErrorKind::InvalidData, "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::ReadSecret { path, error })
+            if *path == file && error.kind() == std::io::ErrorKind::InvalidData,
+        "{err}"
+    );
     assert!(err.to_string().contains("1 MiB secret file limit"), "{err}");
 }
 
@@ -942,21 +982,25 @@ fn secrets_directory_failures_name_the_path_and_no_content() {
     };
     assert_matches!(
         load_from(&missing, BUILD, env(&[])),
-        Err(Error::ReadSecretsDir { .. })
+        Err(Error(ErrorKind::Input(InputError::ReadSecretsDir { .. })))
     );
 
     for name in ["APP__HTTP.ADDR", "APP__HTTP__ADDR__", "APP__"] {
         let dir = tempfile::tempdir().unwrap();
         let file = write(&dir, name, "127.0.0.1:7");
         let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
-        assert_matches!(&err, Error::MalformedSecretName { path } if *path == file, "{name}: {err}");
+        assert_matches!(
+            &err.0,
+            ErrorKind::Input(InputError::MalformedSecretName { path }) if *path == file,
+            "{name}: {err}"
+        );
     }
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("APP__HTTP__ADDR")).unwrap();
     assert_matches!(
         load_from(&with_secrets(&dir), BUILD, env(&[])),
-        Err(Error::ReadSecret { .. })
+        Err(Error(ErrorKind::Input(InputError::ReadSecret { .. })))
     );
 
     for content in [&b"hunter2\xff"[..], &b"\0hunter2"[..]] {
@@ -964,7 +1008,11 @@ fn secrets_directory_failures_name_the_path_and_no_content() {
         let file = dir.path().join("APP__LOG__LEVEL");
         std::fs::write(&file, content).unwrap();
         let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
-        assert_matches!(&err, Error::ReadSecret { path, .. } if *path == file, "{err}");
+        assert_matches!(
+            &err.0,
+            ErrorKind::Input(InputError::ReadSecret { path, .. }) if *path == file,
+            "{err}"
+        );
         assert!(!err.to_string().contains("hunter2"), "{err}");
     }
 }
@@ -980,8 +1028,12 @@ fn two_spellings_of_one_variable_are_refused() {
         ]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::AmbiguousName { name, other }
-            if name == "APP__http__addr" && other == "APP__HTTP__ADDR", "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::AmbiguousName { name, other })
+            if name == "APP__http__addr" && other == "APP__HTTP__ADDR",
+        "{err}"
+    );
 }
 
 #[rstest::rstest]
@@ -1027,7 +1079,11 @@ fn variables_that_are_not_unicode_are_refused() {
         [(OsString::from("APP__LOG__LEVEL"), not_unicode("hunter2"))],
     )
     .unwrap_err();
-    assert_matches!(&err, Error::NonUnicodeEnvValue { name } if name == "APP__LOG__LEVEL", "{err}");
+    assert_matches!(
+        &err.0,
+        ErrorKind::Input(InputError::NonUnicodeEnvValue { name }) if name == "APP__LOG__LEVEL",
+        "{err}"
+    );
     assert!(!err.to_string().contains("hunter2"), "{err}");
 
     let err = load_from(
@@ -1036,7 +1092,11 @@ fn variables_that_are_not_unicode_are_refused() {
         [(not_unicode("APP__LOG__LEVEL"), OsString::from("info"))],
     )
     .unwrap_err();
-    assert_matches!(err, Error::MalformedEnvName { .. }, "{err}");
+    assert_matches!(
+        err.0,
+        ErrorKind::Input(InputError::MalformedEnvName { .. }),
+        "{err}"
+    );
 
     load_from(
         &LoadOptions::default(),
@@ -1052,8 +1112,8 @@ fn typed_version_and_commit_override_build_info() {
         ("APP__APP__VERSION", "9.9.9"),
         ("APP__APP__COMMIT", "deadbeef"),
     ]);
-    assert_eq!(cfg.app.version, "9.9.9");
-    assert_eq!(cfg.app.commit, "deadbeef");
+    assert_eq!(cfg.app().version, "9.9.9");
+    assert_eq!(cfg.app().commit, "deadbeef");
 }
 
 #[test]
@@ -1069,7 +1129,7 @@ fn toml_non_string_on_string_field_is_rejected() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(rendered.contains("app.instance_id"), "{rendered}");
     assert!(rendered.contains("expected a string"), "{rendered}");
@@ -1088,7 +1148,7 @@ fn toml_non_boolean_on_boolean_field_is_rejected() {
         env(&[]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(
         rendered.contains("http.access_log_health_probes"),
@@ -1105,7 +1165,7 @@ fn environment_enum_rejection_names_variants_without_echoing_value() {
         env(&[("APP__LOG__FORMAT", "yaml")]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(
         rendered.contains("expected `json` or `text` for key `log.format` in the environment"),
@@ -1124,7 +1184,7 @@ fn unquoted_toml_datetime_is_rejected_unless_overridden() {
         ..LoadOptions::default()
     };
     let err = load_from(&base_only, BUILD, env(&[])).unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(rendered.contains("app.env"), "{rendered}");
     assert!(
@@ -1139,10 +1199,10 @@ fn unquoted_toml_datetime_is_rejected_unless_overridden() {
         ..LoadOptions::default()
     };
     let cfg = load_from(&with_overlay, BUILD, env(&[])).unwrap();
-    assert_eq!(cfg.app.env, "2026-11-13");
+    assert_eq!(cfg.app().env(), "2026-11-13");
 
     let cfg = load_from(&base_only, BUILD, env(&[("APP__APP__ENV", "production")])).unwrap();
-    assert_eq!(cfg.app.env, "production");
+    assert_eq!(cfg.app().env(), "production");
 
     let scalar_section = LoadOptions {
         config: Some(write(&dir, "scalar.toml", "app = 2026-11-13\n")),
@@ -1154,7 +1214,7 @@ fn unquoted_toml_datetime_is_rejected_unless_overridden() {
         env(&[("APP__APP__ENV", "production")]),
     )
     .unwrap();
-    assert_eq!(cfg.app.env, "production");
+    assert_eq!(cfg.app().env(), "production");
 }
 
 #[test]
@@ -1162,16 +1222,13 @@ fn shutdown_tail_aggregates_grace_budget_with_other_violations() {
     let err = load_with_tail_from(
         &LoadOptions::default(),
         BUILD,
-        Some(crate::ShutdownTail::new(
-            Duration::from_millis(18_500),
-            "teardown tail",
-        )),
+        crate::ShutdownTail::new(Duration::from_millis(18_500), "teardown tail"),
         env(&[("APP__HTTP__GRACE_PERIOD", "40s"), ("APP__APP__ENV", " ")]),
     )
     .unwrap_err();
-    let Error::Validate(errors) = &err else {
-        panic!("expected aggregated validation errors: {err}");
-    };
+    let errors = err
+        .validation_errors()
+        .expect("expected aggregated validation errors");
     assert!(errors.names("http.grace_period"), "{errors}");
     assert!(errors.names("app.env"), "{errors}");
 }

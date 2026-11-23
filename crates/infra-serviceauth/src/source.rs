@@ -22,13 +22,15 @@ pub struct SigningOptions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SigningError {
-    #[error("the signing key is not a PKCS#8 PEM EC P-256 private key")]
-    InvalidKey,
-    #[error("the receiver is not a valid service name")]
-    InvalidReceiver,
-    #[error("service authentication is enabled but this service has no signing key")]
-    NoSigningKey,
+#[error("the signing key is not a PKCS#8 PEM EC P-256 private key")]
+pub struct InvalidSigningKey;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("service authentication is enabled but this service has no signing key")]
+pub struct NoSigningKey;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum TokenIssueError {
     #[error("the system clock precedes the Unix epoch")]
     Clock,
     #[error("a service token could not be signed")]
@@ -60,9 +62,9 @@ impl TokenSource {
         Self(Signing::WithoutKey)
     }
 
-    pub fn try_new(options: SigningOptions) -> Result<Self, SigningError> {
+    pub fn try_new(options: SigningOptions) -> Result<Self, InvalidSigningKey> {
         let key = EncodingKey::from_ec_pem(options.private_key.expose_secret().as_bytes())
-            .map_err(|_| SigningError::InvalidKey)?;
+            .map_err(|_| InvalidSigningKey)?;
         let mut header = Header::new(Algorithm::ES256);
         header.typ = Some(options.jwt_type.as_str().to_owned());
         header.kid = Some(options.key_id.as_str().to_owned());
@@ -71,21 +73,18 @@ impl TokenSource {
             header,
             name: options.name,
         };
-        signer
-            .sign(&signer.name, 0)
-            .map_err(|_| SigningError::InvalidKey)?;
+        signer.prove_key().map_err(|_| InvalidSigningKey)?;
         Ok(Self(Signing::Key(Arc::new(signer))))
     }
 
     pub fn receiver(
         &self,
-        receiver: &str,
+        audience: ServiceName,
         origin: http::Uri,
-    ) -> Result<ReceiverTokens, SigningError> {
-        let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
+    ) -> Result<ReceiverTokens, NoSigningKey> {
         let state = match &self.0 {
             Signing::Disabled => ReceiverState::Disabled(audience),
-            Signing::WithoutKey => return Err(SigningError::NoSigningKey),
+            Signing::WithoutKey => return Err(NoSigningKey),
             Signing::Key(signer) => ReceiverState::Active(Arc::new(ActiveReceiver {
                 signer: Arc::clone(signer),
                 audience,
@@ -111,11 +110,11 @@ struct ActiveReceiver {
     signer: Arc<Signer>,
     audience: ServiceName,
     origin: http::Uri,
-    cached: ArcSwapOption<Cached>,
+    cached: ArcSwapOption<CachedAuthorization>,
     refresh: Mutex<()>,
 }
 
-struct Cached {
+struct CachedAuthorization {
     issued_at: u64,
     authorization: HeaderValue,
 }
@@ -143,11 +142,11 @@ impl ReceiverTokens {
         }
     }
 
-    pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
+    pub fn authorization(&self) -> Result<Option<HeaderValue>, TokenIssueError> {
         let ReceiverState::Active(active) = &self.0 else {
             return Ok(None);
         };
-        let now = unix_seconds().ok_or(SigningError::Clock)?;
+        let now = unix_seconds().ok_or(TokenIssueError::Clock)?;
         active.authorization_at(now).map(Some)
     }
 }
@@ -159,13 +158,13 @@ pub fn has_cached_authorization(tokens: &ReceiverTokens) -> bool {
 }
 
 impl ActiveReceiver {
-    fn reusable(cached: Option<&Arc<Cached>>, now: u64) -> Option<HeaderValue> {
+    fn reusable(cached: Option<&Arc<CachedAuthorization>>, now: u64) -> Option<HeaderValue> {
         cached
-            .filter(|token| (token.issued_at..token.issued_at + REUSE_SECONDS).contains(&now))
-            .map(|token| token.authorization.clone())
+            .filter(|cached| (cached.issued_at..cached.issued_at + REUSE_SECONDS).contains(&now))
+            .map(|cached| cached.authorization.clone())
     }
 
-    fn authorization_at(&self, now: u64) -> Result<HeaderValue, SigningError> {
+    fn authorization_at(&self, now: u64) -> Result<HeaderValue, TokenIssueError> {
         if let Some(authorization) = Self::reusable(self.cached.load().as_ref(), now) {
             return Ok(authorization);
         }
@@ -173,15 +172,20 @@ impl ActiveReceiver {
         if let Some(authorization) = Self::reusable(self.cached.load().as_ref(), now) {
             return Ok(authorization);
         }
-        let token = self.signer.sign(&self.audience, now)?;
-        let bearer = Zeroizing::new(format!("Bearer {}", token.as_str()));
-        let mut authorization =
-            HeaderValue::from_str(bearer.as_str()).map_err(|_| SigningError::Signing)?;
-        authorization.set_sensitive(true);
-        self.cached.store(Some(Arc::new(Cached {
+        let authorization = self.issue(now)?;
+        self.cached.store(Some(Arc::new(CachedAuthorization {
             issued_at: now,
             authorization: authorization.clone(),
         })));
+        Ok(authorization)
+    }
+
+    fn issue(&self, now: u64) -> Result<HeaderValue, TokenIssueError> {
+        let token = self.signer.sign(&self.audience, now)?;
+        let bearer = Zeroizing::new(format!("Bearer {}", token.as_str()));
+        let mut authorization =
+            HeaderValue::from_str(bearer.as_str()).map_err(|_| TokenIssueError::Signing)?;
+        authorization.set_sensitive(true);
         Ok(authorization)
     }
 }
@@ -202,7 +206,11 @@ struct Claims<'a> {
 }
 
 impl Signer {
-    fn sign(&self, audience: &ServiceName, now: u64) -> Result<Zeroizing<String>, SigningError> {
+    fn prove_key(&self) -> Result<(), TokenIssueError> {
+        self.sign(&self.name, 0).map(drop)
+    }
+
+    fn sign(&self, audience: &ServiceName, now: u64) -> Result<Zeroizing<String>, TokenIssueError> {
         let claims = Claims {
             iss: self.name.as_str(),
             sub: self.name.as_str(),
@@ -212,7 +220,7 @@ impl Signer {
         };
         jsonwebtoken::encode(&self.header, &claims, &self.key)
             .map(Zeroizing::new)
-            .map_err(|_| SigningError::Signing)
+            .map_err(|_| TokenIssueError::Signing)
     }
 }
 
@@ -252,11 +260,15 @@ mod tests {
             .to_owned()
     }
 
+    fn service(name: &str) -> ServiceName {
+        name.parse().unwrap()
+    }
+
     #[test]
     fn signed_tokens_meet_the_contract_the_receiver_verifies() {
         let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(options(&key)).unwrap();
-        let catalog = source.receiver("catalog", origin()).unwrap();
+        let catalog = source.receiver(service("catalog"), origin()).unwrap();
         let header = at(&catalog, NOW);
         assert!(header.is_sensitive());
         let token = token(&header);
@@ -300,13 +312,13 @@ mod tests {
     fn a_handle_reuses_its_token_for_half_its_lifetime() {
         let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(options(&key)).unwrap();
-        let catalog = source.receiver("catalog", origin()).unwrap();
+        let catalog = source.receiver(service("catalog"), origin()).unwrap();
         let first = at(&catalog, NOW);
         let shared = catalog.clone();
         assert_eq!(at(&shared, NOW + 29), first);
-        let inventory = source.receiver("inventory", origin()).unwrap();
+        let inventory = source.receiver(service("inventory"), origin()).unwrap();
         assert_ne!(at(&inventory, NOW + 29), first);
-        let another_catalog = source.receiver("catalog", origin()).unwrap();
+        let another_catalog = source.receiver(service("catalog"), origin()).unwrap();
         assert_ne!(at(&another_catalog, NOW + 29), first);
         assert_eq!(at(&catalog, NOW + 29), first);
         let renewed = at(&catalog, NOW + 30);
@@ -323,31 +335,21 @@ mod tests {
             .into();
         assert_eq!(
             TokenSource::try_new(invalid).unwrap_err(),
-            SigningError::InvalidKey
+            InvalidSigningKey
         );
         let source = TokenSource::try_new(options(&key)).unwrap();
         assert_eq!(
-            source.receiver("Catalog", origin()).unwrap_err(),
-            SigningError::InvalidReceiver
-        );
-        assert_eq!(
             TokenSource::without_key()
-                .receiver("catalog", origin())
+                .receiver(service("catalog"), origin())
                 .unwrap_err(),
-            SigningError::NoSigningKey
+            NoSigningKey
         );
         let disabled = TokenSource::disabled()
-            .receiver("catalog", origin())
+            .receiver(service("catalog"), origin())
             .unwrap();
         assert_eq!(disabled.authorization(), Ok(None));
         assert!(format!("{disabled:?}").contains("catalog"));
-        assert_eq!(
-            TokenSource::disabled()
-                .receiver("Catalog", origin())
-                .unwrap_err(),
-            SigningError::InvalidReceiver
-        );
-        let catalog = source.receiver("catalog", origin()).unwrap();
+        let catalog = source.receiver(service("catalog"), origin()).unwrap();
         assert!(catalog.authorization().unwrap().is_some());
         assert_eq!(
             format!("{:?}", TokenSource::disabled()),

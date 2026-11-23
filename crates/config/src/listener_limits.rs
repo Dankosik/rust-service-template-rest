@@ -8,6 +8,25 @@ pub(super) const DEFAULT_MAX_IN_FLIGHT: u32 = 256;
 pub(super) const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(1);
 pub(super) const DEFAULT_MAX_CONNECTIONS: u32 = 4096;
 
+#[derive(Clone, Copy)]
+pub(super) struct ListenerKind {
+    section: &'static str,
+    subject: &'static str,
+}
+
+impl ListenerKind {
+    pub(super) const HTTP: Self = Self {
+        section: "http",
+        subject: "requests",
+    };
+    // template:begin grpc:listener-kind
+    pub(super) const GRPC: Self = Self {
+        section: "grpc",
+        subject: "calls",
+    };
+    // template:end grpc:listener-kind
+}
+
 pub(super) struct RawListenerLimits {
     pub(super) request_timeout: Duration,
     pub(super) max_in_flight: u32,
@@ -27,33 +46,32 @@ pub(super) struct AdmittedListenerLimits {
 impl RawListenerLimits {
     pub(super) fn admit(
         self,
-        section: &str,
+        ListenerKind { section, subject }: ListenerKind,
         drain_budget: Option<Duration>,
-        subject: &str,
-        violations: &mut Violations,
+        v: &mut Violations,
     ) -> AdmittedListenerLimits {
-        violations.check(validate_request_timeout(
+        v.check(validate_request_timeout(
             &format!("{section}.request_timeout"),
             self.request_timeout,
             drain_budget,
             subject,
         ));
-        violations.check(int_range(
+        v.check(int_range(
             &format!("{section}.max_in_flight"),
             self.max_in_flight,
             0..=100_000,
         ));
-        violations.check(duration_range(
+        v.check(duration_range(
             &format!("{section}.admission_wait"),
             self.admission_wait,
             Duration::ZERO..=Duration::from_mins(10),
         ));
-        violations.check(int_range(
+        v.check(int_range(
             &format!("{section}.max_connections"),
             self.max_connections,
             0..=1_000_000,
         ));
-        violations.check(connection_age_range(
+        v.check(connection_age_range(
             &format!("{section}.max_connection_age"),
             self.max_connection_age,
         ));

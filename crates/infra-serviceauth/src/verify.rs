@@ -180,27 +180,34 @@ impl Verifier {
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Caller, Failure> {
-        let result = rfc6750::token_bytes(authorization)
-            .map_err(|refusal| match refusal {
-                NoBearer::Missing => Reason::Missing,
-                NoBearer::Malformed => Reason::Malformed,
-            })
-            .and_then(|token| self.verify_at(token, unix_seconds().ok_or(Reason::Clock)?));
-        match result {
+        match self.verify_authorization(authorization) {
             Ok(caller) => {
                 self.0.verified.increment(1);
                 Ok(caller)
             }
             Err(reason) => {
-                self.0.refused[reason]
-                    .get_or_init(|| {
-                        metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "failure", "reason" => reason.label())
-                    })
-                    .increment(1);
-                tracing::debug!(reason = reason.label(), "service_auth_verification_failed");
+                self.record_refusal(reason);
                 Err(reason.failure())
             }
         }
+    }
+
+    fn verify_authorization<'a>(
+        &self,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<Caller, Reason> {
+        let token = rfc6750::token_bytes(authorization)?;
+        let now = unix_seconds().ok_or(Reason::Clock)?;
+        self.verify_at(token, now)
+    }
+
+    fn record_refusal(&self, reason: Reason) {
+        self.0.refused[reason]
+            .get_or_init(|| {
+                metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "failure", "reason" => reason.label())
+            })
+            .increment(1);
+        tracing::debug!(reason = reason.label(), "service_auth_verification_failed");
     }
 
     fn verify_at(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
@@ -229,15 +236,16 @@ impl Verifier {
 
     fn verify_uncached(&self, token: &[u8], now: u64) -> Result<(Caller, Window), Reason> {
         let rfc7515::Compact {
-            signing_input: message,
-            header,
-            payload,
+            signing_input,
+            header: header_segment,
+            payload: payload_segment,
             signature,
         } = rfc7515::compact(token).ok_or(Reason::Header)?;
-        let header = decode_segment(header, Reason::Header)?;
+        let header_bytes = decode_segment(header_segment, Reason::Header)?;
         // RFC 7515 §5.2
-        let header = std::str::from_utf8(&header).map_err(|_| Reason::Header)?;
-        let header: TokenHeader<'_> = serde_json::from_str(header).map_err(|_| Reason::Header)?;
+        let header_json = std::str::from_utf8(&header_bytes).map_err(|_| Reason::Header)?;
+        let header: TokenHeader<'_> =
+            serde_json::from_str(header_json).map_err(|_| Reason::Header)?;
         if header.has_crit {
             return Err(Reason::Header);
         }
@@ -246,31 +254,26 @@ impl Verifier {
         }
         if !header
             .typ
-            .as_ref()
-            .is_some_and(|typ| self.0.jwt_type.admits(typ.as_str()))
+            .as_deref()
+            .is_some_and(|typ| self.0.jwt_type.admits(typ))
         {
             return Err(Reason::Type);
         }
         let kid = header
             .kid
-            .as_ref()
-            .map(BorrowableString::as_str)
+            .as_deref()
             .filter(|kid| !kid.is_empty())
             .ok_or(Reason::KeyId)?;
-        let payload = decode_segment(payload, Reason::Claims)?;
-        let payload = std::str::from_utf8(&payload).map_err(|_| Reason::Claims)?;
-        let claims: Claims<'_> = serde_json::from_str(payload).map_err(|_| Reason::Claims)?;
-        let issuer = claims
-            .iss
-            .as_ref()
-            .map(BorrowableString::as_str)
-            .ok_or(Reason::Issuer)?;
+        let claims_bytes = decode_segment(payload_segment, Reason::Claims)?;
+        let claims_json = std::str::from_utf8(&claims_bytes).map_err(|_| Reason::Claims)?;
+        let claims: Claims<'_> = serde_json::from_str(claims_json).map_err(|_| Reason::Claims)?;
+        let issuer = claims.iss.as_deref().ok_or(Reason::Issuer)?;
         let (caller, keys) = self.0.trust.caller(issuer).ok_or(Reason::Issuer)?;
         let index = keys
             .binary_search_by(|key| key.kid.as_str().cmp(kid))
             .map_err(|_| Reason::UnknownKey)?;
-        verify_signature(&keys[index].public_key, message, signature)?;
-        if claims.sub.as_ref().map(BorrowableString::as_str) != Some(issuer) {
+        verify_signature(&keys[index].public_key, signing_input, signature)?;
+        if claims.sub.as_deref() != Some(issuer) {
             return Err(Reason::Subject);
         }
         if !claims
@@ -308,7 +311,7 @@ fn decode_segment(encoded: &[u8], reason: Reason) -> Result<SmallVec<[u8; 256]>,
 
 fn verify_signature(
     key: &aws_lc_rs::signature::ParsedPublicKey,
-    message: &[u8],
+    signing_input: &[u8],
     encoded_signature: &[u8],
 ) -> Result<(), Reason> {
     let mut signature = [0_u8; ES256_SIGNATURE_BYTES];
@@ -318,7 +321,7 @@ fn verify_signature(
     if length != signature.len() {
         return Err(Reason::Signature);
     }
-    key.verify_sig(message, &signature)
+    key.verify_sig(signing_input, &signature)
         .map_err(|_| Reason::Signature)
 }
 
@@ -326,6 +329,15 @@ fn verify_signature(
 enum WindowRejection {
     Expired,
     NotYetValid,
+}
+
+impl From<NoBearer> for Reason {
+    fn from(refusal: NoBearer) -> Self {
+        match refusal {
+            NoBearer::Missing => Self::Missing,
+            NoBearer::Malformed => Self::Malformed,
+        }
+    }
 }
 
 impl From<WindowRejection> for Reason {
@@ -399,7 +411,7 @@ impl Claims<'_> {
 #[derive(Debug)]
 enum Audience<'a> {
     Single(Cow<'a, str>),
-    Other,
+    NotSingle,
 }
 
 impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
@@ -422,13 +434,13 @@ impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
 
             fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let Some(first) = seq.next_element::<BorrowableString<'de>>()? else {
-                    return Ok(Audience::Other);
+                    return Ok(Audience::NotSingle);
                 };
                 if seq.next_element::<BorrowableString<'de>>()?.is_none() {
                     return Ok(Audience::Single(first.0));
                 }
                 while seq.next_element::<BorrowableString<'de>>()?.is_some() {}
-                Ok(Audience::Other)
+                Ok(Audience::NotSingle)
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -438,9 +450,11 @@ impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
-impl BorrowableString<'_> {
-    fn as_str(&self) -> &str {
-        self.0.as_ref()
+impl std::ops::Deref for BorrowableString<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
     }
 }
 

@@ -7,10 +7,10 @@ use arc_swap::{ArcSwap, Guard};
 use shared_rules::oidc_jwt::REFRESH_COOLDOWN;
 use tokio::sync::watch;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
+    DiscoveryError, JwksError,
     jwks::{AllowedAlgorithms, JwksSource, KeySet, KeySetFailure},
     provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
@@ -28,11 +28,18 @@ pub(crate) enum SignatureRefresh {
     WorkerLost,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerState {
+    Running,
+    Stopped,
+    Lost,
+}
+
 struct State {
     requested_ticket: u64,
     finished_ticket: u64,
     cooldown_started_at: Instant,
-    stopped: bool,
+    worker: WorkerState,
 }
 
 impl State {
@@ -47,6 +54,7 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 enum MissAdmission {
     Answer(SignatureRefresh),
     Wait(u64),
@@ -55,7 +63,6 @@ enum MissAdmission {
 pub(crate) struct KeyStore {
     keys: ArcSwap<KeySet>,
     state: watch::Sender<State>,
-    worker_lost: CancellationToken,
     last_acquisition: metrics::Gauge,
 }
 
@@ -67,7 +74,7 @@ impl KeyStore {
             requested_ticket: 0,
             finished_ticket: 0,
             cooldown_started_at: Instant::now(),
-            stopped: false,
+            worker: WorkerState::Running,
         });
         metrics::describe_gauge!(
             ACQUISITION_METRIC,
@@ -79,7 +86,6 @@ impl KeyStore {
         Arc::new(Self {
             keys,
             state,
-            worker_lost: CancellationToken::new(),
             last_acquisition,
         })
     }
@@ -93,25 +99,41 @@ impl KeyStore {
         (!Arc::ptr_eq(&installed, checked)).then(|| Arc::clone(&installed))
     }
 
+    fn inspect_signature_miss(
+        &self,
+        state: &State,
+        checked: &Arc<KeySet>,
+    ) -> Option<MissAdmission> {
+        if state.worker == WorkerState::Stopped {
+            return Some(MissAdmission::Answer(SignatureRefresh::NoNewerSet));
+        }
+        if let Some(keys) = self.newer_set(checked) {
+            return Some(MissAdmission::Answer(SignatureRefresh::NewerSet(keys)));
+        }
+        if state.worker == WorkerState::Lost {
+            return Some(MissAdmission::Answer(SignatureRefresh::WorkerLost));
+        }
+        if let Some(ticket) = state.pending() {
+            return Some(MissAdmission::Wait(ticket));
+        }
+        if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
+            return Some(MissAdmission::Answer(SignatureRefresh::NoNewerSet));
+        }
+        None
+    }
+
     fn admit_signature_miss(&self, checked: &Arc<KeySet>) -> MissAdmission {
+        let fast_path = {
+            let state = self.state.borrow();
+            self.inspect_signature_miss(&state, checked)
+        };
+        if let Some(admission) = fast_path {
+            return admission;
+        }
         let mut admission = MissAdmission::Answer(SignatureRefresh::NoNewerSet);
         self.state.send_if_modified(|state| {
-            if state.stopped {
-                return false;
-            }
-            if let Some(keys) = self.newer_set(checked) {
-                admission = MissAdmission::Answer(SignatureRefresh::NewerSet(keys));
-                return false;
-            }
-            if self.worker_lost.is_cancelled() {
-                admission = MissAdmission::Answer(SignatureRefresh::WorkerLost);
-                return false;
-            }
-            if let Some(ticket) = state.pending() {
-                admission = MissAdmission::Wait(ticket);
-                return false;
-            }
-            if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
+            if let Some(decided) = self.inspect_signature_miss(state, checked) {
+                admission = decided;
                 return false;
             }
             admission = MissAdmission::Wait(state.request_fetch());
@@ -129,18 +151,18 @@ impl KeyStore {
             MissAdmission::Wait(ticket) => ticket,
         };
         let mut state_changes = self.state.subscribe();
-        match self
-            .worker_lost
-            .run_until_cancelled(
-                state_changes.wait_for(|state| state.stopped || state.finished_ticket >= ticket),
-            )
+        let worker = state_changes
+            .wait_for(|state| {
+                state.worker != WorkerState::Running || state.finished_ticket >= ticket
+            })
             .await
-        {
-            Some(Ok(state)) if !state.stopped => self
+            .map(|state| state.worker);
+        match worker {
+            Ok(WorkerState::Lost) => SignatureRefresh::WorkerLost,
+            Ok(WorkerState::Stopped) | Err(_) => SignatureRefresh::NoNewerSet,
+            Ok(WorkerState::Running) => self
                 .newer_set(checked)
                 .map_or(SignatureRefresh::NoNewerSet, SignatureRefresh::NewerSet),
-            Some(_) => SignatureRefresh::NoNewerSet,
-            None => SignatureRefresh::WorkerLost,
         }
     }
 
@@ -159,37 +181,44 @@ impl KeyStore {
     }
 
     pub(crate) fn finish(&self, ticket: u64, replacement: Result<Arc<KeySet>, KeySetFailure>) {
-        let (result, reason) = match &replacement {
+        let (result_label, reason_label) = match &replacement {
             Ok(_) => ("success", "success"),
             Err(failure) => {
-                let reason = failure.label();
-                match failure {
-                    KeySetFailure::Discovery(error) => {
-                        warn!(reason, cause = ?error.reason(), "authn_jwks_refresh_failed");
-                    }
-                    KeySetFailure::Fetch(cause) => {
-                        warn!(reason, ?cause, "authn_jwks_refresh_failed");
-                    }
-                    KeySetFailure::Parse | KeySetFailure::NoUsableKeys => {
-                        warn!(reason, "authn_jwks_refresh_failed");
-                    }
-                }
-                ("failure", reason)
+                warn_refresh_failure(failure);
+                ("failure", failure.label())
             }
         };
+        let mut previous = None;
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
-                self.keys.store(keys);
+                previous = Some(self.keys.swap(keys));
                 self.last_acquisition
                     .set(acquisition_timestamp(SystemTime::now()));
             }
             state.finished_ticket = ticket;
         });
-        metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
+        drop(previous);
+        metrics::counter!(REFRESH_METRIC, "result" => result_label, "reason" => reason_label)
+            .increment(1);
     }
 
     fn stop(&self) {
-        self.state.send_modify(|state| state.stopped = true);
+        self.state
+            .send_modify(|state| state.worker = WorkerState::Stopped);
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "std::mem::DropGuard invokes its drop callback with owned Arc<KeyStore>"
+    )]
+    fn mark_lost(store: Arc<Self>) {
+        store.state.send_if_modified(|state| {
+            if state.worker != WorkerState::Running {
+                return false;
+            }
+            state.worker = WorkerState::Lost;
+            true
+        });
     }
 
     #[cfg(test)]
@@ -200,6 +229,29 @@ impl KeyStore {
     }
 }
 
+fn warn_refresh_failure(failure: &KeySetFailure) {
+    let reason = failure.label();
+    match failure {
+        KeySetFailure::Discovery(DiscoveryError::Fetch(cause))
+        | KeySetFailure::Jwks(JwksError::Fetch(cause)) => {
+            warn!(reason, ?cause, "authn_jwks_refresh_failed");
+        }
+        KeySetFailure::Discovery(error) => {
+            warn!(
+                reason,
+                cause = error.reason_label(),
+                "authn_jwks_refresh_failed"
+            );
+        }
+        KeySetFailure::DiscoveryTimeout => {
+            warn!(reason, cause = "timeout", "authn_jwks_refresh_failed");
+        }
+        KeySetFailure::Jwks(JwksError::Parse | JwksError::NoUsableKeys) => {
+            warn!(reason, "authn_jwks_refresh_failed");
+        }
+    }
+}
+
 fn acquisition_timestamp(now: SystemTime) -> f64 {
     match now.duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed.as_secs_f64(),
@@ -207,50 +259,78 @@ fn acquisition_timestamp(now: SystemTime) -> f64 {
     }
 }
 
-pub(crate) fn run_refresh_worker(
-    store: Arc<KeyStore>,
+#[must_use = "drive and await RefreshDriver::run for the verifier lifetime"]
+#[derive(derive_more::Debug)]
+#[debug("RefreshDriver([REDACTED])")]
+pub struct RefreshDriver {
+    store: std::mem::DropGuard<Arc<KeyStore>, fn(Arc<KeyStore>)>,
     provider: ProviderClient,
     source: JwksSource,
     algorithms: AllowedAlgorithms,
-    cancel: CancellationToken,
     jwks_max_age: Duration,
-) -> impl Future<Output = ()> {
-    let worker_lost_guard = store.worker_lost.clone().drop_guard();
-    let next_period = move || refresh_period().min(jwks_max_age / 2);
-    let mut next_refresh = Instant::now() + next_period();
-    async move {
+}
+
+impl RefreshDriver {
+    pub(crate) fn new(
+        store: Arc<KeyStore>,
+        provider: ProviderClient,
+        source: JwksSource,
+        algorithms: AllowedAlgorithms,
+        jwks_max_age: Duration,
+    ) -> Self {
+        Self {
+            store: std::mem::DropGuard::new(store, KeyStore::mark_lost),
+            provider,
+            source,
+            algorithms,
+            jwks_max_age,
+        }
+    }
+
+    pub async fn run(self, shutdown: impl Future<Output = ()>) {
+        let Self {
+            store,
+            provider,
+            source,
+            algorithms,
+            jwks_max_age,
+        } = self;
+        let next_refresh_delay = move || jittered_refresh_interval().min(jwks_max_age / 2);
+        let mut next_refresh = Instant::now() + next_refresh_delay();
         let mut state_changes = store.state.subscribe();
+        let mut shutdown = std::pin::pin!(shutdown);
         'worker: loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => break,
+                () = &mut shutdown => break,
                 _ = state_changes.wait_for(|state| state.pending().is_some()) => {}
                 () = tokio::time::sleep_until(next_refresh) => {
                     store.request_periodic();
-                    next_refresh = Instant::now() + next_period();
+                    next_refresh = Instant::now() + next_refresh_delay();
                 }
             }
             while let Some(ticket) = store.pending() {
                 let replacement = tokio::select! {
                     biased;
-                    () = cancel.cancelled() => break 'worker,
+                    () = &mut shutdown => break 'worker,
                     replacement = source.fetch(&provider, algorithms, Instant::now() + PROVIDER_TIMEOUT) => replacement,
                 };
                 store.finish(ticket, replacement);
             }
         }
-        store.stop();
-        worker_lost_guard.disarm();
+        std::mem::DropGuard::dismiss(store).stop();
     }
 }
 
-fn refresh_period() -> Duration {
+fn jittered_refresh_interval() -> Duration {
     let mut bytes = [0_u8; 2];
     let sample = aws_lc_rs::rand::fill(&mut bytes).map(|()| u16::from_be_bytes(bytes));
-    refresh_period_for_sample(sample)
+    jittered_refresh_interval_for_sample(sample)
 }
 
-fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
+fn jittered_refresh_interval_for_sample(
+    sample: Result<u16, aws_lc_rs::error::Unspecified>,
+) -> Duration {
     let spread = sample.map_or(Duration::ZERO, |sample| {
         shared_rules::jitter::share_of_window(MAX_REFRESH_SPREAD, sample)
     });
@@ -313,9 +393,9 @@ mod tests {
         assert_eq!(diagnostics.acquisitions().len(), 1);
 
         for failure in [
-            KeySetFailure::Fetch(crate::ProviderFailure::Timeout),
-            KeySetFailure::Parse,
-            KeySetFailure::NoUsableKeys,
+            KeySetFailure::Jwks(crate::JwksError::Fetch(crate::ProviderFailure::Timeout)),
+            KeySetFailure::Jwks(crate::JwksError::Parse),
+            KeySetFailure::Jwks(crate::JwksError::NoUsableKeys),
         ] {
             store.request_periodic();
             store.finish(store.pending().unwrap(), Err(failure));
@@ -357,14 +437,14 @@ mod tests {
             crate::EndpointUrl::parse(&format!("https://jwks.test:{}/keys", address.port()))
                 .unwrap();
         store.request_periodic();
-        let worker = tokio::spawn(super::run_refresh_worker(
+        let driver = super::RefreshDriver::new(
             store.clone(),
             provider,
             super::JwksSource::Configured(endpoint),
             crate::jwks::allowed_algorithms(&[crate::JwtAlgorithm::Rs256]),
-            cancel.clone(),
             Duration::from_hours(1),
-        ));
+        );
+        let worker = tokio::spawn(driver.run(cancel.clone().cancelled_owned()));
         let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
             .unwrap()
@@ -408,15 +488,17 @@ mod tests {
             (Ok(u16::MAX), Duration::from_secs(810)),
             (Err(aws_lc_rs::error::Unspecified), Duration::from_mins(15)),
         ] {
-            assert_eq!(super::refresh_period_for_sample(sample), expected);
+            assert_eq!(
+                super::jittered_refresh_interval_for_sample(sample),
+                expected
+            );
         }
     }
 
     fn worker_with_unavailable_provider(
         store: &Arc<KeyStore>,
-        cancel: &CancellationToken,
         jwks_max_age: Duration,
-    ) -> impl Future<Output = ()> + use<> {
+    ) -> super::RefreshDriver {
         let host = "authn.fixture.test";
         let material = tls_test_support::TlsMaterial::new(host);
         let deny_dns = CancellationToken::new();
@@ -428,14 +510,13 @@ mod tests {
             deny_dns,
         )
         .unwrap();
-        super::run_refresh_worker(
+        super::RefreshDriver::new(
             store.clone(),
             provider,
             super::JwksSource::Configured(
                 crate::EndpointUrl::parse("https://authn.fixture.test/keys").unwrap(),
             ),
             crate::jwks::allowed_algorithms(&[crate::JwtAlgorithm::Rs256]),
-            cancel.clone(),
             jwks_max_age,
         )
     }
@@ -466,11 +547,10 @@ mod tests {
     async fn unknown_key_work_does_not_postpone_initial_or_subsequent_periods() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
-            &store,
-            &cancel,
-            Duration::from_hours(1)
-        ));
+        let mut worker = std::pin::pin!(
+            worker_with_unavailable_provider(&store, Duration::from_hours(1))
+                .run(cancel.cancelled())
+        );
         poll_waiting_worker(worker.as_mut()).await;
         for period in 0..2 {
             let started = tokio::time::Instant::now();
@@ -497,11 +577,10 @@ mod tests {
     async fn an_overdue_period_rearms_from_observed_time_without_a_backlog() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
-            &store,
-            &cancel,
-            Duration::from_hours(1)
-        ));
+        let mut worker = std::pin::pin!(
+            worker_with_unavailable_provider(&store, Duration::from_hours(1))
+                .run(cancel.cancelled())
+        );
         poll_waiting_worker(worker.as_mut()).await;
         tokio::time::advance(Duration::from_secs(4_000)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;
@@ -516,7 +595,7 @@ mod tests {
         cancel.cancel();
         worker.await;
         assert_eq!(store.state.borrow().requested_ticket, 2);
-        assert!(store.state.borrow().stopped);
+        assert_eq!(store.state.borrow().worker, super::WorkerState::Stopped);
     }
 
     #[tokio::test(start_paused = true)]
@@ -539,11 +618,10 @@ mod tests {
     async fn a_short_freshness_window_renews_before_the_normal_refresh_period() {
         let store = KeyStore::new(key_set("old"));
         let cancel = CancellationToken::new();
-        let mut worker = std::pin::pin!(worker_with_unavailable_provider(
-            &store,
-            &cancel,
-            Duration::from_mins(1),
-        ));
+        let mut worker = std::pin::pin!(
+            worker_with_unavailable_provider(&store, Duration::from_mins(1))
+                .run(cancel.cancelled())
+        );
         poll_waiting_worker(worker.as_mut()).await;
         tokio::time::advance(Duration::from_secs(30)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;
@@ -579,7 +657,9 @@ mod tests {
         tokio::task::yield_now().await;
         store.finish(
             1,
-            Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(super::KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         assert_eq!(waiter.await.unwrap(), None);
         assert_eq!(spawn_refresh(&store).await.unwrap(), None);
@@ -597,7 +677,9 @@ mod tests {
         store.request_periodic();
         store.finish(
             2,
-            Err(super::KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(super::KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         assert_eq!(waiter.await.unwrap(), Some(true));
     }
@@ -627,7 +709,9 @@ mod tests {
             .poll(&mut Context::from_waker(Waker::noop()));
         store.finish(
             2,
-            Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         let after_failure = store.refresh_for_signature_miss(&checked).await;
 
@@ -644,5 +728,81 @@ mod tests {
         store.stop();
         assert_eq!(waiter.await.unwrap(), None);
         assert_eq!(spawn_refresh(&store).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_refresh_driver_marks_the_worker_lost_for_current_and_future_waiters() {
+        let store = KeyStore::new(key_set("old"));
+        let checked = Guard::into_inner(store.current());
+        let driver = worker_with_unavailable_provider(&store, Duration::from_hours(1));
+        store.expire_refresh_cooldown_for_test();
+        let mut waiter = std::pin::pin!(store.refresh_for_signature_miss(&checked));
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        drop(driver);
+        assert_matches!(waiter.await, SignatureRefresh::WorkerLost);
+        assert_matches!(
+            store.refresh_for_signature_miss(&checked).await,
+            SignatureRefresh::WorkerLost
+        );
+        assert_eq!(store.state.borrow().worker, super::WorkerState::Lost);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_only_miss_admissions_never_wait_for_a_write_lock() {
+        let admit_under_read_lock = |store: &Arc<KeyStore>, checked: &Arc<KeySet>| {
+            let reader = store.state.borrow();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let handle = tokio::runtime::Handle::current();
+            let probe = {
+                let store = Arc::clone(store);
+                let checked = Arc::clone(checked);
+                std::thread::spawn(move || {
+                    let _entered = handle.enter();
+                    let _ = done_tx.send(store.admit_signature_miss(&checked));
+                })
+            };
+            let result = done_rx.recv_timeout(Duration::from_secs(2));
+            drop(reader);
+            probe.join().unwrap();
+            result.expect("read-only miss admission must not acquire a write lock")
+        };
+
+        let store = KeyStore::new(key_set("old"));
+        let checked = Guard::into_inner(store.current());
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Answer(SignatureRefresh::NoNewerSet)
+        );
+
+        store.expire_refresh_cooldown_for_test();
+        assert_matches!(
+            store.admit_signature_miss(&checked),
+            super::MissAdmission::Wait(1)
+        );
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Wait(1)
+        );
+
+        store.finish(1, Ok(key_set("new")));
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Answer(SignatureRefresh::NewerSet(keys)) if keys.has_kid("new")
+        );
+
+        store.stop();
+        assert_matches!(
+            admit_under_read_lock(&store, &checked),
+            super::MissAdmission::Answer(SignatureRefresh::NoNewerSet)
+        );
+
+        let lost_store = KeyStore::new(key_set("old"));
+        let lost_checked = Guard::into_inner(lost_store.current());
+        let driver = worker_with_unavailable_provider(&lost_store, Duration::from_hours(1));
+        drop(driver);
+        assert_matches!(
+            admit_under_read_lock(&lost_store, &lost_checked),
+            super::MissAdmission::Answer(SignatureRefresh::WorkerLost)
+        );
     }
 }

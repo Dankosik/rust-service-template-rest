@@ -7,7 +7,7 @@ use health::{Probe, ProbeError};
 use parking_lot::Mutex;
 
 use crate::messaging::Shared;
-use crate::topology::{classify_topology, validate_server};
+use crate::topology::{classify_topology, fetch_stream_info, validate_server};
 
 const PUBLISH_WORK_IN_FLIGHT: &str = "messaging_publish_work_in_flight";
 const PUBLISH_WORK_LAST_OBSERVED_SECONDS: &str =
@@ -18,7 +18,7 @@ static PUBLISH_SLOTS: Mutex<BTreeMap<String, BTreeSet<usize>>> = Mutex::new(BTre
 
 #[derive(Debug)]
 pub(crate) struct PublishWorkMetrics {
-    connection: String,
+    connection_name: String,
     slot: usize,
     capacity: metrics::Gauge,
     in_flight: metrics::Gauge,
@@ -26,18 +26,10 @@ pub(crate) struct PublishWorkMetrics {
 }
 
 impl PublishWorkMetrics {
-    pub(crate) fn register(capacity: usize, connection: &str) -> Self {
-        let slot = {
-            let mut active = PUBLISH_SLOTS.lock();
-            let slots = active.entry(connection.to_owned()).or_default();
-            let mut slot = 0;
-            while !slots.insert(slot) {
-                slot += 1;
-            }
-            slot
-        };
-        let connection = connection.to_owned();
-        let mut labels = vec![metrics::Label::new("connection", connection.clone())];
+    pub(crate) fn register(capacity: usize, connection_name: &str) -> Self {
+        let slot = claim_slot(connection_name);
+        let connection_name = connection_name.to_owned();
+        let mut labels = vec![metrics::Label::new("connection", connection_name.clone())];
         if slot > 0 {
             labels.push(metrics::Label::new("connection_slot", slot.to_string()));
         }
@@ -52,7 +44,7 @@ impl PublishWorkMetrics {
         )]
         capacity_gauge.set(capacity as f64);
         Self {
-            connection,
+            connection_name,
             slot,
             capacity: capacity_gauge,
             in_flight,
@@ -60,12 +52,12 @@ impl PublishWorkMetrics {
         }
     }
 
-    pub(crate) fn observe(&self, context: &async_nats::jetstream::Context) {
+    pub(crate) fn observe(&self, jetstream: &async_nats::jetstream::Context) {
         #[expect(
             clippy::cast_precision_loss,
             reason = "occupancy is bounded by publication capacity"
         )]
-        self.in_flight.set(context.in_flight_publishes() as f64);
+        self.in_flight.set(jetstream.in_flight_publishes() as f64);
         self.last_observed.set(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -74,13 +66,27 @@ impl PublishWorkMetrics {
     }
 }
 
+fn claim_slot(connection_name: &str) -> usize {
+    let mut slots_by_connection = PUBLISH_SLOTS.lock();
+    let slots = slots_by_connection
+        .entry(connection_name.to_owned())
+        .or_default();
+    let mut slot = 0;
+    while !slots.insert(slot) {
+        slot += 1;
+    }
+    slot
+}
+
 impl Drop for PublishWorkMetrics {
     fn drop(&mut self) {
         self.in_flight.set(f64::NAN);
         self.last_observed.set(0.0);
         self.capacity.set(f64::NAN);
-        let mut active = PUBLISH_SLOTS.lock();
-        if let Entry::Occupied(mut entry) = active.entry(std::mem::take(&mut self.connection)) {
+        let mut slots_by_connection = PUBLISH_SLOTS.lock();
+        if let Entry::Occupied(mut entry) =
+            slots_by_connection.entry(std::mem::take(&mut self.connection_name))
+        {
             let slots = entry.get_mut();
             slots.remove(&self.slot);
             if slots.is_empty() {
@@ -95,7 +101,6 @@ pub struct MessagingProbe {
     pub(crate) shared: Arc<Shared>,
 }
 
-#[async_trait::async_trait]
 impl Probe for MessagingProbe {
     fn name(&self) -> &'static str {
         "messaging"
@@ -106,11 +111,11 @@ impl Probe for MessagingProbe {
             .publish_work_metrics
             .observe(&self.shared.jetstream);
         self.check_local_state()?;
-        match self
-            .shared
-            .jetstream
-            .get_stream(&self.shared.source_stream)
-            .await
+        match fetch_stream_info(
+            &self.shared.jetstream,
+            &self.shared.source_stream_info_subject,
+        )
+        .await
         {
             Ok(_) => self.check_local_state(),
             Err(error) => {
@@ -132,27 +137,18 @@ impl MessagingProbe {
         if self.shared.has_failed() {
             return Err(ProbeError::from_static("messaging consumer failed"));
         }
-        if self
-            .shared
-            .connection
-            .client
-            .wait_closed()
-            .now_or_never()
-            .is_some()
-            || !matches!(
-                self.shared.connection.client.connection_state(),
+        let client = &self.shared.connection.client;
+        let connected = client.wait_closed().now_or_never().is_none()
+            && matches!(
+                client.connection_state(),
                 async_nats::connection::State::Connected
-            )
-        {
+            );
+        if !connected {
             return Err(ProbeError::from_static(
                 "messaging connection is unavailable",
             ));
         }
-        validate_server(
-            &self.shared.connection.client,
-            self.shared.envelope_limit_bytes,
-        )
-        .map_err(|refusal| {
+        validate_server(client, self.shared.envelope_limit_bytes).map_err(|refusal| {
             ProbeError::format(format_args!(
                 "messaging server admission is unavailable ({})",
                 refusal.error_type()

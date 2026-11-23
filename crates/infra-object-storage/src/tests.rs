@@ -13,11 +13,12 @@ use http_body_util::{BodyExt, StreamBody};
 use operation_context::{OperationContext, Stopped};
 use secrecy::SecretString;
 
-use crate::error::{Failure, LocalFailure};
+use crate::error::{ConfigErrorKind, Failure, LocalFailure};
 use crate::provider::{UploadChecksum, resolve};
 use crate::{
-    ConfigError, ContentType, CredentialSource, MutationError, MutationFailure, ObjectKey,
+    AccessKey, AmazonCredentials, ContentType, MutationError, MutationFailure, ObjectKey,
     ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutBody, PutOptions,
+    UnknownOutcome,
 };
 
 const R2_ENDPOINT: &str = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
@@ -26,44 +27,50 @@ fn options(provider: Provider) -> ObjectStorageOptions {
     ObjectStorageOptions {
         provider,
         bucket: "evidence-bucket".to_owned(),
-        credentials: access_key("AKIDEXAMPLE", "hunter2-secret"),
         max_object_bytes: 1024,
         max_concurrency: 2,
         operation_timeout: Duration::from_secs(2),
     }
 }
 
-fn access_key(access_key_id: &str, secret_access_key: &str) -> CredentialSource {
-    CredentialSource::AccessKey {
+fn access_key(access_key_id: &str, secret_access_key: &str) -> AccessKey {
+    AccessKey {
         access_key_id: access_key_id.to_owned(),
         secret_access_key: SecretString::from(secret_access_key.to_owned()),
     }
 }
 
+fn default_access_key() -> AccessKey {
+    access_key("AKIDEXAMPLE", "hunter2-secret")
+}
+
 #[test]
 fn credentials_are_required_and_redacted() {
-    let mut missing_id = options(Provider::Local {
+    let missing_id = options(Provider::Local {
         endpoint: "http://127.0.0.1:1".to_owned(),
-        region: String::new(),
+        region: None,
+        credentials: access_key(" ", "hunter2-secret"),
     });
-    missing_id.credentials = access_key(" ", "hunter2-secret");
     assert_eq!(
-        ObjectStorage::try_new(missing_id).unwrap_err(),
-        ConfigError::AccessKeyId
+        ObjectStorage::try_new(missing_id).unwrap_err().0,
+        ConfigErrorKind::AccessKeyId
     );
 
-    let mut missing_secret = options(Provider::Local {
+    let missing_secret = options(Provider::Local {
         endpoint: "http://127.0.0.1:1".to_owned(),
-        region: String::new(),
+        region: None,
+        credentials: access_key("AKIDEXAMPLE", ""),
     });
-    missing_secret.credentials = access_key("AKIDEXAMPLE", "");
     assert_eq!(
-        ObjectStorage::try_new(missing_secret).unwrap_err(),
-        ConfigError::SecretAccessKey
+        ObjectStorage::try_new(missing_secret).unwrap_err().0,
+        ConfigErrorKind::SecretAccessKey
     );
 
+    let credentials = default_access_key();
+    assert_eq!(format!("{credentials:?}"), "AccessKey");
     let options = options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
+        credentials,
     });
     let rendered_options = format!("{options:?}");
     assert_eq!(
@@ -78,39 +85,18 @@ fn credentials_are_required_and_redacted() {
 }
 
 #[test]
-fn workload_identity_is_built_without_io_and_only_for_amazon() {
-    let mut amazon = options(Provider::AmazonS3 {
+fn workload_identity_is_built_without_io() {
+    let credentials = AmazonCredentials::WorkloadIdentity;
+    assert_eq!(format!("{credentials:?}"), "WorkloadIdentity");
+    let amazon = options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
         expected_bucket_owner: "123456789012".to_owned(),
+        credentials,
     });
-    amazon.credentials = CredentialSource::WorkloadIdentity;
-    assert_eq!(format!("{:?}", amazon.credentials), "WorkloadIdentity");
     assert_eq!(
         ObjectStorage::try_new(amazon).unwrap().provider_name(),
         "amazon_s3"
     );
-
-    for provider in [
-        Provider::CloudflareR2 {
-            endpoint: R2_ENDPOINT.to_owned(),
-        },
-        Provider::S3Compatible {
-            endpoint: "https://ceph.internal.example".to_owned(),
-            region: String::new(),
-            path_style: true,
-        },
-        Provider::Local {
-            endpoint: "http://127.0.0.1:1".to_owned(),
-            region: String::new(),
-        },
-    ] {
-        let mut other = options(provider);
-        other.credentials = CredentialSource::WorkloadIdentity;
-        assert_eq!(
-            ObjectStorage::try_new(other).unwrap_err(),
-            ConfigError::Credentials
-        );
-    }
 }
 
 #[test]
@@ -118,12 +104,13 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
     for max_concurrency in [0, usize::MAX] {
         let mut refused = options(Provider::Local {
             endpoint: "http://127.0.0.1:1".to_owned(),
-            region: String::new(),
+            region: None,
+            credentials: default_access_key(),
         });
         refused.max_concurrency = max_concurrency;
         assert_eq!(
-            ObjectStorage::try_new(refused).unwrap_err(),
-            ConfigError::MaxConcurrency
+            ObjectStorage::try_new(refused).unwrap_err().0,
+            ConfigErrorKind::MaxConcurrency
         );
     }
 }
@@ -216,7 +203,8 @@ impl Stub {
     fn storage(&self, configure: impl FnOnce(&mut ObjectStorageOptions)) -> ObjectStorage {
         let mut options = options(Provider::Local {
             endpoint: self.endpoint.clone(),
-            region: String::new(),
+            region: None,
+            credentials: default_access_key(),
         });
         configure(&mut options);
         ObjectStorage::try_new(options).unwrap()
@@ -366,7 +354,7 @@ async fn check_service_reply(
         let expected = if within_limit {
             MutationError::NotApplied(MutationFailure::Rejected)
         } else {
-            MutationError::OutcomeUnknown(MutationFailure::Unavailable)
+            MutationError::OutcomeUnknown(UnknownOutcome::Unavailable)
         };
         assert_eq!(result, Err(expected), "{method} {status} {length}");
         assert_eq!(stub.seen().len(), 1, "mutation must not retry");
@@ -444,7 +432,7 @@ async fn failed_create_only_put_is_not_retried_and_is_unknown() {
         .await;
     assert_eq!(
         result,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 }
@@ -466,7 +454,7 @@ async fn mutations_make_one_attempt() {
     let storage = stub.storage(|_| {});
     assert_eq!(
         storage.delete(&parent, &key()).await,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 
@@ -483,7 +471,7 @@ async fn mutations_make_one_attempt() {
                 PutOptions::overwrite()
             )
             .await,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(stub.seen().len(), 1);
 }
@@ -547,7 +535,7 @@ async fn empty_stream_preparation_and_response_share_one_put_timeout() {
     stub.stop().await;
     assert_eq!(
         result,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
     assert_eq!(sent, 1, "the mutation must be dispatched exactly once");
     assert_eq!(follow_up, Ok(()));
@@ -674,7 +662,8 @@ async fn get_distinguishes_short_eof_from_an_interrupted_body() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut options = options(Provider::Local {
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
-            region: String::new(),
+            region: None,
+            credentials: default_access_key(),
         });
         options.operation_timeout = Duration::from_secs(30);
         let storage = ObjectStorage::try_new(options).unwrap();
@@ -838,7 +827,8 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
     let stub = Stub::start(|_, _| ok_empty()).await;
     let options = options(Provider::Local {
         endpoint: stub.endpoint.clone(),
-        region: String::new(),
+        region: None,
+        credentials: default_access_key(),
     });
     let resolved = resolve(&options.provider, &options.bucket).unwrap();
     let storage = ObjectStorage::build(
@@ -874,6 +864,8 @@ async fn head_reports_size_above_the_limit() {
             .status(StatusCode::OK)
             .header("content-length", "2097152")
             .header("content-type", "application/json")
+            .header("last-modified", "Thu, 01 Jan 1970 00:00:01 GMT")
+            .header("etag", r#""head-tag""#)
             .body(Body::empty())
             .unwrap()
     })
@@ -881,6 +873,12 @@ async fn head_reports_size_above_the_limit() {
     let storage = stub.storage(|options| options.max_object_bytes = 4);
     let metadata = storage.head(&parent, &key()).await.unwrap();
     assert_eq!(metadata.size, 2_097_152);
+    assert_eq!(metadata.content_type.as_deref(), Some("application/json"));
+    assert_eq!(
+        metadata.last_modified,
+        Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+    );
+    assert_eq!(metadata.e_tag.as_deref(), Some(r#""head-tag""#));
 
     let stub = Stub::start(|_, _| {
         Response::builder()
@@ -928,6 +926,9 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
         storage.head(&parent, &key()).await,
         Err(ObjectStorageError::Busy)
     );
+    let busy = Err(MutationError::NotApplied(MutationFailure::Busy));
+    assert_eq!(put_json(&storage).await, busy);
+    assert_eq!(storage.delete(&parent, &key()).await, busy);
     assert_eq!(stub.seen().len(), 1);
     drop(held);
     let mut completed = storage.get(&parent, &key()).await.unwrap();
@@ -949,7 +950,8 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
     drop(listener);
     let mut options = options(Provider::Local {
         endpoint,
-        region: String::new(),
+        region: None,
+        credentials: default_access_key(),
     });
     options.operation_timeout = Duration::from_secs(5);
     let storage = ObjectStorage::try_new(options).unwrap();
@@ -966,7 +968,7 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
                 PutOptions::overwrite()
             )
             .await,
-        Err(MutationError::OutcomeUnknown(MutationFailure::Unavailable))
+        Err(MutationError::OutcomeUnknown(UnknownOutcome::Unavailable))
     );
 }
 
@@ -1009,12 +1011,12 @@ async fn the_span_names_the_region_only_on_amazon() {
         return;
     }
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
 
     let amazon = ObjectStorage::try_new(options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
         expected_bucket_owner: "123456789012".to_owned(),
+        credentials: AmazonCredentials::AccessKey(default_access_key()),
     }))
     .unwrap();
     amazon
@@ -1034,6 +1036,7 @@ async fn the_span_names_the_region_only_on_amazon() {
 
     let r2 = ObjectStorage::try_new(options(Provider::CloudflareR2 {
         endpoint: R2_ENDPOINT.to_owned(),
+        credentials: default_access_key(),
     }))
     .unwrap();
     r2.presign_get(&parent, &key(), Duration::from_mins(1))
@@ -1095,91 +1098,94 @@ pub(super) fn in_tracing_child(test_name: &str) -> bool {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Records(Arc<Mutex<Vec<String>>>);
-
-struct Line(String);
-
-impl tracing::field::Visit for Line {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        let _ = write!(self.0, " {}={value}", field.name());
-    }
-
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let _ = write!(self.0, " {}={value:?}", field.name());
-    }
+pub(super) struct Records {
+    spans: observe_test_support::SpanCapture,
+    events: observe_test_support::EventCapture,
 }
 
 impl Records {
-    fn push(&self, line: Line) {
-        self.0.lock().unwrap().push(line.0);
+    pub(super) fn install_default(&self) -> observe_test_support::ScopedDispatch {
+        observe_test_support::install_spans_and_events(&self.spans, &self.events)
     }
 
     pub(super) fn matching(&self, kind: &str, field: &str) -> Vec<String> {
-        let lines = self.0.lock().unwrap();
+        let render = |prefix: &str, fields: &observe_test_support::FieldMap| {
+            let mut line = prefix.to_owned();
+            for (name, value) in fields {
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(value);
+                let _ = write!(line, " {name}={value}");
+            }
+            line
+        };
+        let lines: Vec<String> = match kind {
+            "span" => self
+                .spans
+                .snapshot()
+                .into_iter()
+                .map(|span| render("span", &span.fields))
+                .collect(),
+            "event" => self
+                .events
+                .snapshot()
+                .into_iter()
+                .map(|event| render("event", &event.fields))
+                .collect(),
+            _ => Vec::new(),
+        };
         lines
-            .iter()
-            .filter(|line| line.starts_with(kind) && line.contains(field))
-            .cloned()
+            .into_iter()
+            .filter(|line| line.contains(field))
             .collect()
     }
 }
 
-impl tracing::Subscriber for Records {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
+const REQUEST_ID: &str = "4442587FB7D0A2F9";
+const EXTENDED_REQUEST_ID: &str =
+    "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
+
+fn request_identifier_response(index: usize) -> Response {
+    let mut response = match index {
+        3 => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-length", "8")
+            .body(Body::empty())
+            .unwrap(),
+        4 => xml_error(StatusCode::NOT_FOUND, "NoSuchKey"),
+        5 => ok_empty(),
+        6 => object(
+            b"download",
+            &[
+                ("x-amz-checksum-crc64nvme", "AAAAAAAAAAA="),
+                ("x-amz-checksum-type", "FULL_OBJECT"),
+            ],
+        ),
+        _ => xml_error(StatusCode::FORBIDDEN, "AccessDenied"),
+    };
+    let headers = response.headers_mut();
+    if index == 1 {
+        headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
+    } else {
+        headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
+        headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
     }
-
-    fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        let mut line = Line("span".to_owned());
-        span.record(&mut line);
-        self.push(line);
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-        let mut line = Line("span".to_owned());
-        values.record(&mut line);
-        self.push(line);
-    }
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut line = Line("event".to_owned());
-        event.record(&mut line);
-        self.push(line);
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
+    response
 }
 
 #[tokio::test]
 async fn a_failure_reports_the_request_identifiers_of_its_response() {
-    const REQUEST_ID: &str = "4442587FB7D0A2F9";
-    const EXTENDED_REQUEST_ID: &str =
-        "eftixk72aD6Ap51TnqcoF8eFidJG9Z/2mkiDFu8yU9AS1ed4OpIszj7UDNEHGran";
     if !in_tracing_child("tests::a_failure_reports_the_request_identifiers_of_its_response") {
         return;
     }
     let parent = OperationContext::unbounded();
-    let stub = Stub::start(|_, index| {
-        let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
-        let headers = response.headers_mut();
-        if index == 1 {
-            headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
-        } else {
-            headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
-            headers.insert("x-amz-id-2", EXTENDED_REQUEST_ID.parse().unwrap());
-        }
-        response
-    })
-    .await;
+    let stub = Stub::start(|_, index| request_identifier_response(index)).await;
     let storage = stub.storage(|_| {});
     let records = Records::default();
-    let _subscriber = tracing::subscriber::set_default(records.clone());
-    let _every_dispatcher = tracing::Dispatch::new(Records::default());
+    let _subscriber = records.install_default();
+    let request_id = format!(" aws.request_id={REQUEST_ID}");
+    let extended_id = format!(" aws.extended_request_id={EXTENDED_REQUEST_ID}");
 
     assert_eq!(
         storage.head(&parent, &key()).await,
@@ -1190,18 +1196,10 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
         panic!("one failure event: {failed:?}");
     };
     assert!(event.contains(" error.type=403"), "{event}");
-    assert!(
-        event.contains(&format!(" aws.request_id={REQUEST_ID}")),
-        "{event}"
-    );
-    assert!(
-        event.contains(&format!(" aws.extended_request_id={EXTENDED_REQUEST_ID}")),
-        "{event}"
-    );
+    assert!(event.contains(&request_id), "{event}");
+    assert!(event.contains(&extended_id), "{event}");
     assert_eq!(
-        records
-            .matching("span", &format!(" aws.request_id={REQUEST_ID}"))
-            .len(),
+        records.matching("span", &request_id).len(),
         1,
         "the span carries the identifier"
     );
@@ -1235,11 +1233,45 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     );
     let failed = records.matching("event", "object_storage_operation_failed");
     assert_eq!(failed.len(), 3);
-    assert!(
-        failed[2].contains(&format!(" aws.request_id={REQUEST_ID}")),
-        "{}",
-        failed[2]
+    assert!(failed[2].contains(&request_id), "{}", failed[2]);
+
+    assert_eq!(storage.head(&parent, &key()).await.unwrap().size, 8);
+    storage.delete(&parent, &key()).await.unwrap();
+    put_json(&storage).await.unwrap();
+    assert_eq!(
+        records
+            .matching("event", "object_storage_operation_failed")
+            .len(),
+        3
     );
+    for identifier in [&request_id, &extended_id] {
+        let spans = records.matching("span", identifier);
+        assert_eq!(spans.len(), 5, "{identifier}");
+    }
+    assert_eq!(
+        records.matching("span", " object_storage.outcome=ok").len(),
+        3
+    );
+
+    let download = storage.get(&parent, &key()).await.unwrap();
+    assert_eq!(
+        download.into_bytes(8).await,
+        Err(ObjectStorageError::Integrity)
+    );
+    assert_eq!(
+        storage.delete(&parent, &key()).await,
+        Err(MutationError::NotApplied(MutationFailure::Rejected))
+    );
+    let failed = records.matching("event", "object_storage_operation_failed");
+    assert_eq!(failed.len(), 5);
+    for (event, operation) in [(&failed[3], "get"), (&failed[4], "delete")] {
+        assert!(
+            event.contains(&format!(" object_storage.operation={operation}")),
+            "{event}"
+        );
+        assert!(event.contains(&request_id), "{event}");
+        assert!(event.contains(&extended_id), "{event}");
+    }
 }
 
 #[tokio::test]
@@ -1249,21 +1281,22 @@ async fn metrics_carry_only_operation_and_outcome() {
     let stub = Stub::start(|_, _| xml_error(StatusCode::NOT_FOUND, "NoSuchKey")).await;
     let storage = stub.storage(|_| {});
     metrics::with_local_recorder(&recorder, || {
-        let guard = storage.start_observation(crate::observe::Operation::Head);
+        let guard = storage.start_borrowed_observation(crate::observe::Operation::Head);
         drop(guard);
         storage
-            .start_observation(crate::observe::Operation::Head)
+            .start_borrowed_observation(crate::observe::Operation::Head)
             .succeed();
         storage
-            .start_observation(crate::observe::Operation::Head)
-            .fail(Failure {
+            .start_borrowed_observation(crate::observe::Operation::Head)
+            .fail(&Failure {
                 error: ObjectStorageError::NotFound,
                 error_type: "404".into(),
                 timeout_source: None,
             });
+        let failure: Failure = LocalFailure::ContentLength.into();
         storage
-            .start_observation(crate::observe::Operation::Head)
-            .fail(LocalFailure::ContentLength);
+            .start_borrowed_observation(crate::observe::Operation::Head)
+            .fail(&failure);
     });
     let rendered = handle.render();
     assert!(
@@ -1362,7 +1395,7 @@ async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
         cancelled.cancel();
         assert_eq!(
             call.await.unwrap(),
-            Err(MutationError::OutcomeUnknown(MutationFailure::Stopped(
+            Err(MutationError::OutcomeUnknown(UnknownOutcome::Stopped(
                 Stopped::Cancelled
             )))
         );
@@ -1429,11 +1462,11 @@ async fn endpoint_and_credential_changes_require_a_reconstructed_client() {
     current.head(&parent, &key()).await.unwrap();
 
     let replacement = Stub::start(|_, _| object(b"{}", &[])).await;
-    let mut replacement_options = options(Provider::Local {
+    let replacement_options = options(Provider::Local {
         endpoint: replacement.endpoint.clone(),
-        region: String::new(),
+        region: None,
+        credentials: access_key("AKIDROTATED", "rotated-secret"),
     });
-    replacement_options.credentials = access_key("AKIDROTATED", "rotated-secret");
     let reconstructed = ObjectStorage::try_new(replacement_options).unwrap();
     reconstructed.head(&parent, &key()).await.unwrap();
 
@@ -1521,22 +1554,8 @@ impl aws_smithy_runtime_api::client::dns::ResolveDns for FixtureResolver {
 }
 
 fn tls_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, String) {
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-
     let material = tls_test_support::TlsMaterial::new(host);
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.key));
-    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(vec![material.cert.into()], key)
-    .unwrap();
-    (
-        tokio_rustls::TlsAcceptor::from(Arc::new(server)),
-        material.root_pem,
-    )
+    (material.acceptor(), material.root_pem)
 }
 
 async fn answer_tls_s3(mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>) {
@@ -1563,7 +1582,8 @@ fn tls_snapshot_storage(
 ) -> ObjectStorage {
     let mut options = options(Provider::Local {
         endpoint,
-        region: String::new(),
+        region: None,
+        credentials: default_access_key(),
     });
     options.operation_timeout = Duration::from_millis(250);
     let resolved = resolve(&options.provider, &options.bucket).unwrap();
@@ -1581,8 +1601,8 @@ fn tls_snapshot_storage(
         .tls_context(tls_context)
         .build_with_resolver(FixtureResolver(address.ip()));
     let credentials = options
-        .credentials
-        .credentials_provider(&resolved, &client)
+        .provider
+        .credentials_provider(&resolved.region, &client)
         .unwrap();
     ObjectStorage::build(options, resolved, client, credentials)
 }
@@ -1644,6 +1664,45 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     );
     assert_eq!(stub.seen().len(), 1);
     stub.stop().await;
+}
+
+#[tokio::test]
+async fn head_reuses_connection_across_distinct_remaining_deadlines() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut options = options(Provider::Local {
+        endpoint: format!("http://{}", listener.local_addr().unwrap()),
+        region: None,
+        credentials: default_access_key(),
+    });
+    options.operation_timeout = Duration::from_secs(4);
+    let storage = ObjectStorage::try_new(options).unwrap();
+
+    let server = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        for size in [4, 7] {
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+            }
+            assert!(request.starts_with(b"HEAD "));
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\n\r\n");
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    };
+    let client = async {
+        for (remaining_ms, size) in [(1_900, 4), (1_100, 7)] {
+            let parent = OperationContext::with_timeout(Duration::from_millis(remaining_ms));
+            assert_eq!(storage.head(&parent, &key()).await.unwrap().size, size);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(server, client)
+    })
+    .await
+    .expect("both HEAD calls should complete on the same socket");
 }
 
 #[derive(Debug)]

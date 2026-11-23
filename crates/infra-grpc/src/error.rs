@@ -1,5 +1,47 @@
+use std::fmt;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "optional auth profiles construct policy error variants"
+)]
+pub(crate) enum PolicyKind {
+    ScopeRequirement,
+    CallerRule,
+}
+
+impl fmt::Display for PolicyKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ScopeRequirement => formatter.write_str("scope requirement"),
+            Self::CallerRule => formatter.write_str("caller rule"),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+#[error(transparent)]
+pub struct Error(pub(crate) ErrorKind);
+
+impl Error {
+    pub(crate) const fn new(kind: ErrorKind) -> Self {
+        Self(kind)
+    }
+
+    // template:begin authn:grpc-unauthenticated-business-calls-ctor
+    #[must_use]
+    pub const fn unauthenticated_business_calls() -> Self {
+        Self(ErrorKind::UnauthenticatedBusinessCalls)
+    }
+    // template:end authn:grpc-unauthenticated-business-calls-ctor
+}
+
+#[derive(Debug, thiserror::Error)]
+#[allow(
+    dead_code,
+    reason = "optional auth profiles construct policy error variants"
+)]
+pub(crate) enum ErrorKind {
     #[error("decode gRPC file descriptor set")]
     DecodeDescriptorSet(#[source] prost::DecodeError),
     #[error("inspect gRPC reflection file descriptor")]
@@ -18,15 +60,15 @@ pub enum Error {
     DuplicateService(&'static str),
     #[error("gRPC service {0} is in no described file descriptor set")]
     UndescribedService(&'static str),
+    #[error("gRPC {policy} for {path} must name a described method of a registered service")]
+    UnregisteredMethod { policy: PolicyKind, path: String },
+    #[error("gRPC {policy} is declared twice for {path}")]
+    DuplicatePolicy { policy: PolicyKind, path: String },
+    #[error("gRPC method {path} has no {policy}")]
+    MissingPolicy { policy: PolicyKind, path: String },
     // template:begin authn:grpc-unauthenticated-business-calls-error
-    #[error("gRPC scope requirement for {0} must name a described method of a registered service")]
-    UnregisteredMethodPath(String),
-    #[error("gRPC scope requirement is declared twice for {0}")]
-    DuplicateScopeRequirement(String),
     #[error("gRPC scope requirement for {path} has an invalid scope token at index {index}")]
     InvalidScopeToken { path: String, index: usize },
-    #[error("gRPC method {0} has no bearer scope requirement")]
-    MissingScopeRequirement(String),
     #[error("gRPC business calls require {}", crate::authn::VERIFIER_SETTINGS.join(" or "))]
     UnauthenticatedBusinessCalls,
     #[error(
@@ -37,12 +79,6 @@ pub enum Error {
     // template:begin service-auth:grpc-caller-rule-errors
     #[error("gRPC caller rules require service token authentication")]
     CallerRulesRequireServiceTokens,
-    #[error("gRPC service token authentication requires TLS")]
-    ServiceTokensRequireTls,
-    #[error("gRPC caller rule for {0} must name a described method of a registered service")]
-    UnregisteredCallerRule(String),
-    #[error("gRPC caller rule is declared twice for {0}")]
-    DuplicateCallerRule(String),
     #[error("gRPC caller rule for {path} is invalid")]
     InvalidCallerRule {
         path: String,
@@ -50,10 +86,12 @@ pub enum Error {
     },
     #[error("gRPC caller rule for {0} names the same caller twice")]
     DuplicateCallerName(String),
-    #[error("gRPC method {0} has no caller rule")]
-    MissingCallerRule(String),
     // template:end service-auth:grpc-caller-rule-errors
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("gRPC service token authentication requires TLS")]
+pub struct TlsRequiredError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TlsMaterialError {

@@ -1,4 +1,3 @@
-#![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,
     clippy::panic,
@@ -7,12 +6,6 @@
 )]
 
 // template:begin inbound-webhooks:test-webhooks-inbound-modules
-#[allow(
-    dead_code,
-    reason = "the shared transport also supplies pending-BEGIN cancellation proof to the postgres integration target"
-)]
-#[path = "../support/commit_proxy.rs"]
-mod commit_proxy;
 mod inbound;
 // template:end inbound-webhooks:test-webhooks-inbound-modules
 // template:begin webhooks:test-webhooks-outbound-module
@@ -22,7 +15,7 @@ mod outbound;
 use std::time::Duration;
 
 // template:begin inbound-webhooks:test-webhooks-inbound-postgres
-use infra_postgres::{Dsn, Isolation, PgPool};
+use infra_postgres::{Dsn, Isolation, Pool};
 // template:end inbound-webhooks:test-webhooks-inbound-postgres
 
 // template:begin inbound-webhooks:test-webhooks-inbound-constants
@@ -31,7 +24,7 @@ const APP: &str = "integration-tests-webhooks";
 pub(crate) const WAIT: Duration = Duration::from_secs(10);
 
 // template:begin inbound-webhooks:test-webhooks-inbound-pool
-pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
+pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> Pool {
     integration_tests::template_pool(dsn, APP, max_connections, Isolation::ServerDefault).await
 }
 // template:end inbound-webhooks:test-webhooks-inbound-pool

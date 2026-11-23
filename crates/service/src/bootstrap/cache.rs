@@ -1,7 +1,7 @@
-use infra_cache::{Cache, CacheError, CacheOptions, ClientCertificate};
+use infra_cache::{Cache, CacheOptions, ClientCertificate, StartError};
 use service_config::CacheConfig;
 
-pub(super) async fn open(cache: &CacheConfig) -> Result<Cache, CacheError> {
+pub(super) async fn open(cache: &CacheConfig) -> Result<Cache, StartError> {
     let options = CacheOptions {
         dsn: cache.dsn.clone(),
         password_file: cache.password_file.clone(),
@@ -15,9 +15,9 @@ pub(super) async fn open(cache: &CacheConfig) -> Result<Cache, CacheError> {
         allow_plaintext: cache.allow_plaintext,
         allow_unauthenticated: cache.allow_unauthenticated,
         command_timeout: cache.command_timeout,
-        max_concurrency: cache.max_concurrency,
-        max_key_bytes: usize::try_from(cache.max_key_bytes.as_u64()).unwrap_or(usize::MAX),
-        max_value_bytes: usize::try_from(cache.max_value_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_concurrency: cache.max_concurrency.get(),
+        max_key_bytes: cache.max_key_bytes.get(),
+        max_value_bytes: cache.max_value_bytes.get(),
     };
     Cache::start(options).await
 }
@@ -38,9 +38,15 @@ mod tests {
             .as_ref()
             .map(|cache| cache.namespace(namespace!("items")));
         let cache = CacheLookup::new(namespace, Duration::from_millis(100));
+        assert!(cache.namespace().is_none());
         let _: axum::routing::MethodRouter = axum::routing::get(
             async |State(cache): State<CacheLookup>, request: RequestContext| {
                 let _lookup = cache.lookup(request.operation(), "key").await;
+                if let Some(namespace) = cache.namespace() {
+                    let _set = namespace
+                        .set(request.operation(), "key", b"v", Duration::from_secs(1))
+                        .await;
+                }
             },
         )
         .with_state(cache);

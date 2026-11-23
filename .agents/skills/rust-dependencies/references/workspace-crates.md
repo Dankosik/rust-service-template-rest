@@ -5,7 +5,6 @@ Consult this index before hand-rolling a non-domain helper, parser, encoder, ret
 ## Boilerplate, derives, and compile-time helpers
 
 - **Custom `Default` values or selective trait bounds** — `educe`: keep manual `Default` when a template identity anchor must remain literal (such as `observability.rs`).
-- **Mechanical method forwarding on wrappers or newtypes** — `delegate`: pure forwarding only; keep policy checks and error mapping explicit.
 - **Generic `Clone`/`Debug`/`Default`/`Eq` without bounds on `T`** — `derive-where`: avoids accidental `T: Debug` or `T: Default` bounds on generic containers and routes.
 - **Redacted `Debug`, `Deref`, `Display`, `From`, `IntoIterator`** — `derive_more`: redact secrets (`#[debug("...")]`); reserve `Deref` for smart pointers.
 - **Safe `Pin` projections for `Future`/`Stream`/`Body` adapters** — `pin-project-lite`: works under `unsafe_code = "forbid"`.
@@ -40,7 +39,6 @@ Consult this index before hand-rolling a non-domain helper, parser, encoder, ret
 - **Stack or streaming hex encoding and decoding** — `const-hex`: `const_hex::display`, `const_hex::Buffer::<N>`, `decode_to_array`, `encode_to_slice`.
 - **Standard and URL-safe Base64** — `base64`: decode into caller-owned slices or stack buffers on hot paths.
 - **Reusable `serde` field adapters** — `serde_with`: `#[serde_as]` / `DeserializeAs`; never use `PickFirst` or `OneOrMany` on config fields that may carry secrets.
-- **Untagged scalar or enum `Deserializer` visitors** — `serde-untagged`: `UntaggedEnumVisitor` without buffering into `serde_json::Value`.
 - **Field-path-preserving `serde` errors and URL-encoded forms** — `serde_path_to_error`, `serde_html_form`: use instead of manual form/path wrappers.
 - **Typed HTTP headers** — `axum-extra`: `axum_extra::headers::HeaderMapExt` for standard typed headers; do not use for `Bearer` or `Retry-After` (see rejected list).
 - **URL parsing and normalization** — `url`: keep cross-crate URI/origin policy in `crates/shared-rules`.

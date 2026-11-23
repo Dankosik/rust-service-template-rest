@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -10,10 +11,49 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-#[async_trait::async_trait]
 pub trait Probe: Send + Sync + 'static {
     fn name(&self) -> &'static str;
-    async fn check(&self) -> Result<(), ProbeError>;
+    fn check(&self) -> impl Future<Output = Result<(), ProbeError>> + Send;
+}
+
+type ProbeFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ProbeError>> + Send + 'a>>;
+
+trait ErasedProbe: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn check(&self) -> ProbeFuture<'_>;
+}
+
+impl<P: Probe> ErasedProbe for P {
+    fn name(&self) -> &'static str {
+        Probe::name(self)
+    }
+
+    fn check(&self) -> ProbeFuture<'_> {
+        Box::pin(Probe::check(self))
+    }
+}
+
+pub struct BoxedProbe(Box<dyn ErasedProbe>);
+
+impl BoxedProbe {
+    #[must_use]
+    pub fn new(probe: impl Probe) -> Self {
+        Self(Box::new(probe))
+    }
+
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn check(&self) -> ProbeFuture<'_> {
+        self.0.check()
+    }
+}
+
+impl fmt::Debug for BoxedProbe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BoxedProbe").field(&self.name()).finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -80,27 +120,56 @@ const CHECKS_METRIC: &str = "readiness_checks_total";
 
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 
-fn outcome_metric_parts(
-    outcome: &Result<(), ProbeFailure>,
-) -> (&'static str, &'static metrics::Key) {
-    const OK: &str = "ok";
-    const TIMED_OUT: &str = "timed_out";
-    const FAILED: &str = "failed";
-    static OK_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts("outcome", OK)];
-    static TIMED_OUT_LABELS: [metrics::Label; 1] =
-        [metrics::Label::from_static_parts("outcome", TIMED_OUT)];
-    static FAILED_LABELS: [metrics::Label; 1] =
-        [metrics::Label::from_static_parts("outcome", FAILED)];
-    static OK_KEY: metrics::Key = metrics::Key::from_static_parts(CHECKS_METRIC, &OK_LABELS);
-    static TIMED_OUT_KEY: metrics::Key =
-        metrics::Key::from_static_parts(CHECKS_METRIC, &TIMED_OUT_LABELS);
-    static FAILED_KEY: metrics::Key =
-        metrics::Key::from_static_parts(CHECKS_METRIC, &FAILED_LABELS);
+static CHECK_METRIC_METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
-    match outcome {
-        Ok(()) => (OK, &OK_KEY),
-        Err(ProbeFailure::TimedOut { .. }) => (TIMED_OUT, &TIMED_OUT_KEY),
-        Err(ProbeFailure::Failed { .. }) => (FAILED, &FAILED_KEY),
+#[derive(Clone, Copy)]
+enum CheckOutcome {
+    Ok,
+    TimedOut,
+    Failed,
+}
+
+impl CheckOutcome {
+    const fn of(outcome: &Result<(), ProbeFailure>) -> Self {
+        match outcome {
+            Ok(()) => Self::Ok,
+            Err(ProbeFailure::TimedOut { .. }) => Self::TimedOut,
+            Err(ProbeFailure::Failed { .. }) => Self::Failed,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn metric_key(self) -> &'static metrics::Key {
+        static OK_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts(
+            "outcome",
+            CheckOutcome::Ok.label(),
+        )];
+        static TIMED_OUT_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts(
+            "outcome",
+            CheckOutcome::TimedOut.label(),
+        )];
+        static FAILED_LABELS: [metrics::Label; 1] = [metrics::Label::from_static_parts(
+            "outcome",
+            CheckOutcome::Failed.label(),
+        )];
+        static OK: metrics::Key = metrics::Key::from_static_parts(CHECKS_METRIC, &OK_LABELS);
+        static TIMED_OUT: metrics::Key =
+            metrics::Key::from_static_parts(CHECKS_METRIC, &TIMED_OUT_LABELS);
+        static FAILED: metrics::Key =
+            metrics::Key::from_static_parts(CHECKS_METRIC, &FAILED_LABELS);
+        match self {
+            Self::Ok => &OK,
+            Self::TimedOut => &TIMED_OUT,
+            Self::Failed => &FAILED,
+        }
     }
 }
 
@@ -159,7 +228,7 @@ impl RefreshPolicy {
 #[derive(Clone, Debug)]
 enum State {
     NotEvaluated,
-    Evaluated(Check),
+    Evaluated(Evaluation),
     Draining,
 }
 
@@ -178,6 +247,32 @@ struct RefreshLog {
     event: RefreshEvent,
 }
 
+impl RefreshLog {
+    fn emit(self, stale_after: Duration, failure_threshold: NonZeroU32) {
+        if let Some(age) = self.stale_age {
+            tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
+        }
+        match self.event {
+            RefreshEvent::Unchanged => {}
+            RefreshEvent::Recovered => tracing::info!("readiness_recovered"),
+            RefreshEvent::Lost(reason) => {
+                tracing::warn!(reason = %NotReady::from(reason), "readiness_lost");
+            }
+            RefreshEvent::AbsorbedFailure {
+                reason,
+                consecutive_failures,
+            } => {
+                tracing::warn!(
+                    reason = %NotReady::from(reason),
+                    consecutive_failures,
+                    failure_threshold,
+                    "readiness_check_failed"
+                );
+            }
+        }
+    }
+}
+
 impl State {
     fn apply_round(
         &mut self,
@@ -191,28 +286,20 @@ impl State {
             Self::NotEvaluated => None,
             Self::Evaluated(check) => Some(&*check),
         };
-        let stale_age = previous.and_then(|check| stale_age(check.checked_at, now, stale_after));
+        let stale_age = previous.and_then(|check| check.stale_age(now));
         let is_fresh = stale_age.is_none();
         let (verdict, event) = match (observed, previous.map(|check| &check.verdict)) {
-            (Ok(()), Some(Verdict::Ready { .. })) if is_fresh => (
-                Verdict::Ready {
-                    consecutive_failures: 0,
-                },
-                RefreshEvent::Unchanged,
-            ),
-            (Ok(()), _) => (
-                Verdict::Ready {
-                    consecutive_failures: 0,
-                },
-                RefreshEvent::Recovered,
-            ),
+            (Ok(()), Some(Verdict::Ready { .. })) if is_fresh => {
+                (Verdict::READY, RefreshEvent::Unchanged)
+            }
+            (Ok(()), _) => (Verdict::READY, RefreshEvent::Recovered),
             (
                 Err(reason),
                 Some(Verdict::Ready {
-                    consecutive_failures,
+                    consecutive_failures: previous_failures,
                 }),
             ) => {
-                let consecutive_failures = consecutive_failures.saturating_add(1);
+                let consecutive_failures = previous_failures.saturating_add(1);
                 if is_fresh && consecutive_failures < failure_threshold.get() {
                     (
                         Verdict::Ready {
@@ -234,38 +321,31 @@ impl State {
                 (Verdict::NotReady(reason), RefreshEvent::Unchanged)
             }
         };
-        *self = Self::Evaluated(Check {
-            checked_at: now,
-            verdict,
-        });
+        *self = Self::Evaluated(Evaluation::new(now, stale_after, verdict));
         Some(RefreshLog { stale_age, event })
     }
 
-    fn fresh_check(&self, now: Instant, stale_after: Duration) -> Result<&Check, NotReady> {
+    fn readiness(&self) -> (bool, Option<Instant>) {
+        match self {
+            Self::Evaluated(check)
+                if check.verdict.is_ready() && check.stale_age(Instant::now()).is_none() =>
+            {
+                (true, check.stale_at)
+            }
+            _ => (false, None),
+        }
+    }
+
+    fn verdict(&self, stale_after: Duration) -> Result<(), NotReady> {
         let check = match self {
             Self::Draining => return Err(NotReady::Draining),
             Self::NotEvaluated => return Err(NotReady::NotEvaluated),
             Self::Evaluated(check) => check,
         };
-        check_freshness(check.checked_at, now, stale_after)?;
-        Ok(check)
-    }
-
-    fn readiness(&self, stale_after: Duration) -> (bool, Option<Instant>) {
-        let checked_at = match self {
-            Self::Evaluated(check) if check.verdict.is_ready() => check.checked_at,
-            _ => return (false, None),
-        };
-        let deadline = stale_at(checked_at, stale_after);
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            (false, None)
-        } else {
-            (true, deadline)
+        if let Some(age) = check.stale_age(Instant::now()) {
+            return Err(NotReady::Stale { age, stale_after });
         }
-    }
-
-    fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
-        self.fresh_check(now, stale_after)?.verdict.to_result()
+        check.verdict.to_result()
     }
 }
 
@@ -276,6 +356,10 @@ enum Verdict {
 }
 
 impl Verdict {
+    const READY: Self = Self::Ready {
+        consecutive_failures: 0,
+    };
+
     fn is_ready(&self) -> bool {
         matches!(self, Self::Ready { .. })
     }
@@ -289,21 +373,32 @@ impl Verdict {
 }
 
 #[derive(Clone, Debug)]
-struct Check {
+struct Evaluation {
     checked_at: Instant,
+    stale_at: Option<Instant>,
     verdict: Verdict,
 }
 
-fn stale_at(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
+impl Evaluation {
+    fn new(checked_at: Instant, stale_after: Duration, verdict: Verdict) -> Self {
+        Self {
+            checked_at,
+            stale_at: stale_deadline(checked_at, stale_after),
+            verdict,
+        }
+    }
+
+    fn stale_age(&self, now: Instant) -> Option<Duration> {
+        self.stale_at
+            .filter(|&deadline| now >= deadline)
+            .map(|_| now.duration_since(self.checked_at))
+    }
+}
+
+fn stale_deadline(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
     checked_at
         .checked_add(stale_after)?
         .checked_add(Duration::from_nanos(1))
-}
-
-fn stale_age(checked_at: Instant, now: Instant, stale_after: Duration) -> Option<Duration> {
-    stale_at(checked_at, stale_after)
-        .filter(|&deadline| now >= deadline)
-        .map(|_| now.duration_since(checked_at))
 }
 
 fn check_freshness(
@@ -311,15 +406,19 @@ fn check_freshness(
     now: Instant,
     stale_after: Duration,
 ) -> Result<(), NotReady> {
-    match stale_age(checked_at, now, stale_after) {
-        Some(age) => Err(NotReady::Stale { age, stale_after }),
-        None => Ok(()),
+    if stale_deadline(checked_at, stale_after).is_some_and(|deadline| now >= deadline) {
+        Err(NotReady::Stale {
+            age: now.duration_since(checked_at),
+            stale_after,
+        })
+    } else {
+        Ok(())
     }
 }
 
 pub struct Readiness {
     control: ReadinessControl,
-    probes: Vec<Box<dyn Probe>>,
+    probes: Vec<BoxedProbe>,
 }
 
 #[derive(Clone, Debug)]
@@ -329,12 +428,14 @@ pub struct ReadinessControl {
     policy: RefreshPolicy,
 }
 
+#[must_use = "activate PreparedReadiness to publish readiness state"]
 #[derive(Debug)]
 pub struct PreparedReadiness {
     readiness: Readiness,
     checked_at: Instant,
 }
 
+#[must_use = "run ReadinessRefresher to keep readiness fresh"]
 #[derive(Debug)]
 pub struct ReadinessRefresher {
     readiness: Readiness,
@@ -345,7 +446,7 @@ impl fmt::Debug for Readiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let probes = fmt::from_fn(|f| {
             f.debug_list()
-                .entries(self.probes.iter().map(|probe| probe.name()))
+                .entries(self.probes.iter().map(BoxedProbe::name))
                 .finish()
         });
         f.debug_struct("Readiness")
@@ -365,7 +466,7 @@ pub struct ReadinessReader {
 
 impl Readiness {
     #[must_use]
-    pub fn new(probes: Vec<Box<dyn Probe>>, policy: RefreshPolicy) -> Self {
+    pub fn new(probes: Vec<BoxedProbe>, policy: RefreshPolicy) -> Self {
         metrics::describe_counter!(
             CHECKS_METRIC,
             metrics::Unit::Count,
@@ -450,25 +551,21 @@ impl PreparedReadiness {
     pub fn activate(self) -> Result<ReadinessRefresher, NotReady> {
         let control = &self.readiness.control;
         let mut admission = Ok(());
+        let stale_after = control.policy.stale_after();
         control.tx.send_if_modified(|state| {
             admission = if matches!(state, State::Draining) {
                 Err(NotReady::Draining)
             } else {
-                check_freshness(
-                    self.checked_at,
-                    Instant::now(),
-                    control.policy.stale_after(),
-                )
+                check_freshness(self.checked_at, Instant::now(), stale_after)
             };
             if admission.is_err() {
                 return false;
             }
-            *state = State::Evaluated(Check {
-                checked_at: self.checked_at,
-                verdict: Verdict::Ready {
-                    consecutive_failures: 0,
-                },
-            });
+            *state = State::Evaluated(Evaluation::new(
+                self.checked_at,
+                stale_after,
+                Verdict::READY,
+            ));
             true
         });
         admission?;
@@ -493,29 +590,8 @@ impl ReadinessRefresher {
             log = state.apply_round(observed, Instant::now(), failure_threshold, stale_after);
             log.is_some()
         });
-        let Some(log) = log else { return };
-        if let Some(age) = log.stale_age {
-            tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
-        }
-        match log.event {
-            RefreshEvent::Unchanged => {}
-            RefreshEvent::Recovered => tracing::info!("readiness_recovered"),
-            RefreshEvent::Lost(reason) => {
-                let reason = NotReady::from(reason);
-                tracing::warn!(%reason, "readiness_lost");
-            }
-            RefreshEvent::AbsorbedFailure {
-                reason,
-                consecutive_failures,
-            } => {
-                let reason = NotReady::from(reason);
-                tracing::warn!(
-                    %reason,
-                    consecutive_failures,
-                    failure_threshold,
-                    "readiness_check_failed"
-                );
-            }
+        if let Some(log) = log {
+            log.emit(stale_after, failure_threshold);
         }
     }
 
@@ -538,31 +614,29 @@ impl ReadinessRefresher {
 
 impl Readiness {
     async fn check_probes(&self) -> Result<(), ProbeFailure> {
-        static METADATA: metrics::Metadata<'static> =
-            metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
-
         let budget = self.control.policy.probe_budget;
         let deadline = Instant::now() + budget;
         let observed = match self.probes.as_slice() {
-            [probe] => check_probe(probe.as_ref(), deadline, budget).await,
+            [probe] => check_probe(probe, deadline, budget).await,
             probes => {
                 let checks = probes
                     .iter()
-                    .map(|probe| check_probe(probe.as_ref(), deadline, budget));
+                    .map(|probe| check_probe(probe, deadline, budget));
                 join_all(checks)
                     .await
                     .into_iter()
                     .collect::<Result<(), _>>()
             }
         };
-        let (_, key) = outcome_metric_parts(&observed);
-        metrics::with_recorder(|recorder| recorder.register_counter(key, &METADATA)).increment(1);
+        let key = CheckOutcome::of(&observed).metric_key();
+        metrics::with_recorder(|recorder| recorder.register_counter(key, &CHECK_METRIC_METADATA))
+            .increment(1);
         observed
     }
 }
 
 async fn check_probe(
-    probe: &dyn Probe,
+    probe: &BoxedProbe,
     deadline: Instant,
     budget: Duration,
 ) -> Result<(), ProbeFailure> {
@@ -580,11 +654,10 @@ async fn check_probe(
             budget,
         }),
     };
-    let (outcome_label, _) = outcome_metric_parts(&outcome);
     metrics::counter!(
         PROBE_CHECKS_METRIC,
         "probe" => probe_name,
-        "outcome" => outcome_label
+        "outcome" => CheckOutcome::of(&outcome).label()
     )
     .increment(1);
     outcome
@@ -598,12 +671,11 @@ impl ReadinessReader {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        let (ready, _) = self.rx.borrow().readiness(self.stale_after);
-        ready
+        self.rx.borrow().readiness().0
     }
 
     pub fn verdict(&self) -> Result<(), NotReady> {
-        self.rx.borrow().verdict(Instant::now(), self.stale_after)
+        self.rx.borrow().verdict(self.stale_after)
     }
 
     // template:begin grpc:health-changed-verdict
@@ -618,7 +690,7 @@ impl ReadinessReader {
         loop {
             let stale_deadline = {
                 let state = self.rx.borrow_and_update();
-                let (ready, stale_deadline) = state.readiness(self.stale_after);
+                let (ready, stale_deadline) = state.readiness();
                 if ready != seen {
                     return Some(ready);
                 }

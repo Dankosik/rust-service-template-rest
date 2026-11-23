@@ -6,11 +6,12 @@ use http::header::{
     LOCATION,
 };
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use sqlx::postgres::{PgHasArrayType, PgTypeInfo};
-use sqlx::{Postgres, Type};
+use sqlx::postgres::{PgHasArrayType, PgTypeInfo, PgValueRef};
+use sqlx::{Decode, Postgres, Type};
 
 pub const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;
+const HEADER_PAIR_TYPE: &str = "http_idempotency_header_pair";
 
 static REPLAYABLE: [HeaderName; 7] = [
     CONTENT_TYPE,
@@ -22,13 +23,53 @@ static REPLAYABLE: [HeaderName; 7] = [
     LAST_MODIFIED,
 ];
 
-#[derive(PartialEq, Eq, derive_more::Debug, sqlx::Type)]
-#[sqlx(type_name = "http_idempotency_header_pair")]
+#[derive(Clone, Copy)]
+struct StoredHeaderName(Option<&'static HeaderName>);
+
+impl StoredHeaderName {
+    fn parse(name: &str) -> Self {
+        Self(
+            REPLAYABLE
+                .iter()
+                .find(|candidate| candidate.as_str() == name),
+        )
+    }
+}
+
+impl Type<Postgres> for StoredHeaderName {
+    fn type_info() -> PgTypeInfo {
+        <str as Type<Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        <str as Type<Postgres>>::compatible(ty)
+    }
+}
+
+impl Decode<'_, Postgres> for StoredHeaderName {
+    fn decode(value: PgValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
+        Ok(Self::parse(value.as_str()?))
+    }
+}
+
+#[derive(derive_more::Debug, sqlx::Decode)]
 pub(crate) struct HeaderPair {
     #[debug(skip)]
-    name: String,
+    name: StoredHeaderName,
     #[debug(skip)]
     value: Vec<u8>,
+}
+
+impl Type<Postgres> for HeaderPair {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name(HEADER_PAIR_TYPE)
+    }
+}
+
+impl PgHasArrayType for HeaderPair {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::array_of(HEADER_PAIR_TYPE)
+    }
 }
 
 #[derive(sqlx::Encode)]
@@ -100,7 +141,10 @@ impl Undecodable {
     }
 }
 
-impl Record {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuccessRecord(Record);
+
+impl SuccessRecord {
     pub fn capture(
         status: StatusCode,
         headers: &HeaderMap,
@@ -109,10 +153,26 @@ impl Record {
         if !status.is_success() {
             return Err(CaptureError::InvalidStatus);
         }
-        Self::capture_parts(status, headers, body)
+        Record::capture_parts(status, headers, body).map(Self)
     }
 
-    pub fn capture_terminal_refusal(
+    #[must_use]
+    pub fn into_record(self) -> Record {
+        self.0
+    }
+}
+
+impl From<SuccessRecord> for Record {
+    fn from(record: SuccessRecord) -> Self {
+        record.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRefusal(Record);
+
+impl TerminalRefusal {
+    pub fn capture(
         status: StatusCode,
         headers: &HeaderMap,
         body: Bytes,
@@ -120,9 +180,22 @@ impl Record {
         if !is_terminal_refusal(status) {
             return Err(CaptureError::InvalidStatus);
         }
-        Self::capture_parts(status, headers, body)
+        Record::capture_parts(status, headers, body).map(Self)
     }
 
+    #[must_use]
+    pub fn into_record(self) -> Record {
+        self.0
+    }
+}
+
+impl From<TerminalRefusal> for Record {
+    fn from(refusal: TerminalRefusal) -> Self {
+        refusal.0
+    }
+}
+
+impl Record {
     fn capture_parts(
         status: StatusCode,
         headers: &HeaderMap,
@@ -156,16 +229,16 @@ impl Record {
     }
 
     pub(crate) fn decode(
-        status: i16,
+        stored_status: i16,
         headers: Vec<HeaderPair>,
         body: Bytes,
     ) -> Result<Self, Undecodable> {
         if body.len() > MAX_STORED_BODY_BYTES {
             return Err(Undecodable::BodyLimit);
         }
-        let status = u16::try_from(status)
+        let status = u16::try_from(stored_status)
             .ok()
-            .and_then(|status| StatusCode::from_u16(status).ok())
+            .and_then(|code| StatusCode::from_u16(code).ok())
             .filter(|status| status.is_success() || is_terminal_refusal(*status))
             .ok_or(Undecodable::Status)?;
         Ok(Self {
@@ -181,11 +254,6 @@ impl Record {
 
     pub(crate) const fn encode_status(&self) -> i16 {
         self.status.as_u16().cast_signed()
-    }
-
-    #[must_use]
-    pub fn is_terminal_refusal(&self) -> bool {
-        is_terminal_refusal(self.status)
     }
 
     pub(crate) fn encode_headers(&self) -> impl Iterator<Item = HeaderPairRef<'_>> {
@@ -219,15 +287,10 @@ fn decode_headers(headers: Vec<HeaderPair>) -> Result<HeaderMap, Undecodable> {
     let mut admitted = HeaderMap::new();
     let mut size = 0_usize;
     for HeaderPair { name, value } in headers {
-        let name = REPLAYABLE
-            .iter()
-            .find(|candidate| candidate.as_str() == name)
-            .ok_or(Undecodable::HeaderName)?;
+        let name = name.0.ok_or(Undecodable::HeaderName)?;
         let value = HeaderValue::try_from(value).map_err(|_| Undecodable::HeaderValue)?;
         size = size.saturating_add(header_size(name, &value));
-        if size <= MAX_TOTAL_STORED_HEADER_BYTES {
-            admitted.append(name, value);
-        }
+        admitted.append(name, value);
     }
     if size > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Undecodable::HeaderLimit);
@@ -256,7 +319,7 @@ mod tests {
 
     fn pair(name: &str, value: &[u8]) -> HeaderPair {
         HeaderPair {
-            name: name.to_owned(),
+            name: StoredHeaderName::parse(name),
             value: value.to_vec(),
         }
     }
@@ -270,23 +333,29 @@ mod tests {
         headers.append(CONTENT_TYPE, HeaderValue::from_bytes(&[0xff]).unwrap());
         headers.append("set-cookie", HeaderValue::from_static("secret"));
         let body = Bytes::from_static(b"stored");
-        let record = Record::capture(StatusCode::CREATED, &headers, body.clone()).unwrap();
+        let record = SuccessRecord::capture(StatusCode::CREATED, &headers, body.clone())
+            .unwrap()
+            .into_record();
 
         assert_eq!(record.encode_status(), 201);
         assert_eq!(record.body(), b"stored");
-        let stored_headers: Vec<_> = record
+        let encoded: Vec<_> = record
             .encode_headers()
-            .map(|header| pair(header.name, header.value))
+            .map(|header| (header.name, header.value))
             .collect();
         assert_eq!(
-            stored_headers,
+            encoded,
             [
-                pair("content-type", &[0xff]),
-                pair("content-language", b"en"),
-                pair("content-language", b"fr"),
-                pair("etag", b"\"v1\""),
+                ("content-type", [0xff].as_slice()),
+                ("content-language", b"en".as_slice()),
+                ("content-language", b"fr".as_slice()),
+                ("etag", b"\"v1\"".as_slice()),
             ]
         );
+        let stored_headers = encoded
+            .into_iter()
+            .map(|(name, value)| pair(name, value))
+            .collect();
         let (status, headers, body) = Record::decode(record.encode_status(), stored_headers, body)
             .unwrap()
             .into_parts();
@@ -322,6 +391,12 @@ mod tests {
                 Undecodable::HeaderName,
             ),
             (
+                200,
+                vec![pair("x-unreplayable-long-header-name", b"value")],
+                Bytes::new(),
+                Undecodable::HeaderName,
+            ),
+            (
                 204,
                 vec![pair("content-type", b"\n")],
                 Bytes::from_static(b"legacy body"),
@@ -329,10 +404,10 @@ mod tests {
             ),
             (
                 200,
-                vec![HeaderPair {
-                    name: "content-type".to_owned(),
-                    value: vec![b'a'; MAX_TOTAL_STORED_HEADER_BYTES],
-                }],
+                vec![pair(
+                    "content-type",
+                    &vec![b'a'; MAX_TOTAL_STORED_HEADER_BYTES],
+                )],
                 Bytes::new(),
                 Undecodable::HeaderLimit,
             ),
@@ -342,10 +417,38 @@ mod tests {
     }
 
     #[test]
+    fn success_and_terminal_refusal_enforce_disjoint_status_sets() {
+        for status in [StatusCode::OK, StatusCode::CREATED, StatusCode::NO_CONTENT] {
+            assert!(SuccessRecord::capture(status, &HeaderMap::new(), Bytes::new()).is_ok());
+            assert_eq!(
+                TerminalRefusal::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+        }
+        for status in [StatusCode::CONFLICT, StatusCode::UNPROCESSABLE_ENTITY] {
+            assert!(TerminalRefusal::capture(status, &HeaderMap::new(), Bytes::new()).is_ok());
+            assert_eq!(
+                SuccessRecord::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+        }
+        for status in [StatusCode::BAD_REQUEST, StatusCode::INTERNAL_SERVER_ERROR] {
+            assert_eq!(
+                SuccessRecord::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+            assert_eq!(
+                TerminalRefusal::capture(status, &HeaderMap::new(), Bytes::new()),
+                Err(CaptureError::InvalidStatus)
+            );
+        }
+    }
+
+    #[test]
     fn debug_output_omits_payloads_and_raw_header_pairs() {
         let mut headers = HeaderMap::new();
         headers.insert(LOCATION, HeaderValue::from_static("/private-resource"));
-        let record = Record::capture(
+        let record = SuccessRecord::capture(
             StatusCode::OK,
             &headers,
             Bytes::from_static(b"private-body"),

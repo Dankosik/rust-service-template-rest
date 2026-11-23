@@ -1,15 +1,16 @@
+use std::convert::Infallible;
 use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    BudgetedTx, Tx, TxError, TxMode, failure_cause, in_tx_with, in_tx_with_acquire_deadline,
-    in_tx_with_deadline, is_transient, observed, sqlstate,
+    BudgetedTx, SavepointEnd, SavepointError, Tx, TxError, TxMode, failure_cause, is_transient,
+    observed, sqlstate,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::postgres::PgBindIterExt as _;
 
 use crate::record::HeaderPair;
-use crate::{READ_COMMITTED, Record, Store};
+use crate::{READ_COMMITTED, Record, Store, SuccessRecord, TerminalRefusal};
 
 pub type Digest = [u8; 32];
 
@@ -103,9 +104,51 @@ pub struct CallerIdentity {
     pub value: String,
 }
 
+mod sealed {
+    pub trait RefusalMode {}
+}
+
+pub trait RefusalMode: sealed::RefusalMode + Send {
+    const NEEDS_SAVEPOINT: bool;
+
+    fn into_record(self) -> Record;
+}
+
+impl sealed::RefusalMode for Infallible {}
+impl RefusalMode for Infallible {
+    const NEEDS_SAVEPOINT: bool = false;
+
+    fn into_record(self) -> Record {
+        match self {}
+    }
+}
+
+impl sealed::RefusalMode for TerminalRefusal {}
+impl RefusalMode for TerminalRefusal {
+    const NEEDS_SAVEPOINT: bool = true;
+
+    fn into_record(self) -> Record {
+        Record::from(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WriteOutcome<T = Infallible> {
+    Success(SuccessRecord),
+    TerminalRefusal(T),
+}
+
+impl WriteOutcome {
+    #[must_use]
+    pub const fn success(record: SuccessRecord) -> Self {
+        Self::Success(record)
+    }
+}
+
 #[derive(Debug)]
 pub enum Attempted<R> {
     Committed(Record),
+    TerminalRefusal(Record),
     RolledBack(R),
     Replay(Record),
     Mismatch,
@@ -135,45 +178,58 @@ impl AttemptError {
     }
 }
 
+enum Written {
+    Success(Record),
+    TerminalRefusal(Record),
+}
+
+impl<T: RefusalMode> From<WriteOutcome<T>> for Written {
+    fn from(outcome: WriteOutcome<T>) -> Self {
+        match outcome {
+            WriteOutcome::Success(record) => Self::Success(record.into_record()),
+            WriteOutcome::TerminalRefusal(refusal) => Self::TerminalRefusal(refusal.into_record()),
+        }
+    }
+}
+
+impl Written {
+    fn into_savepoint_end<A>(self) -> SavepointEnd<Self, A> {
+        match self {
+            Self::Success(_) => SavepointEnd::Keep(self),
+            Self::TerminalRefusal(_) => SavepointEnd::Rollback(self),
+        }
+    }
+
+    const fn record(&self) -> &Record {
+        match self {
+            Self::Success(record) | Self::TerminalRefusal(record) => record,
+        }
+    }
+}
+
 impl Store {
-    pub async fn attempt<W, R>(
+    pub async fn attempt<T, W, R>(
         &self,
         scope: &ScopeKey,
         fingerprint: &RequestFingerprint,
         work: W,
     ) -> Result<Attempted<R>, AttemptError>
     where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
+        T: RefusalMode,
+        W: AsyncFnOnce(&mut Tx<'_>) -> Result<WriteOutcome<T>, R>,
     {
         scope.validate_caller()?;
-        attempted(
-            in_tx_with(&self.pool, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
+        settle(
+            self.inner
+                .pool
+                .in_tx_with(READ_COMMITTED, async |tx| {
+                    self.attempt_in_tx(tx, scope, fingerprint, work).await
+                })
+                .await,
         )
     }
 
-    pub async fn attempt_with_acquire_deadline<W, R>(
-        &self,
-        scope: &ScopeKey,
-        fingerprint: &RequestFingerprint,
-        deadline: tokio::time::Instant,
-        work: W,
-    ) -> Result<Attempted<R>, AttemptError>
-    where
-        W: AsyncFnOnce(&mut Tx<'_>) -> Result<Record, R>,
-    {
-        scope.validate_caller()?;
-        attempted(
-            in_tx_with_acquire_deadline(&self.pool, deadline, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
-        )
-    }
-
-    pub async fn attempt_with_deadline<W, R>(
+    pub async fn attempt_with_deadline<T, W, R>(
         &self,
         scope: &ScopeKey,
         fingerprint: &RequestFingerprint,
@@ -181,56 +237,63 @@ impl Store {
         work: W,
     ) -> Result<Attempted<R>, AttemptError>
     where
-        W: AsyncFnOnce(&mut BudgetedTx<'_>) -> Result<Record, R>,
+        T: RefusalMode,
+        W: AsyncFnOnce(&mut BudgetedTx<'_>) -> Result<WriteOutcome<T>, R>,
     {
         scope.validate_caller()?;
-        attempted(
-            in_tx_with_deadline(&self.pool, deadline, READ_COMMITTED, async |tx| {
-                self.work_in_tx(tx, scope, fingerprint, work).await
-            })
-            .await,
+        settle(
+            self.inner
+                .pool
+                .in_tx_with_deadline(deadline, READ_COMMITTED, async |tx| {
+                    self.attempt_in_tx(tx, scope, fingerprint, work).await
+                })
+                .await,
         )
     }
 
-    async fn work_in_tx<M: TxMode, W, R>(
+    async fn attempt_in_tx<M: TxMode, T: RefusalMode, W, R>(
         &self,
         tx: &mut Tx<'_, M>,
         scope: &ScopeKey,
         fingerprint: &RequestFingerprint,
         work: W,
-    ) -> Result<Record, Stop<R>>
+    ) -> Result<Written, Stop<R>>
     where
-        W: AsyncFnOnce(&mut Tx<'_, M>) -> Result<Record, R>,
+        W: AsyncFnOnce(&mut Tx<'_, M>) -> Result<WriteOutcome<T>, R>,
     {
         if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
             return Err(Stop::Decided(decision));
         }
-        if self.terminal_refusals {
-            tx.begin_command_savepoint()
-                .await
-                .map_err(|err| sql_failed(&err, "savepoint"))?;
-        }
-        let record = work(tx).await.map_err(Stop::RolledBack)?;
-        if record.is_terminal_refusal() {
-            if !self.terminal_refusals {
-                return Err(Stop::Failed(log_failure(
-                    "command",
-                    AttemptError::Internal,
-                    "undeclared_terminal_refusal",
-                )));
-            }
-            tx.rollback_command_savepoint()
-                .await
-                .map_err(|err| sql_failed(&err, "rollback_command"))?;
-        }
-        write(tx, scope, fingerprint, &record, self.retention).await?;
-        Ok(record)
+        let written = if T::NEEDS_SAVEPOINT {
+            tx.with_savepoint(async |tx: &mut Tx<'_, M>| match work(tx).await {
+                Ok(outcome) => Written::from(outcome).into_savepoint_end(),
+                Err(rollback) => SavepointEnd::AbortTransaction(rollback),
+            })
+            .await
+            .map_err(|error| match error {
+                SavepointError::Begin(err) => Stop::Failed(sql_failed(&err, "savepoint")),
+                SavepointError::Rollback(err) => Stop::Failed(sql_failed(&err, "rollback_command")),
+                SavepointError::Aborted(rollback) => Stop::RolledBack(rollback),
+            })?
+        } else {
+            Written::from(work(tx).await.map_err(Stop::RolledBack)?)
+        };
+        write(
+            tx,
+            scope,
+            fingerprint,
+            written.record(),
+            self.inner.retention,
+        )
+        .await?;
+        Ok(written)
     }
 }
 
-fn attempted<R>(outcome: Result<Record, Stop<R>>) -> Result<Attempted<R>, AttemptError> {
+fn settle<R>(outcome: Result<Written, Stop<R>>) -> Result<Attempted<R>, AttemptError> {
     match outcome {
-        Ok(value) => Ok(Attempted::Committed(value)),
+        Ok(Written::Success(record)) => Ok(Attempted::Committed(record)),
+        Ok(Written::TerminalRefusal(record)) => Ok(Attempted::TerminalRefusal(record)),
         Err(Stop::Decided(decision)) => Ok(match decision {
             Decision::Replay(record) => Attempted::Replay(*record),
             Decision::Mismatch => Attempted::Mismatch,
@@ -283,14 +346,21 @@ async fn arbitrate(
     if let (Some(stored_fingerprint), Some(status), Some(headers)) =
         (probe.fingerprint, probe.status, probe.headers)
     {
-        return decide_live(stored_fingerprint, status, headers, probe.body, fingerprint).map(Some);
+        let row = StoredRow {
+            fingerprint: stored_fingerprint,
+            status,
+            headers,
+            body: probe.body,
+        };
+        return decide_live(row, fingerprint).map(Some);
     }
     if !probe.acquired {
         return Ok(Some(Decision::InProgress));
     }
     observed!(
         "read idempotency record",
-        sqlx::query!(
+        sqlx::query_as!(
+            StoredRow,
             "SELECT fingerprint AS \"fingerprint: Digest\", status, \
              headers AS \"headers: Vec<HeaderPair>\", \
              CASE WHEN fingerprint = $2 THEN body END AS body \
@@ -303,31 +373,25 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "read_record"))?
-    .map(|record| {
-        decide_live(
-            record.fingerprint,
-            record.status,
-            record.headers,
-            record.body,
-            fingerprint,
-        )
-    })
+    .map(|row| decide_live(row, fingerprint))
     .transpose()
 }
 
-fn decide_live(
-    stored_fingerprint: Digest,
+struct StoredRow {
+    fingerprint: Digest,
     status: i16,
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
-    fingerprint: &RequestFingerprint,
-) -> Result<Decision, AttemptError> {
-    if &stored_fingerprint != fingerprint.as_bytes() {
+}
+
+fn decide_live(row: StoredRow, fingerprint: &RequestFingerprint) -> Result<Decision, AttemptError> {
+    if &row.fingerprint != fingerprint.as_bytes() {
         return Ok(Decision::Mismatch);
     }
-    let body =
-        body.ok_or_else(|| log_failure("decode_record", AttemptError::Integrity, "decode"))?;
-    Record::decode(status, headers, Bytes::from(body))
+    let body = row
+        .body
+        .ok_or_else(|| log_failure("decode_record", AttemptError::Integrity, "decode"))?;
+    Record::decode(row.status, row.headers, Bytes::from(body))
         .map(|record| Decision::Replay(Box::new(record)))
         .map_err(|err| log_failure("decode_record", AttemptError::Integrity, err.cause()))
 }
@@ -348,37 +412,37 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    let written = observed!(
+    let inserted = observed!(
         "write idempotency record",
         sqlx::query!(
             "WITH locked AS MATERIALIZED ( \
                  SELECT expires_at FROM http_idempotency_records \
                  WHERE scope_key = $1 FOR UPDATE) \
              INSERT INTO http_idempotency_records AS r \
-             (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, \
-              expires_at) \
-             SELECT $1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp() + $9 \
+             (scope_key, fingerprint, status, headers, issuer, caller_kind, caller_value, \
+              expires_at, body) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, clock_timestamp() + $8, $9 \
              WHERE NOT EXISTS (SELECT 1 FROM locked WHERE expires_at > statement_timestamp()) \
              ON CONFLICT (scope_key) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, \
              status = EXCLUDED.status, headers = EXCLUDED.headers, body = EXCLUDED.body, \
              issuer = EXCLUDED.issuer, caller_kind = EXCLUDED.caller_kind, \
-             caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $9 \
+             caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $8 \
              WHERE r.expires_at <= statement_timestamp()",
             scope.digest.as_slice(),
             fingerprint.as_bytes().as_slice(),
             record.encode_status(),
             record.encode_headers().bind_iter() as _,
-            record.body(),
             scope.caller.issuer,
             scope.caller.kind.as_str(),
             scope.caller.value,
             retention as _,
+            record.body(),
         )
         .execute(tx),
     )
     .await
     .map_err(|err| sql_failed(&err, "write_record"))?;
-    if written.rows_affected() == 1 {
+    if inserted.rows_affected() == 1 {
         Ok(())
     } else {
         Err(log_failure(
@@ -437,21 +501,31 @@ fn log_sql_failure(
     class: AttemptError,
     commit_outcome: Option<&'static str>,
 ) -> AttemptError {
+    emit_failure(
+        phase,
+        class,
+        commit_outcome,
+        sqlstate(err).as_deref(),
+        failure_cause(err),
+    )
+}
+
+fn log_failure(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
+    emit_failure(phase, class, None, None, cause)
+}
+
+fn emit_failure(
+    phase: &'static str,
+    class: AttemptError,
+    commit_outcome: Option<&'static str>,
+    sqlstate: Option<&str>,
+    cause: &'static str,
+) -> AttemptError {
     tracing::warn!(
         phase,
         failure_class = %class,
         commit_outcome,
-        sqlstate = sqlstate(err).as_deref(),
-        cause = failure_cause(err),
-        "http_idempotency_store_failed"
-    );
-    class
-}
-
-fn log_failure(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
-    tracing::warn!(
-        phase,
-        failure_class = %class,
+        sqlstate,
         cause,
         "http_idempotency_store_failed"
     );
@@ -502,10 +576,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_caller_with_a_nul_is_refused_before_the_work_runs() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
+        let store = Store::try_new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
             ("iss\0uer", "subject"),
@@ -520,7 +593,7 @@ mod tests {
                 .attempt(
                     &ScopeKey::new(caller, b"k"),
                     &RequestFingerprint::from_bytes([0; 32]),
-                    async |_: &mut Tx<'_>| -> Result<Record, ()> {
+                    async |_: &mut Tx<'_>| -> Result<WriteOutcome, ()> {
                         ran = true;
                         Err(())
                     },
@@ -529,7 +602,7 @@ mod tests {
             std::assert_matches!(attempted, Err(AttemptError::Internal));
             assert!(!ran);
         }
-        pool.close().await;
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]

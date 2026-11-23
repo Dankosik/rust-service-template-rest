@@ -1,15 +1,15 @@
-use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 
-use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
-use axum::http::{Method, Request as HttpRequest};
+use axum::http::header::{ALLOW, CONNECTION, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::{Method, Request as HttpRequest, Version};
+use axum::response::IntoResponse as _;
 use axum::routing::{get, post};
 use axum_test::TestServer;
 use http_body_util::BodyExt;
+use observe_test_support::EventCapture;
 use serde_json::Value;
 use tower::ServiceExt;
 use tracing::instrument::WithSubscriber;
-use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
 use crate::request_id::REQUEST_ID_HEADER;
@@ -74,7 +74,8 @@ async fn request_deadline_is_observable_without_restarting_the_budget() {
     };
     let started = tokio::time::Instant::now();
     let expected = started + options.request_timeout;
-    let handler_1 = move |axum::Extension(deadline): axum::Extension<crate::RequestDeadline>| async move {
+    let handler_1 = move |deadline: crate::RequestDeadline, context: crate::RequestContext| async move {
+        assert_eq!(context.deadline(), Some(deadline));
         assert_eq!(deadline.at(), expected);
         assert_eq!(
             deadline.attempt_end(),
@@ -182,9 +183,14 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
     )]
     let routes = Router::new().route("/problem", get(handler));
     let app = harden(routes, &options());
-    for (path, existing_id, status) in [
-        ("/problem", None, StatusCode::BAD_REQUEST),
-        ("/missing", Some("outer-id"), StatusCode::NOT_FOUND),
+    for (path, existing_id, status, expected_code) in [
+        ("/problem", None, StatusCode::BAD_REQUEST, "\"bad_request\""),
+        (
+            "/missing",
+            Some("outer-id"),
+            StatusCode::NOT_FOUND,
+            "\"not_found\"",
+        ),
     ] {
         let mut request = request(Method::GET, path);
         request
@@ -195,11 +201,8 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
                 .extensions_mut()
                 .insert(RequestId::new(HeaderValue::from_static(id)));
         }
-        let fields = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(EventFields {
-            target: concat!(env!("CARGO_CRATE_NAME"), "::observe"),
-            fields: Arc::clone(&fields),
-        });
+        let events = EventCapture::new();
+        let subscriber = events.dispatch_for(&[concat!(env!("CARGO_CRATE_NAME"), "::observe")]);
         let response = app
             .clone()
             .oneshot(request)
@@ -214,11 +217,10 @@ async fn request_id_stays_consistent_when_other_layers_supply_ids() {
             "{path}"
         );
         assert!(
-            fields
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|field| field == "request_id=\"client-id\""),
+            events.snapshot().iter().any(|event| {
+                event.field("request_id") == Some("\"client-id\"")
+                    && event.field("problem_code") == Some(expected_code)
+            }),
             "{path}"
         );
     }
@@ -241,6 +243,29 @@ async fn not_found_and_method_not_allowed_are_problems_with_allow() {
     let allow = response.header(ALLOW);
     assert!(allow.to_str().unwrap().contains("GET"), "{allow:?}");
     assert_eq!(response.json::<Value>()["code"], "method_not_allowed");
+
+    let head = app(&options())
+        .oneshot(request(Method::HEAD, "/missing"))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::NOT_FOUND);
+    assert_eq!(head.headers()[CONTENT_TYPE], "application/problem+json");
+    assert!(
+        head.headers()[CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -322,37 +347,10 @@ async fn a_cancelled_body_read_does_not_turn_a_handler_timeout_into_408() {
     assert_eq!(body_json(response).await["code"], "gateway_timeout");
 }
 
-struct EventFields {
-    target: &'static str,
-    fields: Arc<Mutex<Vec<String>>>,
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFields {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _context: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        if event.metadata().target() == self.target {
-            event.record(
-                &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                    self.fields
-                        .lock()
-                        .unwrap()
-                        .push(format!("{}={value:?}", field.name()));
-                },
-            );
-        }
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn panic_is_a_sanitized_500_problem() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(EventFields {
-        target: module_path!().trim_suffix("::tests"),
-        fields: Arc::clone(&events),
-    });
+    let events = EventCapture::new();
+    let subscriber = events.dispatch_for(&["infra_http::harden"]);
     let response = app(&options())
         .oneshot(HttpRequest::get("/panic").body(Body::empty()).unwrap())
         .with_subscriber(subscriber)
@@ -370,7 +368,10 @@ async fn panic_is_a_sanitized_500_problem() {
     assert_eq!(json["code"], "internal_error");
     assert_eq!(json["detail"], SANITIZED_DETAIL);
     assert!(!json.to_string().contains("boom"));
-    assert_eq!(*events.lock().unwrap(), ["message=http_handler_panicked"]);
+    let captured = events.snapshot();
+    assert_eq!(captured.len(), 1, "{captured:?}");
+    assert_eq!(captured[0].message(), Some("http_handler_panicked"));
+    assert_eq!(captured[0].fields.len(), 1, "{captured:?}");
 }
 
 #[tokio::test]
@@ -504,6 +505,11 @@ fn holding_routes(started: Arc<AtomicUsize>, gate: Arc<tokio::sync::Notify>) -> 
 
 #[tokio::test]
 async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let started = Arc::new(AtomicUsize::new(0));
     let gate = Arc::new(tokio::sync::Notify::new());
     #[expect(
@@ -542,6 +548,18 @@ async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
         .expect("served once a permit frees")
         .unwrap();
     assert_eq!(served.status(), StatusCode::OK);
+    let wait_samples =
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find_map(|(key, _, _, value)| {
+                (key.key().name() == observe::ADMISSION_WAIT_METRIC).then_some(value)
+            });
+    std::assert_matches!(
+        wait_samples,
+        Some(DebugValue::Histogram(samples)) if samples.len() == 1 && samples[0].into_inner() > 0.0
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -611,6 +629,57 @@ async fn a_request_is_shed_after_the_admission_wait_while_its_budget_is_still_op
     assert_eq!(served.await.unwrap().status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn admission_permit_releases_at_headers_while_response_context_lives_until_body_drop() {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let sender = Arc::new(std::sync::Mutex::new(Some(send)));
+    let stream_handler = move |response: crate::ResponseContext| {
+        let sender = Arc::clone(&sender);
+        async move {
+            sender
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(response)
+                .unwrap();
+            Body::from_stream(futures_util::stream::pending::<
+                Result<axum::body::Bytes, std::io::Error>,
+            >())
+        }
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    let routes = Router::new()
+        .route("/stream", get(stream_handler))
+        .route("/ok", get(|| async { "ok" }));
+    let app = harden(
+        routes,
+        &HardenOptions {
+            max_in_flight: NonZeroU32::new(1),
+            admission_wait: Duration::ZERO,
+            ..options()
+        },
+    );
+
+    let streaming = app
+        .clone()
+        .oneshot(request(Method::GET, "/stream"))
+        .await
+        .unwrap();
+    assert_eq!(streaming.status(), StatusCode::OK);
+    let response_context = receive.await.unwrap();
+    assert!(!response_context.operation().cancellation().is_cancelled());
+
+    let second = app.oneshot(request(Method::GET, "/ok")).await.unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    drop(streaming);
+    assert!(response_context.operation().cancellation().is_cancelled());
+}
+
 async fn ready_control() -> health::ReadinessControl {
     let readiness = health::Readiness::new(
         Vec::new(),
@@ -622,7 +691,7 @@ async fn ready_control() -> health::ReadinessControl {
         .unwrap(),
     );
     let control = readiness.control();
-    readiness.prepare().await.unwrap().activate().unwrap();
+    let _refresher = readiness.prepare().await.unwrap().activate().unwrap();
     control
 }
 
@@ -661,6 +730,11 @@ async fn http1_responses_ask_the_client_to_reconnect_only_while_draining() {
 
 #[tokio::test(start_paused = true)]
 async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
     let started = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(tokio::sync::Notify::new());
     let handler_1 = {
@@ -682,24 +756,17 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     )]
     let routes = Router::new().route("/hold", get(handler_1));
     let patience = Duration::from_millis(100);
-    let app = routes
-        .layer(middleware::from_fn_with_state(
-            Arc::new(Admission {
-                permits: Semaphore::new(1),
-                max_wait: patience,
-                probes: ProbeRoutes::default(),
-            }),
-            admit,
-        ))
-        .layer(middleware::from_fn_with_state(
-            Observer::new(false, false, ProbeRoutes::default()),
-            observe::observe,
-        ));
-    let fields = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing::Dispatch::new(tracing_subscriber::registry().with(EventFields {
-        target: concat!(env!("CARGO_CRATE_NAME"), "::observe"),
-        fields: Arc::clone(&fields),
-    }));
+    let app = harden(
+        routes,
+        &HardenOptions {
+            max_in_flight: NonZeroU32::new(1),
+            admission_wait: patience,
+            request_timeout: Duration::from_secs(10),
+            ..options()
+        },
+    );
+    let events = EventCapture::new();
+    let subscriber = events.dispatch_for(&[concat!(env!("CARGO_CRATE_NAME"), "::observe")]);
 
     let holder = tokio::spawn({
         let app = app.clone();
@@ -723,17 +790,26 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     assert_eq!(json["code"], "service_unavailable");
     assert_eq!(json["detail"], service_failure::AT_CAPACITY_DETAIL);
 
-    let shed_fields = std::mem::take(&mut *fields.lock().unwrap());
-    assert!(
-        shed_fields
-            .iter()
-            .any(|field| field == "message=http_request")
+    let metrics = snapshotter.snapshot().into_vec();
+    let wait_samples = metrics.iter().find_map(|(key, _, _, value)| {
+        (key.key().name() == observe::ADMISSION_WAIT_METRIC).then_some(value)
+    });
+    std::assert_matches!(
+        wait_samples,
+        Some(DebugValue::Histogram(samples))
+            if samples.len() == 1 && samples[0].into_inner() >= patience.as_secs_f64()
     );
-    assert!(
-        shed_fields
-            .iter()
-            .any(|field| field == "termination=\"load_shed\"")
-    );
+    let shed_count = metrics.iter().find_map(|(key, _, _, value)| {
+        (key.key().name() == observe::SHED_REQUESTS_METRIC).then_some(value)
+    });
+    assert_eq!(shed_count, Some(&DebugValue::Counter(1)));
+
+    let shed_events = events.take();
+    assert!(shed_events.iter().any(|event| {
+        event.message() == Some("http_request")
+            && event.field("termination") == Some("\"load_shed\"")
+            && event.field("problem_code") == Some("\"service_unavailable\"")
+    }));
 
     gate.notify_one();
     let unavailable = tokio::time::timeout(Duration::from_secs(1), holder)
@@ -743,9 +819,10 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
         .unwrap();
     assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body_json(unavailable).await["code"], "service_unavailable");
-    let fields = fields.lock().unwrap();
-    assert!(fields.iter().any(|field| field == "message=http_request"));
-    assert!(!fields.iter().any(|field| field.starts_with("termination=")));
+    let holder_events = events.snapshot();
+    assert!(holder_events.iter().any(|event| {
+        event.message() == Some("http_request") && event.field("termination").is_none()
+    }));
 }
 
 async fn probe_admission_app() -> (

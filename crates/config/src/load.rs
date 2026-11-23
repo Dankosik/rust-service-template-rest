@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -9,10 +8,9 @@ use crate::app::BuildInfo;
 use crate::secret_policy::first_secret_key;
 use crate::{Config, ConfigInput, LoadOptions, ValidationErrors};
 
-mod rejection;
+mod tree;
 mod variables;
 
-use rejection::describe_rejection;
 use variables::collect_variables;
 pub(crate) use variables::{ADDRESSABLE_KEY_FORM, is_env_addressable, variable_name};
 
@@ -43,6 +41,9 @@ const RETAINED_SECTIONS: &[&str] = &[
     // template:begin object-storage:config-section
     "object_storage",
     // template:end object-storage:config-section
+    // template:begin clickhouse:config-section
+    "clickhouse",
+    // template:end clickhouse:config-section
     // template:begin authn:config-section
     "authn",
     // template:end authn:config-section
@@ -64,7 +65,54 @@ const RETAINED_SECTIONS: &[&str] = &[
 ];
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+#[error(transparent)]
+pub struct Error(pub(crate) ErrorKind);
+
+impl Error {
+    #[must_use]
+    pub const fn validation_errors(&self) -> Option<&ValidationErrors> {
+        match &self.0 {
+            ErrorKind::Validate(errors) => Some(errors),
+            _ => None,
+        }
+    }
+}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self(kind)
+    }
+}
+
+impl From<InputError> for Error {
+    fn from(error: InputError) -> Self {
+        Self(ErrorKind::Input(error))
+    }
+}
+
+impl From<ValidationErrors> for Error {
+    fn from(errors: ValidationErrors) -> Self {
+        Self(ErrorKind::Validate(errors))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ErrorKind {
+    #[error(transparent)]
+    Input(InputError),
+    #[error(
+        "configuration inputs are invalid: {}",
+        crate::validate::join_errors(.0)
+    )]
+    Inputs(Vec<InputError>),
+    #[error("configuration is invalid: {0}")]
+    Deserialize(String),
+    #[error("configuration is invalid: {0}")]
+    Validate(ValidationErrors),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InputError {
     #[error("environment variable {name} is malformed: {NAME_FORM}")]
     MalformedEnvName { name: String },
     #[error("environment variable {name} holds a value that is not valid Unicode")]
@@ -79,7 +127,10 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
-    #[error("secret file {} is malformed: its name is a variable name, and {NAME_FORM}", path.display())]
+    #[error(
+        "secret file {} is malformed: its name is a variable name, and {NAME_FORM}",
+        path.display()
+    )]
     MalformedSecretName { path: PathBuf },
     #[error("{name} and {other} set the same key")]
     AmbiguousName { name: String, other: String },
@@ -96,21 +147,16 @@ pub enum Error {
     },
     #[error("config file {}: {message}", path.display())]
     ParseFile { path: PathBuf, message: String },
-    #[error("secret key `{key}` carries a value in config file {}; use an `{ENV_PREFIX}{ENV_SEPARATOR}` environment variable or a matching file in --secrets-dir", path.display())]
-    SecretInFile { key: String, path: PathBuf },
-    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
-    UnaddressableKey { key: String, path: PathBuf },
     #[error(
-        "configuration inputs are invalid: {}",
-        crate::validate::join_errors(.0)
+        "secret key `{key}` carries a value in config file {}; use an `{ENV_PREFIX}{ENV_SEPARATOR}` environment variable or a matching file in --secrets-dir",
+        path.display()
     )]
-    InputErrors(Vec<Error>),
-    #[error("load configuration: {0}")]
-    Merge(String),
-    #[error("configuration is invalid: {0}")]
-    Deserialize(String),
-    #[error("configuration is invalid: {0}")]
-    Validate(#[from] ValidationErrors),
+    SecretInFile { key: String, path: PathBuf },
+    #[error(
+        "key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays",
+        path.display()
+    )]
+    UnaddressableKey { key: String, path: PathBuf },
 }
 
 pub fn load(
@@ -118,7 +164,7 @@ pub fn load(
     build: BuildInfo,
     shutdown_tail: crate::ShutdownTail,
 ) -> Result<Config, Error> {
-    load_with_tail_from(options, build, Some(shutdown_tail), std::env::vars_os())
+    load_with_tail_from(options, build, shutdown_tail, std::env::vars_os())
 }
 
 #[cfg(test)]
@@ -127,18 +173,17 @@ pub(crate) fn load_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Config, Error> {
-    load_with_tail_from(options, build, None, environment)
+    load_with_tail_from(options, build, crate::http::NO_SHUTDOWN_TAIL, environment)
 }
 
 pub(crate) fn load_with_tail_from(
     options: &LoadOptions,
     build: BuildInfo,
-    shutdown_tail: Option<crate::ShutdownTail>,
+    shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Config, Error> {
-    let mut input: ConfigInput = merge(options, environment)?;
-    input.app.apply_build_info(build);
-    Ok(input.admit(shutdown_tail)?)
+    let input: ConfigInput = load_input(options, environment)?;
+    Ok(input.admit(build, shutdown_tail)?)
 }
 
 // template:begin worker:load-worker
@@ -147,7 +192,7 @@ pub fn load_worker(
     build: BuildInfo,
     shutdown_tail: crate::ShutdownTail,
 ) -> Result<crate::WorkerConfig, Error> {
-    load_worker_with_tail_from(options, build, Some(shutdown_tail), std::env::vars_os())
+    load_worker_with_tail_from(options, build, shutdown_tail, std::env::vars_os())
 }
 
 #[cfg(test)]
@@ -156,18 +201,17 @@ pub(crate) fn load_worker_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::WorkerConfig, Error> {
-    load_worker_with_tail_from(options, build, None, environment)
+    load_worker_with_tail_from(options, build, crate::http::NO_SHUTDOWN_TAIL, environment)
 }
 
 pub(crate) fn load_worker_with_tail_from(
     options: &LoadOptions,
     build: BuildInfo,
-    shutdown_tail: Option<crate::ShutdownTail>,
+    shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::WorkerConfig, Error> {
-    let mut input: crate::WorkerInput = merge(options, environment)?;
-    input.app.apply_build_info(build);
-    Ok(input.admit(shutdown_tail)?)
+    let input: crate::WorkerInput = load_input(options, environment)?;
+    Ok(input.admit(build, shutdown_tail)?)
 }
 // template:end worker:load-worker
 
@@ -192,9 +236,8 @@ pub(crate) fn load_migration_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::MigrationConfig, MigrationLoadError> {
-    let mut input: crate::postgres::MigrationInput = merge(options, environment)?;
-    input.app.apply_build_info(build);
-    input.admit()
+    let input: crate::postgres::MigrationInput = load_input(options, environment)?;
+    input.admit(build)
 }
 // template:end postgres:load-migration
 
@@ -217,12 +260,12 @@ pub(crate) fn load_jobs_operator_from(
     options: &LoadOptions,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::JobsOperatorConfig, JobsOperatorLoadError> {
-    let input: crate::jobs::JobsOperatorInput = merge(options, environment)?;
+    let input: crate::jobs::JobsOperatorInput = load_input(options, environment)?;
     input.admit()
 }
 // template:end jobs:load-jobs-operator
 
-fn merge<T: DeserializeOwned>(
+fn load_input<T: DeserializeOwned>(
     options: &LoadOptions,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<T, Error> {
@@ -235,11 +278,13 @@ fn collect_inputs(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<(Vec<ScannedFile>, variables::Variables), Error> {
     let mut errors = Vec::new();
-    let variables =
-        collect_variables(options.secrets_dir.as_deref(), environment).unwrap_or_else(|error| {
+    let variables = match collect_variables(options.secrets_dir.as_deref(), environment) {
+        Ok(variables) => variables,
+        Err(error) => {
             errors.push(error);
-            BTreeMap::new()
-        });
+            variables::Variables::new()
+        }
+    };
     let mut files = Vec::new();
     for path in options.files() {
         match scan_file(path) {
@@ -249,8 +294,8 @@ fn collect_inputs(
     }
     match errors.len() {
         0 => Ok((files, variables)),
-        1 => Err(errors.remove(0)),
-        _ => Err(Error::InputErrors(errors)),
+        1 => Err(errors.remove(0).into()),
+        _ => Err(ErrorKind::Inputs(errors).into()),
     }
 }
 
@@ -258,175 +303,71 @@ fn merge_inputs<T: DeserializeOwned>(
     files: Vec<ScannedFile>,
     variables: variables::Variables,
 ) -> Result<T, Error> {
-    reject_table_overrides(&files, &variables)?;
-    reject_surviving_datetimes(&files, &variables)?;
-    let mut builder = config::Config::builder();
-    for file in files {
-        builder = builder.add_source(file);
-    }
-    let mut variable_sources = Vec::with_capacity(variables.len());
-    for variable in variables.into_values() {
-        let value = config::Value::new(
-            Some(&variable.source.as_str().to_owned()),
-            variable.value.as_str(),
-        );
-        builder = builder
-            .set_override(&variable.key, value)
-            .map_err(|error| Error::Merge(error.to_string()))?;
-        variable_sources.push((variable.key, variable.source));
-    }
-    let merged = builder
-        .build()
-        .map_err(|error| Error::Merge(error.to_string()))?;
-
-    let rejection = |error| Error::Deserialize(describe_rejection(&error, &variable_sources));
-    if let config::ValueKind::Table(sections) = &merged.cache.kind
-        && let Some(key) = sections
-            .keys()
-            .find(|key| !RETAINED_SECTIONS.contains(&key.as_str()))
-    {
-        return Err(rejection(serde::de::Error::unknown_field(
-            key,
-            RETAINED_SECTIONS,
-        )));
-    }
-    merged.try_deserialize().map_err(rejection)
-}
-
-fn reject_table_overrides(
-    files: &[ScannedFile],
-    variables: &variables::Variables,
-) -> Result<(), Error> {
-    let mut table_keys = BTreeSet::new();
-    let mut key_segments = Vec::new();
-    for file in files {
-        if let Some(key) =
-            record_tables_and_find_override(&file.table, &mut table_keys, &mut key_segments)
-        {
-            return Err(Error::TableOverride {
-                key,
-                input: file.path.display().to_string(),
-            });
-        }
-    }
-    if let Some(variable) = variables
-        .values()
-        .find(|variable| table_keys.contains(&variable.key))
-    {
-        return Err(Error::TableOverride {
-            key: variable.key.clone(),
-            input: variable.original_name.to_ascii_uppercase(),
-        });
-    }
-    Ok(())
-}
-
-fn reject_surviving_datetimes(
-    files: &[ScannedFile],
-    variables: &variables::Variables,
-) -> Result<(), Error> {
-    let mut datetime_keys = BTreeMap::new();
-    let mut key_segments = Vec::new();
-    for file in files {
-        update_datetime_keys(
-            &file.table,
-            &file.path,
-            &mut key_segments,
-            &mut datetime_keys,
-        );
-    }
-    for variable in variables.values() {
-        let mut key = variable.key.as_str();
-        datetime_keys.remove(key);
-        while let Some((parent, _)) = key.rsplit_once('.') {
-            datetime_keys.remove(parent);
-            key = parent;
-        }
-    }
-    if let Some((key, path)) = datetime_keys.into_iter().next() {
-        return Err(Error::Deserialize(format!(
+    let root = tree::merge(files, variables)?;
+    if let Some((key, path)) = root.first_datetime() {
+        return Err(ErrorKind::Deserialize(format!(
             "key `{key}` in {} must not be an unquoted TOML datetime; quote it as a string",
             path.display()
-        )));
+        ))
+        .into());
     }
-    Ok(())
+    if let Some(key) = root.first_unknown_section(RETAINED_SECTIONS) {
+        return Err(ErrorKind::Deserialize(
+            <tree::DecodeError as serde::de::Error>::unknown_field(key, RETAINED_SECTIONS).render(),
+        )
+        .into());
+    }
+    root.deserialize_into()
+        .map_err(|error| ErrorKind::Deserialize(error.render()).into())
 }
 
-#[derive(Clone, derive_more::Debug)]
-struct ScannedFile {
-    path: PathBuf,
-    #[debug(skip)]
-    table: toml::Table,
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "only profiles with secret-gated fields deserialize a test node directly"
+)]
+pub(crate) fn deserialize_toml_for_test<T: DeserializeOwned>(body: &str) -> Result<T, String> {
+    let table: toml::Table = toml::from_str(body).expect("fixture must be valid TOML");
+    tree::from_test_toml(table)
+        .deserialize_into()
+        .map_err(|error| error.render())
 }
 
-impl config::Source for ScannedFile {
-    fn clone_into_box(&self) -> Box<dyn config::Source + Send + Sync> {
-        Box::new(self.clone())
-    }
-
-    fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
-        let uri = self.path.to_string_lossy().into_owned();
-        Ok(from_toml_table(Some(&uri), &self.table))
-    }
-}
-
-fn from_toml_table(
-    uri: Option<&String>,
-    table: &toml::Table,
-) -> config::Map<String, config::Value> {
-    table
-        .iter()
-        .map(|(key, value)| (key.clone(), from_toml_value(uri, value)))
-        .collect()
-}
-
-fn from_toml_value(uri: Option<&String>, value: &toml::Value) -> config::Value {
-    match value {
-        toml::Value::String(value) => config::Value::new(uri, value.clone()),
-        toml::Value::Integer(value) => config::Value::new(uri, *value),
-        toml::Value::Float(value) => config::Value::new(uri, *value),
-        toml::Value::Boolean(value) => config::Value::new(uri, *value),
-        toml::Value::Datetime(value) => config::Value::new(uri, value.to_string()),
-        toml::Value::Array(items) => config::Value::new(
-            uri,
-            items
-                .iter()
-                .map(|item| from_toml_value(uri, item))
-                .collect::<Vec<_>>(),
-        ),
-        toml::Value::Table(nested) => config::Value::new(uri, from_toml_table(uri, nested)),
-    }
+pub(super) struct ScannedFile {
+    pub(super) path: PathBuf,
+    pub(super) table: toml::Table,
 }
 
 #[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
-fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
-    let text = Zeroizing::new(
-        std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
-            path: path.to_owned(),
-            error,
-        })?,
-    );
+fn scan_file(path: &Path) -> Result<ScannedFile, InputError> {
+    let text =
+        Zeroizing::new(
+            std::fs::read_to_string(path).map_err(|error| InputError::ReadFile {
+                path: path.to_owned(),
+                error,
+            })?,
+        );
     let table: toml::Table = toml::from_str(&text).map_err(|error| {
         let message = match error.span() {
             Some(span) => format!("invalid TOML at byte {}", span.start),
             None => "invalid TOML".to_owned(),
         };
-        Error::ParseFile {
+        InputError::ParseFile {
             path: path.to_owned(),
             message,
         }
     })?;
     if let Some(key) = first_unaddressable_key(&table, &mut Vec::new()) {
-        return Err(Error::UnaddressableKey {
+        return Err(InputError::UnaddressableKey {
             key,
             path: path.to_owned(),
         });
     }
     if let Some(key) = first_secret_key(&table) {
-        return Err(Error::SecretInFile {
+        return Err(InputError::SecretInFile {
             key,
             path: path.to_owned(),
         });
@@ -435,57 +376,6 @@ fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
         path: path.to_owned(),
         table,
     })
-}
-
-fn update_datetime_keys<'a>(
-    table: &'a toml::Table,
-    file_path: &Path,
-    key_segments: &mut Vec<&'a str>,
-    datetime_keys: &mut BTreeMap<String, PathBuf>,
-) {
-    for (key, value) in table {
-        key_segments.push(key);
-        let dotted = key_segments.join(".");
-        if let toml::Value::Table(nested) = value {
-            datetime_keys.remove(&dotted);
-            update_datetime_keys(nested, file_path, key_segments, datetime_keys);
-        } else if contains_datetime(value) {
-            datetime_keys.insert(dotted, file_path.to_owned());
-        } else {
-            datetime_keys.remove(&dotted);
-        }
-        key_segments.pop();
-    }
-}
-
-fn contains_datetime(value: &toml::Value) -> bool {
-    match value {
-        toml::Value::Datetime(_) => true,
-        toml::Value::Array(items) => items.iter().any(contains_datetime),
-        _ => false,
-    }
-}
-
-fn record_tables_and_find_override<'a>(
-    table: &'a toml::Table,
-    table_keys: &mut BTreeSet<String>,
-    key_segments: &mut Vec<&'a str>,
-) -> Option<String> {
-    for (segment, value) in table {
-        key_segments.push(segment);
-        let dotted_key = key_segments.join(".");
-        let found = if let Some(nested) = value.as_table() {
-            table_keys.insert(dotted_key);
-            record_tables_and_find_override(nested, table_keys, key_segments)
-        } else {
-            table_keys.contains(&dotted_key).then_some(dotted_key)
-        };
-        key_segments.pop();
-        if found.is_some() {
-            return found;
-        }
-    }
-    None
 }
 
 fn first_unaddressable_key<'a>(

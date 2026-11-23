@@ -2,37 +2,39 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::dsn::DsnError;
+use crate::dsn::DsnErrorKind;
+use crate::pool::Pool;
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
-pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-pub async fn refresh_password_periodically(
-    pool: PgPool,
-    password_file: PathBuf,
-    cancel: CancellationToken,
-) {
-    metrics::describe_counter!(
-        REFRESHES_METRIC,
-        "Completed periodic password-file reads and future connection-options installations; not database authentication."
-    );
-    let _ = cancel
-        .run_until_cancelled(async {
-            let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut refresh = Refresh::default();
-            loop {
-                ticker.tick().await;
-                refresh.step(&pool, &password_file).await;
-            }
-        })
-        .await;
+impl Pool {
+    pub async fn refresh_password_periodically(
+        self,
+        password_file: PathBuf,
+        cancel: CancellationToken,
+    ) {
+        metrics::describe_counter!(
+            REFRESHES_METRIC,
+            "Completed periodic password-file reads and future connection-options installations; not database authentication."
+        );
+        let _ = cancel
+            .run_until_cancelled(async {
+                let mut ticker = tokio::time::interval(PASSWORD_REFRESH_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut refresh = Refresh::default();
+                loop {
+                    ticker.tick().await;
+                    refresh.step(&self, &password_file).await;
+                }
+            })
+            .await;
+    }
 }
 
 #[derive(Default)]
@@ -42,8 +44,8 @@ struct Refresh {
 }
 
 impl Refresh {
-    async fn step(&mut self, pool: &PgPool, path: &Path) {
-        let password = match read(path).await {
+    async fn step(&mut self, pool: &Pool, path: &Path) {
+        let password = match read_password_in_blocking_task(path).await {
             Ok(password) => password,
             Err(error) => {
                 metrics::counter!(REFRESHES_METRIC, "outcome" => "read_failed").increment(1);
@@ -58,8 +60,7 @@ impl Refresh {
             metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
             return;
         }
-        let options = (*pool.connect_options()).clone().password(&password);
-        pool.set_connect_options(options);
+        pool.set_password(&password);
         if self.last_installed.replace(password).is_some() {
             tracing::info!("postgres_password_reloaded");
         }
@@ -67,20 +68,20 @@ impl Refresh {
     }
 }
 
-async fn read(path: &Path) -> Result<Zeroizing<String>, DsnError> {
+async fn read_password_in_blocking_task(path: &Path) -> Result<Zeroizing<String>, DsnErrorKind> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || read_password(&path))
         .await
-        .map_err(|_| DsnError::PasswordFile(io::ErrorKind::Other))?
+        .map_err(|_| DsnErrorKind::PasswordFile(io::ErrorKind::Other))?
 }
 
-pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
-    let mut content = read_file(path).map_err(|error| DsnError::PasswordFile(error.kind()))?;
+pub(crate) fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnErrorKind> {
+    let mut content = read_file(path).map_err(|error| DsnErrorKind::PasswordFile(error.kind()))?;
     let password = Zeroizing::new(shared_rules::secret_file::value(std::mem::take(
         &mut *content,
     )));
     if password.is_empty() {
-        return Err(DsnError::PasswordFileEmpty);
+        return Err(DsnErrorKind::PasswordFileEmpty);
     }
     Ok(password)
 }
@@ -128,7 +129,7 @@ mod tests {
     use super::*;
     use crate::Dsn;
 
-    fn password(pool: &PgPool) -> Option<String> {
+    fn password(pool: &Pool) -> Option<String> {
         pool.connect_options()
             .to_url_lossy()
             .password()
@@ -142,34 +143,35 @@ mod tests {
     )]
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
         use metrics::Key;
-        use metrics_util::debugging::DebuggingRecorder;
+        use observe_test_support::{MetricsCapture, counter};
 
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let metrics = MetricsCapture::new();
+        let _recorder = metrics.install_default();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("password");
         std::fs::write(&file, "first\n").unwrap();
         assert_eq!(
             Dsn::admit_with(
                 "postgres://app@127.0.0.1:1/app?sslmode=require",
-                Some(&file)
+                Some(&file),
+                crate::SslPolicy::VerifyFull,
             )
             .unwrap_err(),
-            DsnError::ServerVerification,
+            crate::DsnError(DsnErrorKind::ServerVerification),
         );
         let dsn = Dsn::admit_with(
             "postgres://app@127.0.0.1:1/app?sslmode=verify-full",
             Some(&file),
+            crate::SslPolicy::VerifyFull,
         )
         .unwrap();
-        let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
+        let pool =
+            Pool::from_test_pool(PgPoolOptions::new().connect_lazy_with(dsn.connect_options()));
         assert_eq!(password(&pool).as_deref(), Some("first"));
         assert!(!format!("{:?}", pool.connect_options()).contains("first"));
         assert!(
-            snapshotter
-                .snapshot()
-                .into_vec()
+            metrics
+                .snapshot_vec()
                 .iter()
                 .all(|(key, ..)| key.key().name() != REFRESHES_METRIC)
         );
@@ -200,11 +202,11 @@ mod tests {
         assert!(!refresh.read_error_logged);
         assert_eq!(password(&pool).as_deref(), Some("third"));
         dir.close().unwrap();
-        let snapshot = snapshotter.snapshot().into_hashmap();
+        let snapshot = metrics.snapshot();
         assert_eq!(snapshot.len(), 3, "{snapshot:?}");
         for (outcome, expected) in [("installed", 3), ("read_failed", 3), ("unchanged", 1)] {
             let target = Key::from_parts(REFRESHES_METRIC, &[("outcome", outcome)]);
-            let actual = crate::test_metrics::counter(&snapshot, &target);
+            let actual = counter(&snapshot, &target);
             assert_eq!(actual, Some(expected), "{target}: {snapshot:?}");
         }
         let debug = format!("{snapshot:?}");

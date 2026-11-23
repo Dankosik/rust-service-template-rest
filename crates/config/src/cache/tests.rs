@@ -4,7 +4,7 @@ use secrecy::ExposeSecret as _;
 
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
+use crate::load::load_from;
 use crate::test_support::{
     BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, load_env, write,
 };
@@ -26,21 +26,21 @@ fn rejected_keys(input: CacheInput) -> Vec<String> {
 
 #[test]
 fn only_a_nonblank_dsn_enables_the_cache() {
-    assert!(load_env(&[]).cache.is_none());
+    assert!(load_env(&[]).cache().is_none());
     for dsn in ["", " \t "] {
         let config = load_env(&[
             ("APP__CACHE__DSN", dsn),
             ("APP__CACHE__ROOT_CA_PATH", "/run/tls/root-ca.pem"),
         ]);
-        assert!(config.cache.is_none());
+        assert!(config.cache().is_none());
     }
 
     let config = load_env(&[CACHE_DSN_ENV]);
-    let config = config.cache.as_ref().unwrap();
+    let config = config.cache().unwrap();
     assert_eq!(config.password_file, None);
     assert_eq!(config.root_ca_path, None);
     assert_eq!(config.command_timeout, Duration::from_secs(2));
-    assert_eq!(config.max_concurrency, 256);
+    assert_eq!(config.max_concurrency.get(), 256);
     assert!(config.client_certificate.is_none());
     assert!(!config.allow_plaintext && !config.allow_unauthenticated);
 }
@@ -49,7 +49,7 @@ fn only_a_nonblank_dsn_enables_the_cache() {
 fn admission_leaves_dsn_parsing_to_the_driver() {
     let raw_dsn = "opaque-cache-dsn";
     let config = load_env(&[("APP__CACHE__DSN", raw_dsn)]);
-    assert_eq!(config.cache.as_ref().unwrap().dsn.expose_secret(), raw_dsn);
+    assert_eq!(config.cache().unwrap().dsn.expose_secret(), raw_dsn);
 }
 
 #[test]
@@ -61,12 +61,13 @@ fn a_local_environment_name_alone_refuses_each_cache_exception() {
             "cache.allow_unauthenticated",
         ),
     ] {
-        let result = load_from(
+        let error = load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[("APP__APP__ENV", "local"), (variable, "true")]),
-        );
-        std::assert_matches!(result, Err(Error::Validate(errors)) if errors.names(key));
+        )
+        .unwrap_err();
+        assert!(error.validation_errors().unwrap().names(key), "{error}");
     }
 }
 
@@ -156,13 +157,13 @@ fn cache_environment_reads_the_dsn_and_redacts_it() {
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
     ]);
-    let cache = cfg.cache.as_ref().unwrap();
+    let cache = cfg.cache().unwrap();
     assert!(cache.allow_plaintext && cache.allow_unauthenticated);
     assert_eq!(cache.dsn.expose_secret(), CACHE_DSN_ENV.1);
     assert_eq!(cache.command_timeout, Duration::from_millis(200));
-    assert_eq!(cache.max_concurrency, 2);
-    assert_eq!(cache.max_key_bytes, ByteSize::kib(3));
-    assert_eq!(cache.max_value_bytes, ByteSize::kib(17));
+    assert_eq!(cache.max_concurrency.get(), 2);
+    assert_eq!(cache.max_key_bytes.get(), 3 * 1024);
+    assert_eq!(cache.max_value_bytes.get(), 17 * 1024);
     assert!(!format!("{cfg:?}").contains("hunter2"));
 }
 
@@ -180,7 +181,7 @@ fn cache_empty_root_ca_path_unsets_the_file_value() {
     };
     let set = load_from(&options, BUILD, env(&[CACHE_DSN_ENV])).unwrap();
     assert_eq!(
-        set.cache.as_ref().unwrap().root_ca_path.as_deref(),
+        set.cache().unwrap().root_ca_path.as_deref(),
         Some(Path::new("/etc/cache/root-ca.pem"))
     );
     let unset = load_from(
@@ -189,7 +190,7 @@ fn cache_empty_root_ca_path_unsets_the_file_value() {
         env(&[CACHE_DSN_ENV, ("APP__CACHE__ROOT_CA_PATH", " ")]),
     )
     .unwrap();
-    assert_eq!(unset.cache.as_ref().unwrap().root_ca_path, None);
+    assert_eq!(unset.cache().unwrap().root_ca_path, None);
 }
 
 #[test]
@@ -214,7 +215,7 @@ fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
     };
     let cfg = load_from(&options, BUILD, env(&[CACHE_DSN_ENV])).unwrap();
     assert_eq!(
-        cfg.cache.as_ref().unwrap().password_file.as_deref(),
+        cfg.cache().unwrap().password_file.as_deref(),
         Some(Path::new("/run/secrets/from-file"))
     );
 
@@ -228,7 +229,7 @@ fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
     )
     .unwrap();
     assert_eq!(
-        cfg.cache.as_ref().unwrap().password_file.as_deref(),
+        cfg.cache().unwrap().password_file.as_deref(),
         Some(Path::new("/run/secrets/cache-password"))
     );
 
@@ -238,7 +239,7 @@ fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
         env(&[CACHE_DSN_ENV, ("APP__CACHE__PASSWORD_FILE", " ")]),
     )
     .unwrap();
-    assert_eq!(cfg.cache.as_ref().unwrap().password_file, None);
+    assert_eq!(cfg.cache().unwrap().password_file, None);
 }
 
 #[test]
@@ -248,13 +249,7 @@ fn cache_client_certificate_paths_are_set_from_the_environment_together() {
         ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
         ("APP__CACHE__CLIENT_KEY_PATH", "/run/tls/client.key"),
     ]);
-    let certificate = cfg
-        .cache
-        .as_ref()
-        .unwrap()
-        .client_certificate
-        .as_ref()
-        .unwrap();
+    let certificate = cfg.cache().unwrap().client_certificate.as_ref().unwrap();
     assert_eq!(certificate.cert_path, Path::new("/run/tls/client.crt"));
     assert_eq!(certificate.key_path, Path::new("/run/tls/client.key"));
 

@@ -6,12 +6,12 @@ use std::time::Duration;
 use axum::http::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use enum_map::{Enum, EnumMap};
-use infra_idempotency_store::{AttemptError, Attempted, RequestFingerprint, ScopeKey, Store};
+use infra_idempotency_store::{
+    AttemptError, Attempted, RequestFingerprint, ScopeKey, Store, WriteOutcome,
+};
 use infra_postgres::{SqlError, failure_cause, sqlstate};
-use metrics::{Key, Label, Level, Metadata};
 use tokio::time::Instant;
 
-use super::compose::wiring_failure;
 use super::stored::{ReplayError, ReplaySuccess, TerminalProblem, response_from_record};
 use super::{REPLAYED_HEADER_NAME, REPLAYED_VALUE, Tx};
 use crate::context::RequestDeadline;
@@ -46,32 +46,38 @@ pub(super) enum Outcome {
 }
 
 impl Outcome {
-    fn key(self) -> &'static Key {
-        macro_rules! outcomes {
-            ($($variant:ident => $label:literal),* $(,)?) => {
-                match self {
-                    $(Self::$variant => {
-                        static LABELS: [Label; 1] = [Label::from_static_parts("outcome", $label)];
-                        static KEY: Key = Key::from_static_parts(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, &LABELS);
-                        &KEY
-                    },)*
-                }
-            };
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidKey => "invalid_key",
+            Self::Unavailable => "unavailable",
+            Self::InProgress => "in_progress",
+            Self::KeyMismatch => "key_mismatch",
+            Self::Replayed => "replayed",
+            Self::Integrity => "integrity",
+            Self::Internal => "internal",
+            Self::Executed => "executed",
+            Self::TerminalRefusal => "terminal_refusal",
+            Self::Unstorable => "unstorable",
+            Self::NotStored => "not_stored",
+            Self::Abandoned => "abandoned",
         }
-        outcomes!(
-            InvalidKey => "invalid_key",
-            Unavailable => "unavailable",
-            InProgress => "in_progress",
-            KeyMismatch => "key_mismatch",
-            Replayed => "replayed",
-            Integrity => "integrity",
-            Internal => "internal",
-            Executed => "executed",
-            TerminalRefusal => "terminal_refusal",
-            Unstorable => "unstorable",
-            NotStored => "not_stored",
-            Abandoned => "abandoned",
-        )
+    }
+
+    const fn yields_to_request_timeout(self) -> bool {
+        match self {
+            Self::Unavailable
+            | Self::InProgress
+            | Self::KeyMismatch
+            | Self::Integrity
+            | Self::Internal
+            | Self::Unstorable => true,
+            Self::InvalidKey
+            | Self::Replayed
+            | Self::Executed
+            | Self::TerminalRefusal
+            | Self::NotStored
+            | Self::Abandoned => false,
+        }
     }
 }
 
@@ -97,13 +103,9 @@ impl RouteState {
     }
 
     pub(super) fn record(&self, outcome: Outcome) {
-        static METADATA: Metadata<'static> =
-            Metadata::new(module_path!(), Level::INFO, Some(module_path!()));
         self.outcomes[outcome]
             .get_or_init(|| {
-                metrics::with_recorder(|recorder| {
-                    recorder.register_counter(outcome.key(), &METADATA)
-                })
+                metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => outcome.as_str())
             })
             .increment(1);
     }
@@ -136,16 +138,20 @@ impl Attempt {
         let command_end = command
             .attempt_timeout()
             .and_then(|budget| Instant::now().checked_add(budget));
-        let execution = self.execute(command, command_end);
+        let execution = self.run_in_store(command, command_end);
         match command_end {
             Some(end) => tokio::time::timeout_at(end, execution)
                 .await
-                .unwrap_or_else(|_| command_timeout()),
+                .unwrap_or_else(|_| command_timeout_response()),
             None => execution.await,
         }
     }
 
-    async fn execute<C: FreshCommand>(self, command: C, command_end: Option<Instant>) -> Response {
+    async fn run_in_store<C: FreshCommand>(
+        self,
+        command: C,
+        command_end: Option<Instant>,
+    ) -> Response {
         let Attempt {
             store,
             scope,
@@ -157,39 +163,46 @@ impl Attempt {
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
-                let store = store.with_terminal_refusals(C::Terminal::ENABLED);
                 let command_cutoff = command_end.filter(|end| *end <= attempt_end);
                 let attempt = store.attempt_with_deadline(
                     &scope,
                     &fingerprint,
                     command_cutoff.unwrap_or(attempt_end),
-                    async |tx: &mut Tx<'_>| match command.execute(tx).await {
-                        Ok(success) => Ok(success.capture()?.into_record()),
-                        Err(Rollback::Terminal(problem)) => {
-                            let terminal: TerminalProblem = problem.into();
-                            Ok(terminal.capture()?)
-                        }
-                        Err(Rollback::Refused(response)) => Err(AttemptRollback::Refused(response)),
-                        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
-                        Err(Rollback::Unstorable(error)) => Err(AttemptRollback::Unstorable(error)),
-                    },
+                    async |tx: &mut Tx<'_>| write_outcome(command, tx).await,
                 );
                 let result = tokio::time::timeout_at(attempt_end, attempt)
                     .await
                     .unwrap_or(Err(AttemptError::Unavailable));
                 if command_cutoff.is_some() && matches!(result, Err(AttemptError::Deadline)) {
-                    return command_timeout();
+                    return command_timeout_response();
                 }
                 result
             }
         };
-        map_attempted(attempted, &scope, &route)
-            .settle(deadline.at(), &route, guard)
-            .await
+        let answer = map_attempted(attempted, &scope, &route);
+        if answer.outcome.yields_to_request_timeout() && Instant::now() >= deadline.at() {
+            return std::future::pending().await;
+        }
+        DropGuard::dismiss(guard).record(answer.outcome);
+        answer.response
     }
 }
 
-fn command_timeout() -> Response {
+async fn write_outcome<C: FreshCommand>(
+    command: C,
+    tx: &mut Tx<'_>,
+) -> Result<WriteOutcome<<C::Terminal as TerminalMode>::StoreMode>, AttemptRollback> {
+    match command.execute(tx).await {
+        Ok(success) => Ok(WriteOutcome::Success(success.capture()?.into_success())),
+        Err(Rollback::Terminal(problem)) => {
+            Ok(WriteOutcome::TerminalRefusal(problem.capture_terminal()?))
+        }
+        Err(Rollback::Refused(problem)) => Err(AttemptRollback::Refused(problem)),
+        Err(Rollback::Database(error)) => Err(AttemptRollback::Database(error)),
+    }
+}
+
+fn command_timeout_response() -> Response {
     Problem::new(Code::GatewayTimeout)
         .detail_static(ATTEMPT_TIMEOUT_DETAIL)
         .into_response()
@@ -199,31 +212,37 @@ mod sealed {
     pub trait TerminalMode {}
 }
 
-pub trait TerminalMode: sealed::TerminalMode + Into<TerminalProblem> + Send {
-    const ENABLED: bool;
+pub trait TerminalMode: sealed::TerminalMode + Send {
+    type StoreMode: infra_idempotency_store::RefusalMode;
+
+    fn capture_terminal(self) -> Result<Self::StoreMode, ReplayError>;
 }
 
 impl sealed::TerminalMode for Infallible {}
 impl TerminalMode for Infallible {
-    const ENABLED: bool = false;
+    type StoreMode = Self;
+
+    fn capture_terminal(self) -> Result<Self::StoreMode, ReplayError> {
+        match self {}
+    }
 }
 
 impl sealed::TerminalMode for TerminalProblem {}
 impl TerminalMode for TerminalProblem {
-    const ENABLED: bool = true;
-}
+    type StoreMode = infra_idempotency_store::TerminalRefusal;
 
-impl From<Infallible> for TerminalProblem {
-    fn from(never: Infallible) -> Self {
-        match never {}
+    fn capture_terminal(self) -> Result<Self::StoreMode, ReplayError> {
+        self.capture()
     }
 }
+
+const _: () = assert!(std::mem::size_of::<Rollback<TerminalProblem>>() <= 128);
 
 #[derive(derive_more::Debug, derive_more::From, thiserror::Error)]
 pub enum Rollback<T = Infallible> {
     #[debug("{self}")]
     #[error("operation refused")]
-    Refused(Box<Response>),
+    Refused(Box<Problem>),
     #[debug("{self}")]
     #[error("terminal business refusal")]
     Terminal(T),
@@ -231,58 +250,27 @@ pub enum Rollback<T = Infallible> {
     #[debug("{self}")]
     #[error("database")]
     Database(SqlError),
-    #[debug("{self}")]
-    #[error(transparent)]
-    Unstorable(#[from] ReplayError),
 }
 
-impl<T> Rollback<T> {
-    #[must_use]
-    pub fn refuse(response: impl IntoResponse) -> Self {
-        Self::Refused(Box::new(response.into_response()))
+impl<T> From<Problem> for Rollback<T> {
+    fn from(problem: Problem) -> Self {
+        Self::Refused(Box::new(problem))
     }
 }
 
 struct Answer {
     response: Response,
     outcome: Outcome,
-    yield_to_request_timeout: bool,
 }
 
 impl Answer {
-    fn boundary_problem(response: Response, outcome: Outcome) -> Self {
-        Self {
-            response,
-            outcome,
-            yield_to_request_timeout: true,
-        }
-    }
-
-    fn operation_response(response: Response, outcome: Outcome) -> Self {
-        Self {
-            response,
-            outcome,
-            yield_to_request_timeout: false,
-        }
-    }
-
-    async fn settle<'a>(
-        self,
-        deadline: Instant,
-        route: &RouteState,
-        guard: DropGuard<&'a Arc<RouteState>, impl FnOnce(&'a Arc<RouteState>)>,
-    ) -> Response {
-        if self.yield_to_request_timeout && Instant::now() >= deadline {
-            return std::future::pending().await;
-        }
-        DropGuard::dismiss(guard);
-        route.record(self.outcome);
-        self.response
+    const fn new(response: Response, outcome: Outcome) -> Self {
+        Self { response, outcome }
     }
 }
 
 enum AttemptRollback {
-    Refused(Box<Response>),
+    Refused(Box<Problem>),
     Database(SqlError),
     Unstorable(ReplayError),
 }
@@ -301,11 +289,8 @@ fn map_attempted(
     let operation_id = &route.operation_id;
     match attempted {
         Err(error) => attempt_failure(error, scope, operation_id),
-        Ok(Attempted::RolledBack(AttemptRollback::Refused(response))) => {
-            Answer::operation_response(
-                sanitize_refusal(*response, operation_id),
-                Outcome::NotStored,
-            )
+        Ok(Attempted::RolledBack(AttemptRollback::Refused(problem))) => {
+            Answer::new((*problem).into_response(), Outcome::NotStored)
         }
         Ok(Attempted::RolledBack(AttemptRollback::Database(error))) => {
             let class = AttemptError::classify_sql(&error);
@@ -324,10 +309,10 @@ fn map_attempted(
                 failure = %error,
                 "http_idempotency_success_not_stored"
             );
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
+            Answer::new(sanitized_internal_error(), Outcome::Unstorable)
         }
         Ok(Attempted::Mismatch) => {
-            Answer::boundary_problem(key_mismatch(route.rules_link.clone()), Outcome::KeyMismatch)
+            Answer::new(key_mismatch(route.rules_link.clone()), Outcome::KeyMismatch)
         }
         Ok(Attempted::Replay(record)) => {
             let mut response = response_from_record(record);
@@ -335,18 +320,21 @@ fn map_attempted(
                 REPLAYED_HEADER_NAME,
                 HeaderValue::from_static(REPLAYED_VALUE),
             );
-            Answer::operation_response(response, Outcome::Replayed)
+            Answer::new(response, Outcome::Replayed)
         }
         Ok(Attempted::InProgress) => {
-            Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
+            tracing::info!(
+                scope_digest = %const_hex::display(scope.digest()),
+                operation = operation_id,
+                "http_idempotency_in_progress"
+            );
+            Answer::new(in_progress(), Outcome::InProgress)
         }
         Ok(Attempted::Committed(record)) => {
-            let outcome = if record.is_terminal_refusal() {
-                Outcome::TerminalRefusal
-            } else {
-                Outcome::Executed
-            };
-            Answer::operation_response(response_from_record(record), outcome)
+            Answer::new(response_from_record(record), Outcome::Executed)
+        }
+        Ok(Attempted::TerminalRefusal(record)) => {
+            Answer::new(response_from_record(record), Outcome::TerminalRefusal)
         }
     }
 }
@@ -354,11 +342,9 @@ fn map_attempted(
 fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) -> Answer {
     match error {
         AttemptError::Unavailable | AttemptError::Deadline => {
-            Answer::boundary_problem(unavailable(), Outcome::Unavailable)
+            Answer::new(unavailable(), Outcome::Unavailable)
         }
-        AttemptError::Internal => {
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Internal)
-        }
+        AttemptError::Internal => Answer::new(sanitized_internal_error(), Outcome::Internal),
         AttemptError::Integrity => {
             tracing::error!(
                 scope_digest = %const_hex::display(scope.digest()),
@@ -366,17 +352,9 @@ fn attempt_failure(error: AttemptError, scope: &ScopeKey, operation_id: &str) ->
                 failure = "store_undecodable",
                 "http_idempotency_integrity_failed"
             );
-            Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
+            Answer::new(sanitized_internal_error(), Outcome::Integrity)
         }
     }
-}
-
-fn sanitize_refusal(mut response: Response, operation_id: &str) -> Response {
-    if !(response.status().is_client_error() || response.status().is_server_error()) {
-        return wiring_failure(operation_id, "invalid_refusal_status");
-    }
-    response.headers_mut().remove(&REPLAYED_HEADER_NAME);
-    response
 }
 
 fn unavailable() -> Response {
@@ -394,12 +372,7 @@ fn key_mismatch(rules_link: HeaderValue) -> Response {
         .into_response()
 }
 
-fn in_progress(scope: &ScopeKey, operation_id: &str) -> Response {
-    tracing::info!(
-        scope_digest = %const_hex::display(scope.digest()),
-        operation = operation_id,
-        "http_idempotency_in_progress"
-    );
+fn in_progress() -> Response {
     Problem::new(Code::IdempotencyRequestInProgress)
         .detail_static(IN_PROGRESS_DETAIL)
         .retry_after(RETRY_AFTER_HINT)
@@ -451,7 +424,7 @@ mod tests {
     async fn an_exhausted_attempt_answers_unavailable_without_waiting_for_acquisition() {
         use futures_util::FutureExt as _;
 
-        let pool = infra_postgres::PgPool::connect_lazy("postgres://localhost/unused")
+        let pool = infra_postgres::test_support::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let budget = Duration::from_millis(200);
         for elapsed in [Duration::from_millis(100), Duration::from_millis(101)] {
@@ -459,7 +432,7 @@ mod tests {
                 .checked_sub(elapsed)
                 .expect("the deadline origin fits");
             let attempt = Attempt {
-                store: Store::new(pool.clone(), Duration::from_mins(1))
+                store: Store::try_new(pool.clone(), Duration::from_mins(1))
                     .expect("retention fits PostgreSQL"),
                 scope: scope(),
                 fingerprint: RequestFingerprint::from_bytes([9; 32]),
@@ -497,40 +470,37 @@ mod tests {
         assert_eq!(problem["code"], "internal_error");
     }
 
-    #[test]
-    fn a_rollback_cannot_claim_success_or_replay() {
+    #[tokio::test]
+    async fn a_problem_refusal_answers_without_replay_header() {
         let route = route_state();
-        for (status, expected) in [
-            (StatusCode::CONTINUE, StatusCode::INTERNAL_SERVER_ERROR),
-            (StatusCode::CREATED, StatusCode::INTERNAL_SERVER_ERROR),
-            (StatusCode::NOT_MODIFIED, StatusCode::INTERNAL_SERVER_ERROR),
-            (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                StatusCode::from_u16(600).unwrap(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-        ] {
-            let rollback = AttemptRollback::Refused(Box::new(
-                (status, [(REPLAYED_HEADER_NAME, "true")]).into_response(),
-            ));
-            let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), &route);
-            assert_eq!(answer.response.status(), expected);
-            assert!(
-                !answer
-                    .response
-                    .headers()
-                    .contains_key(&REPLAYED_HEADER_NAME)
-            );
-        }
+        let rollback = AttemptRollback::Refused(Box::new(
+            Problem::new(Code::UnprocessableContent).detail("rejected"),
+        ));
+        let answer = map_attempted(Ok(Attempted::RolledBack(rollback)), &scope(), &route);
+        assert_eq!(answer.outcome, Outcome::NotStored);
+        assert_eq!(answer.response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            answer.response.headers()[CONTENT_TYPE],
+            "application/problem+json"
+        );
+        assert!(
+            !answer
+                .response
+                .headers()
+                .contains_key(&REPLAYED_HEADER_NAME)
+        );
+        let problem = body_json(answer.response).await;
+        assert_eq!(problem["code"], "unprocessable_content");
+        assert_eq!(problem["detail"], "rejected");
     }
 
     #[test]
-    fn rollback_debug_and_database_from_preserve_bounds_and_source_privacy() {
+    fn rollback_debug_and_conversions_preserve_bounds_and_source_privacy() {
         struct OpaqueTerminal;
+
+        let refused: Rollback<OpaqueTerminal> = Rollback::from(Problem::new(Code::BadRequest));
+        assert_eq!(format!("{refused:?}"), "operation refused");
+        assert!(refused.source().is_none());
 
         let terminal: Rollback<OpaqueTerminal> = Rollback::Terminal(OpaqueTerminal);
         assert_eq!(format!("{terminal:?}"), "terminal business refusal");

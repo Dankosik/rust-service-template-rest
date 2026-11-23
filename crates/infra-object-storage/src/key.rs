@@ -1,6 +1,6 @@
 const MAX_KEY_BYTES: usize = 1024;
 
-#[derive(Clone, PartialEq, Eq, Hash, derive_more::Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Debug)]
 #[debug("ObjectKey {{ len: {} }}", _0.len())]
 pub struct ObjectKey(String);
 
@@ -9,21 +9,9 @@ pub struct ObjectKey(String);
 pub struct InvalidObjectKey;
 
 impl ObjectKey {
-    pub fn try_new(key: impl Into<String>) -> Result<Self, InvalidObjectKey> {
-        let key = key.into();
-        if key.len() > MAX_KEY_BYTES || key == "soap" {
-            return Err(InvalidObjectKey);
-        }
-        let valid = key.split('/').all(|segment| {
-            !segment.is_empty()
-                && segment != "."
-                && segment != ".."
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"._~-".contains(&byte))
-        });
-        if valid {
-            Ok(Self(key))
+    pub fn try_new(key: impl AsRef<str> + Into<String>) -> Result<Self, InvalidObjectKey> {
+        if is_valid(key.as_ref()) {
+            Ok(Self(key.into()))
         } else {
             Err(InvalidObjectKey)
         }
@@ -32,6 +20,56 @@ impl ObjectKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+fn is_valid(key: &str) -> bool {
+    if key.len() > MAX_KEY_BYTES || key == "soap" {
+        return false;
+    }
+    key.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._~-".contains(&byte))
+    })
+}
+
+impl std::borrow::Borrow<str> for ObjectKey {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ObjectKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::str::FromStr for ObjectKey {
+    type Err = InvalidObjectKey;
+
+    fn from_str(key: &str) -> Result<Self, Self::Err> {
+        Self::try_new(key)
+    }
+}
+
+impl TryFrom<String> for ObjectKey {
+    type Error = InvalidObjectKey;
+
+    fn try_from(key: String) -> Result<Self, Self::Error> {
+        Self::try_new(key)
+    }
+}
+
+impl TryFrom<&str> for ObjectKey {
+    type Error = InvalidObjectKey;
+
+    fn try_from(key: &str) -> Result<Self, Self::Error> {
+        Self::try_new(key)
     }
 }
 
@@ -74,7 +112,14 @@ mod tests {
 
     #[test]
     fn key_debug_hides_the_key() {
-        let key = ObjectKey::try_new("customer-42/invoice.pdf").unwrap();
+        let key: ObjectKey = "customer-42/invoice.pdf".parse().unwrap();
+        assert_eq!(ObjectKey::try_from("customer-42/invoice.pdf").unwrap(), key);
+        assert_eq!(
+            ObjectKey::try_from("customer-42/invoice.pdf".to_owned()).unwrap(),
+            key
+        );
+        assert_eq!(key.as_ref(), "customer-42/invoice.pdf");
+        assert!(ObjectKey::try_new("a").unwrap() < key);
         let rendered = format!("{key:?}");
         assert!(!rendered.contains("customer"), "{rendered}");
     }

@@ -1,75 +1,197 @@
 # Specification
 
-Definition owns what users, callers, operators and downstream systems can
-observe. [Phase Selection](../../spec-first-workflow.md#phase-selection)
-determines whether a behavioral contract needs authoring or reopening.
+Continue autonomously in the same session after [Intake](intake.md) confirms
+shared understanding. Own the externally observable behavioral contract
+(**WHAT**); leave technical mechanisms, storage or migration tactics, crates,
+and code structure to [Technical Design](technical-design.md).
+
+**External Observer Test:** If two implementations differ here, could an
+external caller, consumer, operator, or auditor tell them apart without reading
+source code or internal storage? If yes, pin the rule in `spec.md`. If no, leave
+it to Technical Design—except explicit **hard external constraints** carried
+from Intake that legitimately bind HOW (for example, an externally mandated
+provider or datastore, compliance/data-residency rule, or infrastructure cost
+ceiling).
 
 ## Steps
 
-1. **Ground the request.** Require a ready `specs/<task>/intent.md`. If it is
-   missing or unready, create no spec, leave any existing spec untouched and return a
-   [Blocked Handoff](specification/non-standard-paths.md#blocked-handoff)
-   naming the missing input and reopening Intake. On an existing
-   spec, follow [Reopen Or Resume From Blocked](specification/non-standard-paths.md#reopen-or-resume-from-blocked).
-   Read active coordination and prior research when present. Check Intent's
-   baseline against affected code, callers, schemas, migrations, config,
-   profiles and tests. Consult [Domain Vocabulary](../../repo-architecture.md#domain-vocabulary),
-   decision records and the [Production Contract](../../production-contract.md)
-   for applicable policy. Ground statically by default. Delegate wide
-   multi-crate inventories under [Read-Only Delegation](../shared/read-only-delegation.md)
-   and verify decision-critical anchors directly. Use supporting
-   [Research](research.md) when evidence or feasibility could change behavior. Leave solution discovery
-   to Technical Design unless feasibility changes an observable obligation.
+1. **Ground external-seam delta and inventory affected surfaces (read-only).**
+   - Build on Intake's confirmed baseline (re-verifying baseline claims against
+     live code when resuming from `specs/<task>/intent.md`) without re-asking
+     settled or delegated choices. Inspect the deeper live external-contract
+     facts Intake did not need to pin: exact `api/` schemas, existing statuses
+     and wire error codes, field nullability and defaults, CLI flags/exit codes,
+     sibling endpoint conventions, operator-facing `crates/config` keys, [Domain
+     Vocabulary](../../repo-architecture.md#domain-vocabulary),
+     `docs/decisions/`, and existing persisted entity shapes that govern
+     pre-existing data at deploy. Offload wide scans to a fresh `evidence-agent`
+     via [Read-Only Delegation](../shared/read-only-delegation.md) to stay in
+     the **smart zone**; load [Research](research.md) whenever an unknown
+     external standard, provider contract, or consumer behavior gates an `R<n>`.
+   - Before drafting any `R<n>`, map the affected behavioral surface required by
+     `## Actors, baseline & terminology` in [Artifact Format](#artifact-format).
+   - Surface any verified premise contradiction directly to the user instead of
+     authoring around it. If every requested outcome already holds with zero
+     coding delta, verify via [Zero-Delta Check](plan-review.md#zero-delta-check)
+     before reporting completion.
+   - *Done when:* the full affected behavioral surface for `## Actors, baseline
+     & terminology` is verified in primary sources.
 
-   A contradicted baseline premise or infeasible hard binding takes [Wrong Premise In Intent](specification/non-standard-paths.md#wrong-premise-in-intent).
-   If all obligations are already met, take [Already-Satisfied No-Delta](specification/non-standard-paths.md#already-satisfied-no-delta).
-   If functional behavior stays fixed but work remains, use
-   [Behavior-Preserving Change](specification/non-standard-paths.md#behavior-preserving-change).
+2. **Close observable behavior (WHAT) across Behavioral Probes.**
+   - Walk all seven probes in [Behavioral
+     Probes](specification/behavioral-probes.md) across every inventoried entity
+     and external seam.
+   - **Autonomous closure vs. user reopen:**
+     - *Close autonomously:* protocol and boundary semantics (`omitted`/`null`/
+       empty, exact expiry, sorting/tie-breakers, error codes, failure
+       precedence) consistent with `docs/decisions/`, [Production
+       Contract](../../production-contract.md), and sibling seams; choices
+       inside user-delegated boundaries (within stated limits); and low-stakes
+       reversible edge conventions (pinning the concrete rule in `R<n>` and
+       tracking its `A<n>` assumption with objective `Reopen if`).
+     - *Reopen the user strictly for:* a verified premise contradiction or an
+       unresolved product/risk fork (money, auth/existence hiding, externally
+       observed fate of pre-existing data at deploy, breaking callers, or a
+       conflict with `Must not`).
+   - Shape every closed rule, interaction table, pinned external identifier,
+     public-seam `Falsifier`, risk-anchored `G<n>`, and quantitative target
+     under [Artifact Format](#artifact-format).
+   - *Done when:* every inventoried entity and external seam clears [Behavioral
+     Probes](specification/behavioral-probes.md)'s exhaustiveness bar, with zero
+     unresolved product/risk forks.
 
-2. **Settle behavioral forks.** Use the canonical vocabulary and distinguish
-   new or overloaded terms. Walk [Behavioral Probes](specification/behavioral-probes.md).
-   For an unresolved external-observer question, load the matching
-   `rust-api-contract`, `rust-security`, `rust-config`, `rust-reliability`,
-   `rust-observability` or `rust-performance` skill.
-   Resolve every material [Intent obligation](../interfaces/intent.md#field-rules),
-   including the observable goal behind a suggested mechanism. Keep research
-   unknowns and freshness conditions in `Reopen if`. Investigate conflicting
-   evidence under [Conflict Or Freshness](research-branches.md#conflict-or-freshness).
+3. **Persist `specs/<task>/spec.md` (`status: draft`).**
+   - Write `spec.md` at `status: draft` using [Artifact Format](#artifact-format),
+     omitting empty optional sections and linking unchanged code, `api/`,
+     migrations, and `research/*.md` instead of copying them.
+   - *Done when:* `specs/<task>/spec.md` is on disk at `status: draft` with
+     complete surface inventory, closed behavioral rules, and zero unresolved
+     product/risk forks.
 
-   | Source of a decision | Disposition |
-   | --- | --- |
-   | Applicable contract, code, standard or accepted decision | Cite its primary locator. Revisit a rejected decision only on its reopen condition or an explicit Intent mandate. Flag changes to shared vocabulary, service promises or decision records for a durable contract update. |
-   | A range of outcomes is acceptable | Pin the invariant and leave the permitted variation to Technical Design under [Field Rules](../interfaces/spec-v1.md#field-rules). |
-   | Delegated behavioral choice | Decide within the delegated limits and record the decision. |
-   | Strong repository convention or applicable standard supports a reversible assumption | Record the assumption only if it preserves requester meaning, caller commitments, persisted-data fate and trust boundaries. |
-   | Internal goal or non-behavioral preference | Name its downstream owner in the handoff. |
-   | Required behavioral authority is unresolved | Take the [Blocked Frontier](specification/non-standard-paths.md#blocked-frontier). |
+4. **Falsify on disk and enter [Technical Design](technical-design.md).**
+   - Attack the persisted `spec.md` as a hostile cold-start reader and tighten
+     every surviving defect in place before crossing into Technical Design:
+     - **Two-Implementation Divergence Test:** walk the 2–3 hardest edge,
+       concurrent, replay, or pre-existing-data paths reading only `spec.md`
+       (zero chat history); tighten any clause where two independent engineers
+       could ship externally different statuses, wire codes, ordering, side
+       effects, or state transitions.
+     - **Malicious Compliance Attack:** try to satisfy every `R<n>` and
+       `Falsifier` literally while defeating the observable success signal or a
+       `Must not` prohibition; strengthen any weak clause or happy-path-only
+       falsifier.
+     - **HOW-Leak Scrub:** lift any embedded external requirement into an
+       observable WHAT rule (or verify it is a recorded Intake hard external
+       constraint), then remove any prescribed internal mechanism, storage or
+       cache layout, migration tactic (`backfill` vs `lazy upgrade`), crate or
+       module split, or internal-seam falsifier.
+     - **Cold-Start Self-Sufficiency Check:** verify `spec.md` alone carries
+       Intake's non-obvious *why*, rejected product alternatives, hard external
+       constraints, `Must not` separated from `Non-goals`, delegated boundaries
+       (with limits), settled domain terms (`Means here` / `Does not mean` +
+       cross-task tags), and sharpest concrete edge scenarios (consumed directly
+       by [Design It Twice](technical-design/design-it-twice.md) and
+       [Implementation Review](implementation-review.md)).
+   - Continue directly into [Technical Design](technical-design.md); compact at
+     this phase boundary around `spec.md` only if heavy baseline/research reads
+     pushed context near the **smart zone** edge.
+   - *Done when:* on-disk `specs/<task>/spec.md` clears all four attacks with
+     zero surviving external divergences, malicious-compliance loopholes,
+     ungrounded HOW leaks, or dropped Intake rationales, and work enters
+     Technical Design inside the smart zone.
 
-3. **Render the draft.** Write the closed decisions to `specs/<task>/spec.md`
-   under [Specification V1](../interfaces/spec-v1.md).
+## Artifact Format
 
-4. **Preflight the on-disk draft.** Trace each material Intent obligation and
-   research disposition to a clause. Dry-run the hardest one or two interacting
-   or unhappy paths against the rules, guarantees and table cells. Repair any
-   path that satisfies the text yet defeats the success signal or allows
-   materially different outcomes outside a stated invariant. Check each
-   falsifier and inferred restriction against [Field Rules](../interfaces/spec-v1.md#field-rules).
-   Route newly exposed forks through step 2.
+Keep durable IDs (`R<n>`, `G<n>`, `A<n>`) stable on reopen: preserve surviving
+`A<n>` IDs from Intake / `intent.md`, and allocate newly added spec assumptions
+past the highest existing `A<n>` across `spec.md` and `design.md`.
 
-5. **Review the fixed draft.** Dispatch the fresh reviewer(s) selected by
-   [Specification Review](specification-review.md) with the inputs and checks
-   assigned there. Use [Review Lifecycle](../shared/review.md#lifecycle) for
-   verification, rechecks and adjudication. If any upstream gap is confirmed,
-   take [Upstream Gap After Review](specification/non-standard-paths.md#upstream-gap-after-review)
-   before editing. Otherwise repair confirmed local defects
-   and repeat the affected preflight. A grounding repair that changes rules,
-   guarantees or scope can invalidate the other axis, as can a contract repair
-   that changes behavior, baseline or affected surfaces. Review every failed
-   or invalidated axis afresh unless the bounded delta criteria hold on that
-   axis and the repair leaves the other axis valid.
+- **Header:** `# Spec: <short observable outcome>` and `status: draft | ready`
+  *(stays `draft` until cleared by [Design Review](design-review.md) on
+  substantive architecture, or [Plan Review](plan-review.md) on lightweight
+  inline architecture)*.
+- **`## Context & success signal`:** problem, primary actor/operator, observable
+  success signal, priority tie-breakers, **hard external constraints** (external
+  contracts or ceilings that legitimately bind HOW), settled product choices
+  (**rejected alternatives and *why***), and **concrete scenarios**
+  (`Given -> When -> Then` covering the happy path plus the sharpest failure,
+  concurrency/replay, and pre-existing-data cases).
+- **`## Actors, baseline & terminology`:**
+  - Touched domain entities and lifecycles;
+  - Actors and trust boundaries → external seams with primary locators;
+  - Existing callers, consumers, and pre-existing or in-flight entity classes
+    (or verified absence);
+  - Verified baseline delta (linking existing `api/`, code, migrations, and
+    `research/*.md`);
+  - **Terminology** *(omit when no domain terms need disambiguation)*:
+    domain-specific terms only (no generic programming words, no implementation
+    details), using `| Term | Means here | Does not mean | Scope |` with
+    `Scope` = `task-local` or `cross-task` (cross-task rows feed `Durable doc
+    updates` → [Domain Vocabulary](../../repo-architecture.md#domain-vocabulary)).
+- **`## Behavior delta`:** `### R<n> — <coherent observable capability>` with:
+  - atomic trigger → observable-outcome clauses, using a compact **State ×
+    Event**, **Input Boundary**, or **Precedence** table whenever `≥2` states,
+    input variants, or competing failure conditions interact;
+  - pinned **externally observable identifiers** (routes/RPCs, statuses, wire
+    error codes, payload fields, CLI flags/exit codes, operator-contract
+    config/metric/audit names);
+  - for measurable performance, capacity, or cost goals: labeled numeric target,
+    workload envelope, comparable baseline, and measurement boundary;
+  - a public-seam **Falsifier** attacking the sharpest boundary, race, or
+    precedence loophole.
+  *(Use `Behavior delta: None — behavior-preserving change` strictly when
+  neither external behavior nor a quantitative target changes.)*
+- **`## Preserved guarantees`:** `G<n>` — concrete unchanged observable
+  invariants **this change can realistically disturb**, with primary locators.
+- **`## Must not & Non-goals`:**
+  - **`Must not`** — hard safety, isolation, data-integrity, or compatibility
+    prohibitions (violations are defects/`FAIL`, traced across Design, Plan, and
+    Implementation Reviews).
+  - **`Non-goals`** — plausible adjacent scope explicitly excluded (prevents
+    scope creep).
+- **`## Assumptions & reopen triggers`:** `A<n>` bounded assumptions + objective
+  `Reopen if`, explicitly **delegated boundaries** (with user-stated limits),
+  and any carried residual risks.
 
-6. **Hand off.** When review permits movement, finalize the spec under
-   [Field Rules](../interfaces/spec-v1.md#field-rules) and return its reviewed
-   [Transition Result V1](../shared/transition.md#transition-result-v1)
-   (`owner: Definition`, `result: specs/<task>/spec.md`). Select the next
-   owner under [Phase Selection](../../spec-first-workflow.md#phase-selection).
+*(On [lightweight architecture](technical-design.md#design-review-gate),
+Technical Design appends a compact inline `## Architecture` section directly to
+`spec.md`.)*
+
+## Calibration Bar
+
+- **Crisp WHAT vs HOW-leak vs vague WHAT:**
+  - *Strong:* *"Replaying `POST /orders` with the same `Idempotency-Key` and
+    identical body bytes within 24h returns the original `201` order without
+    creating a second order; replaying with a modified body returns `422
+    idempotency_key_mismatch`; a concurrent in-flight duplicate returns `409
+    idempotency_request_in_progress`; replaying at or after 24h
+    (`now >= expires_at`) treats the request as new."*
+  - *Weak (HOW-leak):* *"Add `UNIQUE (tenant_id, idempotency_key)` on `orders`
+    and cache the JSON receipt in Redis with a 24h TTL."*
+  - *Weak (under-specified):* *"Handle duplicate `POST /orders` requests
+    idempotently and return an appropriate error on conflict."*
+- **Interaction table vs prose essay:**
+  - *Strong:* Compact Precedence table (`1. Unauthenticated -> 401
+    authentication_required`, `2. Tenant mismatch -> 404 not_found`, `3. Invalid
+    body -> 422 unprocessable_content`, `4. Modified replay -> 422
+    idempotency_key_mismatch`) + explicit `now >= expires_at` rule.
+  - *Weak:* A dense paragraph stating *"Unauthorized, invalid, expired, or
+    conflicting requests are rejected with the matching error"* without
+    resolving overlaps or `==`.
+- **Sharp public-seam Falsifier vs tautology / happy-path-only / internal-seam Falsifier:**
+  - *Strong:* *"Concurrent `POST /orders/{id}/pay` and `POST /orders/{id}/cancel`
+    both return `200`, or replaying an `Idempotency-Key` with a modified body
+    returns `200` instead of `422 idempotency_key_mismatch`."*
+  - *Weak:* Repeating `R<n>` verbatim, testing only happy-path failure (`POST
+    /orders` returns `500`), checking internals (*"`OrderRepo::insert` is called
+    twice"*), or naming a unit test / `just` command (tests belong to
+    Implementation per [Evidence
+    Contract](../shared/evidence-contract.md#design-proof)).
+- **Risk-anchored `G<n>` and `Must not` vs `Non-goals` separation:**
+  - *Strong:* `G1` pins a specific at-risk sibling contract (`GET /orders`
+    default descending `created_at, id` order and cursor stability, anchored to
+    `api/openapi/service.yaml` and `crates/orders/src/http.rs`); `Must not`
+    forbids revealing cross-tenant order existence (`404`, never `403`);
+    `Non-goals` excludes CSV export and admin replay UI.
+  - *Weak:* *"G1: Existing API endpoints keep working"* (unanchored boilerplate)
+    or listing *"Must not leak tenant data"* under `Non-goals`.

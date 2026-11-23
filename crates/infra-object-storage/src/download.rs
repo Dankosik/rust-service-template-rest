@@ -5,14 +5,15 @@ use std::task::{Context, Poll, Waker};
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
+use operation_context::{BoundedContext, BoundedStop};
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
-use crate::call::{CallContext, CallStop};
+use crate::byte_progress::{BodyEndedEarly, ByteProgress};
+use crate::call::check_active;
 use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
-use crate::put_body::ByteProgress;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
 #[derive(derive_more::Debug)]
@@ -20,7 +21,7 @@ use crate::{ObjectMetadata, ObjectStorageError, error};
 pub struct Download {
     metadata: ObjectMetadata,
     shared: Arc<Mutex<State>>,
-    timer: JoinHandle<()>,
+    timer: Option<JoinHandle<()>>,
 }
 
 #[expect(
@@ -35,11 +36,11 @@ enum State {
 
 struct Resources {
     waker: Option<Waker>,
-    context: CallContext,
+    context: BoundedContext,
     body: ByteStream,
     progress: ByteProgress,
     guard: OperationGuard,
-    _permit: OwnedSemaphorePermit,
+    permit: OwnedSemaphorePermit,
 }
 
 enum Outcome {
@@ -55,17 +56,32 @@ struct Completion {
 }
 
 impl Completion {
-    fn finish(mut self) {
-        match self.outcome {
-            Outcome::Success => self.resources.guard.succeed(),
+    fn finish(self) {
+        let Self {
+            resources,
+            outcome,
+            discarded,
+        } = self;
+        let Resources {
+            waker,
+            context,
+            body,
+            progress,
+            guard,
+            permit,
+        } = resources;
+        match outcome {
+            Outcome::Success => guard.succeed(),
             Outcome::Failure(failure) => {
-                self.resources.guard.fail(failure);
+                guard.fail(&failure);
             }
-            Outcome::Cancelled => self.resources.guard.cancel(),
+            Outcome::Cancelled => drop(guard),
         }
-        let waker = self.resources.waker.take();
-        drop(self.discarded);
-        drop(self.resources);
+        drop(discarded);
+        drop(body);
+        drop(progress);
+        drop(context);
+        drop(permit);
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -82,14 +98,12 @@ type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 
 impl Resources {
     fn collection_buffer(&self, limit: usize) -> Result<Vec<u8>, Failure> {
-        if let Some(stopped) = self.context.stopped() {
-            return Err(Failure::stopped(stopped));
-        }
+        check_active(&self.context)?;
         let Ok(unread) = usize::try_from(self.progress.remaining()) else {
-            return Err(LocalFailure::TooLarge.into());
+            return Err(Failure::too_large());
         };
         if unread > limit.min(isize::MAX as usize) {
-            return Err(LocalFailure::TooLarge.into());
+            return Err(Failure::too_large());
         }
         let mut buffer = Vec::new();
         buffer
@@ -167,9 +181,12 @@ impl State {
             State::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.fail_poll(Failure::stopped(stopped), None);
+            return self.fail_poll(Failure::not_applied_stop(stopped), None);
         }
-        resources.waker = Some(context.waker().clone());
+        match &mut resources.waker {
+            Some(waker) => waker.clone_from(context.waker()),
+            slot => *slot = Some(context.waker().clone()),
+        }
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
             return (Poll::Pending, None);
         };
@@ -182,7 +199,7 @@ impl State {
                 Poll::Ready(item) => item,
                 Poll::Pending => None,
             };
-            return self.fail_poll(Failure::stopped(stopped), discarded);
+            return self.fail_poll(Failure::not_applied_stop(stopped), discarded);
         }
         match polled {
             Poll::Pending => (Poll::Pending, None),
@@ -202,33 +219,34 @@ impl State {
                     Poll::Ready(Ok(ReadStep::Chunk(chunk))),
                     self.close(Outcome::Success, None),
                 ),
-                Err(()) => self.fail_poll(LocalFailure::ContentLength.into(), None),
+                Err(BodyEndedEarly) => self.fail_poll(LocalFailure::ContentLength.into(), None),
             },
         }
+    }
+
+    fn terminate(&mut self, termination: Termination) -> Option<Completion> {
+        let State::Open(resources) = self else {
+            return None;
+        };
+        let outcome = match termination {
+            Termination::Stopped(stopped) => Outcome::Failure(Failure::not_applied_stop(stopped)),
+            Termination::Fallback(outcome) => {
+                resources.context.stopped().map_or(outcome, |stopped| {
+                    Outcome::Failure(Failure::not_applied_stop(stopped))
+                })
+            }
+        };
+        self.close(outcome, None)
     }
 }
 
 enum Termination {
-    Stopped(CallStop),
+    Stopped(BoundedStop),
     Fallback(Outcome),
 }
 
-fn terminate(shared: &Mutex<State>, termination: Termination) {
-    let completion = {
-        let mut state = shared.lock();
-        let State::Open(resources) = &*state else {
-            return;
-        };
-        let outcome = match termination {
-            Termination::Stopped(stopped) => Outcome::Failure(Failure::stopped(stopped)),
-            Termination::Fallback(outcome) => {
-                resources.context.stopped().map_or(outcome, |stopped| {
-                    Outcome::Failure(Failure::stopped(stopped))
-                })
-            }
-        };
-        state.close(outcome, None)
-    };
+fn terminate_from_timer(shared: &Mutex<State>, termination: Termination) {
+    let completion = shared.lock().terminate(termination);
     if let Some(completion) = completion {
         completion.finish();
     }
@@ -240,7 +258,7 @@ impl Download {
         body: ByteStream,
         guard: OperationGuard,
         permit: OwnedSemaphorePermit,
-        context: CallContext,
+        context: BoundedContext,
     ) -> Self {
         let shared = Arc::new(Mutex::new(State::Open(Resources {
             waker: None,
@@ -248,11 +266,11 @@ impl Download {
             body,
             progress: ByteProgress::new(metadata.size),
             guard,
-            _permit: permit,
+            permit,
         })));
         let shared_on_exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {
-                terminate(
+                terminate_from_timer(
                     &shared,
                     Termination::Fallback(Outcome::Failure(
                         LocalFailure::DownloadTimerExited.into(),
@@ -262,14 +280,15 @@ impl Download {
         });
         let timer = tokio::spawn(async move {
             let stopped = context.wait_stopped().await;
-            if let Some(shared) = shared_on_exit.upgrade() {
-                terminate(&shared, Termination::Stopped(stopped));
+            let shared = std::mem::DropGuard::dismiss(shared_on_exit).upgrade();
+            if let Some(shared) = shared {
+                terminate_from_timer(&shared, Termination::Stopped(stopped));
             }
         });
         Self {
             metadata,
             shared,
-            timer,
+            timer: Some(timer),
         }
     }
 
@@ -316,16 +335,26 @@ impl Download {
         Ok(Bytes::from(buffer))
     }
 
-    fn finish_completion(&self, completion: Option<Completion>) {
+    fn finish_completion(&mut self, completion: Option<Completion>) {
         if let Some(completion) = completion {
+            if let Some(timer) = self.timer.take() {
+                timer.abort();
+            }
             completion.finish();
-            self.timer.abort();
         }
     }
 
-    fn cancel(&self) {
-        terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
-        self.timer.abort();
+    fn cancel(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            let completion = self
+                .shared
+                .lock()
+                .terminate(Termination::Fallback(Outcome::Cancelled));
+            timer.abort();
+            if let Some(completion) = completion {
+                completion.finish();
+            }
+        }
     }
 }
 

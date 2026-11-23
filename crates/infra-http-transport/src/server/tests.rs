@@ -1,6 +1,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 
+use axum::Extension;
 use axum::routing::get;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -68,6 +69,7 @@ async fn a_request_can_cancel_its_own_work_while_listener_drain_reaches_every_ch
     let handler = move |Extension(info): Extension<ConnectionInfo>| {
         let send = send.clone();
         async move {
+            assert_eq!(info.scheme(), TransportScheme::Http);
             send.send(info.child_drain_token()).await.unwrap();
             "ok"
         }
@@ -202,14 +204,16 @@ async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     accept.abort();
     assert!(accept.await.unwrap_err().is_cancelled());
     let now = Instant::now();
-    let (result, residue) = server
+    let result = server
         .drain_until(
             now + Duration::from_millis(20),
             now + Duration::from_secs(2),
         )
         .await;
-    std::assert_matches!(result, Err(ServerError::AcceptTimeout));
-    assert_eq!(residue, DrainResidue::default());
+    std::assert_matches!(
+        result,
+        Err(DrainError::AcceptTimeout { residue }) if residue == DrainResidue::default()
+    );
     assert!(abort.is_finished());
     assert_peer_closed(peer).await;
 }
@@ -222,8 +226,9 @@ async fn expired_confirmation_reports_a_live_accept_producer_even_with_no_connec
     accept.abort();
     assert!(accept.await.unwrap_err().is_cancelled());
     let now = Instant::now();
-    let (cause, residue) = server.drain_until(now, now).await;
-    std::assert_matches!(cause, Err(ServerError::AcceptTimeout));
+    let error = server.drain_until(now, now).await.unwrap_err();
+    std::assert_matches!(error, DrainError::AcceptTimeout { .. });
+    let residue = error.residue();
     assert!(residue.accept_unconfirmed);
     assert_eq!(residue.remaining_connections, 0);
     assert_eq!(residue.remaining_delegated_tasks, 0);
@@ -244,14 +249,17 @@ async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_conne
         failure
     );
     let result = server.drain(Duration::from_millis(20)).await;
-    std::assert_matches!(result, Err(ServerError::AcceptTask(error)) if error.is_cancelled());
+    std::assert_matches!(
+        result,
+        Err(DrainError::AcceptTask { source, .. }) if source.is_cancelled()
+    );
     assert_peer_closed(peer).await;
 }
 
 #[tokio::test]
 async fn accept_panic_after_stop_is_still_observed() {
     #[derive(Debug)]
-    struct PanicOnClone(Arc<std::sync::OnceLock<CancellationToken>>);
+    struct PanicOnClone(Arc<std::sync::OnceLock<Arc<CancellationToken>>>);
     impl Clone for PanicOnClone {
         fn clone(&self) -> Self {
             self.0.get().unwrap().cancel();
@@ -261,14 +269,12 @@ async fn accept_panic_after_stop_is_still_observed() {
     let stop = Arc::new(std::sync::OnceLock::new());
     let marker = PanicOnClone(stop.clone());
     let listener = BoundListener::bind(loopback()).unwrap();
-    let (driver, delegated) = http1_driver(options());
     let server = serve_listener(
         listener,
         app(),
         options().connections,
-        driver,
-        delegated,
-        "http",
+        http1_driver(options()),
+        TransportScheme::Http,
         move |stream, _| {
             let _ = &marker;
             async move { Some(stream) }
@@ -283,7 +289,9 @@ async fn accept_panic_after_stop_is_still_observed() {
             .unwrap(),
         AcceptFailure::Panicked
     );
-    std::assert_matches!(server.drain(Duration::from_secs(1)).await, Err(ServerError::AcceptTask(error)) if error.is_panic()
+    std::assert_matches!(
+        server.drain(Duration::from_secs(1)).await,
+        Err(DrainError::AcceptTask { source, .. }) if source.is_panic()
     );
     drop(peer);
 }
@@ -324,7 +332,7 @@ async fn silent_client_is_closed_after_the_header_timeout() {
         Ok(Ok(0)),
         "expected EOF from the server, got {closed:?}"
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -338,7 +346,7 @@ async fn an_http1_listener_opens_no_http2_connection() {
         let peer = TcpStream::connect(server.local_addr()).await.unwrap();
         assert_http2_rejected(peer, sent).await;
     }
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 const HTTP2_CLIENT_PREFACE: &[u8] =
@@ -379,7 +387,7 @@ async fn an_http1_listener_reads_the_first_request_head_under_one_timeout() {
         Ok(Ok(0)),
         "expected EOF one timeout after accept, got {closed:?}"
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -418,7 +426,7 @@ async fn oversized_header_is_431() {
         "{}",
         text.get(..text.floor_char_boundary(80)).unwrap_or(&text)
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -430,7 +438,7 @@ async fn connection_cap_refuses_the_excess() {
     let second = TcpStream::connect(server.local_addr()).await.unwrap();
     assert_peer_closed(second).await;
     drop(first);
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -475,8 +483,8 @@ async fn bind_failure_is_reported() {
     let occupied = Server::bind(loopback(), app(), options()).unwrap();
     let err =
         Server::bind(occupied.local_addr(), app(), options()).expect_err("second bind must fail");
-    std::assert_matches!(err, ServerError::Bind { .. }, "{err}");
-    occupied.drain(Duration::from_secs(1)).await.unwrap();
+    assert_eq!(err.addr(), occupied.local_addr(), "{err}");
+    let _ = occupied.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 // template:begin grpc:http-server-tls-test
@@ -557,11 +565,13 @@ async fn forced_http2_drain_waits_for_the_stream_handler_or_reports_it_at_cutoff
             );
             release.send(()).unwrap();
         }
-        let (cause, residue) = tokio::time::timeout(Duration::from_secs(1), draining)
+        let outcome = tokio::time::timeout(Duration::from_secs(1), draining)
             .await
             .unwrap()
             .unwrap();
-        std::assert_matches!(cause, Ok(Drained::TimedOut { .. }));
+        let Ok(Drained::TimedOut { residue, .. }) = outcome else {
+            panic!("expected drain timeout, got {outcome:?}");
+        };
         if confirm {
             assert_eq!(residue, DrainResidue::default());
         } else {
@@ -693,7 +703,7 @@ async fn an_http2_tls_connection_serves_requests_after_the_preface_deadline() {
     tokio::time::advance(options.preface_timeout * 2).await;
     tokio::time::resume();
     check_request(&mut sender).await;
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -719,7 +729,7 @@ async fn an_http2_tls_listener_requires_h2_alpn() {
         );
     }
     assert_peer_closed(tls).await;
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -748,7 +758,7 @@ async fn an_http1_tls_listener_rejects_http2_and_allows_absent_alpn() {
     let response = fetch_http1(tls, "/ok").await;
     assert!(response.starts_with("HTTP/1.1 200 "));
     assert!(response.ends_with("ok"));
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 async fn read_http2_frame(peer: &mut TcpStream) -> ([u8; 9], Vec<u8>) {
@@ -800,7 +810,7 @@ async fn an_http2_listener_negotiates_a_segmented_preface_and_advertises_the_hea
     .await
     .expect("the server did not acknowledge the client's SETTINGS");
     drop(peer);
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -819,7 +829,7 @@ async fn stalled_http2_prefaces_close_after_the_preface_timeout() {
     for peer in peers {
         assert_peer_closed(peer).await;
     }
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 
 #[tokio::test]
@@ -860,7 +870,7 @@ async fn an_http2_only_listener_answers_no_http1_request() {
         "an HTTP/1 response was sent: {:?}",
         String::from_utf8_lossy(&response)
     );
-    server.drain(Duration::from_secs(1)).await.unwrap();
+    let _ = server.drain(Duration::from_secs(1)).await.unwrap();
 }
 // template:end grpc:http-server-tls-test
 

@@ -16,6 +16,38 @@ from pathlib import Path
 from scripts import lib
 
 
+_INBOUND_LIFECYCLE_TEST = (
+    "restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_another_job"
+)
+
+
+def _db_test_args(root: Path = lib.ROOT) -> list[str]:
+    manifest_path = root / "test/Cargo.toml"
+    if not manifest_path.is_file():
+        return []
+    manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    args: list[str] = []
+    for target in manifest.get("test", ()):
+        if "integration" in target.get("required-features", ()):
+            args.extend(["--test", target["name"]])
+    return args
+
+
+def _has_explicit_target_filter(extra: Sequence[str]) -> bool:
+    for arg in extra:
+        if arg == "--":
+            return False
+        if arg in {"--test", "--tests", "--lib", "--bin", "--bins", "--doc", "--all-targets"} or arg.startswith(("--test=", "--bin=")):
+            return True
+    return False
+
+
+def _db_test_threads() -> str:
+    if raw := os.environ.get("INTEGRATION_DB_TEST_THREADS"):
+        return raw
+    return str(min(4, max(2, os.cpu_count() or 2)))
+
+
 def _is_no_run(extra_args: Sequence[str]) -> bool:
     for arg in extra_args:
         if arg == "--":
@@ -28,7 +60,7 @@ def _is_no_run(extra_args: Sequence[str]) -> bool:
 def cmd_compile(suite: str) -> None:
     if suite == "retained" and (lib.ROOT / "crates/infra-postgres").is_dir():
         lib.run(
-            ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", "--no-run"],
+            ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", *_db_test_args(), "--no-run"],
             env=lib.clean_pg_env({"DATABASE_URL": "compile-only", "PGBOUNCER_DATABASE_URL": "compile-only"}),
         )
     if (lib.ROOT / "crates/infra-messaging").is_dir():
@@ -60,6 +92,14 @@ def cmd_compile(suite: str) -> None:
                 }
             ),
         )
+    if (lib.ROOT / "crates/infra-clickhouse").is_dir():
+        lib.run(
+            [
+                "cargo", "test", "--locked", "-p", "infra-clickhouse", "--features", "integration",
+                "--test", "clickhouse", "--no-run",
+            ],
+            env=lib.clean_pg_env({"CLICKHOUSE_URL": "compile-only"}),
+        )
     if suite == "retained" and (lib.ROOT / "crates/infra-oauth2-client-credentials").is_dir():
         lib.run(
             [
@@ -70,12 +110,13 @@ def cmd_compile(suite: str) -> None:
         )
 
 
-def cmd_db(extra: Sequence[str]) -> None:
+def cmd_db(extra: Sequence[str], *, with_sqlx_check: bool = False) -> None:
     if not (lib.ROOT / "crates/infra-postgres").is_dir():
         raise lib.ScriptError("postgres profile not present", exit_code=2)
+    target_args = [] if _has_explicit_target_filter(extra) else _db_test_args()
     if _is_no_run(extra):
         lib.run(
-            ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", *extra],
+            ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", *target_args, *extra],
             env=lib.clean_pg_env(
                 {
                     "DATABASE_URL": os.environ.get("DATABASE_URL") or "compile-only",
@@ -84,29 +125,66 @@ def cmd_db(extra: Sequence[str]) -> None:
             ),
         )
         return
+    run_sqlx = with_sqlx_check or os.environ.get("INTEGRATION_DB_SQLX_CHECK") == "1"
+    if run_sqlx:
+        _verify_sqlx_cli()
     lib.require_docker(allow_refusal=True)
+    include_lifecycle = (not extra) and (lib.ROOT / "crates/service/src/bootstrap/inbound_webhooks.rs").is_file()
+    use_nextest = (not extra) and (shutil.which("cargo-nextest") is not None)
+    compile_env = lib.clean_pg_env({"DATABASE_URL": "compile-only", "PGBOUNCER_DATABASE_URL": "compile-only"})
     with lib.ComposeStack("service-db") as stack:
-        pg_port = stack.up("postgres", 5432)
+        pg_port = stack.start("postgres", 5432)
+        nats_port = stack.start("nats", 4222) if (lib.ROOT / "crates/infra-messaging").is_dir() else None
+        if use_nextest:
+            base = ["cargo", "nextest", "run", "--locked", "--no-tests=pass", "-p", "integration-tests"]
+            service_pkg = ""
+            if include_lifecycle:
+                service_pkg, _ = lib.read_service_meta()
+                base.extend(["-p", service_pkg])
+            base.extend(["--features", "integration-tests/integration", *target_args])
+            if include_lifecycle:
+                base.extend(["--test", "lifecycle"])
+            lib.run([*base, "--no-run"], env=compile_env)
+        else:
+            lib.run(
+                ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", *target_args, "--no-run"],
+                env=compile_env,
+            )
+        stack.wait("postgres", pg_port)
         pgb_port = stack.up("pgbouncer", 6432)
         env_extra = {
             "DATABASE_URL": f"postgres://app:app@127.0.0.1:{pg_port}/app?sslmode=disable",
             "PGBOUNCER_DATABASE_URL": f"postgres://app:app@127.0.0.1:{pgb_port}/app?sslmode=disable",
         }
-        if (lib.ROOT / "crates/infra-messaging").is_dir():
-            nats_port = stack.up("nats", 4222)
+        if nats_port is not None:
+            stack.wait("nats", nats_port)
             env_extra["NATS_URL"] = f"nats://127.0.0.1:{nats_port}"
         env = lib.clean_pg_env(env_extra)
-        lib.run(["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", *extra], env=env)
-        if not extra and (lib.ROOT / "crates/service/src/bootstrap/inbound_webhooks.rs").is_file():
+        if use_nextest:
+            lib.run([*base, "--test-threads", _db_test_threads(), "-E", "package(integration-tests)"], env=env)
+            if include_lifecycle:
+                lib.run(
+                    [
+                        *base, "--test-threads", "1", "--run-ignored", "only",
+                        "-E", f"package({service_pkg}) & test(={_INBOUND_LIFECYCLE_TEST})",
+                    ],
+                    env=env,
+                )
+        else:
             lib.run(
-                [
-                    "cargo", "test", "--locked", "--manifest-path", "crates/service/Cargo.toml",
-                    "--test", "lifecycle",
-                    "restarting_with_an_old_inbound_receipt_acknowledges_redelivery_without_another_job",
-                    "--", "--ignored", "--exact",
-                ],
+                ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", *target_args, *extra],
                 env=env,
             )
+            if include_lifecycle:
+                lib.run(
+                    [
+                        "cargo", "test", "--locked", "--manifest-path", "crates/service/Cargo.toml",
+                        "--test", "lifecycle", _INBOUND_LIFECYCLE_TEST, "--", "--ignored", "--exact",
+                    ],
+                    env=env,
+                )
+        if run_sqlx:
+            _run_sqlx_prepare_against_port(pg_port, check_only=True)
 
 
 def cmd_cache(extra: Sequence[str]) -> None:
@@ -281,15 +359,54 @@ def cmd_oauth(extra: Sequence[str]) -> None:
         return
     lib.require_docker(allow_refusal=True)
     with lib.ComposeStack("service-oauth") as stack:
-        port = stack.up("keycloak", 8080, profile="oauth", ready_url="/realms/master", ready_timeout_s=180)
-        lib.run(cmd, env=lib.clean_pg_env({"OAUTH_TEST_KEYCLOAK_URL": f"http://127.0.0.1:{port}"}))
+        port = stack.start("keycloak", 8080, profile="oauth")
+        env = lib.clean_pg_env({"OAUTH_TEST_KEYCLOAK_URL": f"http://127.0.0.1:{port}"})
+        compile_cmd = [
+            "cargo", "test", "--locked", "-p", "infra-oauth2-client-credentials",
+            "--features", "integration", "--no-run",
+        ]
+        lib.run(compile_cmd, env=env)
+        stack.wait("keycloak", port, profile="oauth", ready_url="/realms/master", ready_timeout_s=180)
+        lib.run(cmd, env=env)
 
 
-def cmd_sqlx_prepare(*, check_only: bool) -> None:
+def cmd_clickhouse(extra: Sequence[str]) -> None:
+    if not (lib.ROOT / "crates/infra-clickhouse").is_dir():
+        raise lib.ScriptError("clickhouse profile not present", exit_code=2)
+    cmd = [
+        "cargo", "test", "--locked", "-p", "infra-clickhouse",
+        "--features", "integration", "--test", "clickhouse", *extra,
+    ]
+    compose_creds = {
+        "CLICKHOUSE_DATABASE": "app",
+        "CLICKHOUSE_USER": "app",
+        "CLICKHOUSE_PASSWORD": "app",
+        "CLICKHOUSE_READONLY_USER": "app_ro",
+        "CLICKHOUSE_READONLY_PASSWORD": "app_ro",
+    }
+    override_creds = {k: os.environ.get(k) or v for k, v in compose_creds.items()}
+    if _is_no_run(extra):
+        lib.run(cmd, env=lib.clean_pg_env({**override_creds, "CLICKHOUSE_URL": os.environ.get("CLICKHOUSE_URL") or "compile-only"}))
+        return
+    if existing := os.environ.get("CLICKHOUSE_URL"):
+        lib.run(cmd, env=lib.clean_pg_env({**override_creds, "CLICKHOUSE_URL": existing}))
+        return
+    lib.require_docker(allow_refusal=True)
+    with lib.ComposeStack("service-clickhouse") as stack:
+        port = stack.start("clickhouse", 8123)
+        env = lib.clean_pg_env({**compose_creds, "CLICKHOUSE_URL": f"http://127.0.0.1:{port}"})
+        compile_cmd = [
+            "cargo", "test", "--locked", "-p", "infra-clickhouse",
+            "--features", "integration", "--test", "clickhouse", "--no-run",
+        ]
+        lib.run(compile_cmd, env=env)
+        stack.wait("clickhouse", port)
+        lib.run(cmd, env=env)
+
+
+def _verify_sqlx_cli() -> None:
     if shutil.which("cargo-sqlx") is None or shutil.which("sqlx") is None:
         raise lib.ScriptError("sqlx-cli is required; run `mise install cargo:sqlx-cli`", exit_code=2)
-    lib.require_docker()
-
     cargo_toml = tomllib.loads((lib.ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     sqlx_dep = cargo_toml.get("workspace", {}).get("dependencies", {}).get("sqlx")
     driver_ver = sqlx_dep if isinstance(sqlx_dep, str) else (sqlx_dep.get("version", "") if isinstance(sqlx_dep, dict) else "")
@@ -298,16 +415,24 @@ def cmd_sqlx_prepare(*, check_only: bool) -> None:
     if cli_ver and driver_ver != cli_ver:
         raise lib.ScriptError(f"Cargo.toml pins sqlx {driver_ver or '<none>'}, mise.toml pins sqlx-cli {cli_ver}", exit_code=2)
 
+
+def _run_sqlx_prepare_against_port(pg_port: int, *, check_only: bool) -> None:
+    env = lib.clean_pg_env({"DATABASE_URL": f"postgres://app:app@127.0.0.1:{pg_port}/sqlx_prepare_{os.getpid()}?sslmode=disable"})
+    lib.run(["sqlx", "database", "create"], env=env)
+    lib.run(["sqlx", "migrate", "run", "--source", "migrations"], env=env)
+    prepare_cmd = ["cargo", "sqlx", "prepare", "--workspace"]
+    if check_only:
+        prepare_cmd.append("--check")
+    prepare_cmd.extend(["--", "--locked"])
+    lib.run(prepare_cmd, env={**env, "SQLX_OFFLINE": "false"})
+
+
+def cmd_sqlx_prepare(*, check_only: bool) -> None:
+    _verify_sqlx_cli()
+    lib.require_docker()
     with lib.ComposeStack("sqlx-prepare") as stack:
         port = stack.up("postgres", 5432)
-        env = lib.clean_pg_env({"DATABASE_URL": f"postgres://app:app@127.0.0.1:{port}/sqlx_prepare_{os.getpid()}?sslmode=disable"})
-        lib.run(["sqlx", "database", "create"], env=env)
-        lib.run(["sqlx", "migrate", "run", "--source", "migrations"], env=env)
-        prepare_cmd = ["cargo", "sqlx", "prepare", "--workspace"]
-        if check_only:
-            prepare_cmd.append("--check")
-        prepare_cmd.extend(["--", "--locked"])
-        lib.run(prepare_cmd, env={**env, "SQLX_OFFLINE": "false"})
+        _run_sqlx_prepare_against_port(port, check_only=check_only)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -315,7 +440,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     comp = sub.add_parser("compile")
     comp.add_argument("--suite", choices=("retained", "services"), default="retained")
-    for name in ("db", "cache", "object-storage", "messaging", "oauth"):
+    db_p = sub.add_parser("db")
+    db_p.add_argument("--with-sqlx-check", action="store_true")
+    db_p.add_argument("cargo_args", nargs=argparse.REMAINDER)
+    for name in ("cache", "object-storage", "messaging", "oauth", "clickhouse"):
         p = sub.add_parser(name)
         p.add_argument("cargo_args", nargs=argparse.REMAINDER)
     sqlx_p = sub.add_parser("sqlx-prepare")
@@ -332,13 +460,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             extra = list(args.cargo_args)
             if extra and extra[0] == "--":
                 extra = extra[1:]
-            {
-                "db": cmd_db,
-                "cache": cmd_cache,
-                "object-storage": cmd_object_storage,
-                "messaging": cmd_messaging,
-                "oauth": cmd_oauth,
-            }[args.command](extra)
+            if args.command == "db":
+                cmd_db(extra, with_sqlx_check=args.with_sqlx_check)
+            else:
+                {
+                    "cache": cmd_cache,
+                    "object-storage": cmd_object_storage,
+                    "messaging": cmd_messaging,
+                    "oauth": cmd_oauth,
+                    "clickhouse": cmd_clickhouse,
+                }[args.command](extra)
 
     return lib.run_cli(_dispatch)
 

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -5,17 +6,19 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use enum_map::EnumMap;
-use sqlx::{Postgres, pool::PoolConnection, postgres::PgPool};
+use infra_postgres::Pool;
+use infra_postgres::maintenance::CleanupError;
+use sqlx::{Postgres, pool::PoolConnection};
 use tokio::sync::{Notify, Semaphore, SetOnce, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::Kinds;
 use crate::claim;
 use crate::listener;
 use crate::maintenance;
 use crate::session::StartupError;
-use crate::{KindError, Kinds};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const LEASE_RESERVE: Duration = Duration::from_mins(1);
@@ -29,6 +32,7 @@ pub struct Engine {
     additional_groups: Vec<Arc<WorkerGroup>>,
 }
 
+#[must_use = "dropping Started cancels background job tasks immediately"]
 pub struct Started {
     lifecycle: Arc<AttemptLifecycle>,
     _background: tokio_util::sync::DropGuard,
@@ -49,6 +53,7 @@ impl EngineSignals {
     }
 }
 
+#[must_use = "inspect DrainEnd to detect incomplete job shutdown"]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainEnd {
     pub known_results: usize,
@@ -58,14 +63,30 @@ pub struct DrainEnd {
     pub timed_out: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("job kind {kind:?} is registered in another group")]
+pub struct DuplicateKind {
+    pub kind: &'static str,
+}
+
 #[derive(Debug, thiserror::Error)]
-pub enum OperationError {
+pub(crate) enum OperationError {
     #[error("acquire")]
     Acquire(#[source] sqlx::Error),
     #[error("statement")]
     Statement(#[from] sqlx::Error),
     #[error("timed out")]
     TimedOut,
+}
+
+impl From<OperationError> for CleanupError {
+    fn from(error: OperationError) -> Self {
+        match error {
+            OperationError::Acquire(_) => Self::Acquire,
+            OperationError::Statement(_) => Self::Statement,
+            OperationError::TimedOut => Self::TimedOut,
+        }
+    }
 }
 
 impl OperationError {
@@ -92,7 +113,7 @@ impl From<infra_postgres::TxError> for OperationError {
 
 impl Engine {
     #[must_use]
-    pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
+    pub fn new(pool: Pool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self {
             primary_group: Arc::new(WorkerGroup::new(
                 pool,
@@ -105,12 +126,16 @@ impl Engine {
         }
     }
 
-    pub fn add_group(&mut self, registry: Kinds, max_workers: NonZeroU32) -> Result<(), KindError> {
-        if let Some(duplicate) = registry
+    pub fn add_group(
+        &mut self,
+        registry: Kinds,
+        max_workers: NonZeroU32,
+    ) -> Result<(), DuplicateKind> {
+        if let Some(kind) = registry
             .names()
             .find(|name| self.group_for_kind(name).is_some())
         {
-            return Err(KindError::Duplicate(duplicate));
+            return Err(DuplicateKind { kind });
         }
         self.additional_groups.push(Arc::new(WorkerGroup::new(
             self.primary_group.pool.clone(),
@@ -120,6 +145,10 @@ impl Engine {
             Arc::clone(&self.primary_group.lifecycle),
         )));
         Ok(())
+    }
+
+    pub(crate) fn primary_group(&self) -> &WorkerGroup {
+        &self.primary_group
     }
 
     pub(crate) fn groups(&self) -> impl Iterator<Item = &Arc<WorkerGroup>> {
@@ -136,8 +165,8 @@ impl Engine {
         crate::session::check_startup(&self.primary_group.pool).await
     }
 
-    pub async fn remove_expired(&self) -> Result<u64, OperationError> {
-        maintenance::remove_expired(&self.primary_group).await
+    pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
+        Ok(maintenance::remove_expired(&self.primary_group).await?)
     }
 
     fn kind_names(&self) -> impl Iterator<Item = &'static str> + '_ {
@@ -163,7 +192,6 @@ impl Engine {
         sample_gauges
     }
 
-    #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         let kinds: Vec<_> = self.kind_names().collect();
         let gauges = self.init_metrics(&kinds);
@@ -179,28 +207,51 @@ impl Engine {
         let lifecycle = Arc::clone(&engine.primary_group.lifecycle);
         lifecycle.drain.start_claim_loops(groups);
         for group in engine.groups() {
+            let group = Arc::clone(group);
+            let signals = Arc::clone(&signals);
+            let exit = DrainParticipant::ClaimLoop(Arc::clone(&lifecycle.drain));
             spawn_guarded(
                 tracker,
-                Arc::clone(group),
-                Run::Claim {
-                    _exit: DrainParticipant::ClaimLoop(Arc::clone(&lifecycle.drain)),
-                },
+                "claim",
                 signals.stop.clone(),
-                Arc::clone(&signals),
+                signals.failure.clone(),
+                async move {
+                    let _exit = exit;
+                    claim::run_claim_loop(group, signals).await;
+                },
             );
         }
-        let listener = infra_postgres::notifications_enabled(&engine.primary_group.pool)
-            .then(|| Run::Listener(Arc::clone(&engine)));
-        let background_tasks = [Run::Retention, Run::Sampling { kinds, gauges }]
-            .into_iter()
-            .chain(listener);
-        for run in background_tasks {
+        spawn_guarded(
+            tracker,
+            "retention",
+            background.clone(),
+            signals.failure.clone(),
+            {
+                let group = Arc::clone(&engine.primary_group);
+                let cancel = background.clone();
+                async move { maintenance::run_retention(&group, cancel).await }
+            },
+        );
+        spawn_guarded(
+            tracker,
+            "sampling",
+            background.clone(),
+            signals.failure.clone(),
+            {
+                let group = Arc::clone(&engine.primary_group);
+                let cancel = background.clone();
+                async move { maintenance::run_sampling(&group, &kinds, gauges, cancel).await }
+            },
+        );
+        if engine.primary_group.pool.notifications_enabled() {
+            let engine = Arc::clone(&engine);
+            let cancel = background.clone();
             spawn_guarded(
                 tracker,
-                Arc::clone(&engine.primary_group),
-                run,
+                "listener",
                 background.clone(),
-                Arc::clone(&signals),
+                signals.failure.clone(),
+                async move { listener::run_listener(&engine, cancel).await },
             );
         }
         Started {
@@ -243,7 +294,6 @@ impl Started {
         self.lifecycle.drain.wait().await;
     }
 
-    #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
         let deadline = self.lifecycle.cleanup.begin(budget);
@@ -267,6 +317,11 @@ impl Started {
         }
     }
 
+    #[must_use]
+    pub fn has_failed(&self) -> bool {
+        self.signals.failure.is_cancelled()
+    }
+
     pub async fn failed(&self) {
         self.signals.failure.cancelled().await;
     }
@@ -281,47 +336,17 @@ impl fmt::Debug for Started {
     }
 }
 
-enum Run {
-    Claim {
-        _exit: DrainParticipant,
-    },
-    Retention,
-    Listener(Arc<Engine>),
-    Sampling {
-        kinds: Vec<&'static str>,
-        gauges: maintenance::SampleGauges,
-    },
-}
-
-impl Run {
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Claim { .. } => "claim",
-            Self::Retention => "retention",
-            Self::Listener(_) => "listener",
-            Self::Sampling { .. } => "sampling",
-        }
-    }
-}
-
-fn spawn_guarded(
+fn spawn_guarded<F: Future<Output = ()> + Send + 'static>(
     tracker: &TaskTracker,
-    group: Arc<WorkerGroup>,
-    run: Run,
+    task: &'static str,
     token: CancellationToken,
-    signals: Arc<EngineSignals>,
+    failure: CancellationToken,
+    future: F,
 ) {
-    let guard = task_guard(run.label(), token.clone(), signals.failure.clone());
+    let guard = task_guard(task, token, failure);
     tracker.spawn(async move {
         let _guard = guard;
-        match run {
-            _claim @ Run::Claim { .. } => claim::run_claim_loop(group, signals).await,
-            Run::Retention => maintenance::run_retention(&group, token).await,
-            Run::Listener(engine) => listener::run_listener(&group, &engine, token).await,
-            Run::Sampling { kinds, gauges } => {
-                maintenance::run_sampling(&group, &kinds, gauges, token).await;
-            }
-        }
+        future.await;
     });
 }
 
@@ -403,7 +428,7 @@ pub(crate) struct SupervisorGuard {
     signals: Arc<EngineSignals>,
     job_id: crate::kind::JobId,
     kind: &'static str,
-    retired: bool,
+    disarmed: bool,
     _exit: DrainParticipant,
 }
 
@@ -419,19 +444,19 @@ impl SupervisorGuard {
             signals,
             job_id,
             kind,
-            retired: false,
+            disarmed: false,
             _exit: DrainParticipant::Supervisor(drain),
         }
     }
 
-    pub(crate) fn retire(&mut self) {
-        self.retired = true;
+    pub(crate) fn disarm(&mut self) {
+        self.disarmed = true;
     }
 }
 
 impl Drop for SupervisorGuard {
     fn drop(&mut self) {
-        if std::thread::panicking() || !self.retired {
+        if std::thread::panicking() || !self.disarmed {
             tracing::error!(
                 task = "attempt",
                 job.id = %self.job_id,
@@ -466,10 +491,10 @@ const CLEANUP_OVERFLOW_FALLBACK: Duration = Duration::from_hours(24 * 365);
 
 pub(crate) struct WorkerGroup {
     pub(crate) worker_id: uuid::Uuid,
-    pub(crate) pool: PgPool,
+    pub(crate) pool: Pool,
     pub(crate) registry: Kinds,
     max_workers: NonZeroU32,
-    pub(crate) slots: Arc<Semaphore>,
+    pub(crate) admission_slots: Arc<Semaphore>,
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) lifecycle: Arc<AttemptLifecycle>,
     failing: EnumMap<Operation, AtomicBool>,
@@ -483,13 +508,14 @@ impl WorkerGroup {
         &self,
         operation: &'static str,
     ) -> Result<PoolConnection<Postgres>, OperationError> {
-        infra_postgres::acquire(&self.pool, operation)
+        self.pool
+            .acquire(operation)
             .await
             .map_err(OperationError::Acquire)
     }
 
     fn new(
-        pool: PgPool,
+        pool: Pool,
         registry: Kinds,
         max_workers: NonZeroU32,
         worker_id: uuid::Uuid,
@@ -501,7 +527,7 @@ impl WorkerGroup {
             registry,
             max_workers,
             lifecycle,
-            slots: Arc::new(claim::admission_slots(max_workers)),
+            admission_slots: Arc::new(claim::admission_slots(max_workers)),
             statement_turn: tokio::sync::Mutex::new(()),
             failing: EnumMap::default(),
             completions: crate::attempt::Completions::default(),
@@ -531,9 +557,6 @@ struct CleanupWindow {
 
 impl ForcedCleanup {
     fn begin(&self, budget: Duration) -> Instant {
-        if let Some(window) = self.window.get() {
-            return window.deadline;
-        }
         let started_at = Instant::now();
         let deadline = started_at
             .checked_add(budget)
@@ -613,18 +636,16 @@ pub(crate) fn observe_failure(group: &WorkerGroup, operation: Operation, error: 
 }
 
 fn log_operation_failure(operation: Operation, error: &OperationError) {
-    let (sqlstate, cause) = match error {
-        OperationError::TimedOut => (None, Some("timeout")),
-        OperationError::Acquire(err) | OperationError::Statement(err) => {
-            match infra_postgres::sqlstate(err) {
-                Some(code) => (Some(code), None),
-                None => (None, Some(infra_postgres::failure_cause(err))),
-            }
+    let (sqlstate, cause, decode_reason) = match error {
+        OperationError::TimedOut => (None, Some("timeout"), None),
+        OperationError::Acquire(driver) => {
+            let (sqlstate, cause) = driver_failure(driver);
+            (sqlstate, cause, None)
         }
-    };
-    let decode_reason = match error {
-        OperationError::Statement(error) => claim::decode_reason(error),
-        _ => None,
+        OperationError::Statement(driver) => {
+            let (sqlstate, cause) = driver_failure(driver);
+            (sqlstate, cause, claim::decode_reason(driver))
+        }
     };
     tracing::warn!(
         operation = operation.as_str(),
@@ -636,13 +657,33 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
     );
 }
 
+fn driver_failure(error: &sqlx::Error) -> (Option<Cow<'_, str>>, Option<&'static str>) {
+    match infra_postgres::sqlstate(error) {
+        Some(code) => (Some(code), None),
+        None => (None, Some(infra_postgres::failure_cause(error))),
+    }
+}
+
+pub(crate) fn observe_operation<T>(
+    group: &WorkerGroup,
+    operation: Operation,
+    result: Result<T, OperationError>,
+) -> Option<T> {
+    match result {
+        Ok(value) => {
+            observe_recovery(group, operation);
+            Some(value)
+        }
+        Err(error) => {
+            observe_failure(group, operation, &error);
+            None
+        }
+    }
+}
+
 pub(crate) fn observe_recovery(group: &WorkerGroup, operation: Operation) {
     let failing = &group.failing[operation];
-    if failing.load(Ordering::SeqCst)
-        && failing
-            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    {
+    if failing.load(Ordering::SeqCst) && failing.swap(false, Ordering::SeqCst) {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
     }
 }
@@ -666,21 +707,20 @@ mod tests {
     struct Ordinary;
 
     impl crate::JobKind for Ordinary {
-        const NAME: &'static str = "ordinary";
+        const NAME: crate::KindName = crate::KindName::new("ordinary");
     }
 
     #[derive(Deserialize, Serialize)]
     struct Publisher;
 
     impl crate::JobKind for Publisher {
-        const NAME: &'static str = "publisher";
+        const NAME: crate::KindName = crate::KindName::new("publisher");
     }
 
     #[tokio::test]
     async fn engine_debug_shows_registered_kinds_and_worker_limit() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let mut kinds = crate::KindsBuilder::new();
         kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
             Ok(())
@@ -702,10 +742,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_suspended_attempt_keeps_the_first_stop_reason() {
         for (force_before_timeout, expected) in [(true, (0, 1)), (false, (1, 0))] {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
-            pool.close().await;
+            let pool =
+                infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
+            let _ = pool.close(Duration::from_secs(1)).await;
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(
                 crate::Policy {
@@ -743,7 +782,9 @@ mod tests {
                     payload: Ok(b"null".to_vec()),
                     trace: crate::trace_context::Carrier::default(),
                 },
-                slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
+                slot: Arc::clone(&shared.admission_slots)
+                    .try_acquire_owned()
+                    .unwrap(),
                 kind_slot: None,
             };
             let mut supervisor = std::pin::pin!(crate::attempt::supervise(
@@ -783,9 +824,8 @@ mod tests {
         for (exit_after, observe_timeout_first, timed_out) in
             [(1, false, false), (2, true, true), (3, false, true)]
         {
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
+            let pool =
+                infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -805,7 +845,7 @@ mod tests {
                 crate::JobId(uuid::Uuid::nil()),
                 "ordinary",
             );
-            supervisor.retire();
+            supervisor.disarm();
             drop(claim_loop);
             let deadline = Instant::now() + budget;
             let mut finish = std::pin::pin!(started.cancel_and_finish(budget));
@@ -832,9 +872,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_groups_cannot_claim_the_same_kind() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let kinds = || {
             let mut registry = crate::KindsBuilder::new();
             registry.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
@@ -845,7 +884,7 @@ mod tests {
         let mut engine = Engine::new(pool, kinds(), NonZeroU32::MIN);
         assert_eq!(
             engine.add_group(kinds(), NonZeroU32::MIN),
-            Err(KindError::Duplicate("ordinary"))
+            Err(DuplicateKind { kind: "ordinary" })
         );
     }
 
@@ -857,9 +896,8 @@ mod tests {
                 .build()
                 .unwrap();
             let _entered = runtime.enter();
-            let pool = sqlx::postgres::PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
+            let pool =
+                infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -925,9 +963,8 @@ mod tests {
     async fn supervisor_custody_survives_unpolled_drop_and_abort() {
         let gauges = Gauges::default();
         let _local = metrics::set_default_local_recorder(gauges.recorder());
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
+        let pool =
+            infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap();
         let entered = Arc::new(Notify::new());
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut kinds = crate::KindsBuilder::new();
@@ -963,7 +1000,7 @@ mod tests {
                         payload: Ok(b"null".to_vec()),
                         trace: crate::trace_context::Carrier::default(),
                     },
-                    slot: Arc::clone(&engine.primary_group.slots)
+                    slot: Arc::clone(&engine.primary_group.admission_slots)
                         .try_acquire_owned()
                         .unwrap(),
                     kind_slot: None,
@@ -1004,7 +1041,8 @@ mod tests {
             assert_eq!(signals.failure.is_cancelled(), case != "expired", "{case}");
             assert_eq!(signals.stop.is_cancelled(), case != "expired", "{case}");
             assert_eq!(drain.in_flight(), 0, "{case}");
-            assert_eq!(engine.primary_group.slots.available_permits(), 1, "{case}");
+            let free_slots = engine.primary_group.admission_slots.available_permits();
+            assert_eq!(free_slots, 1, "{case}");
             assert_eq!(gauges.get("jobs_owned_attempts", None), 0.0, "{case}");
         }
         assert_eq!(
@@ -1021,11 +1059,11 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), tracker.wait())
             .await
             .unwrap();
-        pool.close().await;
+        let _ = pool.close(Duration::from_secs(1)).await;
     }
 
     #[test]
-    fn supervisor_panic_after_retirement_still_stops_its_start() {
+    fn supervisor_panic_after_disarm_still_stops_its_start() {
         let signals = Arc::new(EngineSignals::new(CancellationToken::new()));
         let guard = SupervisorGuard::new(
             Arc::default(),
@@ -1035,8 +1073,8 @@ mod tests {
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let mut guard = guard;
-            guard.retire();
-            panic!("retirement defect");
+            guard.disarm();
+            panic!("disarm defect");
         }));
         assert!(result.is_err());
         assert!(signals.stop.is_cancelled());

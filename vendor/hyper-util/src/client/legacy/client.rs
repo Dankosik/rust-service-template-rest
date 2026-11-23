@@ -727,6 +727,13 @@ impl<C, B> fmt::Debug for Client<C, B> {
     }
 }
 
+impl<C, B> Client<C, B> {
+    /// Mutably access this client's connector. Clones keep sharing the pool.
+    pub fn connector_mut(&mut self) -> &mut C {
+        &mut self.connector
+    }
+}
+
 // ===== impl ResponseFuture =====
 
 impl ResponseFuture {

@@ -1,14 +1,14 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use health::Probe;
-use infra_postgres::{Dsn, DsnError, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
+use infra_postgres::{
+    Dsn, DsnError, Pool, PoolOptions, PoolStartup, SessionSettingsSource, SslPolicy,
+};
 use secrecy::ExposeSecret;
 use service_config::{PostgresConfig, PostgresSessionBudgets, WorkerConfig};
 
 use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
-use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 const CREDENTIAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,12 +25,9 @@ pub(super) fn required_pool_config(
     if !has_ordinary_jobs && !has_publisher {
         return Ok(None);
     }
-    let postgres = config
-        .postgres
-        .as_ref()
-        .ok_or(WorkerError::PostgresDisabled)?;
+    let postgres = config.postgres().ok_or(WorkerError::PostgresDisabled)?;
     super::jobs::validate_pool_capacity(
-        has_ordinary_jobs.then_some(config.jobs.max_workers),
+        has_ordinary_jobs.then_some(config.jobs().max_workers),
         has_publisher,
         postgres.max_connections,
     )?;
@@ -40,43 +37,43 @@ pub(super) fn required_pool_config(
 pub(super) async fn admit_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
-    background: &Background,
-    resources: &mut Resources,
-) -> Result<(), WorkerError> {
+    background: &mut Background,
+    retained: &mut Option<PoolStartup>,
+) -> Result<Pool, WorkerError> {
     let dsn = postgres.dsn.clone();
     let password_file = postgres.password_file.clone();
-    let local_development = config.app.is_local_development();
-    let pool = open_pool(config, postgres, background, resources, move || {
-        Dsn::admit_for_environment(
-            dsn.expose_secret(),
-            password_file.as_deref(),
-            local_development,
-        )
+    let ssl_policy = if config.app().is_local_development() {
+        SslPolicy::AllowLocalDevelopment
+    } else {
+        SslPolicy::VerifyFull
+    };
+    let pool = open_pool(config, postgres, background, retained, move || {
+        Dsn::admit_with(dsn.expose_secret(), password_file.as_deref(), ssl_policy)
     })
     .await?;
     migrate::verify_history(&pool).await?;
-    resources.pool = Some(PoolResource::Admitted(pool));
-    Ok(())
+    Ok(pool)
 }
 
 async fn open_pool(
     config: &WorkerConfig,
     postgres: &PostgresConfig,
-    background: &Background,
-    resources: &mut Resources,
+    background: &mut Background,
+    retained: &mut Option<PoolStartup>,
     prepare: impl FnOnce() -> Result<Dsn, DsnError> + Send + 'static,
-) -> Result<PgPool, WorkerError> {
+) -> Result<Pool, WorkerError> {
     let dsn = prepare_dsn(prepare).await?;
-    let application_name = application_name(&config.observability.otel.service_name);
+    let application_name = application_name(&config.observability().otel.service_name);
     let options = pool_options(
         postgres.session_budgets,
         postgres.max_connections,
         &application_name,
+        postgres.notifications,
     );
-    let pool =
-        infra_postgres::prepare_pool_with_notifications(&dsn, &options, postgres.notifications);
-    resources.pool = Some(PoolResource::Starting(pool.clone()));
-    infra_postgres::admit_pool(&pool, &options).await?;
+    let pool = retained
+        .insert(Pool::prepare(&dsn, &options))
+        .admit()
+        .await?;
     tracing::info!(
         postgres.host = dsn.host(),
         postgres.port = dsn.port(),
@@ -102,19 +99,16 @@ async fn prepare_dsn(
     }
 }
 
-fn spawn_pool_tasks(pool: &PgPool, dsn: &Dsn, background: &Background) {
+fn spawn_pool_tasks(pool: &Pool, dsn: &Dsn, background: &mut Background) {
     background.spawn("postgres_pool_metrics", |cancel| {
-        infra_postgres::record_metrics_periodically(
-            pool.clone(),
-            "postgres",
-            METRICS_MAINTENANCE_INTERVAL,
-            cancel,
-        )
+        pool.clone()
+            .record_metrics_periodically("postgres", METRICS_MAINTENANCE_INTERVAL, cancel)
     });
     if let Some(password_file) = dsn.password_file() {
         let password_file = password_file.to_owned();
         background.spawn("postgres_password_refresh", |cancel| {
-            infra_postgres::refresh_password_periodically(pool.clone(), password_file, cancel)
+            pool.clone()
+                .refresh_password_periodically(password_file, cancel)
         });
     }
 }
@@ -123,6 +117,7 @@ pub(crate) fn pool_options(
     session_budgets: PostgresSessionBudgets,
     max_connections: NonZeroU32,
     application_name: &str,
+    notifications: bool,
 ) -> PoolOptions<'_> {
     PoolOptions {
         max_connections,
@@ -133,6 +128,7 @@ pub(crate) fn pool_options(
             PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
         wait_order: infra_postgres::WaitOrder::Arrival,
+        notifications,
     }
 }
 
@@ -140,18 +136,6 @@ fn application_name(service_name: &str) -> String {
     let end = service_name.floor_char_boundary(POSTGRES_IDENTIFIER_LIMIT - IDENTITY_SUFFIX.len());
     let prefix = service_name.get(..end).unwrap_or(service_name);
     format!("{prefix}{IDENTITY_SUFFIX}")
-}
-
-pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
-    match resources.pool.as_ref() {
-        Some(PoolResource::Admitted(pool)) => Ok(pool.clone()),
-        Some(PoolResource::Starting(_)) | None => Err(WorkerError::PostgresDisabled),
-    }
-}
-
-pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
-    let pool = admitted_pool(resources).ok()?;
-    Some(Box::new(PostgresProbe::writable_primary(pool)))
 }
 
 #[cfg(test)]
@@ -162,16 +146,15 @@ mod tests {
     use infra_postgres::Dsn;
     use service_config::WorkerConfig;
 
-    use super::{application_name, open_pool, probe};
+    use super::{application_name, open_pool};
     use crate::background::Background;
     use crate::bootstrap::{WorkerError, worker_identity};
-    use crate::resources::Resources;
 
     const DSN: &str = "postgres://worker:fixture@127.0.0.1:5432/example?sslmode=verify-full";
     const WAIT: Duration = Duration::from_secs(5);
 
     fn config() -> WorkerConfig {
-        service_config::fixtures::worker(
+        service_config::test_support::worker(
             &[
                 ("APP__POSTGRES__ENABLED", "true"),
                 ("APP__POSTGRES__DSN", DSN),
@@ -185,7 +168,7 @@ mod tests {
     #[test]
     fn stopped_or_expired_preparation_cannot_admit_a_late_pool() {
         let config = config();
-        let postgres = config.postgres.as_ref().unwrap();
+        let postgres = config.postgres().unwrap();
         for (expired, result_ready) in [(false, false), (true, false), (true, true)] {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -195,17 +178,22 @@ mod tests {
                 .unwrap();
             let (began, started) = mpsc::channel();
             let (release, wait) = mpsc::channel();
-            let mut resources = Resources::default();
-            let background = Background::new();
+            let mut retained = None;
+            let mut background = Background::new();
             let dsn = Dsn::admit(DSN).unwrap();
             runtime.block_on(async {
-                let admission =
-                    open_pool(&config, postgres, &background, &mut resources, move || {
+                let admission = open_pool(
+                    &config,
+                    postgres,
+                    &mut background,
+                    &mut retained,
+                    move || {
                         began.send(()).unwrap();
                         wait.recv_timeout(WAIT)
                             .expect("release after stop or expiry");
                         Ok(dsn)
-                    });
+                    },
+                );
                 tokio::pin!(admission);
                 assert!(futures_util::poll!(&mut admission).is_pending());
                 started.recv_timeout(WAIT).expect("preparation started");
@@ -229,24 +217,23 @@ mod tests {
                     }
                 }
             });
-            assert!(resources.pool.is_none());
+            assert!(retained.is_none());
             if !result_ready {
                 release.send(()).unwrap();
             }
             drop(runtime);
-            assert!(resources.pool.is_none());
-            assert!(probe(&resources).is_none());
-            assert!(background.tracker.is_empty());
+            assert!(retained.is_none());
+            assert!(background.is_empty());
         }
     }
 
     #[tokio::test]
     async fn failed_preparation_task_withholds_its_panic_payload() {
         let config = config();
-        let postgres = config.postgres.as_ref().unwrap();
-        let mut resources = Resources::default();
-        let background = Background::new();
-        let error = open_pool(&config, postgres, &background, &mut resources, || {
+        let postgres = config.postgres().unwrap();
+        let mut retained = None;
+        let mut background = Background::new();
+        let error = open_pool(&config, postgres, &mut background, &mut retained, || {
             panic!("synthetic preparation payload")
         })
         .await
@@ -256,7 +243,7 @@ mod tests {
             "postgres credential preparation task failed"
         );
         assert!(std::error::Error::source(&error).is_none());
-        assert!(resources.pool.is_none());
+        assert!(retained.is_none());
     }
 
     #[test]

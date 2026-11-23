@@ -1,8 +1,6 @@
 use super::*;
 use std::assert_matches;
 
-use crate::credentials::TokenSource;
-
 #[tokio::test]
 async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let fixture = Fixture::new().await;
@@ -47,14 +45,14 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
     service_tokens
         .http(fixture.resource_client())
         .unwrap()
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
         .await
         .unwrap();
     service_tokens
         .clone()
         .http(fixture.resource_client())
         .unwrap()
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
         .await
         .unwrap();
     fixture.token_json(
@@ -63,7 +61,7 @@ async fn clones_reuse_one_owner_cache_but_independent_owners_do_not_share() {
     );
     fixture
         .service_client()
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .execute(&timeout_context(Duration::from_secs(10)), fixture.request())
         .await
         .unwrap();
     assert_eq!(fixture.token_request_count(), 2);
@@ -88,8 +86,7 @@ async fn a_reusable_service_token_yields_when_the_task_budget_is_exhausted() {
 
     let task = tokio::spawn(async move {
         let context = token_context();
-        let source = TokenSource::Service(tokens);
-        let mut acquisition = Box::pin(source.acquire_for_request(acquisition_deadline(&context)));
+        let mut acquisition = Box::pin(tokens.acquire_for_request(acquisition_deadline(&context)));
         while tokio::task::coop::has_budget_remaining() {
             tokio::task::consume_budget().await;
         }
@@ -129,12 +126,11 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
         fixture.token_json(StatusCode::OK, body);
         let client = fixture
             .service_tokens_with(
-                Options {
-                    provider_concurrency: 1,
+                HttpOptions {
+                    provider_concurrency: nonzero(1),
                     ..fixture.options()
                 },
                 &[],
-                fixture.resource_origin(),
             )
             .http(fixture.resource_client())
             .unwrap();
@@ -182,18 +178,17 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     let fixture = Fixture::new().await;
     let client = fixture
         .service_tokens_with(
-            Options {
-                provider_concurrency: 1,
+            HttpOptions {
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],
-            fixture.resource_origin(),
         )
         .http(fixture.resource_client())
         .unwrap();
     let gate = fixture.block_tokens();
     let context = OperationContext::with_timeout(Duration::from_secs(10));
-    let mut leader = Box::pin(client.execute_with_context(fixture.request(), &context));
+    let mut leader = Box::pin(client.execute(&context, fixture.request()));
     fixture.drive_until_token_received(leader.as_mut()).await;
     let mut survivor = Box::pin(fixture.send(&client));
     poll_pending(survivor.as_mut()).await;
@@ -221,7 +216,8 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
         .expect("available dependency establishes useful work");
     service_tokens.clear_cached();
     let gate = fixture.block_tokens();
-    let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
+    let leader_context = timeout_context(Duration::from_secs(1));
+    let mut leader = Box::pin(client.execute(&leader_context, fixture.request()));
     fixture.drive_until_token_received(leader.as_mut()).await;
     let mut waiter = Box::pin(fixture.send(&client));
     poll_pending(waiter.as_mut()).await;
@@ -246,12 +242,11 @@ async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure
     let client = fixture
         .service_tokens(&[])
         .http(
-            Client::try_new_for_test_http(
-                &fixture.origin,
-                infra_outbound_http::Limits {
-                    operation_timeout: Duration::from_secs(10),
-                    ..TOKEN_LIMITS
-                },
+            infra_outbound_http::test_support::client_http(
+                fixture.origin.as_str(),
+                TOKEN_LIMITS
+                    .with_operation_timeout(Duration::from_secs(10))
+                    .unwrap(),
             )
             .unwrap(),
         )
@@ -284,12 +279,9 @@ async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure
 #[tokio::test]
 async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline() {
     let fixture = Fixture::new().await;
-    let resource = Client::try_new_for_test_http(
-        &fixture.origin,
-        infra_outbound_http::Limits {
-            operation_timeout: Duration::MAX,
-            ..TOKEN_LIMITS
-        },
+    let resource = infra_outbound_http::test_support::client_http(
+        fixture.origin.as_str(),
+        TOKEN_LIMITS.with_operation_timeout(Duration::MAX).unwrap(),
     )
     .unwrap();
     let service = fixture.service_tokens(&[]).http(resource.clone()).unwrap();
@@ -299,12 +291,21 @@ async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline(
         .unwrap();
     let context = OperationContext::unbounded();
     let _gate = fixture.block_tokens();
+    let subject_token = subject("subject");
 
-    for (client, request) in [
-        (service, fixture.request()),
-        (exchange, fixture.on_behalf_of_request("subject")),
-    ] {
-        let mut operation = Box::pin(client.execute_with_context(request, &context));
+    {
+        let mut operation = Box::pin(service.execute(&context, fixture.request()));
+        fixture.drive_until_token_received(operation.as_mut()).await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_matches!(
+            operation.await,
+            Err(Error::Acquisition(AcquisitionError::Unavailable))
+        );
+        tokio::time::resume();
+    }
+    {
+        let mut operation = Box::pin(exchange.execute(&context, fixture.request(), &subject_token));
         fixture.drive_until_token_received(operation.as_mut()).await;
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(5)).await;
@@ -325,20 +326,19 @@ async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     let fixture = Fixture::new().await;
     let client = fixture
         .service_tokens_with(
-            Options {
-                provider_concurrency: 1,
+            HttpOptions {
+                provider_concurrency: nonzero(1),
                 ..fixture.options()
             },
             &[],
-            fixture.resource_origin(),
         )
         .http(fixture.resource_client())
         .unwrap();
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(fixture.send(&client));
     fixture.drive_until_token_received(leader.as_mut()).await;
-    let mut short_waiter =
-        Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
+    let waiter_context = timeout_context(Duration::from_secs(1));
+    let mut short_waiter = Box::pin(client.execute(&waiter_context, fixture.request()));
     poll_pending(short_waiter.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;

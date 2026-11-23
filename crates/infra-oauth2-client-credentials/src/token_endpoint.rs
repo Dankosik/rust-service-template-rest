@@ -6,23 +6,40 @@ use http::{
     Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use infra_outbound_http::{Client, ExchangeError, Limits, RequestContext};
+use infra_outbound_http::{Client, ExchangeError, Limits, Origin};
+use operation_context::OperationContext;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Deserializer};
 use tokio::{sync::Semaphore, time::Instant};
 use url::{Url, form_urlencoded::Serializer};
 
 use crate::{
-    AcquisitionError, ConfigurationError, ExchangeTokenTarget, Rejection, ServiceTokenTarget,
-    assertion::Signer, token::Token,
+    AcquisitionError, ConfigurationError, ExchangeTokenTarget, PreparationError, Rejection,
+    ServiceTokenTarget, TransportBuildFailure, assertion::Signer, token::Token,
 };
 
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const TOKEN_LIMITS: Limits = Limits {
-    operation_timeout: FETCH_TIMEOUT,
-    response_header_count: 64,
-    response_body_bytes: 1024 * 1024,
-};
+pub(crate) const TOKEN_LIMITS: Limits = Limits::new(FETCH_TIMEOUT, 64, 1024 * 1024);
+
+pub(crate) fn build_https_client(url: &Url, key: &'static str) -> Result<Client, PreparationError> {
+    let origin = Origin::parse_https(&url.origin().ascii_serialization()).map_err(|_| {
+        ConfigurationError {
+            key,
+            reason: "must be a valid HTTPS URL",
+        }
+    })?;
+    Client::try_new(origin, TOKEN_LIMITS)
+        .map_err(|cause| TransportBuildFailure::new(key, cause).into())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn build_http_client(
+    url: &Url,
+) -> Result<Client, infra_outbound_http::test_support::TestBuildError> {
+    let origin = url.origin().ascii_serialization();
+    infra_outbound_http::test_support::client_http(&origin, TOKEN_LIMITS)
+}
+
 const GRANT_CLIENT_CREDENTIALS: &str = "client_credentials";
 const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
@@ -67,7 +84,7 @@ impl TokenEndpoint {
     pub(crate) async fn fetch_service_token(
         &self,
         target: &ServiceTokenTarget,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         self.fetch_token(Grant::ClientCredentials(target), context)
             .await
@@ -77,7 +94,7 @@ impl TokenEndpoint {
         &self,
         subject: &SecretString,
         target: &ExchangeTokenTarget,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         self.fetch_token(Grant::TokenExchange { subject, target }, context)
             .await
@@ -86,25 +103,25 @@ impl TokenEndpoint {
     async fn fetch_token(
         &self,
         grant: Grant<'_>,
-        context: &RequestContext,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
-        let started = Instant::now();
+        let requested_at = Instant::now();
         let check = || context.check().map_err(AcquisitionError::from);
-        let metric = std::mem::DropGuard::new(grant.kind(), |grant_kind| {
+        let record_on_drop = std::mem::DropGuard::new(grant.kind(), |grant_kind| {
             let error = check().err().unwrap_or(AcquisitionError::Cancelled);
             self.record_acquisition(grant_kind, AcquisitionOutcome::Error(error));
         });
-        let result = match check() {
-            Ok(()) => self.request_token(grant, started, context).await,
-            Err(error) => Err(error),
+        let attempt = async {
+            check()?;
+            self.request_token(grant, requested_at, context).await
+        }
+        .await;
+        let result = check().and(attempt);
+        let grant_kind = std::mem::DropGuard::dismiss(record_on_drop);
+        let outcome = match &result {
+            Ok(_) => AcquisitionOutcome::Success,
+            Err(error) => AcquisitionOutcome::Error(*error),
         };
-        let result = check().and(result);
-        let grant_kind = std::mem::DropGuard::dismiss(metric);
-        let outcome = result
-            .as_ref()
-            .err()
-            .copied()
-            .map_or(AcquisitionOutcome::Success, AcquisitionOutcome::Error);
         self.record_acquisition(grant_kind, outcome);
         result
     }
@@ -124,32 +141,26 @@ impl TokenEndpoint {
     async fn request_token(
         &self,
         grant: Grant<'_>,
-        started: Instant,
-        context: &RequestContext,
+        requested_at: Instant,
+        context: &OperationContext,
     ) -> Result<Token, AcquisitionError> {
         let _permit = self
             .permits
             .try_acquire()
             .map_err(|_| AcquisitionError::AtCapacity)?;
         let request = self.token_request(grant)?;
-        let http_response = self.http.execute_buffered(request, context.clone()).await;
+        let http_response = self.http.execute(context, request).await;
         let token_response = classify_token_response(http_response)?;
-        token_from_response(&token_response, started, grant.expected_issued_type())
+        token_from_response(
+            &token_response,
+            requested_at,
+            grant.expected_issued_token_type(),
+        )
     }
 
     fn token_request(&self, grant: Grant<'_>) -> Result<Request<Bytes>, AcquisitionError> {
-        let body = {
-            let assertion = self.signer.sign()?;
-            let signer_fields = self.signer.form_fields(&assertion);
-            let capacity = signer_fields
-                .iter()
-                .fold(grant.max_encoded_len(), |total, &(key, value)| {
-                    total.saturating_add(max_form_pair_len(key, value))
-                });
-            let mut form = Serializer::new(String::with_capacity(capacity));
-            grant.append_fields(&mut form);
-            form.extend_pairs(signer_fields).finish()
-        };
+        let assertion = self.signer.sign()?;
+        let body = encode_form(grant.fields().chain(self.signer.form_fields(&assertion)));
         Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
@@ -188,6 +199,15 @@ impl AcquisitionOutcome {
     }
 }
 
+fn encode_form<'k, 'v>(fields: impl Iterator<Item = (&'k str, &'v str)> + Clone) -> String {
+    let capacity = fields.clone().fold(0_usize, |total, (key, value)| {
+        total.saturating_add(max_form_pair_len(key, value))
+    });
+    Serializer::new(String::with_capacity(capacity))
+        .extend_pairs(fields)
+        .finish()
+}
+
 fn max_form_pair_len(key: &str, value: &str) -> usize {
     key.len()
         .saturating_add(value.len().saturating_mul(3))
@@ -203,62 +223,31 @@ enum Grant<'a> {
     },
 }
 
-impl Grant<'_> {
-    fn max_encoded_len(self) -> usize {
+impl<'a> Grant<'a> {
+    fn fields(self) -> impl Iterator<Item = (&'static str, &'a str)> + Clone {
         match self {
-            Self::ClientCredentials(target) => {
-                max_form_pair_len("grant_type", GRANT_CLIENT_CREDENTIALS).saturating_add(
-                    target
-                        .scope
-                        .as_deref()
-                        .map_or(0, |scope| max_form_pair_len("scope", scope)),
-                )
-            }
-            Self::TokenExchange { subject, target } => {
-                max_form_pair_len("grant_type", GRANT_TOKEN_EXCHANGE)
-                    .saturating_add(max_form_pair_len("subject_token", subject.expose_secret()))
-                    .saturating_add(max_form_pair_len(
-                        "subject_token_type",
-                        TOKEN_TYPE_ACCESS_TOKEN,
-                    ))
-                    .saturating_add(max_form_pair_len(
-                        "requested_token_type",
-                        TOKEN_TYPE_ACCESS_TOKEN,
-                    ))
-                    .saturating_add(
-                        target
-                            .scope
-                            .as_deref()
-                            .map_or(0, |scope| max_form_pair_len("scope", scope)),
-                    )
-                    .saturating_add(
-                        target
-                            .audience
-                            .as_deref()
-                            .map_or(0, |audience| max_form_pair_len("audience", audience)),
-                    )
-            }
+            Self::ClientCredentials(target) => [
+                Some(("grant_type", GRANT_CLIENT_CREDENTIALS)),
+                target.scope.as_deref().map(|scope| ("scope", scope)),
+                None,
+                None,
+                None,
+                None,
+            ],
+            Self::TokenExchange { subject, target } => [
+                Some(("grant_type", GRANT_TOKEN_EXCHANGE)),
+                Some(("subject_token", subject.expose_secret())),
+                Some(("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN)),
+                Some(("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN)),
+                target.scope.as_deref().map(|scope| ("scope", scope)),
+                target
+                    .audience
+                    .as_deref()
+                    .map(|audience| ("audience", audience)),
+            ],
         }
-    }
-
-    fn append_fields(self, form: &mut Serializer<'_, String>) {
-        match self {
-            Self::ClientCredentials(target) => form
-                .append_pair("grant_type", GRANT_CLIENT_CREDENTIALS)
-                .extend_pairs(target.scope.as_deref().map(|scope| ("scope", scope))),
-            Self::TokenExchange { subject, target } => form
-                .append_pair("grant_type", GRANT_TOKEN_EXCHANGE)
-                .append_pair("subject_token", subject.expose_secret())
-                .append_pair("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN)
-                .append_pair("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN)
-                .extend_pairs(target.scope.as_deref().map(|scope| ("scope", scope)))
-                .extend_pairs(
-                    target
-                        .audience
-                        .as_deref()
-                        .map(|audience| ("audience", audience)),
-                ),
-        };
+        .into_iter()
+        .flatten()
     }
 
     const fn kind(self) -> GrantKind {
@@ -268,7 +257,7 @@ impl Grant<'_> {
         }
     }
 
-    fn expected_issued_type(self) -> Option<&'static str> {
+    fn expected_issued_token_type(self) -> Option<&'static str> {
         match self {
             Self::ClientCredentials(_) => None,
             Self::TokenExchange { .. } => Some(TOKEN_TYPE_ACCESS_TOKEN),
@@ -334,7 +323,7 @@ fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, Ac
 /// RFC 8693 §2.2.1
 fn token_from_response(
     response: &TokenResponse,
-    started: Instant,
+    requested_at: Instant,
     expected_issued_token_type: Option<&str>,
 ) -> Result<Token, AcquisitionError> {
     if !response.token_type.eq_ignore_ascii_case("bearer") {
@@ -345,5 +334,10 @@ fn token_from_response(
     {
         return Err(AcquisitionError::InvalidResponse);
     }
-    Token::bearer(&response.access_token, started, response.expires_in)
+    Token::bearer(
+        &response.access_token,
+        requested_at,
+        response.expires_in,
+        Instant::now(),
+    )
 }

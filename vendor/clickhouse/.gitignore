@@ -1,0 +1,5 @@
+.idea
+target
+Cargo.lock
+# Track the published crate lockfile inside this vendored copy.
+!/Cargo.lock

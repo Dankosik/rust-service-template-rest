@@ -72,8 +72,8 @@
     },
     {
       "path": "crates/config/src/observability.rs",
-      "old": "service_name: \"service\".to_owned(),",
-      "template": "service_name: \"{service_name}\".to_owned(),",
+      "old": "const DEFAULT_SERVICE_NAME: &str = \"service\";",
+      "template": "const DEFAULT_SERVICE_NAME: &str = \"{service_name}\";",
       "count": 1,
       "encoding": "rust_string"
     },
@@ -249,7 +249,9 @@
   "profiles": {
     "source-template": {
       "when": false,
-      "remove_when_unselected": []
+      "remove_when_unselected": [
+        "crates/utility-recipes/"
+      ]
     },
     "runtime-progress": {
       "when": false,
@@ -273,9 +275,8 @@
         "crates/service/src/bootstrap/postgres.rs",
         "test/tests/postgres.rs",
         "test/tests/postgres/",
-        "test/tests/support/commit_proxy.rs",
+        "test/src/commit_proxy.rs",
         "test/fixtures/migrations/",
-        "test/src/lib.rs",
         "env/pgbouncer/",
         "scripts/checks/migrations.py",
         "scripts/tests/test_migrations.py",
@@ -312,8 +313,13 @@
     "oidc-introspection": {
       "when": {"authn": "oidc-introspection"},
       "remove_when_unselected": [
-        "crates/infra-bearerauthn/src/introspection.rs"
+        "crates/infra-bearerauthn/src/introspection.rs",
+        "crates/infra-http/tests/authn_introspection/"
       ]
+    },
+    "http-tls-fixtures": {
+      "when": {"any": [{"grpc": "enabled"}, {"authn": "oidc-introspection"}]},
+      "remove_when_unselected": []
     },
     "grpc": {
       "when": {"grpc": "enabled"},
@@ -324,6 +330,7 @@
         "crates/config/src/grpc/",
         "crates/grpc-contracts/",
         "crates/infra-grpc/",
+        "crates/infra-grpc-core/",
         "crates/infra-outbound-grpc/",
         "crates/infra-telemetry/src/traces/tests/delivery/",
         "crates/service/examples/grpc.rs",
@@ -366,7 +373,11 @@
       ]
     },
     "config-url": {
-      "when": {"messaging": "nats-jetstream"},
+      "when": {"any": [{"messaging": "nats-jetstream"}, {"clickhouse": "http"}]},
+      "remove_when_unselected": []
+    },
+    "config-unknown-env-test": {
+      "when": {"any": [{"cache": "redis"}, {"clickhouse": "http"}]},
       "remove_when_unselected": []
     },
     "outbound-auth": {
@@ -385,12 +396,16 @@
         "test/tests/outbound_http.rs"
       ]
     },
+    "hyper-rustls": {
+      "when": {"any": [{"outbound_http": "bounded"}, {"clickhouse": "http"}]},
+      "remove_when_unselected": []
+    },
     "service-test-tls": {
-      "when": {"any": [{"service_auth": "jwt"}, {"outbound_auth": "oauth2-client-credentials"}]},
+      "when": {"any": [{"service_auth": "jwt"}, {"outbound_auth": "oauth2-client-credentials"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "tls-fixtures": {
-      "when": {"any": [{"authn": "!none"}, {"outbound_http": "bounded"}, {"grpc": "enabled"}, {"cache": "redis"}, {"database": "postgres"}, {"object_storage": "s3"}]},
+      "when": {"any": [{"authn": "!none"}, {"outbound_http": "bounded"}, {"grpc": "enabled"}, {"cache": "redis"}, {"database": "postgres"}, {"object_storage": "s3"}, {"clickhouse": "http"}]},
       "remove_when_unselected": [
         "crates/tls-test-support/"
       ]
@@ -421,6 +436,7 @@
     "http-idempotency-mounted": {
       "when": {"all": [{"http_idempotency": "postgres"}, {"authn": "oidc-introspection"}]},
       "remove_when_unselected": [
+        "crates/infra-http/tests/authn_introspection/idempotency.rs",
         "test/tests/http_idempotency/mounted.rs"
       ]
     },
@@ -452,6 +468,14 @@
     },
     "test-digest": {
       "when": {"outbox": "postgres"},
+      "remove_when_unselected": []
+    },
+    "test-operation-context": {
+      "when": {"any": [{"outbound_http": "bounded"}, {"outbox": "postgres"}]},
+      "remove_when_unselected": []
+    },
+    "test-runtime": {
+      "when": {"any": [{"database": "postgres"}, {"outbound_http": "bounded"}]},
       "remove_when_unselected": []
     },
     "test-metrics": {
@@ -497,14 +521,15 @@
       ]
     },
     "service-test-tempfile": {
-      "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
+      "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"clickhouse": "http"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "integration": {
-      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}]},
+      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}, {"clickhouse": "http"}]},
       "remove_when_unselected": [
         "env/docker-compose.yml",
-        "scripts/integration.py"
+        "scripts/integration.py",
+        "scripts/tests/test_integration.py"
       ]
     },
     "outbox": {
@@ -557,8 +582,21 @@
       ]
     },
     "rustls": {
-      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}]},
+      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}, {"clickhouse": "http"}]},
       "remove_when_unselected": []
+    },
+    "clickhouse": {
+      "when": {"clickhouse": "http"},
+      "remove_when_unselected": [
+        "crates/infra-clickhouse/",
+        "crates/config/src/clickhouse.rs",
+        "crates/config/src/clickhouse/",
+        "crates/service/src/bootstrap/clickhouse.rs",
+        "crates/shared-rules/src/clickhouse.rs",
+        "docs/decisions/clickhouse-decisions.md",
+        "env/clickhouse/",
+        "vendor/clickhouse/"
+      ]
     },
     "cache": {
       "when": {"cache": "redis"},
@@ -577,6 +615,7 @@
     "object-storage": {
       "when": {"object_storage": "s3"},
       "remove_when_unselected": [
+        "vendor/aws-runtime/",
         "vendor/aws-smithy-http-client/",
         "crates/infra-object-storage/",
         "crates/infra-http/src/object_storage.rs",

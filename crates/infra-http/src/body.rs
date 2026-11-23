@@ -4,65 +4,83 @@ use std::task::{Context, Poll};
 use axum::body::{Body, Bytes};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 
-pub(crate) fn hold_guard_until_end<G: Send + 'static>(body: Body, guard: G) -> Body {
-    on_body_end(body, None, move |_| drop(guard))
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BodyEnd {
     Complete,
     Error,
 }
 
-pub(crate) fn on_body_end(
+pub(crate) fn on_body_end<G, F>(
     body: Body,
+    guard: Option<G>,
     remaining: Option<u64>,
-    finish: impl FnOnce(BodyEnd) + Send + 'static,
-) -> Body {
-    if let Some(end) = body_end(body.is_end_stream(), remaining) {
+    finish: F,
+) -> Body
+where
+    G: Send + Unpin + 'static,
+    F: FnOnce(BodyEnd) + Send + Unpin + 'static,
+{
+    if body.is_end_stream() {
+        drop(guard);
+        finish(stream_end(remaining));
+        return body;
+    }
+    let finish = if let Some(end) = length_exhausted(remaining) {
         finish(end);
+        None
+    } else {
+        Some(finish)
+    };
+    if guard.is_none() && finish.is_none() {
         return body;
     }
     Body::new(GuardedBody {
         body,
+        guard,
         remaining,
-        finish: Some(finish),
+        finish,
     })
 }
 
-fn body_end(end_stream: bool, remaining: Option<u64>) -> Option<BodyEnd> {
-    match (end_stream, remaining) {
-        (_, Some(0)) | (true, None) => Some(BodyEnd::Complete),
-        (true, Some(_)) => Some(BodyEnd::Error),
-        (false, _) => None,
+fn stream_end(remaining: Option<u64>) -> BodyEnd {
+    match remaining {
+        None | Some(0) => BodyEnd::Complete,
+        Some(_) => BodyEnd::Error,
     }
 }
 
-pin_project_lite::pin_project! {
-    struct GuardedBody<F> {
-        #[pin]
-        body: Body,
-        remaining: Option<u64>,
-        finish: Option<F>,
-    }
+fn length_exhausted(remaining: Option<u64>) -> Option<BodyEnd> {
+    (remaining == Some(0)).then_some(BodyEnd::Complete)
 }
 
-impl<F: FnOnce(BodyEnd)> HttpBody for GuardedBody<F> {
+struct GuardedBody<G, F> {
+    body: Body,
+    guard: Option<G>,
+    remaining: Option<u64>,
+    finish: Option<F>,
+}
+
+impl<G: Unpin, F: FnOnce(BodyEnd) + Unpin> HttpBody for GuardedBody<G, F> {
     type Data = Bytes;
     type Error = axum::Error;
 
     fn poll_frame(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut this = self.project();
-        let frame = this.body.as_mut().poll_frame(cx);
-        if let Poll::Ready(ref frame) = frame
-            && this.finish.is_some()
-            && let Some(end) = end_after(this.remaining, &this.body, frame.as_ref())
-            && let Some(finish) = this.finish.take()
-        {
-            finish(end);
+        let this = &mut *self;
+        let frame = Pin::new(&mut this.body).poll_frame(cx);
+        if let Poll::Ready(ref frame) = frame {
+            let (ended, overflowed) =
+                advance_stream(&mut this.remaining, &this.body, frame.as_ref());
+            if ended.is_some() {
+                this.guard = None;
+            }
+            if let Some(end) = observed_end(ended, overflowed, this.remaining)
+                && let Some(finish) = this.finish.take()
+            {
+                finish(end);
+            }
         }
         frame
     }
@@ -76,23 +94,198 @@ impl<F: FnOnce(BodyEnd)> HttpBody for GuardedBody<F> {
     }
 }
 
-fn end_after(
+fn advance_stream(
     remaining: &mut Option<u64>,
     body: &Body,
     frame: Option<&Result<Frame<Bytes>, axum::Error>>,
-) -> Option<BodyEnd> {
-    let end_stream = match frame {
-        None => true,
-        Some(Err(_)) => return Some(BodyEnd::Error),
+) -> (Option<BodyEnd>, bool) {
+    match frame {
+        None => (Some(BodyEnd::Complete), false),
+        Some(Err(_)) => (Some(BodyEnd::Error), false),
         Some(Ok(frame)) => {
-            if let (Some(remaining), Some(data)) = (remaining.as_mut(), frame.data_ref()) {
-                let Some(next) = remaining.checked_sub(data.len() as u64) else {
-                    return Some(BodyEnd::Error);
-                };
-                *remaining = next;
-            }
-            frame.is_trailers() || body.is_end_stream()
+            let overflowed = match (remaining.as_mut(), frame.data_ref()) {
+                (Some(remaining), Some(data)) => match remaining.checked_sub(data.len() as u64) {
+                    Some(next) => {
+                        *remaining = next;
+                        false
+                    }
+                    None => true,
+                },
+                _ => false,
+            };
+            let ended = (frame.is_trailers() || body.is_end_stream()).then_some(BodyEnd::Complete);
+            (ended, overflowed)
         }
-    };
-    body_end(end_stream, *remaining)
+    }
+}
+
+fn observed_end(
+    ended: Option<BodyEnd>,
+    overflowed: bool,
+    remaining: Option<u64>,
+) -> Option<BodyEnd> {
+    if overflowed {
+        return Some(BodyEnd::Error);
+    }
+    match ended {
+        Some(BodyEnd::Error) => Some(BodyEnd::Error),
+        Some(BodyEnd::Complete) => Some(stream_end(remaining)),
+        None => length_exhausted(remaining),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::DropGuard;
+    use std::sync::{Arc, Mutex};
+
+    use axum::http::HeaderMap;
+    use http_body_util::BodyExt as _;
+
+    use super::*;
+
+    struct ScriptedBody {
+        frames: std::collections::VecDeque<Result<Frame<Bytes>, std::io::Error>>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl HttpBody for ScriptedBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            Poll::Ready(self.frames.pop_front())
+        }
+    }
+
+    impl Drop for ScriptedBody {
+        fn drop(&mut self) {
+            self.events.lock().unwrap().push("body_dropped");
+        }
+    }
+
+    fn tracked(
+        inner: Body,
+        remaining: Option<u64>,
+        events: &Arc<Mutex<Vec<&'static str>>>,
+    ) -> Body {
+        let guard = DropGuard::new(Arc::clone(events), |events| {
+            events.lock().unwrap().push("guard_dropped");
+        });
+        let observer = DropGuard::new(Arc::clone(events), |events| {
+            events.lock().unwrap().push("observer_abandoned");
+        });
+        on_body_end(inner, Some(guard), remaining, move |end| {
+            let events = DropGuard::dismiss(observer);
+            events.lock().unwrap().push(match end {
+                BodyEnd::Complete => "observer_complete",
+                BodyEnd::Error => "observer_error",
+            });
+        })
+    }
+
+    fn scripted(
+        frames: impl IntoIterator<Item = Result<Frame<Bytes>, std::io::Error>>,
+        events: &Arc<Mutex<Vec<&'static str>>>,
+    ) -> Body {
+        Body::new(ScriptedBody {
+            frames: frames.into_iter().collect(),
+            events: Arc::clone(events),
+        })
+    }
+
+    #[tokio::test]
+    async fn declared_length_finishes_observation_before_eof_and_keeps_drop_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut body = tracked(
+            scripted([Ok(Frame::data(Bytes::from_static(b"ok")))], &events),
+            Some(2),
+            &events,
+        );
+
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap(), "ok");
+        assert_eq!(*events.lock().unwrap(), ["observer_complete"]);
+
+        drop(body);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["observer_complete", "body_dropped", "guard_dropped"]
+        );
+    }
+
+    #[tokio::test]
+    async fn early_drop_runs_body_then_guard_then_observer() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let body = tracked(
+            scripted([Ok(Frame::data(Bytes::from_static(b"ok")))], &events),
+            Some(2),
+            &events,
+        );
+
+        drop(body);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["body_dropped", "guard_dropped", "observer_abandoned"]
+        );
+    }
+
+    #[tokio::test]
+    async fn trailers_and_errors_release_guard_before_observation_and_preserve_error_source() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut body = tracked(
+            scripted([Ok(Frame::trailers(HeaderMap::new()))], &events),
+            None,
+            &events,
+        );
+        assert!(body.frame().await.unwrap().unwrap().is_trailers());
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["guard_dropped", "observer_complete"]
+        );
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut body = tracked(
+            scripted([Err(std::io::Error::other("late boom"))], &events),
+            Some(4),
+            &events,
+        );
+        let err = body.frame().await.unwrap().unwrap_err();
+        assert!(
+            shared_rules::error_chain::contains::<std::io::Error>(&err),
+            "late error source chain lost: {err:?}"
+        );
+        assert_eq!(*events.lock().unwrap(), ["guard_dropped", "observer_error"]);
+    }
+
+    #[tokio::test]
+    async fn declared_length_mismatch_reports_error_while_preserving_guard_order() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut body = tracked(
+            scripted([Ok(Frame::data(Bytes::from_static(b"extra")))], &events),
+            Some(2),
+            &events,
+        );
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "extra"
+        );
+        assert_eq!(*events.lock().unwrap(), ["observer_error"]);
+        drop(body);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["observer_error", "body_dropped", "guard_dropped"]
+        );
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut body = tracked(Body::from("extra"), Some(2), &events);
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "extra"
+        );
+        assert_eq!(*events.lock().unwrap(), ["guard_dropped", "observer_error"]);
+    }
 }

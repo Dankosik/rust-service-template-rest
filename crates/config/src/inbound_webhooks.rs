@@ -5,35 +5,35 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 use crate::ValidationError;
+use crate::de::{BlankAsNone, Keep, Mode, ModeMarker, When};
 use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::{Violations, missing, validate_endpoint_id};
 
+#[serde_with::serde_as]
 #[derive(Deserialize, educe::Educe)]
-#[educe(Default(bound(Secrets: Default)))]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct InboundWebhooksFields<Endpoint, Secrets> {
+#[educe(Default(bound = false))]
+#[serde(
+    bound(deserialize = "Endpoint: Deserialize<'de>"),
+    deny_unknown_fields,
+    default
+)]
+pub(crate) struct InboundWebhooksFields<Endpoint, Secrets: Mode = Keep> {
     endpoints: BTreeMap<String, Endpoint>,
-    secrets: Secrets,
+    #[serde_as(as = "When<Secrets>")]
+    secrets: BTreeMap<String, SecretString>,
+    #[serde(skip)]
+    _mode: ModeMarker<Secrets>,
 }
 
-#[serde_with::serde_as]
-#[derive(Default, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct SecretMap(
-    #[serde_as(as = "BTreeMap<_, crate::de::StrictSecret>")] BTreeMap<String, SecretString>,
-);
-
-pub(crate) type InboundWebhooksInput =
-    InboundWebhooksFields<InboundWebhookEndpointInput, SecretMap>;
+pub(crate) type InboundWebhooksInput = InboundWebhooksFields<InboundWebhookEndpointInput>;
 
 #[serde_with::serde_as]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InboundWebhookEndpointInput {
-    #[serde_as(as = "crate::de::StrictString")]
     active_key: String,
     #[serde(default)]
-    #[serde_as(as = "crate::de::BlankAsNone")]
+    #[serde_as(as = "BlankAsNone")]
     previous_key: Option<String>,
 }
 
@@ -53,38 +53,15 @@ impl InboundWebhooksInput {
     pub(crate) fn admit(
         self,
         postgres_enabled: bool,
-        violations: &mut Violations,
+        v: &mut Violations,
     ) -> BTreeMap<String, InboundWebhookEndpointConfig> {
-        validate_endpoints(&self.endpoints, postgres_enabled, violations);
-        let mut keys = BTreeMap::new();
-        for (reference, secret) in self.secrets.0 {
-            violations.check(validate_key_ref(
-                &format!("inbound_webhooks.secrets.{reference}"),
-                &reference,
-            ));
-            if !secret.expose_secret().trim().is_empty() {
-                keys.insert(
-                    reference.clone(),
-                    Arc::new(InboundWebhookKey { reference, secret }),
-                );
-            }
-        }
+        validate_endpoints(&self.endpoints, postgres_enabled, v);
+        let keys = admit_keys(self.secrets, v);
         let mut bindings = BTreeMap::new();
         for (endpoint_id, endpoint) in self.endpoints {
             let active = resolve_key(&keys, &endpoint_id, "active_key", &endpoint.active_key);
-            let previous = match endpoint.previous_key {
-                Some(reference) if reference == endpoint.active_key => Err(ValidationError::new(
-                    format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key"),
-                    "must differ from active_key when present",
-                )),
-                Some(reference) => {
-                    resolve_key(&keys, &endpoint_id, "previous_key", &reference).map(Some)
-                }
-                None => Ok(None),
-            };
-            if let (Ok(active_key), Ok(previous_key)) =
-                (violations.record(active), violations.record(previous))
-            {
+            let previous = resolve_previous_key(&keys, &endpoint_id, &endpoint);
+            if let (Ok(active_key), Ok(previous_key)) = (v.record(active), v.record(previous)) {
                 bindings.insert(
                     endpoint_id,
                     InboundWebhookEndpointConfig {
@@ -95,6 +72,41 @@ impl InboundWebhooksInput {
             }
         }
         bindings
+    }
+}
+
+fn admit_keys(
+    secrets: BTreeMap<String, SecretString>,
+    v: &mut Violations,
+) -> BTreeMap<String, Arc<InboundWebhookKey>> {
+    let mut keys = BTreeMap::new();
+    for (reference, secret) in secrets {
+        v.check(validate_key_ref(
+            &format!("inbound_webhooks.secrets.{reference}"),
+            &reference,
+        ));
+        if !secret.expose_secret().trim().is_empty() {
+            keys.insert(
+                reference.clone(),
+                Arc::new(InboundWebhookKey { reference, secret }),
+            );
+        }
+    }
+    keys
+}
+
+fn resolve_previous_key(
+    keys: &BTreeMap<String, Arc<InboundWebhookKey>>,
+    endpoint_id: &str,
+    endpoint: &InboundWebhookEndpointInput,
+) -> Result<Option<Arc<InboundWebhookKey>>, ValidationError> {
+    match &endpoint.previous_key {
+        Some(reference) if *reference == endpoint.active_key => Err(ValidationError::new(
+            format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key"),
+            "must differ from active_key when present",
+        )),
+        Some(reference) => resolve_key(keys, endpoint_id, "previous_key", reference).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -116,7 +128,7 @@ fn resolve_key(
 
 // template:begin worker:worker-inbound-webhooks
 pub(crate) type WorkerInboundWebhooksInput =
-    InboundWebhooksFields<WorkerEndpointInput, serde::de::IgnoredAny>;
+    InboundWebhooksFields<WorkerEndpointInput, crate::de::Skip>;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -128,12 +140,8 @@ pub(crate) struct WorkerEndpointInput {
 }
 
 impl WorkerInboundWebhooksInput {
-    pub(crate) fn admit(
-        self,
-        postgres_enabled: bool,
-        violations: &mut Violations,
-    ) -> std::collections::BTreeSet<String> {
-        validate_endpoints(&self.endpoints, postgres_enabled, violations);
+    pub(crate) fn admit(self, postgres_enabled: bool, v: &mut Violations) -> Vec<String> {
+        validate_endpoints(&self.endpoints, postgres_enabled, v);
         self.endpoints.into_keys().collect()
     }
 }
@@ -142,16 +150,16 @@ impl WorkerInboundWebhooksInput {
 fn validate_endpoints<T>(
     endpoints: &BTreeMap<String, T>,
     postgres_enabled: bool,
-    violations: &mut Violations,
+    v: &mut Violations,
 ) {
     if !endpoints.is_empty() && !postgres_enabled {
-        violations.reject(ValidationError::new(
+        v.reject(ValidationError::new(
             "postgres.enabled",
             "must be true when inbound webhook endpoints are configured",
         ));
     }
     for endpoint_id in endpoints.keys() {
-        violations.check(validate_endpoint_id(
+        v.check(validate_endpoint_id(
             "inbound_webhooks.endpoints",
             endpoint_id,
         ));

@@ -1,17 +1,22 @@
 use std::time::UNIX_EPOCH;
 
 use super::*;
-use crate::{ConfigurationError, PreparationError, assertion::Signer};
+use crate::{
+    ConfigurationError, PreparationError,
+    assertion::{Signer, SignerConfig},
+};
 
 fn valid_options() -> Options {
     Options {
-        token_url: "https://identity.example/token".to_owned(),
+        token_url: TokenUrl::parse("https://identity.example/token").unwrap(),
         client_id: "client".to_owned(),
-        private_key: SecretString::from("placeholder"),
-        key_id: "key-1".to_owned(),
-        algorithm: Algorithm::Rs256,
-        assertion_audience: "https://issuer.example".to_owned(),
-        provider_concurrency: 32,
+        auth: PrivateKeyJwt {
+            private_key: SecretString::from("placeholder"),
+            key_id: "key-1".to_owned(),
+            algorithm: Algorithm::Rs256,
+            audience: IssuerUrl::parse("https://issuer.example").unwrap(),
+        },
+        provider_concurrency: nonzero(32),
     }
 }
 
@@ -27,31 +32,23 @@ fn direct_construction_repeats_sensitive_option_admission() {
         ),
         (
             Options {
-                key_id: String::new(),
+                auth: PrivateKeyJwt {
+                    key_id: String::new(),
+                    ..valid_options().auth
+                },
                 ..valid_options()
             },
             "key_id",
         ),
         (
             Options {
-                assertion_audience: String::new(),
-                ..valid_options()
-            },
-            "assertion_audience",
-        ),
-        (
-            Options {
-                private_key: SecretString::from(""),
+                auth: PrivateKeyJwt {
+                    private_key: SecretString::from(""),
+                    ..valid_options().auth
+                },
                 ..valid_options()
             },
             "private_key",
-        ),
-        (
-            Options {
-                token_url: "https://user:secret@identity.example/token".to_owned(),
-                ..valid_options()
-            },
-            "token_url",
         ),
         (
             Options {
@@ -62,31 +59,23 @@ fn direct_construction_repeats_sensitive_option_admission() {
         ),
         (
             Options {
-                key_id: "\t".to_owned(),
+                auth: PrivateKeyJwt {
+                    key_id: "\t".to_owned(),
+                    ..valid_options().auth
+                },
                 ..valid_options()
             },
             "key_id",
         ),
         (
             Options {
-                assertion_audience: " ".to_owned(),
-                ..valid_options()
-            },
-            "assertion_audience",
-        ),
-        (
-            Options {
-                private_key: SecretString::from(" \n"),
+                auth: PrivateKeyJwt {
+                    private_key: SecretString::from(" \n"),
+                    ..valid_options().auth
+                },
                 ..valid_options()
             },
             "private_key",
-        ),
-        (
-            Options {
-                provider_concurrency: 0,
-                ..valid_options()
-            },
-            "provider_concurrency",
         ),
     ] {
         let mut options = options;
@@ -96,66 +85,149 @@ fn direct_construction_repeats_sensitive_option_admission() {
             PreparationError::Configuration(ConfigurationError { key: actual, .. })
             if actual == key
         );
-        options.private_key = SecretString::from("different-secret");
+        options.auth.private_key = SecretString::from("different-secret");
         assert!(!format!("{options:?} {error:?}").contains("different-secret"));
     }
 }
 
 #[test]
-fn the_assertion_audience_must_be_an_issuer_distinct_from_the_token_endpoint() {
+fn issuer_and_token_url_types_implement_from_str_and_enforce_url_rules() {
+    let issuer: IssuerUrl = "https://issuer.example".parse().unwrap();
+    assert_eq!(issuer.as_str(), "https://issuer.example");
+    assert_eq!(issuer.as_ref(), "https://issuer.example");
+    assert!(std::collections::HashSet::from([issuer]).contains("https://issuer.example"));
+    let token: TokenUrl = "https://identity.example/token?x=1".parse().unwrap();
+    assert_eq!(token.as_str(), "https://identity.example/token?x=1");
+    assert_eq!(token.as_ref(), "https://identity.example/token?x=1");
+    assert!(
+        std::collections::HashSet::from([token]).contains("https://identity.example/token?x=1")
+    );
+
     for audience in [
+        "",
+        " ",
         "billing-api",
         "http://issuer.example",
         "https://issuer.example/?tenant=x",
         "https://issuer.example/#fragment",
         "https://@issuer.example",
         "https://issuer.example/\n",
-        "https://identity.example/token",
     ] {
-        let error = Registration::prepare(Options {
-            assertion_audience: audience.to_owned(),
-            ..valid_options()
-        })
-        .unwrap_err();
-        std::assert_matches!(
-            error,
-            PreparationError::Configuration(ConfigurationError {
-                key: "assertion_audience",
-                ..
-            }),
-            "{audience:?}"
-        );
+        let error = IssuerUrl::parse(audience).unwrap_err();
+        assert_eq!(error.key, "issuer", "{audience:?}");
     }
+    assert_eq!(
+        TokenUrl::parse("http://identity.example/token").unwrap_err(),
+        ConfigurationError {
+            key: "token_url",
+            reason: "must use HTTPS",
+        }
+    );
+
+    let error = Registration::prepare(Options {
+        auth: PrivateKeyJwt {
+            audience: IssuerUrl::parse("https://identity.example/token").unwrap(),
+            ..valid_options().auth
+        },
+        ..valid_options()
+    })
+    .unwrap_err();
+    std::assert_matches!(
+        error,
+        PreparationError::Configuration(ConfigurationError {
+            key: "assertion_audience",
+            ..
+        })
+    );
 }
 
 #[tokio::test]
 async fn only_the_exchange_source_requires_a_valid_cache_capacity() {
     let fixture = Fixture::new().await;
     let registration = prepare_registration(fixture.options());
-    for capacity in [0, 65_537] {
-        let error = registration
-            .exchange_tokens(
-                ExchangeTokenTarget::default(),
-                fixture.resource_origin(),
-                capacity,
-            )
-            .unwrap_err();
-        assert_eq!(error.key, "exchange_cache_capacity");
-    }
+    let error = registration
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            Origin::parse_https("https://resource.example").unwrap(),
+            nonzero(65_537),
+        )
+        .unwrap_err();
+    assert_eq!(error.key, "exchange_cache_capacity");
     fixture.finish().await;
+}
+
+#[tokio::test]
+async fn test_http_token_sources_require_a_loopback_http_origin() {
+    let fixture = Fixture::new().await;
+    let registration = prepare_registration(fixture.options());
+    for invalid in [
+        "https://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://10.0.0.1:8080",
+        "http://user@127.0.0.1:8080",
+        "http://127.0.0.1:8080/path",
+        "http://127.0.0.1:8080/.",
+        "http://127.0.0.1:8080?x=1",
+    ] {
+        assert_eq!(
+            service_tokens_http(&registration, ServiceTokenTarget::default(), invalid)
+                .unwrap_err()
+                .key,
+            "resource_origin",
+            "{invalid}"
+        );
+        assert_eq!(
+            exchange_tokens_http(
+                &registration,
+                ExchangeTokenTarget::default(),
+                invalid,
+                EXCHANGE_CAPACITY,
+            )
+            .unwrap_err()
+            .key,
+            "resource_origin",
+            "{invalid}"
+        );
+    }
+    assert!(
+        service_tokens_http(
+            &registration,
+            ServiceTokenTarget::default(),
+            "http://[::1]:8080",
+        )
+        .is_ok()
+    );
+    assert!(
+        exchange_tokens_http(
+            &registration,
+            ExchangeTokenTarget::default(),
+            "http://[::1]:8080",
+            EXCHANGE_CAPACITY,
+        )
+        .is_ok()
+    );
+    fixture.finish().await;
+}
+
+#[test]
+fn on_behalf_of_rejects_an_empty_subject_at_construction() {
+    assert_eq!(
+        OnBehalfOf::try_new(SecretString::from("")).unwrap_err(),
+        EmptySubject
+    );
+    let valid = OnBehalfOf::try_new(SecretString::from("subject-secret")).unwrap();
+    assert!(!format!("{valid:?}").contains("subject-secret"));
 }
 
 #[test]
 fn token_targets_require_valid_scope_tokens_and_a_nonempty_configured_audience() {
     assert_eq!(
-        ServiceTokenTarget::try_new(&["bad scope".to_owned()])
-            .unwrap_err()
-            .key,
+        ServiceTokenTarget::try_new(["bad scope"]).unwrap_err().key,
         "scopes"
     );
     for audience in ["", " "] {
         assert_eq!(
-            ExchangeTokenTarget::try_new(&[], Some(audience.to_owned()))
+            ExchangeTokenTarget::try_new(std::iter::empty::<&str>(), Some(audience.to_owned()))
                 .unwrap_err()
                 .key,
             "audience"
@@ -165,17 +237,13 @@ fn token_targets_require_valid_scope_tokens_and_a_nonempty_configured_audience()
 
 #[test]
 fn a_token_url_with_whitespace_reports_the_character_rule() {
-    let error = Registration::prepare(Options {
-        token_url: "https://identity.example/token\n".to_owned(),
-        ..valid_options()
-    })
-    .unwrap_err();
-    std::assert_matches!(
+    let error = TokenUrl::parse("https://identity.example/token\n").unwrap_err();
+    assert_eq!(
         error,
-        PreparationError::Configuration(ConfigurationError {
+        ConfigurationError {
             key: "token_url",
             reason: "must not contain whitespace or controls",
-        })
+        }
     );
 }
 
@@ -190,22 +258,12 @@ fn an_unregistered_rejection_says_that_no_code_was_registered() {
 #[test]
 fn a_token_url_with_an_at_sign_in_its_raw_authority_is_refused() {
     for token_url in [
+        "https://user:secret@identity.example/token",
         "https://@identity.example/token",
         r"https://identity.example\@other.example/token",
     ] {
-        let error = Registration::prepare(Options {
-            token_url: token_url.to_owned(),
-            ..valid_options()
-        })
-        .unwrap_err();
-        std::assert_matches!(
-            error,
-            PreparationError::Configuration(ConfigurationError {
-                key: "token_url",
-                ..
-            }),
-            "{token_url}"
-        );
+        let error = TokenUrl::parse(token_url).unwrap_err();
+        assert_eq!(error.key, "token_url", "{token_url}");
     }
 }
 
@@ -216,8 +274,11 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
         .serialize_pem();
     for private_key in [ec_pem, "not a pem key".to_owned()] {
         let options = Options {
-            private_key: SecretString::from(private_key),
-            algorithm: Algorithm::Rs256,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(private_key),
+                algorithm: Algorithm::Rs256,
+                ..valid_options().auth
+            },
             ..valid_options()
         };
         let error = Registration::prepare(options).unwrap_err();
@@ -233,16 +294,19 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
 
 #[test]
 fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
-    let options = Options {
+    let options = valid_options();
+    let config = SignerConfig {
+        client_id: options.client_id,
         private_key: SecretString::from(
             KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
                 .unwrap()
                 .serialize_pem(),
         ),
+        key_id: options.auth.key_id,
         algorithm: Algorithm::Es256,
-        ..valid_options()
+        audience: options.auth.audience.as_str().to_owned(),
     };
-    let error = Signer::try_new(options, UNIX_EPOCH - Duration::from_secs(1))
+    let error = Signer::try_new(config, UNIX_EPOCH - Duration::from_secs(1))
         .err()
         .unwrap();
     assert_eq!(error.key, "system_clock");
@@ -251,12 +315,16 @@ fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
 #[test]
 fn a_token_url_longer_than_a_request_target_may_be_is_refused_at_preparation() {
     let error = Registration::prepare(Options {
-        token_url: format!("https://identity.example/{}", "a".repeat(70_000)),
-        private_key: SecretString::from(
-            KeyPair::generate_for(&PKCS_RSA_SHA256)
-                .unwrap()
-                .serialize_pem(),
-        ),
+        token_url: TokenUrl::parse(&format!("https://identity.example/{}", "a".repeat(70_000)))
+            .unwrap(),
+        auth: PrivateKeyJwt {
+            private_key: SecretString::from(
+                KeyPair::generate_for(&PKCS_RSA_SHA256)
+                    .unwrap()
+                    .serialize_pem(),
+            ),
+            ..valid_options().auth
+        },
         ..valid_options()
     })
     .unwrap_err();

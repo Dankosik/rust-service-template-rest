@@ -23,6 +23,7 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout, ClientTlsMaterial};
+use infra_outbound_http::Origin;
 use operation_context::OperationContext;
 use tls_test_support::TlsMaterial;
 use tokio::{
@@ -31,19 +32,15 @@ use tokio::{
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{ServerConfig, crypto::aws_lc_rs, pki_types::PrivatePkcs8KeyDer},
-};
+use tokio_rustls::TlsAcceptor;
 use tonic::{Code, Request, Response, Status, body::Body};
 use tower::{Service as _, service_fn};
 
-use secrecy::SecretString;
-
-use super::{Fixture, acquisition_deadline, prepare_registration, token_context};
-use crate::{
-    AcquisitionError, ExchangeTokenTarget, OnBehalfOf, Rejection, ServiceTokenTarget, ServiceTokens,
+use super::{
+    Fixture, acquisition_deadline, exchange_tokens_http, nonzero, prepare_registration, subject,
+    token_context,
 };
+use crate::{AcquisitionError, ExchangeTokenTarget, Rejection, ServiceTokenTarget, ServiceTokens};
 
 #[derive(Clone)]
 struct Peer {
@@ -121,28 +118,24 @@ struct Resource {
 }
 
 impl Resource {
-    fn origin(&self) -> http::Uri {
-        format!("https://{}", self.address).parse().unwrap()
+    fn origin(&self) -> Origin {
+        Origin::parse_https(&format!("https://{}", self.address)).unwrap()
     }
 
     fn credentials(&self, tokens: &Fixture) -> ServiceTokens {
-        tokens.service_tokens_with(tokens.options(), &[], self.origin())
+        let registration = prepare_registration(tokens.options());
+        let (credentials, driver) =
+            registration.service_tokens(ServiceTokenTarget::default(), self.origin());
+        tokens.drive(driver);
+        tokens.registrations.lock().unwrap().push(registration);
+        credentials
     }
 
     async fn new() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let material = TlsMaterial::new("127.0.0.1");
-        let mut config =
-            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![material.cert.into()],
-                    PrivatePkcs8KeyDer::from(material.key).into(),
-                )
-                .unwrap();
+        let mut config = material.server_config();
         config.alpn_protocols = vec![b"h2".to_vec()];
         let peer = Peer::new();
         let (shutdown, receiver) = oneshot::channel();
@@ -178,15 +171,16 @@ impl Resource {
     }
 
     fn channel_with_limit(&self, timeout: ClientTimeout, limit: Option<NonZeroUsize>) -> Client {
-        Client::with_opening_limit(
+        Client::builder(
             &format!("https://{}", self.address),
             ClientSecurity::Tls(ClientTlsMaterial {
-                ca_certificate_pem: Some(self.root_pem.clone()),
+                ca_certificate_pem: Some(&self.root_pem),
                 identity: None,
             }),
             timeout,
-            limit,
         )
+        .opening_limit(limit)
+        .build()
         .unwrap()
     }
 
@@ -293,7 +287,7 @@ impl hyper::body::Body for GatedTrailers {
 async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Body> {
     if request.uri().path() == "/budget-stream" {
         peer.record(header_string(request.headers(), "authorization"));
-        if let Some(timeout) = infra_outbound_grpc::grpc_timeout(request.headers()) {
+        if let Some(timeout) = grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         let status = request
@@ -330,7 +324,7 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         return response.body(Body::empty()).unwrap();
     }
     if request.uri().path() == "/example.v1.EchoService/Unary" {
-        if let Some(timeout) = infra_outbound_grpc::grpc_timeout(request.headers()) {
+        if let Some(timeout) = grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
         return tonic::server::Grpc::new(
@@ -343,6 +337,12 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         .into_http::<()>()
         .into_parts();
     HyperResponse::from_parts(parts, Body::empty())
+}
+
+fn grpc_timeout(headers: &http::HeaderMap) -> Option<Duration> {
+    headers
+        .get(shared_rules::grpc::TIMEOUT_HEADER)
+        .and_then(|value| shared_rules::grpc::parse_timeout(value.as_bytes()))
 }
 
 fn header_string(headers: &http::HeaderMap, name: &str) -> Option<String> {
@@ -363,18 +363,25 @@ async fn plaintext_cannot_be_bound_to_oauth_credentials() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let credentials = resource.credentials(&tokens);
-    let channel = Client::try_new(
+    let channel = Client::builder(
         &format!("http://{}", resource.address),
         ClientSecurity::Plaintext,
         Duration::from_secs(10),
     )
+    .build()
     .unwrap();
-    for binding in [
-        credentials.grpc(channel.clone()),
-        tokens.exchange_tokens(&[], None, 1).grpc(channel),
-    ] {
-        assert_eq!(binding.unwrap_err().key, "grpc_resource");
-    }
+    assert_eq!(
+        credentials.grpc(channel.clone()).unwrap_err().key,
+        "grpc_resource"
+    );
+    assert_eq!(
+        tokens
+            .exchange_tokens(&[], None, nonzero(1))
+            .grpc(channel)
+            .unwrap_err()
+            .key,
+        "grpc_resource"
+    );
     assert_eq!(tokens.token_request_count(), 0);
     assert_eq!(resource.calls(), 0);
     resource.finish().await;
@@ -621,23 +628,26 @@ async fn dropping_registration_stops_a_bound_grpc_call_during_token_acquisition(
 async fn provider_capacity_is_unavailable_with_typed_source_before_resource_dispatch() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    let registration = prepare_registration(crate::Options {
-        provider_concurrency: 1,
+    let registration = prepare_registration(crate::test_support::HttpOptions {
+        provider_concurrency: nonzero(1),
         ..tokens.options()
     });
     let (credentials, driver) =
         registration.service_tokens(ServiceTokenTarget::default(), resource.origin());
     tokens.drive(driver);
-    let http = registration
-        .exchange_tokens(ExchangeTokenTarget::default(), tokens.resource_origin(), 1)
-        .unwrap()
-        .http(tokens.resource_client())
-        .unwrap();
+    let http = exchange_tokens_http(
+        &registration,
+        ExchangeTokenTarget::default(),
+        tokens.resource_origin(),
+        nonzero(1),
+    )
+    .unwrap()
+    .http(tokens.resource_client())
+    .unwrap();
     let gate = tokens.block_tokens();
-    let mut exchange = Box::pin(http.execute(
-        tokens.on_behalf_of_request("active"),
-        Instant::now() + Duration::from_secs(10),
-    ));
+    let active_subject = subject("active");
+    let context = OperationContext::with_timeout(Duration::from_secs(10));
+    let mut exchange = Box::pin(http.execute(&context, tokens.request(), &active_subject));
     tokio::select! { () = tokens.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
     let error = resource
         .client(&credentials)
@@ -1067,33 +1077,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
 }
 
 #[tokio::test]
-async fn service_identity_refuses_an_unexpected_subject_before_any_io() {
-    let tokens = Fixture::new().await;
-    let resource = Resource::new().await;
-    let credentials = resource.credentials(&tokens);
-    let mut request = rpc(
-        UnaryRequest {
-            message: "one".to_owned(),
-        },
-        Duration::from_secs(10),
-    );
-    request
-        .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
-    let error = resource
-        .client(&credentials)
-        .unary(request)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::Internal);
-    assert_eq!(tokens.token_request_count(), 0);
-    assert_eq!(resource.calls(), 0);
-    resource.finish().await;
-    tokens.finish().await;
-}
-
-#[tokio::test]
-async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
+async fn exchange_client_sends_exchanged_bearer_and_closes_when_registration_drops() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
     let credentials = resource.credentials(&tokens);
@@ -1111,44 +1095,44 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let channel = resource.channel(ClientTimeout::FullRpc(Duration::from_secs(10)));
     let registration = prepare_registration(tokens.options());
     let exchange = registration
-        .exchange_tokens(ExchangeTokenTarget::default(), resource.origin(), 1)
+        .exchange_tokens(
+            ExchangeTokenTarget::default(),
+            resource.origin(),
+            nonzero(1),
+        )
         .unwrap();
-    let mut client = EchoServiceClient::new(exchange.grpc(channel).unwrap());
-    for subject in [None, Some("")] {
-        let mut request = rpc(message(), Duration::from_secs(10));
-        if let Some(subject) = subject {
-            request
-                .extensions_mut()
-                .insert(OnBehalfOf::new(SecretString::from(subject)));
-        }
-        let error = client.unary(request).await.unwrap_err();
-        assert_eq!(error.code(), Code::Internal);
-        assert_eq!(error.message(), "on-behalf-of subject is required");
-    }
-    assert_eq!(tokens.token_request_count(), 1);
-    assert_eq!(resource.calls(), 1);
+    let exchange_client = exchange.grpc(channel).unwrap();
+    let authenticated = exchange_client.on_behalf_of(subject("subject-token"));
+    let mut client = EchoServiceClient::new(authenticated.clone());
 
     tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
-    let mut request = rpc(message(), Duration::from_secs(10));
-    request
-        .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
-    client.unary(request).await.unwrap();
+    client
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap();
+    EchoServiceClient::new(authenticated.with_context(&OperationContext::unbounded()))
+        .unary(rpc(message(), Duration::from_secs(10)))
+        .await
+        .unwrap();
     assert_eq!(
         resource.authorizations(),
-        ["Bearer fixture-token", "Bearer exchanged-token"]
+        [
+            "Bearer fixture-token",
+            "Bearer exchanged-token",
+            "Bearer exchanged-token",
+        ]
     );
     drop(registration);
-    let mut request = rpc(message(), Duration::from_secs(10));
-    request
-        .extensions_mut()
-        .insert(OnBehalfOf::new(SecretString::from("subject-token")));
     assert_eq!(
-        client.unary(request).await.unwrap_err().code(),
+        client
+            .unary(rpc(message(), Duration::from_secs(10)))
+            .await
+            .unwrap_err()
+            .code(),
         Code::Unavailable
     );
     assert_eq!(tokens.token_request_count(), 2);
-    assert_eq!(resource.calls(), 2);
+    assert_eq!(resource.calls(), 3);
     resource.finish().await;
     tokens.finish().await;
 }

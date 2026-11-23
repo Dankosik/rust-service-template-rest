@@ -8,18 +8,16 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 
-use async_nats::HeaderMap;
-use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use infra_messaging::wire::{
-    CREATED_AT, DEAD_LETTER_REASON, DeadLetterRecord, NATS_MSG_ID, dead_letter_id, decode_envelope,
-    encode_prepared, restore_dead_letter,
+    Bytes, CREATED_AT, DEAD_LETTER_REASON, DeadLetterRecord, HeaderMap, NATS_MSG_ID,
+    OffsetDateTime, UtcDateTime, dead_letter_id, decode_envelope, encode_prepared,
+    restore_dead_letter,
 };
 use infra_messaging::{Registry, Route};
 use serde::Deserialize;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time::macros::utc_datetime;
 
@@ -63,8 +61,8 @@ struct EventRecord {
 }
 
 impl EventRecord {
-    fn occurred_at(&self) -> OffsetDateTime {
-        OffsetDateTime::from_unix_timestamp_nanos(
+    fn occurred_at(&self) -> UtcDateTime {
+        UtcDateTime::from_unix_timestamp_nanos(
             i128::from(self.unix_seconds) * 1_000_000_000 + i128::from(self.nanosecond),
         )
         .expect("fixture instant is representable")
@@ -389,7 +387,7 @@ fn rust_production_records() -> Vec<WireRecord> {
     let prepared = publication
         .prepare(&event)
         .expect("production Rust preparation admits");
-    let headers = encode_prepared(&prepared).expect("production Rust encoding admits");
+    let headers = encode_prepared(&prepared);
     vec![WireRecord {
         subject: prepared.subject().to_owned(),
         headers: header_values(&headers),

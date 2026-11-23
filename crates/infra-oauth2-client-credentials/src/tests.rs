@@ -8,6 +8,7 @@
 use std::{
     collections::BTreeMap,
     future::poll_fn,
+    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, Mutex},
     task::Poll,
@@ -16,7 +17,7 @@ use std::{
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode, header};
-use infra_outbound_http::Client;
+use infra_outbound_http::{Client, Origin};
 use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_RSA_SHA256};
 use secrecy::SecretString;
@@ -30,9 +31,11 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokenTarget, ExchangeTokens,
-    OnBehalfOf, Options, RefreshDriver, Registration, Rejection, ServiceTokenTarget, ServiceTokens,
+    AcquisitionError, Algorithm, EmptySubject, Error, ExchangeHttpClient, ExchangeTokenTarget,
+    ExchangeTokens, IssuerUrl, OnBehalfOf, Options, PrivateKeyJwt, RefreshDriver, Registration,
+    Rejection, ServiceHttpClient, ServiceTokenTarget, ServiceTokens, TokenUrl,
     credentials::acquisition_deadline,
+    test_support::{HttpOptions, exchange_tokens_http, prepare_http, service_tokens_http},
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -58,7 +61,15 @@ const RESOURCE_PATH: &str = "/resource";
 const ASSERTION_AUDIENCE: &str = "https://issuer.example";
 const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-const EXCHANGE_CAPACITY: u32 = 1024;
+const EXCHANGE_CAPACITY: NonZeroU32 = NonZeroU32::new(1024).unwrap();
+
+fn nonzero(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).unwrap()
+}
+
+fn subject(value: &str) -> OnBehalfOf {
+    OnBehalfOf::try_new(SecretString::from(value)).unwrap()
+}
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -140,34 +151,36 @@ impl Fixture {
         }
     }
 
-    fn options(&self) -> Options {
-        Options {
+    fn options(&self) -> HttpOptions {
+        HttpOptions {
             token_url: self.endpoint.to_string(),
             client_id: "client:id".to_owned(),
-            private_key: SecretString::from(self.key.serialize_pem()),
-            key_id: "key-1".to_owned(),
-            algorithm: Algorithm::Rs256,
-            assertion_audience: ASSERTION_AUDIENCE.to_owned(),
-            provider_concurrency: 32,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(self.key.serialize_pem()),
+                key_id: "key-1".to_owned(),
+                algorithm: Algorithm::Rs256,
+                audience: IssuerUrl::parse(ASSERTION_AUDIENCE).unwrap(),
+            },
+            provider_concurrency: nonzero(32),
         }
     }
 
-    fn resource_origin(&self) -> http::Uri {
-        self.origin.as_str().parse().unwrap()
+    fn resource_origin(&self) -> &str {
+        self.origin.as_str()
     }
 
     fn service_tokens(&self, scopes: &[&str]) -> ServiceTokens {
-        self.service_tokens_with(self.options(), scopes, self.resource_origin())
+        self.service_tokens_with(self.options(), scopes)
     }
 
-    fn service_tokens_with(
-        &self,
-        options: Options,
-        scopes: &[&str],
-        origin: http::Uri,
-    ) -> ServiceTokens {
+    fn service_tokens_with(&self, options: HttpOptions, scopes: &[&str]) -> ServiceTokens {
         let registration = prepare_registration(options);
-        let (tokens, driver) = registration.service_tokens(service_target(scopes), origin);
+        let (tokens, driver) = service_tokens_http(
+            &registration,
+            service_target(scopes),
+            self.resource_origin(),
+        )
+        .unwrap();
         self.drive(driver);
         self.registrations.lock().unwrap().push(registration);
         tokens
@@ -177,26 +190,26 @@ impl Fixture {
         &self,
         scopes: &[&str],
         audience: Option<&str>,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> ExchangeTokens {
         self.exchange_tokens_with(self.options(), scopes, audience, capacity)
     }
 
     fn exchange_tokens_with(
         &self,
-        options: Options,
+        options: HttpOptions,
         scopes: &[&str],
         audience: Option<&str>,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> ExchangeTokens {
         let registration = prepare_registration(options);
-        let tokens = registration
-            .exchange_tokens(
-                exchange_target(scopes, audience),
-                self.resource_origin(),
-                capacity,
-            )
-            .unwrap();
+        let tokens = exchange_tokens_http(
+            &registration,
+            exchange_target(scopes, audience),
+            self.resource_origin(),
+            capacity,
+        )
+        .unwrap();
         self.registrations.lock().unwrap().push(registration);
         tokens
     }
@@ -212,32 +225,56 @@ impl Fixture {
     }
 
     fn resource_client(&self) -> Client {
-        Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
+        infra_outbound_http::test_support::client_http(self.origin.as_str(), TOKEN_LIMITS).unwrap()
     }
 
-    fn service_client(&self) -> AuthenticatedClient {
+    fn service_client(&self) -> ServiceHttpClient {
         self.service_tokens(&[])
             .http(self.resource_client())
             .unwrap()
     }
 
-    fn exchange_client(&self) -> AuthenticatedClient {
+    fn exchange_client(&self) -> ExchangeHttpClient {
         self.exchange_tokens(&[], None, EXCHANGE_CAPACITY)
             .http(self.resource_client())
             .unwrap()
     }
 
-    async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {
+    async fn send(&self, client: &ServiceHttpClient) -> Result<Response<Bytes>, Error> {
         self.send_request(client, self.request()).await
     }
 
     async fn send_request(
         &self,
-        client: &AuthenticatedClient,
+        client: &ServiceHttpClient,
         request: Request<Bytes>,
     ) -> Result<Response<Bytes>, Error> {
         client
-            .execute(request, deadline(Duration::from_secs(10)))
+            .execute(&timeout_context(Duration::from_secs(10)), request)
+            .await
+    }
+
+    async fn send_exchange(
+        &self,
+        client: &ExchangeHttpClient,
+        subject_token: &str,
+    ) -> Result<Response<Bytes>, Error> {
+        self.send_exchange_request(client, self.request(), subject_token)
+            .await
+    }
+
+    async fn send_exchange_request(
+        &self,
+        client: &ExchangeHttpClient,
+        request: Request<Bytes>,
+        subject_token: &str,
+    ) -> Result<Response<Bytes>, Error> {
+        client
+            .execute(
+                &timeout_context(Duration::from_secs(10)),
+                request,
+                &subject(subject_token),
+            )
             .await
     }
 
@@ -245,14 +282,6 @@ impl Fixture {
         Request::get(self.origin.join(RESOURCE_PATH).unwrap().as_str())
             .body(Bytes::new())
             .unwrap()
-    }
-
-    fn on_behalf_of_request(&self, subject: &str) -> Request<Bytes> {
-        let mut request = self.request();
-        request
-            .extensions_mut()
-            .insert(OnBehalfOf::new(SecretString::from(subject)));
-        request
     }
 
     fn token_json(&self, status: StatusCode, body: &serde_json::Value) {
@@ -339,19 +368,11 @@ impl Fixture {
 }
 
 fn service_target(scopes: &[&str]) -> ServiceTokenTarget {
-    let scopes = scopes
-        .iter()
-        .map(|&scope| scope.to_owned())
-        .collect::<Vec<_>>();
-    ServiceTokenTarget::try_new(&scopes).unwrap()
+    ServiceTokenTarget::try_new(scopes).unwrap()
 }
 
 fn exchange_target(scopes: &[&str], audience: Option<&str>) -> ExchangeTokenTarget {
-    let scopes = scopes
-        .iter()
-        .map(|&scope| scope.to_owned())
-        .collect::<Vec<_>>();
-    ExchangeTokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
+    ExchangeTokenTarget::try_new(scopes, audience.map(str::to_owned)).unwrap()
 }
 
 async fn take_event(events: &Semaphore) {
@@ -427,8 +448,12 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
             request.len() <= 2 * 1024 * 1024,
             "fixture request exceeded bound"
         );
-        if let Some(end) = request.array_windows().position(|part| part == b"\r\n\r\n") {
-            break end + 4;
+        let scan_start = request.len().saturating_sub(read + 3);
+        if let Some(offset) = request[scan_start..]
+            .array_windows()
+            .position(|part| part == b"\r\n\r\n")
+        {
+            break scan_start + offset + 4;
         }
     };
     let head = std::str::from_utf8(&request[..header_end]).unwrap();
@@ -481,16 +506,16 @@ fn exchange_response(access_token: &str) -> serde_json::Value {
     })
 }
 
-fn prepare_registration(options: Options) -> Registration {
-    Registration::prepare_for_test_http(options).unwrap()
+fn prepare_registration(options: HttpOptions) -> Registration {
+    prepare_http(options).unwrap()
 }
 
-fn deadline(after: Duration) -> Instant {
-    Instant::now() + after
+fn timeout_context(after: Duration) -> OperationContext {
+    OperationContext::with_timeout(after)
 }
 
-fn token_context() -> infra_outbound_http::RequestContext {
-    OperationContext::with_timeout(Duration::from_secs(10)).into()
+fn token_context() -> OperationContext {
+    OperationContext::with_timeout(Duration::from_secs(10))
 }
 
 async fn advance(duration: Duration) {
@@ -499,7 +524,7 @@ async fn advance(duration: Duration) {
     tokio::time::resume();
 }
 
-async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
+async fn poll_pending<F: Future + ?Sized>(mut future: Pin<&mut F>) {
     assert!(
         poll_fn(|context| Poll::Ready(future.as_mut().poll(context)))
             .await

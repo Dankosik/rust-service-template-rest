@@ -9,24 +9,24 @@ struct Flaky {
     calls: Arc<AtomicU32>,
 }
 
-#[async_trait::async_trait]
 impl Probe for Flaky {
     fn name(&self) -> &'static str {
         "flaky"
     }
-    async fn check(&self) -> Result<(), ProbeError> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        if self.healthy.load(Ordering::Relaxed) {
-            Ok(())
-        } else {
-            Err(ProbeError::from_static("connection refused"))
-        }
+    fn check(&self) -> impl Future<Output = Result<(), ProbeError>> + Send {
+        std::future::poll_fn(|_| {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::task::Poll::Ready(if self.healthy.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(ProbeError::from_static("connection refused"))
+            })
+        })
     }
 }
 
 struct Hanging;
 
-#[async_trait::async_trait]
 impl Probe for Hanging {
     fn name(&self) -> &'static str {
         "hanging"
@@ -41,7 +41,6 @@ struct Slow {
     delay: Duration,
 }
 
-#[async_trait::async_trait]
 impl Probe for Slow {
     fn name(&self) -> &'static str {
         self.name
@@ -57,7 +56,6 @@ struct Gated {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[async_trait::async_trait]
 impl Probe for Gated {
     fn name(&self) -> &'static str {
         "gated"
@@ -79,10 +77,10 @@ fn policy() -> RefreshPolicy {
     .unwrap()
 }
 
-fn flaky_probe(healthy: bool) -> (Box<dyn Probe>, Arc<AtomicBool>, Arc<AtomicU32>) {
+fn flaky_probe(healthy: bool) -> (BoxedProbe, Arc<AtomicBool>, Arc<AtomicU32>) {
     let flag = Arc::new(AtomicBool::new(healthy));
     let calls = Arc::new(AtomicU32::new(0));
-    let probe = Box::new(Flaky {
+    let probe = BoxedProbe::new(Flaky {
         healthy: Arc::clone(&flag),
         calls: Arc::clone(&calls),
     });
@@ -274,6 +272,41 @@ async fn is_draining_stays_false_through_every_verdict_until_drain_starts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_stale_not_ready_verdict_reports_staleness_while_is_ready_stays_false() {
+    let (readiness, flag, _) = flaky(true);
+    let control = readiness.control();
+    let reader = control.reader();
+    let mut refresher = activate(readiness).await;
+    flag.store(false, Ordering::Relaxed);
+    for _ in 0..3 {
+        refresher.refresh().await;
+    }
+    assert!(!reader.is_ready());
+    std::assert_matches!(
+        reader.verdict(),
+        Err(NotReady::ProbeFailed { probe: "flaky", .. })
+    );
+
+    let stale_after = policy().stale_after();
+    tokio::time::advance(stale_after).await;
+    assert!(!reader.is_ready());
+    std::assert_matches!(
+        reader.verdict(),
+        Err(NotReady::ProbeFailed { probe: "flaky", .. })
+    );
+
+    tokio::time::advance(Duration::from_nanos(1)).await;
+    assert!(!reader.is_ready());
+    assert_eq!(
+        reader.verdict(),
+        Err(NotReady::Stale {
+            age: stale_after + Duration::from_nanos(1),
+            stale_after,
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn failed_refresh_only_absorbs_a_previous_ready_that_is_fresh_at_completion() {
     for previously_absorbed in [false, true] {
         for expired in [false, true] {
@@ -320,7 +353,7 @@ async fn a_failed_round_starting_fresh_cannot_revive_readiness_after_expiry() {
     let readiness = Readiness::new(
         vec![
             probe,
-            Box::new(Slow {
+            BoxedProbe::new(Slow {
                 name: "slow",
                 delay: policy().probe_budget / 2,
             }),
@@ -353,7 +386,7 @@ async fn a_success_observed_after_the_budget_cannot_admit_startup() {
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let release = Arc::new(tokio::sync::Notify::new());
     let readiness = Readiness::new(
-        vec![Box::new(Gated {
+        vec![BoxedProbe::new(Gated {
             hold: Arc::new(AtomicBool::new(true)),
             release: Arc::clone(&release),
         })],
@@ -432,7 +465,7 @@ async fn refresh_until_stops_while_an_evaluation_is_in_flight() {
     let readiness = Readiness::new(
         vec![
             probe,
-            Box::new(Gated {
+            BoxedProbe::new(Gated {
                 hold: Arc::clone(&hold),
                 release: Arc::new(tokio::sync::Notify::new()),
             }),
@@ -468,7 +501,7 @@ async fn an_already_cancelled_refresher_skips_an_overdue_round() {
 async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_named() {
     let (healthy, _, healthy_calls) = flaky_probe(true);
     let (failing, _, failing_calls) = flaky_probe(false);
-    let readiness = Readiness::new(vec![Box::new(Hanging), healthy, failing], policy());
+    let readiness = Readiness::new(vec![BoxedProbe::new(Hanging), healthy, failing], policy());
     let verdict = readiness.prepare().await;
     std::assert_matches!(
         verdict,
@@ -487,7 +520,7 @@ async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
     let hold = Arc::new(AtomicBool::new(false));
     let release = Arc::new(tokio::sync::Notify::new());
     let readiness = Readiness::new(
-        vec![Box::new(Gated {
+        vec![BoxedProbe::new(Gated {
             hold: Arc::clone(&hold),
             release: Arc::clone(&release),
         })],
@@ -510,11 +543,11 @@ async fn a_slow_probe_does_not_spend_another_probes_budget() {
     let delay = policy().probe_budget * 3 / 4;
     let readiness = Readiness::new(
         vec![
-            Box::new(Slow {
+            BoxedProbe::new(Slow {
                 name: "first",
                 delay,
             }),
-            Box::new(Slow {
+            BoxedProbe::new(Slow {
                 name: "second",
                 delay,
             }),
@@ -524,35 +557,6 @@ async fn a_slow_probe_does_not_spend_another_probes_budget() {
     let control = readiness.control();
     let _refresher = activate(readiness).await;
     assert_eq!(control.reader().verdict(), Ok(()));
-}
-
-#[derive(Clone, Default)]
-struct Events(Arc<std::sync::Mutex<Vec<String>>>);
-
-impl tracing::Subscriber for Events {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Message(String);
-        impl tracing::field::Visit for Message {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = format!("{value:?}");
-                }
-            }
-        }
-        let mut message = Message(String::new());
-        event.record(&mut message);
-        self.0.lock().unwrap().push(message.0);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 fn recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
@@ -574,7 +578,7 @@ async fn each_completed_check_is_counted_by_outcome() {
     refresher.refresh().await;
     refresher.refresh().await;
     std::assert_matches!(
-        Readiness::new(vec![Box::new(Hanging)], policy())
+        Readiness::new(vec![BoxedProbe::new(Hanging)], policy())
             .prepare()
             .await,
         Err(NotReady::TimedOut { .. })
@@ -598,8 +602,8 @@ async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
         let readiness = Readiness::new(
             vec![
                 healthy,
-                Box::new(Hanging),
-                Box::new(Slow {
+                BoxedProbe::new(Hanging),
+                BoxedProbe::new(Slow {
                     name: "slow",
                     delay: Duration::ZERO,
                 }),
@@ -621,9 +625,8 @@ async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
 
 #[tokio::test(start_paused = true)]
 async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
-    let events = Events::default();
-    let _guard = tracing::subscriber::set_default(events.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let events = observe_test_support::EventCapture::new();
+    let _guard = events.install_default();
     let (readiness, flag, _) = flaky(true);
     let mut refresher = activate(readiness).await;
     flag.store(false, Ordering::Relaxed);
@@ -638,8 +641,13 @@ async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
     tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
     refresher.refresh().await;
 
+    let captured = events.snapshot();
+    let messages: Vec<_> = captured
+        .iter()
+        .map(|event| event.message().unwrap_or_default())
+        .collect();
     assert_eq!(
-        *events.0.lock().unwrap(),
+        messages,
         [
             "readiness_check_failed",
             "readiness_check_failed",
@@ -655,9 +663,8 @@ async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
 
 #[tokio::test(start_paused = true)]
 async fn a_draining_owner_skips_probes_and_logs_no_check_outcome() {
-    let events = Events::default();
-    let _guard = tracing::subscriber::set_default(events.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let events = observe_test_support::EventCapture::new();
+    let _guard = events.install_default();
     let (readiness, flag, calls) = flaky(true);
     let control = readiness.control();
     let mut refresher = activate(readiness).await;
@@ -668,7 +675,8 @@ async fn a_draining_owner_skips_probes_and_logs_no_check_outcome() {
     }
 
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert!(events.0.lock().unwrap().is_empty(), "{:?}", events.0);
+    let captured = events.snapshot();
+    assert!(captured.is_empty(), "{captured:?}");
 }
 
 // template:begin grpc:health-changed-verdict-test
@@ -845,7 +853,7 @@ async fn a_ready_watch_reports_a_failed_check_published_after_a_stall_before_it_
 async fn a_ready_watch_reports_a_stall_that_ends_in_a_timed_out_check_of_a_running_refresher() {
     let hold = Arc::new(AtomicBool::new(false));
     let readiness = Readiness::new(
-        vec![Box::new(Gated {
+        vec![BoxedProbe::new(Gated {
             hold: Arc::clone(&hold),
             release: Arc::new(tokio::sync::Notify::new()),
         })],

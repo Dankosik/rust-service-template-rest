@@ -12,6 +12,9 @@ mod authn;
 // template:begin cache:service-bootstrap-cache-module
 mod cache;
 // template:end cache:service-bootstrap-cache-module
+// template:begin clickhouse:service-bootstrap-clickhouse-module
+mod clickhouse;
+// template:end clickhouse:service-bootstrap-clickhouse-module
 // template:begin http-idempotency:bootstrap-http-idempotency-module
 mod idempotency;
 // template:end http-idempotency:bootstrap-http-idempotency-module
@@ -31,7 +34,6 @@ mod telemetry;
 mod inbound_webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
 
-use std::ffi::OsString;
 use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::process::ExitCode;
@@ -39,12 +41,12 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::{PreparedReadiness, Probe, Readiness, RefreshPolicy};
+use health::{BoxedProbe, PreparedReadiness, Readiness, RefreshPolicy};
 use infra_http::{Authentication, HardenOptions};
 use infra_http_transport::{BoundListener, ConnectionLimits, Http1Options};
 use infra_telemetry::{
-    LoggerGuard, LoggingFormat, LoggingOptions, Metrics, TracerProviderHandle, diagnostics_router,
-    install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
+    LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
+    install_subscriber, install_tracer_provider, runtime_metrics,
 };
 use service_config::{BuildInfo, Config, LoadOptions, LogFormat};
 use tokio::time::Instant;
@@ -52,9 +54,9 @@ use tokio_util::sync::CancellationToken;
 
 use self::background::{Background, BackgroundFailure, wait_for_failure};
 pub use self::background::{BackgroundFailureReporter, BackgroundRegistration};
-use self::shutdown::{Dependencies, Outcome, Serving};
+use self::shutdown::{Dependencies, Outcome, ReadinessState, Serving, Telemetry};
 use self::signals::Signals;
-use crate::StartupRegistration;
+use crate::{RegistrationError, ServiceRegistration};
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -84,14 +86,18 @@ pub(crate) enum BootstrapError {
     Metrics(#[from] infra_telemetry::MetricsError),
     // template:begin cache:service-bootstrap-cache-errors
     #[error("cache startup: {0}")]
-    Cache(#[from] infra_cache::CacheError),
+    Cache(#[from] infra_cache::StartError),
     // template:end cache:service-bootstrap-cache-errors
     // template:begin object-storage:service-bootstrap-object-storage-errors
     #[error("object storage configuration: {0}")]
     ObjectStorage(#[from] infra_object_storage::ConfigError),
     // template:end object-storage:service-bootstrap-object-storage-errors
+    // template:begin clickhouse:service-bootstrap-clickhouse-errors
+    #[error("clickhouse startup: {0}")]
+    ClickHouse(#[from] infra_clickhouse::StartError),
+    // template:end clickhouse:service-bootstrap-clickhouse-errors
     #[error("startup admission: {0}")]
-    Admission(health::NotReady),
+    Admission(#[from] health::NotReady),
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     // template:begin authn:bootstrap-authn-errors
@@ -100,7 +106,7 @@ pub(crate) enum BootstrapError {
         mode: &'static str,
         key: &'static str,
         #[source]
-        source: infra_bearerauthn::PreparationError,
+        source: authn::AuthnPreparationError,
     },
     // template:end authn:bootstrap-authn-errors
     #[error(transparent)]
@@ -108,7 +114,7 @@ pub(crate) enum BootstrapError {
     #[error("http contract composition: {0}")]
     HttpComposition(#[from] crate::api::ContractError),
     #[error("HTTP resource preparation failed")]
-    HttpResource(#[source] Box<dyn std::error::Error + Send + Sync>),
+    HttpResource(#[source] RegistrationError),
     // template:begin postgres:bootstrap-errors
     #[error("configuration is invalid: postgres.dsn: {0}")]
     PostgresDsn(#[from] infra_postgres::DsnError),
@@ -135,12 +141,14 @@ pub(crate) enum BootstrapError {
     },
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]
-    Server(#[from] infra_http_transport::ServerError),
+    Server(#[from] infra_http_transport::BindError),
     // template:begin grpc:bootstrap-grpc-error
     #[error(transparent)]
     Grpc(#[from] infra_grpc::Error),
+    #[error(transparent)]
+    GrpcTlsRequired(#[from] infra_grpc::TlsRequiredError),
     #[error("gRPC service registration: {0}")]
-    GrpcRegistration(#[source] Box<dyn std::error::Error + Send + Sync>),
+    GrpcRegistration(#[source] RegistrationError),
     // template:end grpc:bootstrap-grpc-error
     #[error(transparent)]
     Background(#[from] BackgroundFailure),
@@ -181,46 +189,41 @@ fn fail_to_stderr(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-pub(super) fn run_registered<I>(
-    args: I,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
-) -> ExitCode
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let options = match LoadOptions::try_parse_from(args) {
-        Ok(options) => options,
-        Err(error) => {
-            return if error.print().is_ok() {
-                ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(1))
-            } else {
-                ExitCode::FAILURE
-            };
-        }
-    };
-    let config = match service_config::load(&options, BUILD_INFO, shutdown::TAIL) {
+pub(super) fn run_registered(options: &LoadOptions, registration: ServiceRegistration) -> ExitCode {
+    let config = match service_config::load(options, BUILD_INFO, shutdown::TAIL) {
         Ok(config) => config,
         Err(err) => return fail_to_stderr(&err),
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.runtime.effective_worker_threads())
+        .worker_threads(config.runtime().effective_worker_threads())
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
         Err(err) => return fail_to_stderr(format!("build tokio runtime: {err}")),
     };
+    let signals = {
+        let _entered = runtime.enter();
+        Signals::install()
+    };
+    let mut signals = match signals {
+        Ok(signals) => signals,
+        Err(err) => {
+            runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+            return fail_to_stderr(BootstrapError::Signals(err));
+        }
+    };
 
     let mut exit = RuntimeExit::default();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        runtime.block_on(serve(config, registration, &mut exit))
+        runtime.block_on(serve(config, registration, &mut signals, &mut exit))
     }))
     .unwrap_or(Err(BootstrapError::Panicked));
     let remaining = exit.deadline.map_or(RUNTIME_SHUTDOWN_TIMEOUT, |deadline| {
         RUNTIME_SHUTDOWN_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()))
     });
     runtime.shutdown_timeout(remaining);
-    drop(exit.signals);
+    drop(signals);
 
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
@@ -238,14 +241,13 @@ where
 #[derive(Default)]
 struct RuntimeExit {
     logger_installed: bool,
-    signals: Option<Signals>,
     deadline: Option<Instant>,
 }
 
-#[derive(Default)]
-struct TelemetryHandles {
-    tracer_provider: Option<TracerProviderHandle>,
-    logger: Option<LoggerGuard>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupOutcome {
+    Admitted,
+    Stopped,
 }
 
 #[allow(
@@ -254,19 +256,17 @@ struct TelemetryHandles {
 )]
 async fn serve(
     config: Config,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
+    registration: ServiceRegistration,
+    signals: &mut Signals,
     exit: &mut RuntimeExit,
 ) -> Result<Outcome, BootstrapError> {
-    let signals = exit
-        .signals
-        .insert(Signals::install().map_err(BootstrapError::Signals)?);
     let config = Box::new(config);
-    let http_config = config.http.clone();
+    let http_config = config.http().clone();
     let mut background = Background::new(CancellationToken::new());
     let mut background_failures = background.failure_observer();
     let mut dependencies = Dependencies::default();
     let mut serving = Serving::default();
-    let mut telemetry = TelemetryHandles::default();
+    let mut telemetry = Telemetry::default();
 
     let failure = AssertUnwindSafe(async {
         let startup = async {
@@ -295,8 +295,9 @@ async fn serve(
             started = startup => started.map(Some),
         };
         drop(config);
-        finish_startup(startup_result, signals, &mut background, &mut serving)?;
-        if !serving.admitted {
+        if finish_startup(startup_result, signals, &mut background, &mut serving)?
+            == StartupOutcome::Stopped
+        {
             return Ok(());
         }
         tokio::select! {
@@ -325,8 +326,7 @@ async fn serve(
         serving,
         background,
         dependencies,
-        tracer_provider: telemetry.tracer_provider,
-        logger: telemetry.logger,
+        telemetry,
     })
     .await;
     match failure {
@@ -338,15 +338,15 @@ async fn serve(
 async fn install_telemetry(
     config: &Config,
     background: &mut Background,
-    handles: &mut TelemetryHandles,
+    handles: &mut Telemetry,
     logger_installed: &mut bool,
 ) -> Result<Metrics, BootstrapError> {
     let provider = handles
         .tracer_provider
         .insert(install_tracer_provider(&telemetry::tracing_options(config)).await?);
     handles.logger = Some(install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
+        level: &config.log().level,
+        format: match config.log().format {
             LogFormat::Json => LoggingFormat::Json,
             LogFormat::Text => LoggingFormat::Text,
         },
@@ -355,8 +355,8 @@ async fn install_telemetry(
     *logger_installed = true;
     install_panic_hook();
     let metrics = telemetry::install_metrics()?;
-    metrics.record_trace_exporter(Some(&provider.exporter_state));
-    telemetry::log_startup_summary(config, &provider.exporter_state);
+    metrics.record_trace_exporter(provider.exporter_state());
+    telemetry::log_startup_summary(config, provider.exporter_state());
     spawn_metrics_tasks(&metrics, background);
     Ok(metrics)
 }
@@ -391,19 +391,20 @@ fn finish_startup(
     signals: &mut Signals,
     background: &mut Background,
     serving: &mut Serving,
-) -> Result<(), BootstrapError> {
+) -> Result<StartupOutcome, BootstrapError> {
     if let Some(error) = pending_failure(background, serving) {
         return Err(error);
     }
     if let Some(prepared) = started?
         && !signals.take_pending()?
     {
-        let refresher = prepared.activate().map_err(BootstrapError::Admission)?;
-        serving.admitted = true;
+        let refresher = prepared.activate()?;
+        serving.readiness.mark_admitted();
         background.spawn_with_token("readiness", |stop| refresher.refresh_until(stop));
         tracing::info!("service_ready");
+        return Ok(StartupOutcome::Admitted);
     }
-    Ok(())
+    Ok(StartupOutcome::Stopped)
 }
 
 fn pending_failure(background: &Background, serving: &Serving) -> Option<BootstrapError> {
@@ -411,10 +412,10 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
         return Some(failure.into());
     }
     for (name, server) in [
-        (HTTP_ACCEPT_TASK, serving.http_server.as_ref()),
-        (DIAGNOSTICS_ACCEPT_TASK, serving.diagnostics_server.as_ref()),
+        (HTTP_ACCEPT_TASK, serving.traffic.http.as_ref()),
+        (DIAGNOSTICS_ACCEPT_TASK, serving.diagnostics.as_ref()),
         // template:begin grpc:bootstrap-pending-grpc
-        (GRPC_ACCEPT_TASK, serving.grpc_server.as_ref()),
+        (GRPC_ACCEPT_TASK, serving.traffic.grpc.as_ref()),
         // template:end grpc:bootstrap-pending-grpc
     ] {
         if let Some(server) = server
@@ -438,7 +439,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
 )]
 async fn start(
     config: &Config,
-    registration: StartupRegistration<impl Clone + Send + Sync + 'static>,
+    registration: ServiceRegistration,
     metrics: &Metrics,
     background: &mut Background,
     #[allow(unused_variables, reason = "dependency-free profiles open nothing")]
@@ -449,7 +450,7 @@ async fn start(
         unused_mut,
         reason = "profiles without PostgreSQL or messaging have no probe"
     )]
-    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
+    let mut probes: Vec<BoxedProbe> = Vec::new();
     // template:begin authn:bootstrap-authn-prepare
     let bearer = authn::prepare(config, background).await?;
     // template:end authn:bootstrap-authn-prepare
@@ -457,46 +458,61 @@ async fn start(
     let service_auth = service_auth::prepare(config)?;
     // template:end service-auth:bootstrap-service-auth-prepare
     // template:begin postgres:bootstrap-postgres-startup
-    if let Some(postgres) = &config.postgres {
+    #[allow(
+        unused_variables,
+        reason = "profiles without inbound webhooks or HTTP idempotency read no pool after history check"
+    )]
+    let postgres_pool = if let Some(postgres) = config.postgres() {
         let pool = postgres::open(postgres, config, background, &mut dependencies.postgres).await?;
-        probes.push(Box::new(infra_postgres::PostgresProbe::new(pool.clone())));
-        migrate::verify_history(pool).await?;
-    }
+        probes.push(BoxedProbe::new(infra_postgres::PostgresProbe::new(
+            pool.clone(),
+        )));
+        migrate::verify_history(&pool).await?;
+        Some(pool)
+    } else {
+        None
+    };
     // template:end postgres:bootstrap-postgres-startup
     // template:begin cache:service-bootstrap-cache-startup
-    if let Some(settings) = &config.cache {
+    if let Some(settings) = config.cache() {
         dependencies.cache = Some(cache::open(settings).await?);
     }
     // template:end cache:service-bootstrap-cache-startup
     // template:begin object-storage:service-bootstrap-object-storage-startup
     dependencies.object_storage = config
-        .object_storage
-        .as_ref()
+        .object_storage()
         .map(object_storage::open)
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
+    // template:begin clickhouse:service-bootstrap-clickhouse-startup
+    if let Some(settings) = config.clickhouse() {
+        dependencies.clickhouse = Some(clickhouse::open(settings).await?);
+    }
+    // template:end clickhouse:service-bootstrap-clickhouse-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state = inbound_webhooks::prepare(config, dependencies.postgres.as_ref())?;
+    let webhook_state = inbound_webhooks::prepare(config, postgres_pool.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = Readiness::new(
         probes,
         RefreshPolicy::try_new(
-            config.health.refresh_interval,
-            config.health.probe_budget,
-            config.health.failure_threshold,
+            config.health().refresh_interval,
+            config.health().probe_budget,
+            config.health().failure_threshold,
         )
         .map_err(|err| service_config::ValidationError::new("health", err.to_string()))?,
     );
-    let readiness_control = serving.readiness.insert(readiness.control());
+    let readiness_control = readiness.control();
+    let readiness_reader = readiness_control.reader();
+    serving.readiness = ReadinessState::Prepared(readiness_control);
 
     let state = crate::AppState {
-        readiness: readiness_control.reader(),
+        readiness: readiness_reader.clone(),
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
         webhooks: webhook_state,
         // template:end inbound-webhooks:bootstrap-webhooks-route-state
         // template:begin webhooks:bootstrap-outbound-webhooks-state
         outbound_webhooks: infra_webhooks::outbound::Producer::new(
-            config.outbound_webhook_endpoints.iter().cloned(),
+            config.outbound_webhook_endpoints().iter().cloned(),
         ),
         // template:end webhooks:bootstrap-outbound-webhooks-state
         // template:begin service-auth:bootstrap-service-auth-route-state
@@ -505,7 +521,7 @@ async fn start(
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start
-    let grpc_prepared = if let Some(grpc_config) = &config.grpc {
+    let grpc_prepared = if let Some(grpc_config) = config.grpc() {
         Some(grpc::prepare(
             grpc_config,
             registration.grpc,
@@ -526,24 +542,21 @@ async fn start(
     // template:end grpc:bootstrap-grpc-prepare-finish
     let auth = Authentication::Public;
     // template:begin authn:bootstrap-http-bearer-authentication
-    let auth = bearer.map_or(auth, |verifier| Authentication::Bearer(Box::new(verifier)));
+    let auth = bearer.map_or(auth, Authentication::Bearer);
     // template:end authn:bootstrap-http-bearer-authentication
     let app = http_application(
         state,
         auth,
         config,
         // template:begin http-idempotency:bootstrap-http-idempotency-resources
-        dependencies.postgres.as_ref(),
+        postgres_pool.as_ref(),
         background,
         // template:end http-idempotency:bootstrap-http-idempotency-resources
     )
     .await?;
     let app = match registration.http_resource {
-        Some(prepare) => {
-            let resource = prepare(config, &mut BackgroundRegistration { background })
-                .map_err(BootstrapError::HttpResource)?;
-            app.with_extension(resource)
-        }
+        Some(attach) => attach(app, config, &mut BackgroundRegistration { background })
+            .map_err(BootstrapError::HttpResource)?,
         None => app,
     };
     let listeners = BoundListeners::bind(
@@ -552,23 +565,11 @@ async fn start(
         grpc_prepared,
         // template:end grpc:bootstrap-grpc-bind-argument
     )?;
-    let mut prepared_readiness = readiness
-        .prepare()
-        .await
-        .map_err(BootstrapError::Admission)?;
+    let mut prepared_readiness = readiness.prepare().await?;
 
-    listeners.serve(
-        app,
-        metrics,
-        readiness_control.reader(),
-        background,
-        serving,
-    )?;
+    listeners.serve(app, metrics, readiness_reader, background, serving)?;
 
-    prepared_readiness
-        .ensure_fresh()
-        .await
-        .map_err(BootstrapError::Admission)?;
+    prepared_readiness.ensure_fresh().await?;
     Ok(prepared_readiness)
 }
 
@@ -584,8 +585,7 @@ struct BoundListeners {
 fn http1_options(http: &service_config::HttpListenerConfig) -> Http1Options {
     Http1Options {
         header_read_timeout: http.header_read_timeout,
-        max_read_buffer_bytes: usize::try_from(http.max_header_bytes.as_u64())
-            .unwrap_or(usize::MAX),
+        max_read_buffer_bytes: http.max_header_bytes.get(),
         connections: ConnectionLimits {
             max_connections: http.max_connections,
             max_connection_age: http.max_connection_age,
@@ -600,10 +600,10 @@ impl BoundListeners {
         grpc_prepared: Option<grpc::Prepared>,
         // template:end grpc:bootstrap-grpc-bind-input
     ) -> Result<Self, BootstrapError> {
-        let http = config.http.listener();
+        let http = config.http().listener();
         let http_listener = BoundListener::bind(http.addr)?;
         let diagnostics = config
-            .observability
+            .observability()
             .metrics
             .addr
             .map(BoundListener::bind)
@@ -638,7 +638,8 @@ impl BoundListeners {
         #[cfg(feature = "hotpath")]
         hotpath::tokio_runtime!();
         let http_server = serving
-            .http_server
+            .traffic
+            .http
             .insert(app.serve(self.http, self.http_options));
         background.watch_server(HTTP_ACCEPT_TASK, http_server);
         tracing::info!(addr = %http_server.local_addr(), "http listener bound");
@@ -647,7 +648,7 @@ impl BoundListeners {
             let diagnostics = diagnostics_router(metrics.clone(), move || readiness.is_ready())
                 .merge(infra_http::liveness_router());
             let diagnostics_server = serving
-                .diagnostics_server
+                .diagnostics
                 .insert(listener.serve(diagnostics, self.http_options));
             background.watch_server(DIAGNOSTICS_ACCEPT_TASK, diagnostics_server);
             tracing::info!(
@@ -660,7 +661,8 @@ impl BoundListeners {
         if let Some((listener, grpc)) = self.grpc {
             let grpc_server =
                 serving
-                    .grpc_server
+                    .traffic
+                    .grpc
                     .insert(grpc.app.serve(listener, grpc.options, grpc.tls)?);
             background.watch_server(GRPC_ACCEPT_TASK, grpc_server);
             tracing::info!(addr = %grpc_server.local_addr(), "grpc listener bound");
@@ -680,14 +682,14 @@ async fn http_application(
     auth: Authentication,
     config: &Config,
     // template:begin http-idempotency:bootstrap-http-idempotency-inputs
-    pool: Option<&infra_postgres::PgPool>,
+    pool: Option<&infra_postgres::Pool>,
     background: &mut Background,
     // template:end http-idempotency:bootstrap-http-idempotency-inputs
 ) -> Result<infra_http::Application, BootstrapError> {
     let contract = crate::api::contract()?;
-    let http = config.http.listener();
+    let http = config.http().listener();
     let options = HardenOptions {
-        max_body_bytes: usize::try_from(http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
+        max_body_bytes: http.max_body_bytes.get(),
         request_timeout: http.request_timeout,
         max_in_flight: http.max_in_flight,
         admission_wait: http.admission_wait,
@@ -713,7 +715,7 @@ async fn http_application(
 
 #[cfg(test)]
 fn test_config(environment: &[(&str, &str)]) -> Config {
-    service_config::fixtures::service(environment, BUILD_INFO, shutdown::TAIL).unwrap()
+    service_config::test_support::service(environment, BUILD_INFO, shutdown::TAIL).unwrap()
 }
 
 #[cfg(test)]
@@ -813,7 +815,7 @@ mod tests {
         let mut serving = Serving::default();
         let prepared = start(
             &config,
-            crate::ServiceRegistration::<()>::default().into(),
+            crate::ServiceRegistration::default(),
             &shared_metrics(),
             &mut background,
             &mut Dependencies::default(),
@@ -821,7 +823,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let address = serving.http_server.as_ref().unwrap().local_addr();
+        let address = serving.traffic.http.as_ref().unwrap().local_addr();
         let status = tokio::time::timeout(Duration::from_secs(2), async {
             let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
             stream
@@ -855,9 +857,9 @@ mod tests {
                 panicked: false
             }))
         );
-        assert!(!serving.admitted);
+        assert!(!serving.readiness.is_admitted());
         std::assert_matches!(
-            serving.readiness.as_ref().unwrap().reader().verdict(),
+            serving.readiness.control().unwrap().reader().verdict(),
             Err(health::NotReady::NotEvaluated)
         );
         background.cancel();
@@ -881,37 +883,31 @@ mod tests {
         let mut serving = Serving::default();
         let result = start(
             &config,
-            crate::ServiceRegistration::<()>::default().into(),
+            crate::ServiceRegistration::default(),
             &metrics,
             &mut background,
             &mut dependencies,
             &mut serving,
         )
         .await;
+        std::assert_matches!(result, Err(BootstrapError::Server(_)));
+        assert!(!serving.readiness.is_admitted());
+        assert!(serving.traffic.http.is_none());
         std::assert_matches!(
-            result,
-            Err(BootstrapError::Server(
-                infra_http_transport::ServerError::Bind { .. }
-            ))
-        );
-        assert!(!serving.admitted);
-        assert!(serving.http_server.is_none());
-        std::assert_matches!(
-            serving.readiness.as_ref().unwrap().reader().verdict(),
+            serving.readiness.control().unwrap().reader().verdict(),
             Err(health::NotReady::NotEvaluated)
         );
         let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
             shutdown::run(shutdown::Plan {
-                http_config: &config.http,
+                http_config: config.http(),
                 signals: &mut signals,
-                deadline: Instant::now() + config.http.grace_period,
+                deadline: Instant::now() + config.http().grace_period,
                 serving,
                 background,
                 dependencies,
-                tracer_provider: None,
-                logger: None,
+                telemetry: Telemetry::default(),
             }),
         )
         .await
@@ -929,6 +925,7 @@ mod tests {
             ServerStreamRequest, ServerStreamResponse, UnaryRequest, UnaryResponse,
             echo_service_server::{EchoService, EchoServiceServer},
         };
+        use infra_grpc::RequestExt as _;
         use infra_outbound_grpc::{Client, ClientSecurity};
         use tonic::{Request, Response, Status};
         use tonic_reflection::pb::v1::{
@@ -951,7 +948,7 @@ mod tests {
                 &self,
                 request: Request<UnaryRequest>,
             ) -> Result<Response<UnaryResponse>, Status> {
-                let caller = infra_grpc::require_caller(&request)?;
+                let caller = request.caller()?;
                 let query = ServerReflectionRequest {
                     message_request: Some(MessageRequest::ListServices(String::new())),
                     ..Default::default()
@@ -1017,40 +1014,29 @@ mod tests {
                 )
         }
 
-        pub(super) fn registration(origin: String) -> super::StartupRegistration<()> {
-            super::StartupRegistration {
-                http_resource: None,
-                grpc: Some(Box::new(move |services, _, _| {
-                    let directory = Client::try_new(
-                        &origin,
-                        ClientSecurity::Plaintext,
-                        Duration::from_secs(5),
-                    )?;
-                    services.set_listener_layer(tower::util::MapResponseLayer::new(
-                        |mut response: axum::response::Response| {
-                            response
-                                .headers_mut()
-                                .insert("x-listener", "grpc".parse().unwrap());
-                            response
-                        },
-                    ));
-                    services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
-                    services.add(EchoServiceServer::new(Echo(ServerReflectionClient::new(
-                        directory,
-                    ))))?;
-                    services.add_reflection()?;
-                    for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                        services.allow_callers(
-                            &format!("/example.v1.EchoService/{method}"),
-                            &["orders"],
-                        )?;
-                    }
-                    for path in infra_grpc::REFLECTION_PATHS {
-                        services.allow_callers(path, &["orders"])?;
-                    }
-                    Ok(())
-                })),
-            }
+        pub(super) fn registration(origin: String) -> super::ServiceRegistration {
+            super::ServiceRegistration::default().with_grpc(move |services, _, _| {
+                let directory =
+                    Client::builder(&origin, ClientSecurity::Plaintext, Duration::from_secs(5))
+                        .build()?;
+                services.add_listener_layer(tower::util::MapResponseLayer::new(
+                    |mut response: axum::http::Response<tonic::body::Body>| {
+                        response
+                            .headers_mut()
+                            .insert("x-listener", "grpc".parse().unwrap());
+                        response
+                    },
+                ));
+                services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
+                let mut echo = services.add(EchoServiceServer::new(Echo(
+                    ServerReflectionClient::new(directory),
+                )))?;
+                for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
+                    echo.allow_callers(method, &["orders"])?;
+                }
+                services.add_reflection()?.allow_callers(&["orders"])?;
+                Ok(())
+            })
         }
 
         pub(super) async fn exercise_listener(
@@ -1140,7 +1126,7 @@ mod tests {
                 source.downcast_ref::<infra_outbound_grpc::ClientError>(),
                 Some(infra_outbound_grpc::ClientError::DestinationSecurityMismatch)
             );
-            assert!(serving.grpc_server.is_none() && serving.http_server.is_none());
+            assert!(serving.traffic.grpc.is_none() && serving.traffic.http.is_none());
         }
     }
 
@@ -1195,23 +1181,27 @@ mod tests {
         .await
         .unwrap();
         let mut signals = Signals::install().unwrap();
-        finish_startup(
-            Ok(Some(prepared)),
-            &mut signals,
-            &mut background,
-            &mut serving,
-        )
-        .unwrap();
-        let address = serving.grpc_server.as_ref().unwrap().local_addr();
+        assert_eq!(
+            finish_startup(
+                Ok(Some(prepared)),
+                &mut signals,
+                &mut background,
+                &mut serving,
+            )
+            .unwrap(),
+            StartupOutcome::Admitted
+        );
+        let address = serving.traffic.grpc.as_ref().unwrap().local_addr();
         let origin = format!("https://{address}");
-        let resource = infra_outbound_grpc::Client::try_new(
+        let resource = infra_outbound_grpc::Client::builder(
             &origin,
             infra_outbound_grpc::ClientSecurity::Tls(infra_outbound_grpc::ClientTlsMaterial {
-                ca_certificate_pem: Some(certificate.root_pem),
+                ca_certificate_pem: Some(&certificate.root_pem),
                 identity: None,
             }),
             Duration::from_secs(5),
         )
+        .build()
         .unwrap();
         let status = EchoServiceClient::new(resource.clone())
             .unary(UnaryRequest::default())
@@ -1225,7 +1215,7 @@ mod tests {
         let signed = resource
             .with_service_tokens(
                 signing
-                    .receiver("catalog", origin.parse().unwrap())
+                    .receiver("catalog".parse().unwrap(), origin.parse().unwrap())
                     .unwrap(),
             )
             .unwrap();
@@ -1239,14 +1229,13 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             shutdown::run(shutdown::Plan {
-                http_config: &config.http,
+                http_config: config.http(),
                 signals: &mut signals,
-                deadline: Instant::now() + config.http.grace_period,
+                deadline: Instant::now() + config.http().grace_period,
                 serving,
                 background,
                 dependencies,
-                tracer_provider: None,
-                logger: None,
+                telemetry: Telemetry::default(),
             }),
         )
         .await

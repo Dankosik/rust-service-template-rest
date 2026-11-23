@@ -1,19 +1,20 @@
-use arrayvec::ArrayVec;
-use async_nats::{HeaderMap, HeaderName};
-use bytes::Bytes;
+use arrayvec::{ArrayString, ArrayVec};
+use async_nats::HeaderName;
 use compact_str::CompactString;
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
 
-use crate::error::EnvelopeError;
+use crate::error::{PrepareError, PublishEnvelopeError};
 use crate::prepared::{PreparedEvent, Publication};
 
 mod dead_letter;
 
+pub use async_nats::HeaderMap;
+pub use bytes::Bytes;
 pub(crate) use dead_letter::{DeadLetterReason, dead_letter_bounds, dead_letter_headers};
-pub use dead_letter::{DeadLetterRecord, dead_letter_id, restore_dead_letter};
+pub use dead_letter::{DeadLetterRecord, RestoreError, dead_letter_id, restore_dead_letter};
+pub use time::{OffsetDateTime, UtcDateTime};
 
-pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
+pub const HEADER_LIMIT_BYTES: usize = shared_rules::messaging::HEADER_LIMIT_BYTES;
 pub const MESSAGE_ID: &str = "Message-Id";
 pub const EVENT_TYPE: &str = "Event-Type";
 pub const EVENT_SCHEMA: &str = "Event-Schema";
@@ -26,6 +27,71 @@ pub(crate) const NATIVE_HEADER_LIMIT_BYTES: usize = 65_535;
 pub(crate) const IDENTITY_MAX_BYTES: usize = 256;
 const SHA256_HEX_LEN: usize = 64;
 const HEADER_PREAMBLE_BYTES: usize = "NATS/1.0\r\n\r\n".len();
+const RFC3339_MAX_BYTES: usize = 40;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("creation time is out of range")]
+pub struct TimestampOutOfRange;
+
+impl From<TimestampOutOfRange> for PrepareError {
+    fn from(_: TimestampOutOfRange) -> Self {
+        Self::CreatedAtOutOfRange
+    }
+}
+
+impl From<TimestampOutOfRange> for RestoreError {
+    fn from(_: TimestampOutOfRange) -> Self {
+        Self::CreatedAtOutOfRange
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CreatedAt {
+    instant: UtcDateTime,
+    rfc3339: ArrayString<RFC3339_MAX_BYTES>,
+}
+
+impl CreatedAt {
+    pub(crate) fn new(instant: UtcDateTime) -> Result<Self, TimestampOutOfRange> {
+        let bytes = format_timestamp_bytes(instant)?;
+        let text = str::from_utf8(&bytes).map_err(|_| TimestampOutOfRange)?;
+        let rfc3339 = ArrayString::from(text).map_err(|_| TimestampOutOfRange)?;
+        Ok(Self { instant, rfc3339 })
+    }
+
+    pub(crate) fn new_outbound(instant: UtcDateTime) -> Result<Self, PrepareError> {
+        if is_zero_time(instant) {
+            return Err(PrepareError::CreatedAtRequired);
+        }
+        Self::new(instant).map_err(PrepareError::from)
+    }
+
+    pub(crate) const fn instant(self) -> UtcDateTime {
+        self.instant
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.rfc3339
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DecodeError {
+    #[error("subject is invalid")]
+    Subject,
+    #[error("encoded headers exceed {} KiB", HEADER_LIMIT_BYTES / 1024)]
+    HeadersTooLarge,
+    #[error("required header {0} is missing")]
+    MissingHeader(&'static str),
+    #[error("event identity is invalid")]
+    Identity,
+    #[error("event schema is invalid")]
+    Schema,
+    #[error("creation time is invalid")]
+    CreatedAtInvalid,
+    #[error("creation time is required")]
+    CreatedAtRequired,
+}
 
 pub(crate) mod header_name {
     use async_nats::HeaderName;
@@ -46,7 +112,7 @@ pub struct InboundEnvelope {
     pub(crate) message_id: String,
     pub(crate) event_type: CompactString,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) occurred_at: UtcDateTime,
     pub(crate) payload: Bytes,
 }
 
@@ -54,35 +120,33 @@ pub(crate) struct InboundEnvelopeRef<'a> {
     pub(crate) message_id: &'a str,
     pub(crate) event_type: &'a str,
     pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) occurred_at: UtcDateTime,
     pub(crate) payload: &'a [u8],
 }
 
-pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
+#[must_use]
+pub fn encode_prepared(event: &PreparedEvent) -> HeaderMap {
     encode_publication(&event.publication())
 }
 
-pub(crate) fn encode_publication(event: &Publication<'_>) -> Result<HeaderMap, EnvelopeError> {
+pub(crate) fn encode_publication(publication: &Publication<'_>) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(header_name::MESSAGE_ID, event.message_id);
-    headers.insert(header_name::EVENT_TYPE, event.event_type);
+    headers.insert(header_name::MESSAGE_ID, publication.message_id);
+    headers.insert(header_name::EVENT_TYPE, publication.event_type);
     headers.insert(
         header_name::EVENT_SCHEMA,
-        schema_label(event.schema_version),
+        schema_label(publication.schema_version),
     );
-    headers.insert(
-        header_name::CREATED_AT,
-        format_timestamp(event.occurred_at)?,
-    );
-    headers.insert(header_name::NATS_MSG_ID, event.publication_id);
-    Ok(headers)
+    headers.insert(header_name::CREATED_AT, publication.created_at);
+    headers.insert(header_name::NATS_MSG_ID, publication.publication_id);
+    headers
 }
 
 pub fn decode_envelope(
     subject: &str,
     headers: &HeaderMap,
     payload: Bytes,
-) -> Result<InboundEnvelope, EnvelopeError> {
+) -> Result<InboundEnvelope, DecodeError> {
     let envelope = decode_envelope_ref(subject, headers, &payload)?;
     Ok(InboundEnvelope {
         message_id: envelope.message_id.to_owned(),
@@ -97,16 +161,16 @@ pub(crate) fn decode_envelope_ref<'a>(
     subject: &str,
     headers: &'a HeaderMap,
     payload: &'a [u8],
-) -> Result<InboundEnvelopeRef<'a>, EnvelopeError> {
+) -> Result<InboundEnvelopeRef<'a>, DecodeError> {
     if !valid_subject(subject) {
-        return Err(EnvelopeError::Subject);
+        return Err(DecodeError::Subject);
     }
-    let mut encoded = HEADER_PREAMBLE_BYTES;
+    let mut header_bytes = HEADER_PREAMBLE_BYTES;
     let mut found = EnvelopeHeaders::default();
     for (header, values) in headers.iter() {
         let header: &str = header.as_ref();
         for value in values {
-            encoded += header_line_bytes(header, value.as_str());
+            header_bytes += header_line_bytes(header, value.as_str());
         }
         let slot = match header {
             MESSAGE_ID => &mut found.message_id,
@@ -118,20 +182,18 @@ pub(crate) fn decode_envelope_ref<'a>(
         };
         *slot = values.first().map(async_nats::HeaderValue::as_str);
     }
-    if encoded > HEADER_LIMIT_BYTES {
-        return Err(EnvelopeError::HeadersTooLarge);
+    if header_bytes > HEADER_LIMIT_BYTES {
+        return Err(DecodeError::HeadersTooLarge);
     }
-    let message_id = required_value(found.message_id, MESSAGE_ID)?;
-    validate_identity(message_id)?;
-    let event_type = required_value(found.event_type, EVENT_TYPE)?;
-    validate_identity(event_type)?;
+    let message_id = required_identity(found.message_id, MESSAGE_ID)?;
+    let event_type = required_identity(found.event_type, EVENT_TYPE)?;
     let schema = required_value(found.schema, EVENT_SCHEMA)?;
     let created_at = required_value(found.created_at, CREATED_AT)?;
-    validate_identity(required_value(found.publication_id, NATS_MSG_ID)?)?;
-    let schema_version = parse_schema(schema)?;
-    let occurred_at = parse_timestamp(created_at)?;
+    required_identity(found.publication_id, NATS_MSG_ID)?;
+    let schema_version = parse_schema(schema).ok_or(DecodeError::Schema)?;
+    let occurred_at = parse_timestamp(created_at).ok_or(DecodeError::CreatedAtInvalid)?;
     if is_zero_time(occurred_at) {
-        return Err(EnvelopeError::CreatedAtRequired);
+        return Err(DecodeError::CreatedAtRequired);
     }
 
     Ok(InboundEnvelopeRef {
@@ -166,12 +228,20 @@ impl InboundEnvelope {
         self.schema_version
     }
     #[must_use]
-    pub const fn occurred_at(&self) -> OffsetDateTime {
+    pub const fn occurred_at(&self) -> UtcDateTime {
         self.occurred_at
     }
     #[must_use]
     pub fn payload(&self) -> &Bytes {
         &self.payload
+    }
+}
+
+pub(crate) struct BorrowedSubject<'a>(pub(crate) &'a async_nats::Subject);
+
+impl async_nats::ToSubject for BorrowedSubject<'_> {
+    fn to_subject(&self) -> async_nats::Subject {
+        self.0.clone()
     }
 }
 
@@ -208,41 +278,33 @@ pub(crate) fn header_value(headers: &HeaderMap, name: HeaderName) -> &str {
 fn required_value<'a>(
     value: Option<&'a str>,
     header: &'static str,
-) -> Result<&'a str, EnvelopeError> {
-    value.ok_or(EnvelopeError::MissingHeader(header))
+) -> Result<&'a str, DecodeError> {
+    value.ok_or(DecodeError::MissingHeader(header))
 }
 
-fn required_header<'a>(
-    headers: &'a HeaderMap,
+fn required_identity<'a>(
+    value: Option<&'a str>,
     header: &'static str,
-) -> Result<&'a str, EnvelopeError> {
-    required_value(
-        headers
-            .get(HeaderName::from_static(header))
-            .map(async_nats::HeaderValue::as_str),
-        header,
-    )
+) -> Result<&'a str, DecodeError> {
+    let value = required_value(value, header)?;
+    valid_identity(value)
+        .then_some(value)
+        .ok_or(DecodeError::Identity)
 }
 
 pub(crate) fn schema_label(version: u16) -> String {
     format!("v{version}")
 }
 
-fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
+fn parse_schema(value: &str) -> Option<u16> {
     value
         .strip_prefix('v')
         .filter(|raw| matches!(raw.as_bytes().first(), Some(b'1'..=b'9')))
         .and_then(|raw| raw.parse().ok())
-        .ok_or(EnvelopeError::Schema)
 }
 
-fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
-    valid_identity(value).ok_or(EnvelopeError::Identity)
-}
-
-pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeError> {
-    validate_identity(value)?;
-    (value.trim().len() == value.len()).ok_or(EnvelopeError::Identity)
+pub(crate) fn valid_outbound_identity(value: &str) -> bool {
+    valid_identity(value) && value.trim().len() == value.len()
 }
 
 pub(crate) const IDENTITY_SCHEMA_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
@@ -298,64 +360,43 @@ fn encoded_header_bytes(headers: &HeaderMap) -> usize {
         + HEADER_PREAMBLE_BYTES
 }
 
-pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), EnvelopeError> {
-    (encoded_header_bytes(headers) <= HEADER_LIMIT_BYTES).ok_or(EnvelopeError::HeadersTooLarge)
-}
-
-pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, EnvelopeError> {
-    let bytes = format_timestamp_bytes(value)?;
-    str::from_utf8(&bytes)
-        .map(str::to_owned)
-        .map_err(|_| EnvelopeError::CreatedAtOutOfRange)
+pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), PublishEnvelopeError> {
+    (encoded_header_bytes(headers) <= HEADER_LIMIT_BYTES)
+        .ok_or(PublishEnvelopeError::HeadersTooLarge)
 }
 
 pub(crate) fn format_timestamp_bytes(
-    value: OffsetDateTime,
-) -> Result<ArrayVec<u8, 40>, EnvelopeError> {
+    value: UtcDateTime,
+) -> Result<ArrayVec<u8, RFC3339_MAX_BYTES>, TimestampOutOfRange> {
     let mut buf = ArrayVec::new();
     value
-        .checked_to_offset(UtcOffset::UTC)
-        .and_then(|value| value.format_into(&mut buf, &Rfc3339).ok())
-        .ok_or(EnvelopeError::CreatedAtOutOfRange)?;
+        .format_into(&mut buf, &Rfc3339)
+        .map_err(|_| TimestampOutOfRange)?;
     Ok(buf)
 }
 
-pub(crate) fn validate_outbound_created_at(value: OffsetDateTime) -> Result<(), EnvelopeError> {
-    if is_zero_time(value) {
-        return Err(EnvelopeError::CreatedAtRequired);
-    }
-    value
-        .checked_to_offset(UtcOffset::UTC)
-        .and_then(|value| value.format_into(&mut std::io::sink(), &Rfc3339).ok())
-        .map(drop)
-        .ok_or(EnvelopeError::CreatedAtOutOfRange)
-}
-
-fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
+fn parse_timestamp(value: &str) -> Option<UtcDateTime> {
     const SEPARATOR_INDEX: usize = "YYYY-MM-DD".len();
-    if value.len() > IDENTITY_MAX_BYTES
+    const CREATED_AT_MAX_BYTES: usize = IDENTITY_MAX_BYTES;
+    if value.len() > CREATED_AT_MAX_BYTES
         || value
             .as_bytes()
             .get(SEPARATOR_INDEX)
             .is_none_or(u8::is_ascii_control)
     {
-        return Err(EnvelopeError::CreatedAtInvalid);
+        return None;
     }
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
-        .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
-        .ok_or(EnvelopeError::CreatedAtInvalid)
+        .and_then(OffsetDateTime::checked_to_utc)
 }
 
 #[must_use]
-pub fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
-    let mut id = String::with_capacity(prefix.len() + SHA256_HEX_LEN);
-    id.push_str(prefix);
-    id.push_str(const_hex::Buffer::<32>::new().format(digest));
-    id
+pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
+    [prefix, const_hex::Buffer::<32>::new().format(digest)].concat()
 }
 
-pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
+pub(crate) fn is_zero_time(value: UtcDateTime) -> bool {
     value.year() == 1 && value.ordinal() == 1 && value.time() == time::Time::MIDNIGHT
 }
 
@@ -410,7 +451,7 @@ mod tests {
                 });
                 u16::try_from(value).ok()
             });
-            proptest::prop_assert_eq!(parse_schema(&text).ok(), expected);
+            proptest::prop_assert_eq!(parse_schema(&text), expected);
         }
 
         #[test]
@@ -471,22 +512,22 @@ mod tests {
             let headers = envelope_headers_without(missing);
             assert_eq!(
                 decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err(),
-                EnvelopeError::MissingHeader(missing)
+                DecodeError::MissingHeader(missing)
             );
         }
         let mut headers = envelope_headers();
         headers.insert(header_name::EVENT_TYPE, "order\u{85}created");
         assert_eq!(
             decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err(),
-            EnvelopeError::Identity
+            DecodeError::Identity
         );
     }
 
     #[test]
     fn decode_names_the_invalid_schema_or_time() {
         for (header, expected) in [
-            (header_name::EVENT_SCHEMA, EnvelopeError::Schema),
-            (header_name::CREATED_AT, EnvelopeError::CreatedAtInvalid),
+            (header_name::EVENT_SCHEMA, DecodeError::Schema),
+            (header_name::CREATED_AT, DecodeError::CreatedAtInvalid),
         ] {
             let mut headers = envelope_headers();
             headers.insert(header, "");
@@ -513,7 +554,7 @@ mod tests {
                 format!("2026-09-29{separator}10:00:00Z"),
             );
             let error = decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err();
-            assert_eq!(error, EnvelopeError::CreatedAtInvalid, "{separator:?}");
+            assert_eq!(error, DecodeError::CreatedAtInvalid, "{separator:?}");
         }
         headers.insert(
             header_name::CREATED_AT,
@@ -526,7 +567,7 @@ mod tests {
             format!("2026-09-29T10:00:00.{}Z", "0".repeat(236)),
         );
         let error = decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err();
-        assert_eq!(error, EnvelopeError::CreatedAtInvalid);
+        assert_eq!(error, DecodeError::CreatedAtInvalid);
     }
 
     #[test]
@@ -534,15 +575,20 @@ mod tests {
         use time::macros::datetime;
 
         let crosses_into_range = datetime!(-0001-12-31 23:30 -01:00);
-        assert_eq!(validate_outbound_created_at(crosses_into_range), Ok(()));
-        assert_eq!(
-            format_timestamp(crosses_into_range).as_deref(),
-            Ok("0000-01-01T00:30:00Z")
-        );
+        let utc_in_range = crosses_into_range.to_utc();
+        let created_at = CreatedAt::new_outbound(utc_in_range).unwrap();
+        assert_eq!(created_at.instant(), utc_in_range);
+        assert_eq!(created_at.as_str(), "0000-01-01T00:30:00Z");
+        assert!(dead_letter_id("SOURCE", 1, crosses_into_range, "event-1").is_ok());
+
         let crosses_out_of_range = datetime!(0000-01-01 00:30 +01:00);
         assert_eq!(
-            validate_outbound_created_at(crosses_out_of_range),
-            Err(EnvelopeError::CreatedAtOutOfRange)
+            CreatedAt::new_outbound(crosses_out_of_range.to_utc()),
+            Err(PrepareError::CreatedAtOutOfRange)
+        );
+        assert_eq!(
+            dead_letter_id("SOURCE", 1, crosses_out_of_range, "event-1"),
+            Err(TimestampOutOfRange)
         );
     }
 }

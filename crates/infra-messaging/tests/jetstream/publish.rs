@@ -1,17 +1,14 @@
 use super::*;
-use infra_messaging::{EnvelopeError, PublishRejection};
+use infra_messaging::{PublishEnvelopeError, PublishRejection};
 
 #[tokio::test]
 async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_definite_refusal() {
     let fixture = Fixture::create_with_source_limit(Topology::StreamsOnly, 1).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
-        options(&fixture, None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect("fixture source stream is admitted");
+    let messaging =
+        Messaging::connect(options(&fixture, None, 1024), &context(deadline(), &cancel))
+            .await
+            .expect("fixture source stream is admitted");
     let original = event("event-publication");
     let prepared = fixture
         .publication
@@ -23,16 +20,16 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
     stopped.cancel();
     assert_eq!(
         producer
-            .publish(&prepared, &context(deadline(), &stopped))
+            .publish(&context(deadline(), &stopped), &prepared)
             .await,
         Err(PublishRejection::ContextStopped.into())
     );
     let first = producer
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("first publication receives a JetStream acknowledgment");
     let duplicate = producer
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("retrying the same immutable publication identity is acknowledged");
 
@@ -47,14 +44,14 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
         .prepare(&event("event-refused"))
         .expect("second registered event is prepared");
     let result = producer
-        .publish(&rejected, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &rejected)
         .await;
     assert_eq!(result, Err(PublishRejection::BrokerRefused.into()));
 
     close(messaging).await;
     assert_eq!(
         producer
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await,
         Err(PublishRejection::Unavailable.into())
     );
@@ -70,44 +67,42 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
         .prepare(&event("event-receiving-limit"))
         .expect("event fits the preparing resource");
     let receiving_limit = prepared.payload().len() - 1;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, None, receiving_limit),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("smaller receiving resource is admitted");
     let (_capture, logged) = capture_logs();
     std::assert_matches!(
         messaging
             .producer()
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await,
         Err(PublishError::Rejected(PublishRejection::InvalidEnvelope(
-            EnvelopeError::PayloadTooLarge
+            PublishEnvelopeError::PayloadTooLarge
         )))
     );
-    assert!(logged.lock().unwrap().iter().any(|fields| {
-        fields.contains(&("message", "messaging_publish_failed".to_owned()))
-            && fields.contains(&("outcome", "rejected".to_owned()))
-            && fields.iter().any(|(name, value)| {
-                *name == "reason" && value.contains("payload exceeds configured maximum")
-            })
+    assert!(logged.snapshot().iter().any(|event| {
+        event.message() == Some("messaging_publish_failed")
+            && event.unquoted("outcome") == Some("rejected")
+            && event
+                .field("reason")
+                .is_some_and(|value| value.contains("payload exceeds configured maximum"))
     }));
     let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     assert_eq!(source.info().await.unwrap().state.messages, 0);
     close(messaging).await;
 
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, None, receiving_limit + 1),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .unwrap();
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("the exact payload boundary is admitted");
     close(messaging).await;
@@ -139,11 +134,10 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     })
     .await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, max_payload_bytes),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .unwrap();
     let prepared = fixture.publication.prepare(&event("event-window")).unwrap();
@@ -152,7 +146,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
         let (producer, prepared, cancel) = (messaging.producer(), prepared.clone(), cancel.clone());
         publications.spawn(async move {
             producer
-                .publish(&prepared, &context(deadline(), &cancel))
+                .publish(&context(deadline(), &cancel), &prepared)
                 .await
         });
     }
@@ -167,7 +161,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     let healthy = CancellationToken::new();
     let refused = timeout(
         Duration::from_millis(250),
-        producer.publish(&prepared, &context(deadline(), &healthy)),
+        producer.publish(&context(deadline(), &healthy), &prepared),
     )
     .await
     .expect("a full shared window refuses without waiting");
@@ -178,7 +172,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
         Duration::from_secs(7),
         "native cleanup restores publication without replacing the resource",
         async || match producer
-            .publish(&prepared, &context(deadline(), &healthy))
+            .publish(&context(deadline(), &healthy), &prepared)
             .await
         {
             Ok(ack) => Some(ack),
@@ -198,11 +192,10 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     let fixture = Fixture::create(Topology::StreamsOnly).await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options_with_servers(&fixture, vec![relay.url.clone()], None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted through the transparent relay");
     let prepared = fixture
@@ -213,8 +206,8 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     let result = messaging
         .producer()
         .publish(
-            &prepared,
             &context(Instant::now() + Duration::from_millis(250), &cancel),
+            &prepared,
         )
         .await;
     std::assert_matches!(result, Err(PublishError::Ambiguous));
@@ -242,16 +235,12 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     close(messaging).await;
     relay.join().await;
 
-    let retry = Box::pin(Messaging::connect(
-        options(&fixture, None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect("direct retry producer is admitted after relay shutdown");
+    let retry = Messaging::connect(options(&fixture, None, 1024), &context(deadline(), &cancel))
+        .await
+        .expect("direct retry producer is admitted after relay shutdown");
     let acknowledgment = retry
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("retrying the same prepared identity receives a broker acknowledgment");
     assert!(acknowledgment.duplicate);

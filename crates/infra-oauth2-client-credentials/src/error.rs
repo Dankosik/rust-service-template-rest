@@ -4,8 +4,6 @@ use http::StatusCode;
 use operation_context::Stopped;
 use serde::Deserialize;
 
-use crate::request_admission::AdmissionRefusal;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
 pub struct ConfigurationError {
@@ -14,7 +12,7 @@ pub struct ConfigurationError {
 }
 
 impl ConfigurationError {
-    pub(crate) const fn resource_origin() -> Self {
+    pub(crate) const fn resource_origin_mismatch() -> Self {
         Self {
             key: "resource_origin",
             reason: "must match the transport origin registered for these credentials",
@@ -32,7 +30,7 @@ pub enum PreparationError {
 
 impl PreparationError {
     #[must_use]
-    pub const fn diagnostic_cause(&self) -> Option<&infra_outbound_http::BuildError> {
+    pub const fn diagnostic_cause(&self) -> Option<&infra_outbound_http::TlsError> {
         match self {
             Self::Configuration(_) => None,
             Self::Transport(error) => Some(&error.cause),
@@ -41,53 +39,57 @@ impl PreparationError {
 }
 
 #[derive(derive_more::Debug, thiserror::Error)]
-#[error("OAuth2 transport construction failed for {endpoint} ({cause})")]
+#[error("OAuth2 transport construction failed for {key} ({cause})")]
 pub struct TransportBuildFailure {
-    endpoint: &'static str,
+    key: &'static str,
     #[debug(skip)]
-    cause: infra_outbound_http::BuildError,
+    cause: infra_outbound_http::TlsError,
 }
 
 impl TransportBuildFailure {
-    pub(crate) const fn token_url(cause: infra_outbound_http::BuildError) -> Self {
-        Self {
-            endpoint: "token_url",
-            cause,
-        }
+    pub(crate) const fn new(key: &'static str, cause: infra_outbound_http::TlsError) -> Self {
+        Self { key, cause }
     }
 
-    pub(crate) const fn assertion_audience(cause: infra_outbound_http::BuildError) -> Self {
-        Self {
-            endpoint: "assertion_audience",
-            cause,
-        }
+    pub(crate) const fn issuer(cause: infra_outbound_http::TlsError) -> Self {
+        Self::new("issuer", cause)
     }
 }
 
 #[derive(derive_more::Debug, thiserror::Error)]
-pub enum KeycloakError {
+pub enum DiscoveryError {
     #[error(transparent)]
-    Configuration(#[from] ConfigurationError),
-    #[error(transparent)]
-    Transport(#[from] TransportBuildFailure),
+    Preparation(#[from] PreparationError),
     #[error("OAuth2 discovery: {0}")]
-    Discovery(&'static str),
+    Metadata(&'static str),
     #[error("OAuth2 discovery: issuer discovery returned HTTP {0}")]
-    DiscoveryStatus(StatusCode),
+    Status(StatusCode),
     #[error(transparent)]
-    DiscoveryTransport(DiscoveryTransportError),
+    Transport(DiscoveryTransportError),
     #[error("OAuth2 discovery: invalid issuer metadata")]
-    DiscoveryMetadata(#[debug(skip)] serde_json::Error),
+    Decode(#[debug(skip)] serde_json::Error),
 }
 
-impl KeycloakError {
+impl From<ConfigurationError> for DiscoveryError {
+    fn from(error: ConfigurationError) -> Self {
+        Self::Preparation(PreparationError::from(error))
+    }
+}
+
+impl From<TransportBuildFailure> for DiscoveryError {
+    fn from(error: TransportBuildFailure) -> Self {
+        Self::Preparation(PreparationError::from(error))
+    }
+}
+
+impl DiscoveryError {
     #[must_use]
     pub fn diagnostic_cause(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
+            Self::Preparation(error) => Some(error.diagnostic_cause()?),
             Self::Transport(error) => Some(&error.cause),
-            Self::DiscoveryTransport(error) => Some(&error.cause),
-            Self::DiscoveryMetadata(error) => Some(error),
-            Self::Configuration(_) | Self::Discovery(_) | Self::DiscoveryStatus(_) => None,
+            Self::Decode(error) => Some(error),
+            Self::Metadata(_) | Self::Status(_) => None,
         }
     }
 }
@@ -140,7 +142,6 @@ impl From<&infra_outbound_http::Error> for TransportFailure {
             infra_outbound_http::Error::Cancelled => Self::Cancelled,
             infra_outbound_http::Error::ResponseBodyTooLarge => Self::ResponseLimit,
             infra_outbound_http::Error::InvalidTarget
-            | infra_outbound_http::Error::DispatchRefused
             | infra_outbound_http::Error::Transport { .. } => Self::Transport,
         }
     }
@@ -256,23 +257,8 @@ impl fmt::Display for Rejection {
 pub enum Error {
     #[error("caller Authorization header conflicts with OAuth2 authentication")]
     AuthorizationConflict,
-    #[error("request carries no subject to act on behalf of")]
-    SubjectRequired,
-    #[error("service identity does not accept an on-behalf-of subject")]
-    UnexpectedSubject,
     #[error(transparent)]
     Acquisition(#[from] AcquisitionError),
     #[error(transparent)]
-    Resource(#[from] infra_outbound_http::Error),
-}
-
-impl From<AdmissionRefusal> for Error {
-    fn from(refusal: AdmissionRefusal) -> Self {
-        match refusal {
-            AdmissionRefusal::AuthorizationConflict => Self::AuthorizationConflict,
-            AdmissionRefusal::SubjectRequired => Self::SubjectRequired,
-            AdmissionRefusal::UnexpectedSubject => Self::UnexpectedSubject,
-            AdmissionRefusal::Acquisition(error) => Self::Acquisition(error),
-        }
-    }
+    Resource(#[from] infra_outbound_http::ExchangeError),
 }

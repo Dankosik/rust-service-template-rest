@@ -56,7 +56,7 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity
   axum routes, the API contract, errors, configuration, observability,
   reliability, security, SQL, tests, performance and dependencies.
 - Larger work follows a [spec-first workflow](docs/spec-first-workflow.md):
-  research, specification, design, plan, implementation and review.
+  intake, specification, technical design, planning, implementation, and review.
 - Lints, tests and CI hold the agent to the same rules as a person. CI runs
   only the checks a change touches.
 - One canonical instruction set lives in `.agents`. Initialization installs only
@@ -129,13 +129,14 @@ deleted; selected ones stay inert until configured.
 - `OUTBOUND_AUTH=oauth2-client-credentials`: OAuth2 machine authentication with
   a private key and RFC 8693 token exchange
   ([`infra-oauth2-client-credentials`](crates/infra-oauth2-client-credentials)).
-  To call a provider as the service, pass `http_resource: Some(Box::new(prepare))`
-  in the `ServiceRegistration` given to `service::run_with`. In `prepare`,
+  To call a provider as the service, pass `ServiceRegistration::for_http_resource(prepare)`
+  to `service::run_with`. In `prepare`,
   pass the OAuth registration and target to `background.service_tokens` and return the adapter
   with its authenticated transport. Keep response limits, timeouts and provider
   error mapping in that adapter. In the handler, extract `Extension<MyAdapter>`
-  and `RequestContext`, then bind the transport with `.with_context(ctx.operation())`
-  once for all calls in that request. The process drives and joins token refresh.
+  and `RequestContext`, then pass `ctx.operation()` to HTTP `.execute(...)`
+  calls (or bind a gRPC client with `.with_context(ctx.operation())`).
+  The process drives and joins token refresh.
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 <!-- template:begin grpc:readme-grpc-profile -->
 - `GRPC=enabled`: tonic gRPC on a separate listener and an outbound client
@@ -173,6 +174,12 @@ deleted; selected ones stay inert until configured.
   File routes use the [HTTP upload and download helpers](crates/infra-http/src/object_storage.rs)
   with the configured [storage client](crates/infra-object-storage).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
+<!-- template:begin clickhouse:docs-readme-clickhouse-profile -->
+- `CLICKHOUSE=http`: an optional hardened ClickHouse OLAP client
+  ([`infra-clickhouse`](crates/infra-clickhouse)) with bounded reads,
+  explicit batched and async writes, `password_file` rotation, and
+  [decision and rollout guidance](docs/decisions/clickhouse-decisions.md).
+<!-- template:end clickhouse:docs-readme-clickhouse-profile -->
 
 ## Run it
 

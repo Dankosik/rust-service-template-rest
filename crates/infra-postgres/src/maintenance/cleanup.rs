@@ -1,12 +1,14 @@
+use std::fmt;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use metrics::Unit;
-use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use super::LOG_TARGET;
+use super::{LOG_TARGET, is_valid_label};
 use crate::error::{failure_cause, sqlstate};
-use crate::transaction::{Tx, TxError, TxOptions, in_tx_with, set_statement_timeout};
+use crate::pool::Pool;
+use crate::transaction::{Tx, TxError, TxOptions};
 
 pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
 
@@ -18,18 +20,41 @@ pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
 const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
 const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cleanup {
-    Jobs,
-    HttpIdempotency,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CleanupName(&'static str);
+
+impl CleanupName {
+    /// ```compile_fail
+    /// const _: infra_postgres::maintenance::CleanupName =
+    ///     infra_postgres::maintenance::CleanupName::new("Not-Valid");
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        assert!(is_valid_label(name), "invalid cleanup name");
+        Self(name)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
 }
 
-impl Cleanup {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Jobs => "jobs",
-            Self::HttpIdempotency => "http_idempotency",
-        }
+impl std::borrow::Borrow<str> for CleanupName {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
+impl AsRef<str> for CleanupName {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
+impl fmt::Display for CleanupName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
     }
 }
 
@@ -48,8 +73,8 @@ pub struct CleanupPassResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CleanupBatchOptions {
     pub transaction: TxOptions,
-    pub limit: u32,
-    pub removed_metric: &'static str,
+    pub limit: NonZeroU32,
+    pub removed_metric: Option<&'static str>,
     pub failure_message: &'static str,
 }
 
@@ -105,12 +130,12 @@ fn describe_cleanup() {
 
 #[derive(Debug)]
 pub struct CleanupPass {
-    cleanup: Cleanup,
+    cleanup: CleanupName,
     started: tokio::time::Instant,
     outcome: CleanupOutcome,
     active: metrics::Gauge,
-    batches: metrics::Counter,
-    rows: metrics::Counter,
+    batches_metric: metrics::Counter,
+    removed_rows_metric: metrics::Counter,
     committed_batches: u64,
     removed_rows: u64,
 }
@@ -158,10 +183,10 @@ impl From<sqlx::Error> for BatchError {
 
 impl CleanupPass {
     #[must_use]
-    pub fn start(cleanup: Cleanup) -> Self {
+    pub fn start(cleanup: CleanupName) -> Self {
         let started = tokio::time::Instant::now();
         describe_cleanup();
-        let label = cleanup.label();
+        let label = cleanup.as_str();
         let active = metrics::gauge!(CLEANUP_ACTIVE_METRIC, "cleanup" => label);
         active.increment(1.0);
         Self {
@@ -169,8 +194,8 @@ impl CleanupPass {
             started,
             outcome: CleanupOutcome::Cancelled,
             active,
-            batches: metrics::counter!(CLEANUP_BATCHES_METRIC, "cleanup" => label),
-            rows: metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => label),
+            batches_metric: metrics::counter!(CLEANUP_BATCHES_METRIC, "cleanup" => label),
+            removed_rows_metric: metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => label),
             committed_batches: 0,
             removed_rows: 0,
         }
@@ -178,13 +203,13 @@ impl CleanupPass {
 
     pub async fn run_until_short_batch<F>(
         mut self,
-        pool: &PgPool,
+        pool: &Pool,
         cancel: Option<&CancellationToken>,
         options: &CleanupBatchOptions,
-        delete: F,
+        mut delete: F,
     ) -> Result<CleanupPassResult, CleanupError>
     where
-        F: Copy + AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, NonZeroU32) -> Result<u64, sqlx::Error>,
     {
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
@@ -193,12 +218,14 @@ impl CleanupPass {
                     end: PassEnd::Cancelled,
                 });
             }
-            let rows = self.run_batch(pool, options, delete).await?;
-            metrics::counter!(options.removed_metric).increment(rows);
-            if rows < u64::from(options.limit) {
-                self.completed();
+            let batch_rows = self.run_batch(pool, options, &mut delete).await?;
+            if let Some(metric) = options.removed_metric {
+                metrics::counter!(metric).increment(batch_rows);
+            }
+            if batch_rows < u64::from(options.limit.get()) {
+                let removed_rows = self.complete();
                 return Ok(CleanupPassResult {
-                    removed_rows: self.removed_rows,
+                    removed_rows,
                     end: PassEnd::Completed,
                 });
             }
@@ -207,21 +234,21 @@ impl CleanupPass {
 
     async fn run_batch<F>(
         &mut self,
-        pool: &PgPool,
+        pool: &Pool,
         options: &CleanupBatchOptions,
-        delete: F,
+        delete: &mut F,
     ) -> Result<u64, CleanupError>
     where
-        F: AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
+        F: AsyncFnMut(&mut Tx<'_>, NonZeroU32) -> Result<u64, sqlx::Error>,
     {
+        let limit = options.limit;
         self.await_batch(
             options.failure_message,
-            in_tx_with(
-                pool,
+            pool.in_tx_with(
                 options.transaction,
-                async |tx| -> Result<u64, BatchError> {
-                    set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
-                    delete(tx, options.limit).await.map_err(BatchError::from)
+                async move |tx| -> Result<u64, BatchError> {
+                    tx.set_statement_timeout(CLEANUP_STATEMENT_TIMEOUT).await?;
+                    delete(tx, limit).await.map_err(BatchError::from)
                 },
             ),
         )
@@ -241,7 +268,7 @@ impl CleanupPass {
             Ok(Err(BatchError { class, driver })) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    cleanup = self.cleanup.label(),
+                    cleanup = self.cleanup.as_str(),
                     failure = %class,
                     sqlstate = sqlstate(&driver).as_deref(),
                     cause = failure_cause(&driver),
@@ -252,28 +279,30 @@ impl CleanupPass {
             Err(_) => {
                 tracing::warn!(
                     target: LOG_TARGET,
-                    cleanup = self.cleanup.label(),
+                    cleanup = self.cleanup.as_str(),
                     "postgres_cleanup_batch_timed_out"
                 );
                 CleanupError::TimedOut
             }
         };
-        self.failed();
+        self.outcome = CleanupOutcome::Failed;
         Err(failure)
     }
 
     pub fn committed(&mut self, rows: u64) {
-        self.batches.increment(1);
-        self.rows.increment(rows);
+        self.batches_metric.increment(1);
+        self.removed_rows_metric.increment(rows);
         self.committed_batches = self.committed_batches.saturating_add(1);
         self.removed_rows = self.removed_rows.saturating_add(rows);
     }
 
-    pub fn completed(&mut self) {
+    #[must_use]
+    pub fn complete(mut self) -> u64 {
         self.outcome = CleanupOutcome::Completed;
+        self.removed_rows
     }
 
-    pub fn failed(&mut self) {
+    pub fn fail(mut self) {
         self.outcome = CleanupOutcome::Failed;
     }
 }
@@ -281,7 +310,7 @@ impl CleanupPass {
 impl Drop for CleanupPass {
     fn drop(&mut self) {
         let elapsed_seconds = self.started.elapsed().as_secs_f64();
-        let cleanup = self.cleanup.label();
+        let cleanup = self.cleanup.as_str();
         let outcome = self.outcome.label();
         self.active.decrement(1.0);
         metrics::counter!(

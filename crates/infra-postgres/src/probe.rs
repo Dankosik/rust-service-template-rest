@@ -1,16 +1,17 @@
 use health::{Probe, ProbeError};
-use sqlx::postgres::PgPool;
 use sqlx::{Connection, PgConnection};
+
+use crate::pool::Pool;
 
 #[derive(Clone, Debug)]
 pub struct PostgresProbe {
-    pool: PgPool,
+    pool: Pool,
     require_writable: bool,
 }
 
 impl PostgresProbe {
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: Pool) -> Self {
         Self {
             pool,
             require_writable: false,
@@ -18,7 +19,7 @@ impl PostgresProbe {
     }
 
     #[must_use]
-    pub fn writable_primary(pool: PgPool) -> Self {
+    pub fn writable_primary(pool: Pool) -> Self {
         Self {
             pool,
             require_writable: true,
@@ -26,14 +27,15 @@ impl PostgresProbe {
     }
 }
 
-#[async_trait::async_trait]
 impl Probe for PostgresProbe {
     fn name(&self) -> &'static str {
         "postgres"
     }
 
     async fn check(&self) -> Result<(), ProbeError> {
-        let mut conn = crate::pool::acquire_probe(&self.pool)
+        let mut conn = self
+            .pool
+            .acquire_probe()
             .await
             .map_err(|err| probe_error(&err))?;
         if !self.require_writable {

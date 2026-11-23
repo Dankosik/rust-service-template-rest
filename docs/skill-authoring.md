@@ -9,10 +9,11 @@ directory:
   shape used by [rust-cli-skills](https://github.com/Dankosik/rust-cli-skills):
   self-contained, decision-focused prose that a model selects from the
   description. The rest of this document describes them.
-- **Workflow skills** provide a method a user or role can invoke explicitly.
-  When a [workflow phase](spec-first-workflow.md) or [harness
+- **Workflow skills** provide a method a user invokes explicitly (`grilling`,
+  `idea-refine`). When a [workflow phase](spec-first-workflow.md) or [harness
   adapter](agent-harness.md) already owns the method, route directly to that
-  document. See [Workflow skills](#workflow-skills).
+  document; role carriers live in `.agents/roles/` and `template/harness.py`,
+  not in `.agents/skills/`. See [Workflow skills](#workflow-skills).
 
 ## Files
 
@@ -163,17 +164,15 @@ code that does not exist.
 
 ## Workflow skills
 
-A workflow skill's frontmatter holds `name`, `description`, `metadata` with
-`invocation` (`role` for a ledger carrier bound by a harness role, `user` for an
-entry a person invokes directly) and `kind` (`carrier` or `workflow`), and
-`disable-model-invocation: true`, keeping implicit model discovery off. Role
-carriers state their binding trigger with `Use when` or `Use only`; user-invoked
-workflow skills write human-facing picker descriptions in at most two sentences
-naming the job, deliverable, and boundary. The body is one H1 and at most 600
-words. Keep the skill's method in the body and link to the workflow and harness
-for shared contracts. Besides `SKILL.md`, a
-workflow skill may hold `references/*.md` (examples the body names) and
-`agents/openai.yaml`, the Codex carrier with `allow_implicit_invocation: false`.
+A user-invoked workflow skill's frontmatter holds `name`, `description`,
+`metadata` (`invocation: user`, `kind: workflow`), and
+`disable-model-invocation: true`, keeping implicit model discovery off. Write
+human-facing picker descriptions in at most two sentences naming the job,
+deliverable, and boundary. The body is one H1 and at most 600 words: keep the
+skill's method in the body and link to the workflow and harness for shared
+contracts. Besides `SKILL.md`, a workflow skill may hold `references/*.md`
+(examples the body names) and `agents/openai.yaml`, the Codex carrier with
+`allow_implicit_invocation: false`.
 
 A decision skill carries only `name` and `description`; harness sync treats the
 omitted `metadata` as `invocation: model`, `kind: method`.

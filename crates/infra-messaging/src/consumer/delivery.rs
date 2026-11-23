@@ -12,12 +12,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 use super::ConsumerError;
-use crate::budget::BROKER_OPERATION_BUDGET;
+use crate::budget::{BROKER_OPERATION_BUDGET, BrokerBudget};
 use crate::error::{HandlerError, PublishError, PublishRejection};
 use crate::messaging::Shared;
-use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
+use crate::observe::{Outcomes, record_span_outcome};
 use crate::producer::send_publication;
-use crate::registry::{DispatchError, Registry};
+use crate::registry::{BoundHandler, DispatchError, Registry};
 use crate::topology::ConsumerAdmission;
 use crate::wire;
 
@@ -31,7 +31,7 @@ const RETRY_DELAYS: [Duration; 4] = [
 const MAX_DELIVERIES: usize = RETRY_DELAYS.len() + 1;
 const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
 const HANDLER_TOTAL: &str = "messaging_handler_total";
-const HANDLER_DURATION_SECONDS: &str = "messaging_handler_duration_seconds";
+pub(crate) const HANDLER_DURATION_SECONDS: &str = "messaging_handler_duration_seconds";
 const DEAD_LETTER_TOTAL: &str = "messaging_dead_letter_total";
 const LAST_DEAD_LETTER_TIMESTAMP_SECONDS: &str = "messaging_last_dead_letter_timestamp_seconds";
 const SETTLEMENT_FAILURES_TOTAL: &str = "messaging_settlement_failures_total";
@@ -39,8 +39,7 @@ const SETTLEMENT_FAILURES_TOTAL: &str = "messaging_settlement_failures_total";
 #[derive(Debug)]
 pub(super) struct DeliveryHandler {
     shared: Arc<Shared>,
-    registry: Registry,
-    metrics: HandlerMetrics,
+    handlers: RegisteredHandlers,
     pub(super) abort: CancellationToken,
     pub(super) filter_subject: String,
     span_name: String,
@@ -57,47 +56,110 @@ struct EventMetrics {
 }
 
 #[derive(Debug)]
-struct HandlerMetrics {
-    registered: foldhash::HashMap<&'static str, EventMetrics>,
+struct HandledRoute {
+    schema_version: u16,
+    subject: Subject,
+    handler: BoundHandler,
+}
+
+#[derive(Debug)]
+struct EventDispatch {
+    metrics: EventMetrics,
+    routes: Vec<HandledRoute>,
+}
+
+#[derive(Clone, Copy)]
+struct DispatchTarget<'a> {
+    metrics: &'a EventMetrics,
+    routes: &'a [HandledRoute],
+}
+
+impl<'a> DispatchTarget<'a> {
+    fn handler(self, subject: &str, schema_version: u16) -> Option<&'a BoundHandler> {
+        self.routes
+            .iter()
+            .find(|route| {
+                route.schema_version == schema_version && route.subject.as_str() == subject
+            })
+            .map(|route| &route.handler)
+    }
+}
+
+#[derive(Debug)]
+struct RegisteredHandlers {
+    registered: foldhash::HashMap<&'static str, EventDispatch>,
     unregistered: EventMetrics,
 }
 
-impl HandlerMetrics {
-    fn register(registry: &Registry) -> Self {
-        let event = |event_type| EventMetrics {
+impl RegisteredHandlers {
+    fn from_registry(registry: Registry) -> Self {
+        let event_metrics = |event_type| EventMetrics {
             event_type,
             outcomes: Outcomes::register(
                 HANDLER_TOTAL,
                 HANDLER_DURATION_SECONDS,
                 "outcome",
                 Some(event_type),
+                Outcome::label,
             ),
         };
+        let mut registered = foldhash::HashMap::<&'static str, EventDispatch>::default();
+        for (key, subject, handler) in registry.into_handled_routes() {
+            registered
+                .entry(key.event_type)
+                .or_insert_with(|| EventDispatch {
+                    metrics: event_metrics(key.event_type),
+                    routes: Vec::new(),
+                })
+                .routes
+                .push(HandledRoute {
+                    schema_version: key.schema_version,
+                    subject,
+                    handler,
+                });
+        }
         Self {
-            registered: registry
-                .handled_routes()
-                .map(|(key, _)| (key.event_type, event(key.event_type)))
-                .collect(),
-            unregistered: event(UNREGISTERED),
+            registered,
+            unregistered: event_metrics(UNREGISTERED),
         }
     }
 
-    fn get(&self, event_type: &str) -> &EventMetrics {
-        self.registered
-            .get(event_type)
-            .unwrap_or(&self.unregistered)
+    fn resolve(&self, event_type: &str) -> DispatchTarget<'_> {
+        match self.registered.get(event_type) {
+            Some(dispatch) => DispatchTarget {
+                metrics: &dispatch.metrics,
+                routes: &dispatch.routes,
+            },
+            None => DispatchTarget {
+                metrics: &self.unregistered,
+                routes: &[],
+            },
+        }
     }
 }
 
-outcome_label! {
-    enum Outcome {
-        Success => "success",
-        Permanent => "permanent",
-        Retryable => "retryable",
-        TimedOut => "timeout",
-        Panicked => "panic",
-        Unhandled => "unhandled",
-        Undecodable => "undecodable",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum)]
+enum Outcome {
+    Success,
+    Permanent,
+    Retryable,
+    TimedOut,
+    Panicked,
+    Unhandled,
+    Undecodable,
+}
+
+impl Outcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Permanent => "permanent",
+            Self::Retryable => "retryable",
+            Self::TimedOut => "timeout",
+            Self::Panicked => "panic",
+            Self::Unhandled => "unhandled",
+            Self::Undecodable => "undecodable",
+        }
     }
 }
 
@@ -161,8 +223,7 @@ impl DeliveryHandler {
         let filter_subject = admission.options.filter_subject;
         Self {
             shared,
-            metrics: HandlerMetrics::register(&registry),
-            registry,
+            handlers: RegisteredHandlers::from_registry(registry),
             abort: CancellationToken::new(),
             span_name: format!("process {filter_subject}"),
             filter_subject,
@@ -191,7 +252,7 @@ impl DeliveryHandler {
         };
         let Some(envelope) = envelope else {
             return self
-                .dead_letter(
+                .transfer_to_dead_letter(
                     &message,
                     &info,
                     wire::DeadLetterReason::Malformed,
@@ -199,14 +260,14 @@ impl DeliveryHandler {
                 )
                 .await;
         };
-        let metrics = self.metrics.get(envelope.event_type);
+        let target = self.handlers.resolve(envelope.event_type);
         if delivery_attempt > MAX_DELIVERIES {
             return self
-                .dead_letter(
+                .transfer_to_dead_letter(
                     &message,
                     &info,
                     wire::DeadLetterReason::Exhausted,
-                    metrics.event_type,
+                    target.metrics.event_type,
                 )
                 .await;
         }
@@ -224,7 +285,7 @@ impl DeliveryHandler {
             otel.status_code = tracing::field::Empty,
         );
         crate::trace::set_remote_parent(&span, headers);
-        self.process(&message, &info, envelope, metrics, delivery_attempt)
+        self.process(&message, &info, envelope, target, delivery_attempt)
             .instrument(span)
             .await
     }
@@ -234,19 +295,47 @@ impl DeliveryHandler {
         message: &Message,
         info: &Info<'_>,
         envelope: wire::InboundEnvelopeRef<'_>,
-        metrics: &EventMetrics,
+        target: DispatchTarget<'_>,
         delivery_attempt: usize,
     ) -> Result<(), ConsumerError> {
         let started = Instant::now();
         let outcome = run_handler(
-            &self.registry,
-            message.subject.as_ref(),
+            target.handler(message.subject.as_ref(), envelope.schema_version),
             envelope,
             &self.abort,
         )
         .await;
-        metrics.outcomes.record(outcome, started.elapsed());
-        let event_type = metrics.event_type;
+        self.report_outcome(target, outcome, delivery_attempt, started.elapsed());
+        match settlement(outcome, delivery_attempt) {
+            Settlement::Acknowledge => {
+                acknowledge(
+                    &self.shared.connection.client,
+                    message,
+                    &self.filter_subject,
+                )
+                .await;
+                Ok(())
+            }
+            Settlement::DeadLetter(reason) => {
+                self.transfer_to_dead_letter(message, info, reason, target.metrics.event_type)
+                    .await
+            }
+            Settlement::Redeliver(delay) => {
+                redeliver_after(message, delay, &self.filter_subject).await;
+                Ok(())
+            }
+        }
+    }
+
+    fn report_outcome(
+        &self,
+        target: DispatchTarget<'_>,
+        outcome: Outcome,
+        delivery_attempt: usize,
+        elapsed: Duration,
+    ) {
+        target.metrics.outcomes.record(outcome, elapsed);
+        let event_type = target.metrics.event_type;
         let label = outcome.label();
         record_span_outcome(
             &tracing::Span::current(),
@@ -270,76 +359,36 @@ impl DeliveryHandler {
                 "messaging_delivery_failed"
             ),
         }
-
-        match settlement(outcome, delivery_attempt) {
-            Settlement::Acknowledge => {
-                acknowledge(
-                    &self.shared.connection.client,
-                    message,
-                    &self.filter_subject,
-                )
-                .await;
-            }
-            Settlement::DeadLetter(reason) => {
-                return self.dead_letter(message, info, reason, event_type).await;
-            }
-            Settlement::Redeliver(delay) => {
-                redeliver_after(message, delay, &self.filter_subject).await;
-            }
-        }
-        Ok(())
     }
 
-    async fn dead_letter(
+    async fn transfer_to_dead_letter(
         &self,
         source: &Message,
         info: &Info<'_>,
         reason: wire::DeadLetterReason,
         event_type: &'static str,
     ) -> Result<(), ConsumerError> {
-        let Some(message) =
+        let reason_label = reason.label();
+        let Some(publication) =
             build_dead_letter_message(source, info, &self.dead_letter_stream, reason)
         else {
             tracing::error!(
                 messaging.destination.template = self.filter_subject.as_str(),
-                reason = reason.label(),
+                reason = reason_label,
                 "messaging_dead_letter_identity_unavailable"
             );
             redeliver_after(source, SETTLEMENT_RETRY_DELAY, &self.filter_subject).await;
             return Ok(());
         };
-        let reason = reason.label();
-
-        let deadline = Deadline::after(BROKER_OPERATION_BUDGET);
-        let result = send_publication(
-            &self.shared,
-            self.dead_letter_subject.clone(),
-            message,
-            Some(deadline),
-            &self.abort,
-        )
-        .await;
-        let outcome = match &result {
+        let budget = BrokerBudget::new(Deadline::after(BROKER_OPERATION_BUDGET), &self.abort);
+        let result =
+            send_publication(&self.shared, &self.dead_letter_subject, publication, budget).await;
+        let transfer_outcome = match &result {
             Ok(_) => "accepted",
             Err(PublishError::Ambiguous) => "ambiguous",
             Err(PublishError::Rejected(_)) => "rejected",
         };
-        metrics::counter!(
-            DEAD_LETTER_TOTAL,
-            "event_type" => event_type,
-            "reason" => reason,
-            "outcome" => outcome
-        )
-        .increment(1);
-        if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            metrics::gauge!(
-                LAST_DEAD_LETTER_TIMESTAMP_SECONDS,
-                "event_type" => event_type,
-                "reason" => reason,
-                "outcome" => outcome
-            )
-            .set(timestamp.as_secs_f64());
-        }
+        record_dead_letter_transfer(event_type, reason_label, transfer_outcome);
         let Err(failure) = result else {
             acknowledge(&self.shared.connection.client, source, &self.filter_subject).await;
             return Ok(());
@@ -347,8 +396,8 @@ impl DeliveryHandler {
         tracing::error!(
             messaging.destination.template = self.filter_subject.as_str(),
             event_type,
-            reason,
-            outcome,
+            reason = reason_label,
+            outcome = transfer_outcome,
             "messaging_dead_letter_transfer_failed"
         );
         match failure {
@@ -377,55 +426,88 @@ impl DeliveryHandler {
     }
 }
 
+fn record_dead_letter_transfer(
+    event_type: &'static str,
+    reason_label: &'static str,
+    transfer_outcome: &'static str,
+) {
+    metrics::counter!(
+        DEAD_LETTER_TOTAL,
+        "event_type" => event_type,
+        "reason" => reason_label,
+        "outcome" => transfer_outcome
+    )
+    .increment(1);
+    if let Ok(timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
+        metrics::gauge!(
+            LAST_DEAD_LETTER_TIMESTAMP_SECONDS,
+            "event_type" => event_type,
+            "reason" => reason_label,
+            "outcome" => transfer_outcome
+        )
+        .set(timestamp.as_secs_f64());
+    }
+}
+
 async fn run_handler(
-    registry: &Registry,
-    subject: &str,
+    handler: Option<&BoundHandler>,
     envelope: wire::InboundEnvelopeRef<'_>,
     cancel: &CancellationToken,
 ) -> Outcome {
+    if cancel.is_cancelled() {
+        return Outcome::Retryable;
+    }
+    let Some(handler) = handler else {
+        return Outcome::Unhandled;
+    };
     let deadline = Deadline::after(HANDLER_TIMEOUT);
     let context = OperationContext::new(Some(deadline), cancel.child_token());
-    let _ended = context.cancellation().drop_guard_ref();
-    let dispatch = registry.dispatch(subject, envelope, context.clone());
-    let stopped = |reason| match reason {
-        Stopped::Deadline => Outcome::TimedOut,
-        Stopped::Cancelled => Outcome::Retryable,
+    let _cancel_handler_on_exit = context.cancellation().drop_guard_ref();
+    let dispatch = handler.dispatch(envelope, context.clone());
+    let result = match context.run(AssertUnwindSafe(dispatch).catch_unwind()).await {
+        Ok(result) => result,
+        Err(Stopped::Deadline) => return Outcome::TimedOut,
+        Err(Stopped::Cancelled) => return Outcome::Retryable,
     };
-    let result = tokio::select! {
-        biased;
-        reason = context.wait_stopped() => return stopped(reason),
-        result = AssertUnwindSafe(dispatch).catch_unwind() => result,
-    };
-    if let Some(reason) = context.stopped() {
-        return stopped(reason);
-    }
     match result {
         Ok(Ok(())) => Outcome::Success,
         Ok(Err(DispatchError::Handler(HandlerError::Permanent))) => Outcome::Permanent,
         Ok(Err(DispatchError::Handler(HandlerError::Retryable))) => Outcome::Retryable,
-        Ok(Err(DispatchError::Unhandled)) => Outcome::Unhandled,
         Ok(Err(DispatchError::Undecodable)) => Outcome::Undecodable,
         Err(_) => Outcome::Panicked,
     }
 }
 
+async fn bounded_settlement<T, E>(
+    span: &tracing::Span,
+    request: impl Future<Output = Result<T, E>>,
+) -> Result<(), &'static str> {
+    match tokio::time::timeout(BROKER_OPERATION_BUDGET, request)
+        .instrument(span.clone())
+        .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err("client_error"),
+        Err(_) => Err("timeout"),
+    }
+}
+
 async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
     let span = settlement_span(filter_subject, "ack");
-    let error_type = if let Some(reply) = source.reply.clone() {
-        let request = Request::new().timeout(None).payload(AckKind::Ack.into());
-        match tokio::time::timeout(BROKER_OPERATION_BUDGET, client.send_request(reply, request))
-            .instrument(span.clone())
+    let confirmation = match source.reply.as_ref() {
+        Some(reply) => {
+            let request = Request::new().timeout(None).payload(AckKind::Ack.into());
+            bounded_settlement(
+                &span,
+                client.send_request(wire::BorrowedSubject(reply), request),
+            )
             .await
-        {
-            Ok(Ok(_)) => {
-                record_span_outcome(&span, "confirmed", None);
-                return;
-            }
-            Ok(Err(_)) => "client_error",
-            Err(_) => "timeout",
         }
-    } else {
-        "missing_reply"
+        None => Err("missing_reply"),
+    };
+    let Err(error_type) = confirmation else {
+        record_span_outcome(&span, "confirmed", None);
+        return;
     };
     record_span_outcome(&span, "unconfirmed", Some(error_type));
     span.in_scope(|| {
@@ -440,19 +522,11 @@ async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subje
 
 pub(super) async fn redeliver_after(source: &Message, delay: Duration, filter_subject: &str) {
     let span = settlement_span(filter_subject, "nak");
-    let error_type = match tokio::time::timeout(
-        BROKER_OPERATION_BUDGET,
-        source.ack_with(AckKind::Nak(Some(delay))),
-    )
-    .instrument(span.clone())
-    .await
-    {
-        Ok(Ok(())) => {
-            record_span_outcome(&span, "submitted", None);
-            return;
-        }
-        Ok(Err(_)) => "client_error",
-        Err(_) => "timeout",
+    let Err(error_type) =
+        bounded_settlement(&span, source.ack_with(AckKind::Nak(Some(delay)))).await
+    else {
+        record_span_outcome(&span, "submitted", None);
+        return;
     };
     record_span_outcome(&span, "failed", Some(error_type));
     span.in_scope(|| {
@@ -509,10 +583,14 @@ pub(super) fn describe_metrics() {
 
 #[cfg(test)]
 mod tests {
-    use domain_events::EventPayload;
+    use domain_events::{Event, EventPayload};
 
     use super::*;
-    use crate::registry::Route;
+    use crate::registry::{EventHandler, Route};
+
+    fn accept<T>(_: Event<T>, _: OperationContext) -> std::future::Ready<Result<(), HandlerError>> {
+        std::future::ready(Ok(()))
+    }
 
     #[derive(serde::Deserialize)]
     struct Created;
@@ -520,6 +598,14 @@ mod tests {
     impl EventPayload for Created {
         const EVENT_TYPE: &'static str = "order.created";
         const SCHEMA_VERSION: u16 = 1;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CreatedV2;
+
+    impl EventPayload for CreatedV2 {
+        const EVENT_TYPE: &'static str = Created::EVENT_TYPE;
+        const SCHEMA_VERSION: u16 = 2;
     }
 
     struct Shipped;
@@ -534,25 +620,31 @@ mod tests {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
             let created = Route::<Created>::new("orders.created");
+            let created_v2 = Route::<CreatedV2>::new("orders.created.v2");
             let mut registry = Registry::default();
-            registry.declare(&created).unwrap();
+            registry.declare(&created).unwrap().handle(accept);
+            registry.declare(&created_v2).unwrap().handle(accept);
             registry
                 .declare(&Route::<Shipped>::new("orders.shipped"))
                 .unwrap();
-            registry
-                .register(&created, |_, _| async { Ok(()) })
-                .unwrap();
-            let metrics = HandlerMetrics::register(&registry);
+            let handlers = RegisteredHandlers::from_registry(registry);
 
-            let handled = metrics.get("order.created");
-            assert_eq!(handled.event_type, "order.created");
-            handled
+            let target = handlers.resolve("order.created");
+            assert_eq!(target.metrics.event_type, "order.created");
+            assert!(target.handler("orders.created", 1).is_some());
+            assert!(target.handler("orders.created.v2", 2).is_some());
+            assert!(target.handler("orders.created", 2).is_none());
+            assert!(target.handler("orders.created", 3).is_none());
+            target
+                .metrics
                 .outcomes
                 .record(Outcome::Retryable, Duration::from_millis(5));
             for unhandled in ["order.shipped", "sentinel.publisher.chosen"] {
-                let metrics = metrics.get(unhandled);
-                assert_eq!(metrics.event_type, UNREGISTERED);
-                metrics
+                let target = handlers.resolve(unhandled);
+                assert_eq!(target.metrics.event_type, UNREGISTERED);
+                assert!(target.handler("orders.shipped", 1).is_none());
+                target
+                    .metrics
                     .outcomes
                     .record(Outcome::Permanent, Duration::from_millis(5));
             }
@@ -568,49 +660,73 @@ mod tests {
         assert!(!scrape.contains("order.shipped") && !scrape.contains("sentinel"));
     }
 
+    async fn dispatch_test(
+        registry: Registry,
+        subject: &str,
+        envelope: wire::InboundEnvelopeRef<'_>,
+        cancel: &CancellationToken,
+    ) -> Outcome {
+        let handlers = RegisteredHandlers::from_registry(registry);
+        let target = handlers.resolve(envelope.event_type);
+        run_handler(
+            target.handler(subject, envelope.schema_version),
+            envelope,
+            cancel,
+        )
+        .await
+    }
+
     fn created_envelope() -> wire::InboundEnvelopeRef<'static> {
         wire::InboundEnvelopeRef {
             message_id: "event-1",
             event_type: Created::EVENT_TYPE,
             schema_version: Created::SCHEMA_VERSION,
-            occurred_at: time::OffsetDateTime::UNIX_EPOCH,
+            occurred_at: time::UtcDateTime::UNIX_EPOCH,
             payload: b"null",
         }
     }
 
     #[tokio::test(start_paused = true)]
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "the outcome cancellation oracle keeps context extraction beside the returned async handler"
-    )]
     async fn the_handler_token_is_cancelled_when_its_delivery_ends() {
+        struct OutcomeHandler {
+            expected: &'static str,
+            token_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CancellationToken>>>,
+        }
+
+        impl EventHandler<Created> for OutcomeHandler {
+            async fn handle(
+                &self,
+                _event: Event<Created>,
+                context: OperationContext,
+            ) -> Result<(), HandlerError> {
+                assert_eq!(context.remaining(), Some(HANDLER_TIMEOUT));
+                self.token_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(context.cancellation().clone())
+                    .unwrap();
+                if self.expected == "timeout" {
+                    std::future::pending::<()>().await;
+                }
+                assert_ne!(self.expected, "panic", "handler panic fixture");
+                Ok(())
+            }
+        }
+
         for expected in ["timeout", "success", "panic"] {
             let (token_tx, token_rx) = tokio::sync::oneshot::channel();
-            let token_tx = std::sync::Mutex::new(Some(token_tx));
             let created = Route::<Created>::new("orders.created");
             let mut registry = Registry::default();
-            registry.declare(&created).unwrap();
-            registry
-                .register(&created, move |_, context| {
-                    let token_tx = token_tx.lock().unwrap().take();
-                    async move {
-                        assert_eq!(context.remaining(), Some(HANDLER_TIMEOUT));
-                        token_tx
-                            .unwrap()
-                            .send(context.cancellation().clone())
-                            .unwrap();
-                        if expected == "timeout" {
-                            std::future::pending::<()>().await;
-                        }
-                        assert_ne!(expected, "panic", "handler panic fixture");
-                        Ok(())
-                    }
-                })
-                .unwrap();
+            registry.declare(&created).unwrap().handle(OutcomeHandler {
+                expected,
+                token_tx: std::sync::Mutex::new(Some(token_tx)),
+            });
 
             let delivery = CancellationToken::new();
             let outcome =
-                run_handler(&registry, "orders.created", created_envelope(), &delivery).await;
+                dispatch_test(registry, "orders.created", created_envelope(), &delivery).await;
 
             assert_eq!(outcome.label(), expected);
             let handler_token = token_rx.await.unwrap();
@@ -628,9 +744,8 @@ mod tests {
         ] {
             let created = Route::<Created>::new("orders.created");
             let mut registry = Registry::default();
-            registry.declare(&created).unwrap();
-            registry
-                .register(&created, move |_, context| async move {
+            registry.declare(&created).unwrap().handle(
+                move |_: Event<Created>, context: OperationContext| async move {
                     if expected == "timeout" {
                         let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
                         assert_eq!(context.remaining(), Some(Duration::ZERO));
@@ -638,10 +753,10 @@ mod tests {
                         context.cancel();
                     }
                     result
-                })
-                .unwrap();
-            let outcome = run_handler(
-                &registry,
+                },
+            );
+            let outcome = dispatch_test(
+                registry,
                 "orders.created",
                 created_envelope(),
                 &CancellationToken::new(),
@@ -655,15 +770,102 @@ mod tests {
     async fn a_cancelled_delivery_never_invokes_the_handler() {
         let created = Route::<Created>::new("orders.created");
         let mut registry = Registry::default();
-        registry.declare(&created).unwrap();
-        registry
-            .register(&created, |_, _| async {
+        registry.declare(&created).unwrap().handle(
+            |_: Event<Created>, _: OperationContext| async {
                 panic!("cancelled delivery reached the handler");
-            })
-            .unwrap();
+            },
+        );
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let outcome = run_handler(&registry, "orders.created", created_envelope(), &cancel).await;
+        let outcome = dispatch_test(
+            registry.clone(),
+            "orders.created",
+            created_envelope(),
+            &cancel,
+        )
+        .await;
         assert_eq!(outcome.label(), "retryable");
+
+        let unhandled_cancelled =
+            dispatch_test(registry, "orders.other", created_envelope(), &cancel).await;
+        assert_eq!(unhandled_cancelled.label(), "retryable");
+    }
+
+    #[tokio::test]
+    async fn registered_handlers_distinguish_unhandled_routes_from_handler_outcomes() {
+        let mut registry = Registry::default();
+        registry
+            .declare(&Route::<Created>::new("orders.created"))
+            .unwrap()
+            .handle(|event: Event<Created>, _: OperationContext| async move {
+                if event.id == "reject" {
+                    Err(HandlerError::Permanent)
+                } else {
+                    Ok(())
+                }
+            });
+        registry
+            .declare(&Route::<CreatedV2>::new("orders.created.v2"))
+            .unwrap()
+            .handle(accept);
+        registry
+            .declare(&Route::<Shipped>::new("orders.shipped"))
+            .unwrap();
+        let handlers = RegisteredHandlers::from_registry(registry);
+        let cancel = CancellationToken::new();
+        let cancel_ref = &cancel;
+
+        let run = |subject: &str,
+                   event_type: &'static str,
+                   schema_version: u16,
+                   message_id: &'static str,
+                   payload: &'static [u8]| {
+            let target = handlers.resolve(event_type);
+            let metric_event_type = target.metrics.event_type;
+            let handler = target.handler(subject, schema_version);
+            let envelope = wire::InboundEnvelopeRef {
+                message_id,
+                event_type,
+                schema_version,
+                occurred_at: time::UtcDateTime::UNIX_EPOCH,
+                payload,
+            };
+            async move {
+                (
+                    metric_event_type,
+                    run_handler(handler, envelope, cancel_ref).await,
+                )
+            }
+        };
+
+        assert_eq!(
+            run("orders.created", "order.created", 1, "ok", b"null").await,
+            ("order.created", Outcome::Success)
+        );
+        assert_eq!(
+            run("orders.created.v2", "order.created", 2, "ok", b"null").await,
+            ("order.created", Outcome::Success)
+        );
+        assert_eq!(
+            run("orders.created", "order.created", 1, "reject", b"null").await,
+            ("order.created", Outcome::Permanent)
+        );
+        assert_eq!(
+            run("orders.created", "order.created", 1, "ok", b"123").await,
+            ("order.created", Outcome::Undecodable)
+        );
+        for (subject, event_type, schema_version, expected_metric) in [
+            ("orders.created", "order.created", 3, "order.created"),
+            ("orders.other", "order.created", 1, "order.created"),
+            ("orders.created", "order.created", 2, "order.created"),
+            ("orders.shipped", "order.shipped", 1, UNREGISTERED),
+            ("orders.created", "order.cancelled", 1, UNREGISTERED),
+        ] {
+            assert_eq!(
+                run(subject, event_type, schema_version, "ok", b"null").await,
+                (expected_metric, Outcome::Unhandled),
+                "{subject} {event_type} v{schema_version}"
+            );
+        }
     }
 }

@@ -25,6 +25,7 @@ impl Token {
         access_token: &str,
         requested_at: Instant,
         expires_in: Option<u64>,
+        now: Instant,
     ) -> Result<Self, AcquisitionError> {
         if !shared_rules::rfc6750::is_b64token(access_token.as_bytes()) {
             return Err(AcquisitionError::InvalidResponse);
@@ -37,7 +38,7 @@ impl Token {
             .map(|lifetime| {
                 requested_at
                     .checked_add(Duration::from_secs(lifetime))
-                    .filter(|&expiry| Instant::now() < expiry)
+                    .filter(|&expiry| now < expiry)
                     .ok_or(AcquisitionError::InvalidResponse)
             })
             .transpose()?;

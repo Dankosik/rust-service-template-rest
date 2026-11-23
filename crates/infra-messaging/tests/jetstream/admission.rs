@@ -1,22 +1,21 @@
 use super::*;
 
 fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> {
-    let field = |event: &[(&'static str, String)], name: &str| {
-        event
-            .iter()
-            .find(|(field, _)| *field == name)
-            .map(|(_, value)| value.clone())
-    };
     logged
-        .lock()
-        .expect("log lock")
-        .iter()
-        .filter(|event| field(event, "message").as_deref() == Some("messaging_admission_failed"))
+        .snapshot()
+        .into_iter()
+        .filter(|event| event.message() == Some("messaging_admission_failed"))
         .map(|event| {
             (
-                field(event, "error.type").expect("refusal names its error type"),
-                field(event, "required_bytes").expect("refusal names the delivery size"),
-                field(event, "limit_bytes"),
+                event
+                    .unquoted("error.type")
+                    .expect("refusal names its error type")
+                    .to_owned(),
+                event
+                    .unquoted("required_bytes")
+                    .expect("refusal names the delivery size")
+                    .to_owned(),
+                event.unquoted("limit_bytes").map(str::to_owned),
             )
         })
         .collect()
@@ -67,15 +66,14 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
                 fixture.replace_stream(config).await;
             }
             let (_guard, logged) = capture_logs();
-            let refused = Box::pin(Messaging::connect(
+            let refused = Messaging::connect(
                 options(
                     &fixture,
                     consumer_mode.then(|| consumer_options(&fixture)),
                     1024,
                 ),
-                deadline(),
-                CancellationToken::new(),
-            ))
+                &OperationContext::with_timeout(Duration::from_secs(5)),
+            )
             .await
             .expect_err("the configured publishing role cannot accept or retain messages");
             std::assert_matches!(refused, infra_messaging::MessagingError::Topology);
@@ -88,11 +86,12 @@ async fn admission_requires_streams_that_accept_and_retain_acknowledged_publicat
             } else {
                 "source_stream"
             };
-            assert!(logged.lock().unwrap().iter().any(|event| {
-                event
+            assert!(
+                logged
+                    .snapshot()
                     .iter()
-                    .any(|(name, value)| *name == "operation" && value == role)
-            }));
+                    .any(|event| event.unquoted("operation") == Some(role))
+            );
             assert_eq!(
                 fixture
                     .jetstream
@@ -157,13 +156,10 @@ async fn outbox_refuses_route_changing_subject_transforms() {
         });
         fixture.jetstream.update_stream(config).await.unwrap();
         let cancel = CancellationToken::new();
-        let messaging = Box::pin(Messaging::connect(
-            options(&fixture, None, 1024),
-            deadline(),
-            cancel.clone(),
-        ))
-        .await
-        .expect("ordinary publication accepts a stream transform");
+        let messaging =
+            Messaging::connect(options(&fixture, None, 1024), &context(deadline(), &cancel))
+                .await
+                .expect("ordinary publication accepts a stream transform");
         let event = Registry::default()
             .declare_publication(&Route::<ExampleEvent>::new(published_subject), 1024)
             .unwrap()
@@ -171,7 +167,7 @@ async fn outbox_refuses_route_changing_subject_transforms() {
             .unwrap();
         let ack = messaging
             .producer()
-            .publish(&event, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &event)
             .await
             .unwrap();
         let stored = source.get_raw_message(ack.sequence).await.unwrap();
@@ -213,8 +209,7 @@ async fn outbox_refuses_interest_retention_when_puback_does_not_imply_storage() 
     std::assert_matches!(
         Messaging::connect(
             options(&fixture, None, 1024),
-            deadline(),
-            CancellationToken::new()
+            &OperationContext::with_timeout(Duration::from_secs(5)),
         )
         .await,
         Err(infra_messaging::MessagingError::Topology)
@@ -259,13 +254,10 @@ async fn outbox_capacity_refuses_new_publication_and_preserves_unread_messages()
         };
         fixture.replace_stream(config.clone()).await;
         let cancel = CancellationToken::new();
-        let messaging = Box::pin(Messaging::connect(
-            options(&fixture, None, 1024),
-            deadline(),
-            cancel.clone(),
-        ))
-        .await
-        .expect("ordinary publisher admission is unchanged");
+        let messaging =
+            Messaging::connect(options(&fixture, None, 1024), &context(deadline(), &cancel))
+                .await
+                .expect("ordinary publisher admission is unchanged");
         std::assert_matches!(
             messaging.outbox_producer(),
             Err(infra_messaging::MessagingError::OutboxSource(reason)) if reason == expected
@@ -282,13 +274,9 @@ async fn outbox_capacity_refuses_new_publication_and_preserves_unread_messages()
 
 async fn verify_full_stream(fixture: &Fixture) {
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
-        options(fixture, None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect("admit WorkQueue source");
+    let messaging = Messaging::connect(options(fixture, None, 1024), &context(deadline(), &cancel))
+        .await
+        .expect("admit WorkQueue source");
     messaging
         .outbox_producer()
         .expect("bounded source safely refuses new messages");
@@ -302,12 +290,12 @@ async fn verify_full_stream(fixture: &Fixture) {
         .prepare(&event_with_value("second", &"b".repeat(750)))
         .unwrap();
     let ack = producer
-        .publish(&first, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &first)
         .await
         .expect("the first event fits into an empty stream");
     assert_eq!(
         producer
-            .publish(&second, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &second)
             .await,
         Err(PublishError::Rejected(
             infra_messaging::PublishRejection::BrokerRefused
@@ -344,7 +332,7 @@ async fn verify_full_stream(fixture: &Fixture) {
     )
     .await;
     let stored = producer
-        .publish(&second, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &second)
         .await
         .expect("the same rejected event fits after old bytes are acknowledged");
     assert!(!stored.duplicate);
@@ -367,11 +355,10 @@ async fn an_explicit_dead_letter_stream_must_receive_the_dead_letter_subject() {
     consumer.dlq_subject = fixture.subject.clone();
     let (_guard, logged) = capture_logs();
     std::assert_matches!(
-        Box::pin(Messaging::connect(
+        Messaging::connect(
             options(&fixture, Some(consumer), 1024),
-            deadline(),
-            CancellationToken::new(),
-        ))
+            &OperationContext::with_timeout(Duration::from_secs(5)),
+        )
         .await,
         Err(infra_messaging::MessagingError::Topology)
     );
@@ -404,21 +391,20 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
         .clone();
     config.persist_mode = Some(stream::PersistenceMode::Default);
     fixture.replace_stream(config).await;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, None, 1024),
-        deadline(),
-        CancellationToken::new(),
-    ))
+        &OperationContext::with_timeout(Duration::from_secs(5)),
+    )
     .await
     .unwrap();
     messaging
         .producer()
         .publish(
+            &context(deadline(), &CancellationToken::new()),
             &fixture
                 .publication
                 .prepare(&event("publisher-no-dlq"))
                 .unwrap(),
-            &context(deadline(), &CancellationToken::new()),
         )
         .await
         .unwrap();
@@ -468,21 +454,25 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
         config.max_message_size = i32::try_from(required - usize::from(short)).unwrap();
         fixture.jetstream.update_stream(config).await.unwrap();
         let cancel = CancellationToken::new();
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             options(&fixture, Some(consumer_options(&fixture)), 1024),
-            deadline(),
-            cancel.clone(),
-        ))
+            &context(deadline(), &cancel),
+        )
         .await
         .unwrap();
         let mut registered = fixture.registry.clone();
         registered
-            .register(&fixture.route, |_, _| async {
-                Err(HandlerError::Permanent)
-            })
+            .register(
+                &fixture.route,
+                |_: Event<ExampleEvent>, _: OperationContext| async {
+                    Err(HandlerError::Permanent)
+                },
+            )
             .unwrap();
         let (_guard, logged) = capture_logs();
-        let consumer = messaging.consumer(registered, deadline(), &cancel).await;
+        let consumer = messaging
+            .consumer(registered, &context(deadline(), &cancel))
+            .await;
         if short {
             std::assert_matches!(consumer, Err(infra_messaging::MessagingError::Bounds));
             assert_eq!(
@@ -511,7 +501,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
                 .prepare(&event_with_value("full-transfer", &"x".repeat(1012)))
                 .unwrap();
             assert_eq!(prepared.payload().len(), 1024);
-            let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
+            let mut headers = infra_messaging::wire::encode_prepared(&prepared);
             headers.insert("tracestate", "");
             let trace = "x".repeat(8192 - encoded_headers(&headers));
             headers.insert("tracestate", trace.as_str());
@@ -559,22 +549,19 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
     let mut registered = Registry::default();
     registered
         .declare(&route)
-        .expect("the handled subject belongs to the wildcard filter");
-    registered
-        .register(&route, |_, _| async { Ok(()) })
-        .unwrap();
+        .expect("the handled subject belongs to the wildcard filter")
+        .handle(accept);
     let mut consumer = consumer_options(&fixture);
     consumer.filter_subject.clone_from(&filter);
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .unwrap();
     let mut handle = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap()
         .start(&cancel);
@@ -585,7 +572,7 @@ async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer()
         .prepare(&event_with_value("wildcard-transfer", &"x".repeat(1012)))
         .unwrap();
     assert_eq!(prepared.payload().len(), 1024);
-    let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
+    let mut headers = infra_messaging::wire::encode_prepared(&prepared);
     headers.insert("tracestate", "");
     let trace = "x".repeat(8192 - encoded_headers(&headers));
     headers.insert("tracestate", trace.as_str());
@@ -663,25 +650,25 @@ async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
         };
         fixture.jetstream.update_stream(config).await.unwrap();
     }
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(
             &fixture,
             Some(consumer_options(&fixture)),
             server_limit - 8192,
         ),
-        deadline(),
-        CancellationToken::new(),
-    ))
+        &OperationContext::with_timeout(Duration::from_secs(5)),
+    )
     .await
     .unwrap();
     let mut registered = fixture.registry.clone();
-    registered
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .unwrap();
+    registered.register(&fixture.route, accept).unwrap();
     let (_guard, logged) = capture_logs();
     std::assert_matches!(
         messaging
-            .consumer(registered, deadline(), &CancellationToken::new())
+            .consumer(
+                registered,
+                &OperationContext::with_timeout(Duration::from_secs(5)),
+            )
             .await,
         Err(infra_messaging::MessagingError::Bounds)
     );
@@ -747,23 +734,22 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
         let subject = format!("{prefix}{}", "x".repeat(subject_bytes - prefix.len()));
         let route = Route::<ExampleEvent>::new(handled_subject);
         let mut registered = Registry::default();
-        registered.declare(&route).unwrap();
+        registered.declare(&route).unwrap().handle(accept);
         registered
             .declare(&Route::<UnhandledEvent>::new(subject))
             .unwrap();
-        registered
-            .register(&route, |_, _| async { Ok(()) })
-            .unwrap();
-        let messaging = Box::pin(Messaging::connect(
+        let messaging = Messaging::connect(
             options,
-            deadline(),
-            CancellationToken::new(),
-        ))
+            &OperationContext::with_timeout(Duration::from_secs(5)),
+        )
         .await
         .unwrap();
         let (_guard, logged) = capture_logs();
         let admitted = messaging
-            .consumer(registered, deadline(), &CancellationToken::new())
+            .consumer(
+                registered,
+                &OperationContext::with_timeout(Duration::from_secs(5)),
+            )
             .await;
         if selected && excess > 0 {
             std::assert_matches!(admitted, Err(infra_messaging::MessagingError::Bounds));
@@ -787,7 +773,7 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
                 0
             );
         } else {
-            admitted.unwrap();
+            let _ = admitted.unwrap();
         }
         close(messaging).await;
         fixture.cleanup().await;
@@ -805,11 +791,10 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
         .max_payload;
     let (_guard, logged) = capture_logs();
 
-    let refused = Box::pin(Messaging::connect(
+    let refused = Messaging::connect(
         options(&fixture, None, server_max_payload),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect_err("a delivery the server cannot carry is refused");
     std::assert_matches!(
@@ -830,24 +815,19 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
         .expect("test stream without a message limit is created");
     let mut without_limit = options(&fixture, Some(consumer_options(&fixture)), 1024);
     without_limit.source_stream.clone_from(&unbounded);
-    let refused = Box::pin(Messaging::connect(
-        without_limit,
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect_err("a source stream without a message limit is refused");
+    let refused = Messaging::connect(without_limit, &context(deadline(), &cancel))
+        .await
+        .expect_err("a source stream without a message limit is refused");
     std::assert_matches!(
         refused,
         infra_messaging::MessagingError::Bounds,
         "{refused:?}"
     );
 
-    let refused = Box::pin(Messaging::connect(
+    let refused = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 512),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect_err("a source stream that admits a larger message is refused");
     std::assert_matches!(

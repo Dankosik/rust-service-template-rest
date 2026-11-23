@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
-use super::{ENV_PREFIX, ENV_SEPARATOR, Error};
+use super::{ENV_PREFIX, ENV_SEPARATOR, InputError};
 
 const SECRET_FILE_BYTES: u64 = 1024 * 1024;
 const SECRETS_SNAPSHOT_ATTEMPTS: usize = 3;
@@ -65,14 +65,14 @@ pub(super) struct Variable {
 
 pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 
-fn insert_variable(
+fn register_variable(
     variables: &mut Variables,
     name: &str,
     suffix: &str,
     value: Zeroizing<String>,
     source: VariableSource,
-) -> Result<(), Error> {
-    let name_key = name.to_ascii_lowercase();
+) -> Result<(), InputError> {
+    let lowercase_name = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
     let variable = Variable {
         original_name: name.to_owned(),
@@ -80,8 +80,8 @@ fn insert_variable(
         value,
         source,
     };
-    match variables.insert(name_key, variable) {
-        Some(other) => Err(Error::AmbiguousName {
+    match variables.insert(lowercase_name, variable) {
+        Some(other) => Err(InputError::AmbiguousName {
             name: name.to_owned(),
             other: other.original_name,
         }),
@@ -92,28 +92,33 @@ fn insert_variable(
 pub(super) fn collect_variables(
     secrets_dir: Option<&Path>,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
-) -> Result<Variables, Error> {
+) -> Result<Variables, InputError> {
     let mut variables = match secrets_dir {
         Some(dir) => read_secrets_dir(dir)?,
         None => Variables::new(),
     };
     variables.extend(read_environment(environment)?);
-    for (name, child) in &variables {
+    reject_overlapping_variables(&variables)?;
+    Ok(variables)
+}
+
+fn reject_overlapping_variables(variables: &Variables) -> Result<(), InputError> {
+    for (name, child) in variables {
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
             if let Some(parent) = name.get(..end).and_then(|prefix| variables.get(prefix)) {
-                return Err(Error::OverlappingVariables {
+                return Err(InputError::OverlappingVariables {
                     parent: parent.original_name.clone(),
                     child: child.original_name.clone(),
                 });
             }
         }
     }
-    Ok(variables)
+    Ok(())
 }
 
 fn read_environment(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
-) -> Result<Variables, Error> {
+) -> Result<Variables, InputError> {
     let mut variables = Variables::new();
     for (key, value) in environment {
         let name = key.to_string_lossy();
@@ -121,16 +126,16 @@ fn read_environment(
             continue;
         };
         if !is_variable_suffix(suffix) {
-            return Err(Error::MalformedEnvName {
+            return Err(InputError::MalformedEnvName {
                 name: name.into_owned(),
             });
         }
         let Ok(value) = value.into_string() else {
-            return Err(Error::NonUnicodeEnvValue {
+            return Err(InputError::NonUnicodeEnvValue {
                 name: name.into_owned(),
             });
         };
-        insert_variable(
+        register_variable(
             &mut variables,
             &name,
             suffix,
@@ -141,41 +146,36 @@ fn read_environment(
     Ok(variables)
 }
 
-fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
+fn read_secrets_dir(dir: &Path) -> Result<Variables, InputError> {
     if let Some(generation) = projected_generation(dir)? {
         return read_projected_secrets(dir, generation);
     }
 
-    let variables = read_secret_files(dir, dir);
+    let scanned = read_secret_files(dir, dir);
     match projected_generation(dir)? {
         Some(generation) => read_projected_secrets(dir, generation),
-        None => variables,
+        None => scanned,
     }
 }
 
-fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, Error> {
+fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, InputError> {
     let mut generation = Some(generation);
     for attempt in 1..=SECRETS_SNAPSHOT_ATTEMPTS {
         let active = generation.take();
-        let Some(scan_dir) = active.as_deref() else {
+        let Some(scan_dir) = active else {
             generation = projected_generation(dir)?;
             continue;
         };
-        let variables = read_secret_files(dir, scan_dir);
+        let scanned = read_secret_files(dir, &scan_dir);
         let current = projected_generation(dir)?;
-        let retry_not_found = attempt < SECRETS_SNAPSHOT_ATTEMPTS
-            && matches!(
-                &variables,
-                Err(Error::ReadSecretsDir { error, .. } | Error::ReadSecret { error, .. })
-                    if error.kind() == io::ErrorKind::NotFound
-            );
-        if current == active && !retry_not_found {
-            return variables;
+        let removed_mid_scan = attempt < SECRETS_SNAPSHOT_ATTEMPTS && is_not_found(&scanned);
+        if current.as_ref() == Some(&scan_dir) && !removed_mid_scan {
+            return scanned;
         }
         generation = current;
     }
 
-    Err(Error::ReadSecretsDir {
+    Err(InputError::ReadSecretsDir {
         path: dir.to_owned(),
         error: io::Error::new(
             io::ErrorKind::Interrupted,
@@ -184,22 +184,29 @@ fn read_projected_secrets(dir: &Path, generation: PathBuf) -> Result<Variables, 
     })
 }
 
+fn is_not_found(scanned: &Result<Variables, InputError>) -> bool {
+    matches!(
+        scanned,
+        Err(InputError::ReadSecretsDir { error, .. } | InputError::ReadSecret { error, .. })
+            if error.kind() == io::ErrorKind::NotFound
+    )
+}
+
 #[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission checks the volume publication link"
 )]
-fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, Error> {
+fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, InputError> {
+    let unreadable = |error| InputError::ReadSecretsDir {
+        path: dir.to_owned(),
+        error,
+    };
     let link = dir.join("..data");
     match fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.is_symlink() => {}
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Error::ReadSecretsDir {
-                path: dir.to_owned(),
-                error,
-            });
-        }
+        Err(error) => return Err(unreadable(error)),
     }
     let target = match fs::read_link(link) {
         Ok(target) => target,
@@ -211,29 +218,27 @@ fn projected_generation(dir: &Path) -> Result<Option<PathBuf>, Error> {
         {
             return Ok(None);
         }
-        Err(error) => {
-            return Err(Error::ReadSecretsDir {
-                path: dir.to_owned(),
-                error,
-            });
-        }
+        Err(error) => return Err(unreadable(error)),
     };
-    // https://github.com/kubernetes/kubernetes/blob/master/pkg/volume/util/atomic_writer.go
-    let timestamped_child = target.file_name() == Some(target.as_os_str())
+    Ok(is_timestamped_generation(&target).then(|| dir.join(target)))
+}
+
+// https://github.com/kubernetes/kubernetes/blob/master/pkg/volume/util/atomic_writer.go
+fn is_timestamped_generation(target: &Path) -> bool {
+    target.file_name() == Some(target.as_os_str())
         && target
             .as_os_str()
             .as_encoded_bytes()
             .strip_prefix(b"..")
-            .is_some_and(|name| name.first().is_some_and(u8::is_ascii_digit));
-    Ok(timestamped_child.then(|| dir.join(target)))
+            .is_some_and(|name| name.first().is_some_and(u8::is_ascii_digit))
 }
 
 #[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission enumerates the selected secrets directory"
 )]
-fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, Error> {
-    let unreadable = |error| Error::ReadSecretsDir {
+fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, InputError> {
+    let unreadable = |error| InputError::ReadSecretsDir {
         path: reported_dir.to_owned(),
         error,
     };
@@ -247,15 +252,15 @@ fn read_secret_files(reported_dir: &Path, scan_dir: &Path) -> Result<Variables, 
         };
         let reported_path = reported_dir.join(&file_name);
         if !is_variable_suffix(suffix) {
-            return Err(Error::MalformedSecretName {
+            return Err(InputError::MalformedSecretName {
                 path: reported_path,
             });
         }
-        let value = read_secret_file(&entry.path()).map_err(|error| Error::ReadSecret {
+        let value = read_secret_file(&entry.path()).map_err(|error| InputError::ReadSecret {
             path: reported_path,
             error,
         })?;
-        insert_variable(
+        register_variable(
             &mut variables,
             &name,
             suffix,
@@ -299,13 +304,17 @@ fn read_secret_file(path: &Path) -> io::Result<Zeroizing<String>> {
             "the value exceeds the 1 MiB secret file limit",
         ));
     }
+    decode_secret(bytes)
+}
+
+fn decode_secret(mut bytes: Zeroizing<Vec<u8>>) -> io::Result<Zeroizing<String>> {
     let mut text = match String::from_utf8(std::mem::take(&mut *bytes)) {
         Ok(text) => Zeroizing::new(text),
         Err(error) => {
             drop(Zeroizing::new(error.into_bytes()));
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "secret file is not valid UTF-8",
+                "the value is not valid UTF-8",
             ));
         }
     };

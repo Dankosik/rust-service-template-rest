@@ -1,33 +1,22 @@
 # Cleanup
 
-Use at proven task closeout when execution-only artifacts or task-owned
-temporary resources remain, or for explicitly scoped cleanup.
+Run at proven task closeout (or for explicitly scoped cleanup) to retire
+task-owned temporary resources and execution-only artifacts.
 
-Within the accepted effect authority, retire resources created for the task
-after their consumers finish and required results, evidence, and recovery
-material are retained. This includes temporary files, task-local build outputs,
-execution-only `tasks.md`, `tasks/`, `workflow-plan.md`, and task worktrees.
-Shared caches, persistent data, and unrelated workspaces retain their own
-owners and cleanup authority.
-
-A worktree is removed only when it is clean and no live session, process,
-validation lock, or pending consumer still needs it. Preserve needed commits
-through durable refs outside the checkout or the owning harness's recoverable
-archive before retirement; a clean status alone proves neither inactivity nor
-recoverability. Uncommitted or untracked paths stop that removal: name them
-and leave the tree. Closeout does not invent a clean tree.
-
-Use the owning harness or worktree manager's supported retirement operation
-(see [Branches and Worktrees](../../worktrees.md#5-post-merge-closeout-and-stale-sweeps))
-and verify its result rather than deleting a managed checkout as an ordinary
-directory. If ownership, inactivity, recoverability, or authority is uncertain,
-leave the affected resource and report its locator and retention reason;
-unrelated cleanup does not reopen an otherwise completed outcome.
-
-Retain a completed spec, design, research note, or rollout record only while a
-live authority names it as a durable decision source. Otherwise move the
-durable rule, deciding commit or pull request when provenance matters, and
-objective reopen condition to its canonical owner, then delete the completed
-bundle.
-
-Git is the archive. Do not keep completed ledgers as a second history.
+- **Retire only task-owned resources:** remove temporary files, task-local build
+  outputs, execution-only `tasks.md` / `tasks/`, and task worktrees once their
+  consumers finish and needed commits and evidence are preserved. Leave shared
+  caches, persistent data, and unrelated workspaces to their owners.
+- **Worktree retirement:** follow [AGENTS.md](../../../AGENTS.md#branches-and-worktrees)
+  and [Branches and Worktrees](../../worktrees.md#5-post-merge-closeout-and-stale-sweeps).
+  Verify both inactivity (no live session, process, or lock) and commit
+  preservation outside the checkout—a clean `git status` alone proves neither.
+  If uncommitted/untracked files exist or ownership or recoverability is
+  uncertain, leave the tree and report its locator and reason without reopening
+  the completed outcome.
+- **Artifact retirement:** promote any lasting rule, deciding commit/PR, and
+  objective `Reopen if` trigger into its canonical doc (`docs/decisions/`,
+  `docs/repo-architecture.md`, etc.), then delete the completed `specs/<task>/`
+  bundle (retain it only while a live authority cites it). Run `just docs-check`
+  and `just typos` if cleanup edits tracked docs. **Git is the archive**—never
+  keep completed ledgers as a second history.

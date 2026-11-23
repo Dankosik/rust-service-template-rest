@@ -17,8 +17,6 @@ use prost::Message as _;
 
 use tracing_subscriber::layer::SubscriberExt as _;
 
-use std::collections::HashMap;
-
 use super::*;
 
 // template:begin grpc:telemetry-tls-delivery-tests
@@ -160,12 +158,13 @@ fn read_request(stream: &mut impl Read) -> Option<Request> {
 #[test]
 fn a_finished_span_reaches_an_anonymous_http_collector() {
     let collector = Collector::start(exchange);
-    let options = options(&format!("http://{}", collector.addr));
+    let endpoint = format!("http://{}", collector.addr);
+    let options = options(&endpoint);
     let handle = tracer_provider(&options, |_| None, &CollectorTrust::default())
         .expect("the provider builds");
     assert_eq!(
-        handle.exporter_state,
-        ExporterState::Initialized {
+        handle.exporter_state(),
+        &ExporterState::Initialized {
             endpoint_source: EndpointSource::Typed,
             has_certificate_file: false,
             has_client_certificate: false,
@@ -225,11 +224,11 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     let files = tempfile::tempdir().expect("directory for trust files");
     let file = |scope, variable, name: &str| TrustFile {
         scope,
-        variable,
+        name: variable,
         path: files.path().join(name),
     };
-    let signal = |variable, name: &str| file(SettingScope::Signal, variable, name);
-    let common = |variable, name: &str| file(SettingScope::Common, variable, name);
+    let signal = |variable, name: &str| file(EnvScope::Signal, variable, name);
+    let common = |variable, name: &str| file(EnvScope::Common, variable, name);
     std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
     std::fs::write(files.path().join("large.pem"), vec![0; 1024 * 1024 + 1])
         .expect("write an oversized file");
@@ -238,14 +237,14 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
     for (trust, diagnostic) in [
         (
             CollectorTrust {
-                certificate: Some(signal(CERTIFICATE_VARS[0], "absent.pem")),
+                certificate: Some(signal(CERTIFICATE_VARS[0].1, "absent.pem")),
                 ..CollectorTrust::default()
             },
             "could not read the OTLP trust file",
         ),
         (
             CollectorTrust {
-                certificate: Some(signal(CERTIFICATE_VARS[0], "large.pem")),
+                certificate: Some(signal(CERTIFICATE_VARS[0].1, "large.pem")),
                 ..CollectorTrust::default()
             },
             "exceeds the 1048576-byte limit",
@@ -253,43 +252,44 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         #[cfg(unix)]
         (
             CollectorTrust {
-                certificate: Some(signal(CERTIFICATE_VARS[0], "directory.pem")),
+                certificate: Some(signal(CERTIFICATE_VARS[0].1, "directory.pem")),
                 ..CollectorTrust::default()
             },
             "must select a regular OTLP trust file",
         ),
         (
             CollectorTrust {
-                certificate: Some(common(CERTIFICATE_VARS[1], "text.pem")),
+                certificate: Some(common(CERTIFICATE_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "must select a usable PEM certificate bundle",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
+                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
-                client_key: Some(common(CLIENT_KEY_VARS[1], "text.pem")),
+                client_key: Some(common(CLIENT_KEY_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "to configure an OTLP client identity",
         ),
         (
             CollectorTrust {
-                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
-                client_key: Some(common(CLIENT_KEY_VARS[1], "text.pem")),
+                client_certificate: Some(common(CLIENT_CERTIFICATE_VARS[1].1, "text.pem")),
+                client_key: Some(common(CLIENT_KEY_VARS[1].1, "text.pem")),
                 ..CollectorTrust::default()
             },
             "usable PEM identity",
         ),
     ] {
+        let headers = SecretString::from(format!("authorization={HEADER_VALUE}"));
         let mut options = options(ENDPOINT);
-        options.otlp_headers = Some(SecretString::from(format!("authorization={HEADER_VALUE}")));
+        options.otlp_headers = Some(&headers);
         let error = tracer_provider(
             &options,
             env(&[(
@@ -302,7 +302,7 @@ fn unusable_trust_material_stops_startup_without_echoing_configuration_values() 
         let message = error.to_string();
         assert!(message.contains(diagnostic), "{message}");
         if let Some(certificate) = &trust.certificate {
-            assert!(message.contains(certificate.variable), "{message}");
+            assert!(message.contains(certificate.name), "{message}");
         }
         let records = format!("{error:?} {message}");
         for value in [
@@ -371,7 +371,10 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
                     release.send(()).unwrap();
                     tokio::task::spawn_blocking(|| ()).await.unwrap();
                 }
-                std::assert_matches!(pending.await, Err(TracingError::PreparationTimeout));
+                std::assert_matches!(
+                    pending.await,
+                    Err(TracingError(TracingErrorKind::PreparationTimeout))
+                );
             }
         });
         if !result_ready {
@@ -390,9 +393,9 @@ fn assert_exporter_warning(state: &ExporterState, variable: &str) -> String {
     use crate::logging::{LoggingFormat, tests::capture};
     let (dispatch, guard, buffer) = capture(LoggingFormat::Json, "warn", None);
     tracing::dispatcher::with_default(&dispatch, || state.log());
-    std::assert_matches!(
+    assert_eq!(
         guard.shutdown(std::time::Instant::now() + WAIT),
-        crate::logging::LoggerShutdown::Completed(_)
+        crate::logging::LoggerShutdown::Completed
     );
     let records = buffer.records();
     let record: serde_json::Value = serde_json::from_str(&records).unwrap();
@@ -414,7 +417,7 @@ fn ignored_compression_is_reported_after_logging_starts_without_disabling_export
         &CollectorTrust::default(),
     )
     .unwrap();
-    let records = assert_exporter_warning(&handle.exporter_state, variable);
+    let records = assert_exporter_warning(handle.exporter_state(), variable);
     assert!(!records.contains("private-compression-value"));
     handle.tracer().start("still exported").end();
     assert_eq!(shutdown(handle), ProviderShutdown::Completed);
@@ -438,7 +441,7 @@ fn zero_batch_processor_sizes_warn_and_spans_still_reach_the_collector() {
             &CollectorTrust::default(),
         )
         .unwrap();
-        assert_exporter_warning(&handle.exporter_state, variable);
+        assert_exporter_warning(handle.exporter_state(), variable);
 
         for _ in 0..=batch_limit {
             handle.tracer().start("still exported").end();
@@ -492,7 +495,7 @@ fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
         inner: exporter,
-        timeout: export_timeout(&|_: &str| None),
+        export_timeout: export_timeout_from_env(&|_: &str| None),
         drain: Arc::clone(&drain),
     })
     .with_batch_config(
@@ -518,11 +521,11 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             ("400 Bad Request", b"collector_failure_secret".to_vec()),
             ("200 OK", Vec::new()),
         ]);
-        let exporter = span_exporter(
+        let exporter = build_span_exporter(
             &format!("http://{}/v1/traces", collector.addr),
             HashMap::new(),
             &CollectorTrust::default(),
-            export_timeout(&|_: &str| None),
+            export_timeout_from_env(&|_: &str| None),
             None,
         )
         .unwrap();
@@ -593,11 +596,11 @@ fn an_inner_shutdown_error_survives_the_sdk_outer_success() {
 fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
     for allowance in [Duration::ZERO, SHUTDOWN_JOIN_SLACK] {
         let (collector, release, thread) = scripted_collector(vec![("200 OK", Vec::new())]);
-        let exporter = span_exporter(
+        let exporter = build_span_exporter(
             &format!("http://{}/v1/traces", collector.addr),
             HashMap::new(),
             &CollectorTrust::default(),
-            export_timeout(&|_: &str| None),
+            export_timeout_from_env(&|_: &str| None),
             None,
         )
         .unwrap();
@@ -676,18 +679,18 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                     tracing::info_span!("ordinary_span").in_scope(|| {
                         tracing::info!("ordinary_event");
                         let exporter = ObservedExporter {
-                            inner: span_exporter(
+                            inner: build_span_exporter(
                                 &format!("http://{}/{URL_SECRET}/v1/traces", collector.addr),
                                 HashMap::from([(
                                     "authorization".to_owned(),
                                     HEADER_SECRET.to_owned(),
                                 )]),
                                 &CollectorTrust::default(),
-                                export_timeout(&|_: &str| None),
+                                export_timeout_from_env(&|_: &str| None),
                                 None,
                             )
                             .unwrap(),
-                            timeout: export_timeout(&|_: &str| None),
+                            export_timeout: export_timeout_from_env(&|_: &str| None),
                             drain: Arc::default(),
                         };
                         let result = exporter
@@ -702,9 +705,9 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                 assert_eq!(request.header("authorization"), Some(HEADER_SECRET));
                 thread.join().expect("collector script finishes");
                 assert_eq!(shutdown(handle), ProviderShutdown::Completed);
-                std::assert_matches!(
+                assert_eq!(
                     logger.shutdown(std::time::Instant::now() + WAIT),
-                    crate::logging::LoggerShutdown::Completed(_)
+                    crate::logging::LoggerShutdown::Completed
                 );
                 let records = records.records();
                 assert!(

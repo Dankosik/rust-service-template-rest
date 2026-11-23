@@ -1,17 +1,17 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
+use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use compact_str::{CompactString, format_compact};
 use futures_util::future::BoxFuture;
-use infra_postgres::{Tx, observed};
+use infra_postgres::{Pool, Tx, observed};
 use operation_context::{Deadline, OperationContext};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::postgres::PgPool;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -44,8 +44,46 @@ pub(crate) fn saturating_micros(duration: Duration) -> i64 {
 
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Debug, derive_more::Display,
+)]
+#[debug("KindName({_0:?})")]
+pub struct KindName(&'static str);
+
+impl KindName {
+    /// ```compile_fail
+    /// const _: infra_jobs::KindName = infra_jobs::KindName::new("Not.Valid");
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        assert!(is_valid_kind_name(name), "invalid job kind name");
+        assert!(
+            !is_reserved_kind_name(name),
+            "job kind name is reserved for the outbox publisher"
+        );
+        Self(name)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for KindName {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
+impl AsRef<str> for KindName {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
 pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
-    const NAME: &'static str;
+    const NAME: KindName;
 }
 
 #[derive(
@@ -62,6 +100,7 @@ impl JobId {
 
 pub(crate) struct Attempt {
     pub(crate) fence: crate::attempt::ClaimFence,
+    pub(crate) kind: &'static str,
     pub(crate) number: u16,
     #[expect(
         clippy::struct_field_names,
@@ -71,7 +110,7 @@ pub(crate) struct Attempt {
     pub(crate) cancellation: CancellationToken,
 }
 
-pub struct Job<K, P = PgPool> {
+pub struct Job<K, P = Pool> {
     attempt: Attempt,
     payload: K,
     pool: P,
@@ -96,8 +135,8 @@ impl<K, P> Job<K, P> {
     }
 
     #[must_use]
-    pub fn cancellation(&self) -> CancellationToken {
-        self.attempt.cancellation.clone()
+    pub const fn cancellation(&self) -> &CancellationToken {
+        &self.attempt.cancellation
     }
 
     #[must_use]
@@ -116,17 +155,17 @@ impl<K, P> Job<K, P> {
 
 impl<K> Job<K> {
     #[must_use]
-    pub const fn pool(&self) -> &PgPool {
+    pub const fn pool(&self) -> &Pool {
         &self.pool
     }
 }
 
-impl<K: JobKind, P> fmt::Debug for Job<K, P> {
+impl<K, P> fmt::Debug for Job<K, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Job")
             .field("id", &self.attempt.fence.job_id)
-            .field("kind", &K::NAME)
+            .field("kind", &self.attempt.kind)
             .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
     }
@@ -140,7 +179,7 @@ pub(crate) enum Disposition {
     Snooze { delay_micros: i64 },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{summary}")]
 pub struct JobError {
     pub(crate) disposition: Disposition,
@@ -225,11 +264,27 @@ pub trait TransactionalHandler<K: JobKind>: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), JobError>> + Send;
 }
 
+impl<K: JobKind, H: TransactionalHandler<K>> TransactionalHandler<K> for Arc<H> {
+    fn run(
+        &self,
+        job: TransactionalJob<K>,
+        tx: &mut Tx<'_>,
+    ) -> impl Future<Output = Result<(), JobError>> + Send {
+        (**self).run(job, tx)
+    }
+}
+
 struct TransactionFailure(JobError);
 
 impl TransactionFailure {
     fn completion(error: &sqlx::Error) -> Self {
         Self(JobError::postgres("job completion failed: postgres", error))
+    }
+}
+
+impl From<JobError> for TransactionFailure {
+    fn from(error: JobError) -> Self {
+        Self(error)
     }
 }
 
@@ -248,13 +303,12 @@ impl From<infra_postgres::TxError> for TransactionFailure {
     }
 }
 
-pub trait Handler<K: JobKind>: Send + Sync + 'static {
+pub trait Handler<K>: Send + Sync + 'static {
     fn run(&self, job: Job<K>) -> impl Future<Output = Result<(), JobError>> + Send;
 }
 
 impl<K, F, Fut> Handler<K> for F
 where
-    K: JobKind,
     F: Fn(Job<K>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), JobError>> + Send + 'static,
 {
@@ -263,11 +317,48 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RetrySchedule {
+    #[default]
+    Quartic,
+    Exponential {
+        max_base: Duration,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KindMode {
+    Ordinary,
+    #[allow(
+        dead_code,
+        reason = "only the optional outbox profile constructs KindMode::Outbox outside tests"
+    )]
+    Outbox,
+}
+
+impl KindMode {
+    pub(crate) const fn is_outbox(self) -> bool {
+        matches!(self, Self::Outbox)
+    }
+
+    pub(crate) const fn exhausts_transient(self) -> bool {
+        matches!(self, Self::Ordinary)
+    }
+
+    pub(crate) const fn missing_payload_error(self) -> Option<JobError> {
+        match self {
+            Self::Outbox => Some(JobError::permanent("outbox_receipt_mismatch")),
+            Self::Ordinary => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     pub max_attempts: u16,
     pub timeout: Duration,
     pub max_running: Option<NonZeroU32>,
+    pub retry: RetrySchedule,
 }
 
 impl Default for Policy {
@@ -276,6 +367,7 @@ impl Default for Policy {
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             timeout: DEFAULT_TIMEOUT,
             max_running: None,
+            retry: RetrySchedule::Quartic,
         }
     }
 }
@@ -294,11 +386,16 @@ impl KindsBuilder {
     }
 
     pub fn register<K: JobKind>(&mut self, policy: Policy, handler: impl Handler<K>) -> &mut Self {
-        let handler = Arc::new(handler);
-        self.register_dispatch::<K>(policy, move |job| {
-            let handler = Arc::clone(&handler);
-            Box::pin(async move { handler.run(job).await.map(|()| Completion::Pending) })
-        })
+        self.entries.push(Registered::new(
+            K::NAME.as_str(),
+            policy,
+            KindMode::Ordinary,
+            Box::new(ErasedOrdinary {
+                handler,
+                payload: PhantomData,
+            }),
+        ));
+        self
     }
 
     pub fn register_transactional<K: JobKind>(
@@ -306,73 +403,28 @@ impl KindsBuilder {
         policy: Policy,
         handler: impl TransactionalHandler<K>,
     ) -> &mut Self {
-        let handler = Arc::new(handler);
-        self.register_dispatch::<K>(policy, move |job| {
-            Box::pin(run_transactional(Arc::clone(&handler), job))
-        })
-    }
-
-    fn register_dispatch<K: JobKind>(
-        &mut self,
-        policy: Policy,
-        run: impl Fn(Job<K>) -> HandlerFuture + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.entries.push(Registered {
-            name: K::NAME,
+        self.entries.push(Registered::new(
+            K::NAME.as_str(),
             policy,
-            is_outbox: crate::RESERVED_OUTBOX_KIND == Some(K::NAME),
-            running_slots: policy
-                .max_running
-                .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
-            dispatch: Box::new(move |attempt, pool, payload| {
-                let payload = serde_json::from_slice::<K>(payload)?;
-                Ok(run(Job {
-                    attempt,
-                    payload,
-                    pool,
-                }))
+            KindMode::Ordinary,
+            Box::new(ErasedTransactional {
+                handler,
+                payload: PhantomData,
             }),
-            metrics: std::sync::OnceLock::new(),
-        });
+        ));
         self
     }
 
     pub fn validate(self) -> Result<Kinds, KindError> {
-        // template:begin outbox:jobs-outbox-registry-guard
-        if self.entries.iter().any(|entry| entry.is_outbox) {
-            return Err(KindError::OutboxKind);
-        }
-        // template:end outbox:jobs-outbox-registry-guard
-        self.validate_kinds()
-    }
-
-    // template:begin outbox:jobs-outbox-registry
-    pub(crate) fn validate_outbox(self) -> Result<Kinds, KindError> {
-        match self.entries.as_slice() {
-            [entry] if entry.is_outbox => self.validate_kinds(),
-            _ => Err(KindError::OutboxKind),
-        }
-    }
-    // template:end outbox:jobs-outbox-registry
-
-    fn validate_kinds(self) -> Result<Kinds, KindError> {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
         }
         let mut seen = HashSet::with_capacity(self.entries.len());
         for entry in &self.entries {
-            if !is_valid_kind_name(entry.name) {
-                return Err(KindError::InvalidName(entry.name));
-            }
             if !seen.insert(entry.name) {
                 return Err(KindError::Duplicate(entry.name));
             }
-            if !(1..=MAX_ATTEMPTS).contains(&entry.policy.max_attempts) {
-                return Err(KindError::InvalidMaxAttempts { kind: entry.name });
-            }
-            if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&entry.policy.timeout) {
-                return Err(KindError::InvalidTimeout { kind: entry.name });
-            }
+            validate_policy(entry.name, entry.policy)?;
         }
         Ok(Kinds {
             entries: self.entries.into_iter().map(Arc::new).collect(),
@@ -380,42 +432,45 @@ impl KindsBuilder {
     }
 }
 
+fn validate_policy(kind: &'static str, policy: Policy) -> Result<(), KindError> {
+    if !(1..=MAX_ATTEMPTS).contains(&policy.max_attempts) {
+        return Err(KindError::InvalidMaxAttempts { kind });
+    }
+    if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&policy.timeout) {
+        return Err(KindError::InvalidTimeout { kind });
+    }
+    if let RetrySchedule::Exponential { max_base } = policy.retry
+        && !(MIN_TIMEOUT..=MAX_DELAY).contains(&max_base)
+    {
+        return Err(KindError::InvalidRetryMaxBase { kind });
+    }
+    Ok(())
+}
+
 #[warn(clippy::map_err_ignore)]
 async fn run_transactional<K: JobKind>(
-    handler: Arc<impl TransactionalHandler<K>>,
-    job: Job<K>,
+    handler: &impl TransactionalHandler<K>,
+    pool: Pool,
+    job: TransactionalJob<K>,
 ) -> Result<Completion, JobError> {
-    let Job {
-        attempt,
-        payload,
-        pool,
-    } = job;
-    let job = Job {
-        attempt,
-        payload,
-        pool: (),
-    };
     let fence = job.attempt.fence;
-    infra_postgres::in_tx_with_acquire_deadline(
-        &pool,
+    pool.in_tx_with_acquire_deadline(
         job.deadline(),
         infra_postgres::TxOptions::default(),
         async move |tx| {
-            handler.run(job, tx).await.map_err(TransactionFailure)?;
+            handler.run(job, tx).await?;
             let complete = crate::attempt::complete_query(fence);
             let completed = observed!("complete job", complete.execute(&mut *tx))
                 .await
                 .map_err(|error| TransactionFailure::completion(&error))?;
             if completed.rows_affected() == 0 {
-                return Err(TransactionFailure(JobError::retryable(
-                    "job claim is stale",
-                )));
+                return Err(JobError::retryable("job claim is stale").into());
             }
             Ok(Completion::Committed)
         },
     )
     .await
-    .map_err(|failure| failure.0)
+    .map_err(|failure: TransactionFailure| failure.0)
 }
 
 impl fmt::Debug for KindsBuilder {
@@ -437,6 +492,26 @@ pub struct Kinds {
 }
 
 impl Kinds {
+    // template:begin outbox:jobs-outbox-registry
+    pub(crate) fn outbox<T>(policy: Policy, handler: impl Handler<T>) -> Result<Self, KindError>
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+    {
+        validate_policy(crate::outbox::KIND, policy)?;
+        Ok(Self {
+            entries: vec![Arc::new(Registered::new(
+                crate::outbox::KIND,
+                policy,
+                KindMode::Outbox,
+                Box::new(ErasedOrdinary {
+                    handler,
+                    payload: PhantomData,
+                }),
+            ))],
+        })
+    }
+    // template:end outbox:jobs-outbox-registry
+
     pub fn names(&self) -> impl Iterator<Item = &'static str> {
         self.entries.iter().map(|entry| entry.name)
     }
@@ -464,29 +539,28 @@ impl fmt::Debug for Kinds {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum KindError {
-    // template:begin outbox:jobs-outbox-registry-error
-    #[error(
-        "{} requires a dedicated single-kind outbox publisher registry",
-        crate::outbox::KIND
-    )]
-    OutboxKind,
-    // template:end outbox:jobs-outbox-registry-error
     #[error("no job kind is registered")]
     NoKinds,
     #[error("job kind {0:?} is registered twice")]
     Duplicate(&'static str),
-    #[error(
-        "job kind name {0:?} must be 1 to {MAX_KIND_LEN} characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
-    )]
-    InvalidName(&'static str),
     #[error("job kind {kind:?}: max_attempts must be between 1 and {MAX_ATTEMPTS}")]
     InvalidMaxAttempts { kind: &'static str },
     #[error(
         "job kind {kind:?}: timeout must be between {} and {}",
-        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MIN_TIMEOUT),
-        jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&MAX_TIMEOUT)
+        friendly_duration(MIN_TIMEOUT),
+        friendly_duration(MAX_TIMEOUT)
     )]
     InvalidTimeout { kind: &'static str },
+    #[error(
+        "job kind {kind:?}: exponential retry max_base must be between {} and {}",
+        friendly_duration(MIN_TIMEOUT),
+        friendly_duration(MAX_DELAY)
+    )]
+    InvalidRetryMaxBase { kind: &'static str },
+}
+
+fn friendly_duration(duration: Duration) -> String {
+    jiff::fmt::friendly::SpanPrinter::new().unsigned_duration_to_string(&duration)
 }
 
 pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
@@ -504,23 +578,53 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     true
 }
 
-/// ```compile_fail
-/// const _: () = infra_jobs::assert_valid_kind_name("Not.Valid");
-/// ```
-pub const fn assert_valid_kind_name(name: &str) {
-    assert!(is_valid_kind_name(name), "invalid job kind name");
+const fn is_reserved_kind_name(name: &str) -> bool {
+    let Some(reserved) = crate::RESERVED_OUTBOX_KIND else {
+        return false;
+    };
+    let name = name.as_bytes();
+    let reserved = reserved.as_bytes();
+    if name.len() != reserved.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < name.len() {
+        if name[index] != reserved[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
-    pub(crate) is_outbox: bool,
+    pub(crate) mode: KindMode,
     pub(crate) running_slots: Option<Arc<Semaphore>>,
-    pub(crate) dispatch: Box<Dispatch>,
+    pub(crate) handler: Box<dyn ErasedHandler>,
     metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
 }
 
 impl Registered {
+    fn new(
+        name: &'static str,
+        policy: Policy,
+        mode: KindMode,
+        handler: Box<dyn ErasedHandler>,
+    ) -> Self {
+        Self {
+            name,
+            policy,
+            mode,
+            running_slots: policy
+                .max_running
+                .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
+            handler,
+            metrics: std::sync::OnceLock::new(),
+        }
+    }
+
     pub(crate) fn metrics(&self) -> &crate::attempt::KindMetrics {
         self.metrics
             .get_or_init(|| crate::attempt::KindMetrics::new(self.name))
@@ -529,20 +633,82 @@ impl Registered {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Completion {
-    Pending,
+    Uncommitted,
     Committed,
 }
 
-pub(crate) type HandlerFuture = BoxFuture<'static, Result<Completion, JobError>>;
+pub(crate) type HandlerFuture<'a> = BoxFuture<'a, Result<Completion, JobError>>;
 
-pub(crate) type Dispatch =
-    dyn Fn(Attempt, PgPool, &[u8]) -> Result<HandlerFuture, serde_json::Error> + Send + Sync;
+pub(crate) trait ErasedHandler: Send + Sync + 'static {
+    fn prepare(
+        &self,
+        attempt: Attempt,
+        pool: Pool,
+        payload: &[u8],
+    ) -> Result<HandlerFuture<'_>, serde_json::Error>;
+}
+
+struct ErasedOrdinary<K, H> {
+    handler: H,
+    payload: PhantomData<fn(K)>,
+}
+
+impl<K, H> ErasedHandler for ErasedOrdinary<K, H>
+where
+    K: DeserializeOwned + Send + Sync + 'static,
+    H: Handler<K>,
+{
+    fn prepare(
+        &self,
+        attempt: Attempt,
+        pool: Pool,
+        payload: &[u8],
+    ) -> Result<HandlerFuture<'_>, serde_json::Error> {
+        let payload = serde_json::from_slice::<K>(payload)?;
+        let job = Job {
+            attempt,
+            payload,
+            pool,
+        };
+        Ok(Box::pin(async move {
+            self.handler
+                .run(job)
+                .await
+                .map(|()| Completion::Uncommitted)
+        }))
+    }
+}
+
+struct ErasedTransactional<K, H> {
+    handler: H,
+    payload: PhantomData<fn(K)>,
+}
+
+impl<K, H> ErasedHandler for ErasedTransactional<K, H>
+where
+    K: JobKind,
+    H: TransactionalHandler<K>,
+{
+    fn prepare(
+        &self,
+        attempt: Attempt,
+        pool: Pool,
+        payload: &[u8],
+    ) -> Result<HandlerFuture<'_>, serde_json::Error> {
+        let payload = serde_json::from_slice::<K>(payload)?;
+        let job = TransactionalJob {
+            attempt,
+            payload,
+            pool: (),
+        };
+        Ok(Box::pin(run_transactional(&self.handler, pool, job)))
+    }
+}
 
 #[cfg(test)]
 mod tests {
 
     use serde::{Deserialize, Serialize};
-    use sqlx::postgres::PgPoolOptions;
 
     use super::*;
 
@@ -553,10 +719,8 @@ mod tests {
     }
 
     impl JobKind for Sample {
-        const NAME: &'static str = "sample";
+        const NAME: KindName = KindName::new("sample");
     }
-
-    const _: () = assert_valid_kind_name(Sample::NAME);
 
     async fn accept(_: Job<Sample>) -> Result<(), JobError> {
         Ok(())
@@ -566,31 +730,22 @@ mod tests {
     struct Alpha;
 
     impl JobKind for Alpha {
-        const NAME: &'static str = "alpha";
+        const NAME: KindName = KindName::new("alpha");
     }
 
     #[derive(Debug, Serialize, Deserialize)]
     struct Beta;
 
     impl JobKind for Beta {
-        const NAME: &'static str = "beta";
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Bad;
-
-    impl JobKind for Bad {
-        const NAME: &'static str = "Bad";
+        const NAME: KindName = KindName::new("beta");
     }
 
     fn job_id(text: &str) -> JobId {
         JobId(uuid::Uuid::try_parse(text).unwrap())
     }
 
-    fn lazy_pool() -> PgPool {
-        PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap()
+    fn lazy_pool() -> Pool {
+        infra_postgres::test_support::connect_lazy("postgres://localhost/unused").unwrap()
     }
 
     proptest::proptest! {
@@ -619,10 +774,15 @@ mod tests {
         assert!(!is_valid_kind_name("a b"));
         assert!(!is_valid_kind_name("a/b"));
         assert!(!is_valid_kind_name("é"));
+        assert_eq!(
+            is_reserved_kind_name("publish_domain_event"),
+            crate::RESERVED_OUTBOX_KIND.is_some()
+        );
+        assert!(!is_reserved_kind_name("sample"));
     }
 
     #[test]
-    fn validate_refuses_empty_duplicate_and_invalid_name() {
+    fn validate_refuses_empty_and_duplicate_kinds() {
         let err = KindsBuilder::new().validate().unwrap_err();
         assert_eq!(err, KindError::NoKinds);
         assert_eq!(err.to_string(), "no job kind is registered");
@@ -639,15 +799,6 @@ mod tests {
         let err = kinds.validate().unwrap_err();
         assert_eq!(err, KindError::Duplicate("sample"));
         assert_eq!(err.to_string(), "job kind \"sample\" is registered twice");
-
-        let mut kinds = KindsBuilder::new();
-        kinds.register(Policy::default(), |_: Job<Bad>| async { Ok(()) });
-        let err = kinds.validate().unwrap_err();
-        assert_eq!(err, KindError::InvalidName("Bad"));
-        assert_eq!(
-            err.to_string(),
-            "job kind name \"Bad\" must be 1 to 64 characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
-        );
     }
 
     #[test]
@@ -686,6 +837,24 @@ mod tests {
             .to_string(),
             "job kind \"sample\": timeout must be between 1s and 1h"
         );
+        assert_eq!(
+            refuse(Policy {
+                retry: RetrySchedule::Exponential {
+                    max_base: Duration::from_millis(999),
+                },
+                ..Policy::default()
+            }),
+            KindError::InvalidRetryMaxBase { kind: "sample" }
+        );
+        assert_eq!(
+            refuse(Policy {
+                retry: RetrySchedule::Exponential {
+                    max_base: MAX_DELAY + Duration::from_nanos(1),
+                },
+                ..Policy::default()
+            }),
+            KindError::InvalidRetryMaxBase { kind: "sample" }
+        );
         admit(Policy {
             max_attempts: 1,
             timeout: MIN_TIMEOUT,
@@ -694,6 +863,15 @@ mod tests {
         admit(Policy {
             max_attempts: MAX_ATTEMPTS,
             timeout: MAX_TIMEOUT,
+            retry: RetrySchedule::Exponential {
+                max_base: MAX_DELAY,
+            },
+            ..Policy::default()
+        });
+        admit(Policy {
+            retry: RetrySchedule::Exponential {
+                max_base: MIN_TIMEOUT,
+            },
             ..Policy::default()
         });
     }
@@ -728,7 +906,7 @@ mod tests {
                 .expect("first registered kind");
             assert!(after_alpha.contains("\"beta\""), "{output}");
             assert!(!output.contains("policy"), "{output}");
-            assert!(!output.contains("dispatch"), "{output}");
+            assert!(!output.contains("handler"), "{output}");
         }
     }
 
@@ -780,34 +958,38 @@ mod tests {
             }
         });
         let registry = kinds.validate().unwrap();
-        let registered = registry.get(Sample::NAME).unwrap();
+        let registered = registry.get(Sample::NAME.as_str()).unwrap();
         let token = CancellationToken::new();
-        let future = (registered.dispatch)(
-            Attempt {
-                fence: crate::attempt::ClaimFence {
-                    job_id: id,
-                    generation: 99,
-                    token: uuid::Uuid::nil(),
+        let future = registered
+            .handler
+            .prepare(
+                Attempt {
+                    fence: crate::attempt::ClaimFence {
+                        job_id: id,
+                        generation: 99,
+                        token: uuid::Uuid::nil(),
+                    },
+                    kind: Sample::NAME.as_str(),
+                    number: 3,
+                    attempt_deadline: deadline,
+                    cancellation: token,
                 },
-                number: 3,
-                attempt_deadline: deadline,
-                cancellation: token,
-            },
-            lazy_pool(),
-            br#"{"n":7,"secret":"payload-secret"}"#,
-        )
-        .unwrap();
+                lazy_pool(),
+                br#"{"n":7,"secret":"payload-secret"}"#,
+            )
+            .unwrap();
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
         future.await.unwrap();
         assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 
-        let err = (registered.dispatch)(
+        let err = registered.handler.prepare(
             Attempt {
                 fence: crate::attempt::ClaimFence {
                     job_id: id,
                     generation: 99,
                     token: uuid::Uuid::nil(),
                 },
+                kind: Sample::NAME.as_str(),
                 number: 1,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
@@ -827,6 +1009,7 @@ mod tests {
                     generation: 99,
                     token: uuid::Uuid::nil(),
                 },
+                kind: Sample::NAME.as_str(),
                 number: 4,
                 attempt_deadline: Instant::now(),
                 cancellation: CancellationToken::new(),
@@ -866,5 +1049,33 @@ mod tests {
             TxError::CommitUnknown(sqlx::Error::Protocol("private-test-value".to_owned())).into();
         assert_eq!(unknown.disposition, Disposition::Retry);
         assert_eq!(unknown.to_string(), "postgres commit outcome unknown");
+    }
+
+    #[test]
+    fn arc_implements_transactional_handler_and_registers_as_ordinary() {
+        struct SharedHandler;
+
+        impl TransactionalHandler<Alpha> for SharedHandler {
+            fn run(
+                &self,
+                _job: TransactionalJob<Alpha>,
+                _tx: &mut Tx<'_>,
+            ) -> impl Future<Output = Result<(), JobError>> + Send {
+                std::future::ready(Ok(()))
+            }
+        }
+
+        let mut kinds = KindsBuilder::new();
+        kinds.register_transactional(Policy::default(), Arc::new(SharedHandler));
+        let registry = kinds.validate().unwrap();
+        let registered = registry.get(Alpha::NAME.as_str()).unwrap();
+        assert_eq!(registered.mode, KindMode::Ordinary);
+        assert!(!registered.mode.is_outbox());
+        assert!(registered.mode.exhausts_transient());
+        assert_eq!(registered.mode.missing_payload_error(), None);
+        assert_eq!(
+            KindMode::Outbox.missing_payload_error(),
+            Some(JobError::permanent("outbox_receipt_mismatch"))
+        );
     }
 }

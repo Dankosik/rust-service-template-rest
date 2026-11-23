@@ -17,27 +17,22 @@ mod common;
 
 use common::{baseline_env, poll_until, spawn_stdout_lines, terminate};
 use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
+use infra_bearerauthn::test_support::JWT_SIGNING_DER;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest, common::v1::any_value::Value, trace::v1::Span,
 };
 use prost::Message as _;
-use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
-};
+use tls_test_support::TlsMaterial;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
-        RootCertStore, ServerConfig,
+        RootCertStore,
         client::{WebPkiServerVerifier, danger::ServerCertVerifier as _},
-        pki_types::{
-            CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
-            pem::PemObject as _,
-        },
+        pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject as _},
     },
 };
 use tonic::{
@@ -47,9 +42,6 @@ use tonic::{
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
-
-const JWT_SIGNING_DER: &[u8] =
-    include_bytes!("../../infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der");
 
 const DIAGNOSTIC_BYTES: usize = 64 * 1024;
 
@@ -302,12 +294,8 @@ impl OidcFixture {
     )]
     fn new(clients: usize) -> Self {
         let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-        let root = new_issuer();
-        let leaf_key = KeyPair::generate().expect("generate OIDC leaf key");
-        let mut leaf = CertificateParams::new(vec!["127.0.0.1".to_owned(), "localhost".to_owned()])
-            .expect("OIDC leaf names");
-        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        let certificate = leaf.signed_by(&leaf_key, &root).expect("sign OIDC leaf");
+        let material = TlsMaterial::for_hosts(&["127.0.0.1", "localhost"]);
+        let acceptor = material.acceptor();
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -343,35 +331,18 @@ impl OidcFixture {
         })
         .to_string();
 
-        let config = ServerConfig::builder_with_provider(
-            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .expect("OIDC TLS versions")
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(certificate.der().to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
-        )
-        .expect("OIDC TLS certificate");
-        let task = runtime.spawn(serve_oidc(
-            listener,
-            TlsAcceptor::from(std::sync::Arc::new(config)),
-            discovery,
-            jwks,
-            clients,
-        ));
+        let task = runtime.spawn(serve_oidc(listener, acceptor, discovery, jwks, clients));
 
         let root_dir = tempfile::tempdir().expect("create OIDC root directory");
         let root_path = root_dir.path().join("root.pem");
-        std::fs::write(&root_path, root.pem()).expect("write OIDC root");
+        std::fs::write(&root_path, &material.root_pem).expect("write OIDC root");
         Self {
             runtime,
             issuer,
             _root_dir: root_dir,
             root_path,
-            root_certificate: root.der().clone(),
-            leaf_certificate: certificate.der().clone(),
+            root_certificate: CertificateDer::from(material.root),
+            leaf_certificate: CertificateDer::from(material.cert),
             token,
             task,
         }
@@ -410,14 +381,6 @@ impl OidcFixture {
         let Self { runtime, task, .. } = self;
         runtime.block_on(task).expect("OIDC fixture task");
     }
-}
-
-fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
-    let mut params = CertificateParams::default();
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    CertifiedIssuer::self_signed(params, KeyPair::generate().expect("generate OIDC root key"))
-        .expect("create OIDC root")
 }
 
 async fn serve_oidc(
@@ -561,12 +524,6 @@ fn grpc_process_requires_one_executable_from_the_selected_build() {
         grpc_example_executable(messages.as_bytes(), MANIFEST),
         Err(2)
     );
-}
-
-fn tls_material() -> (String, String) {
-    let identity = rcgen::generate_simple_self_signed(["127.0.0.1".to_owned()])
-        .expect("self-sign certificate");
-    (identity.cert.pem(), identity.signing_key.serialize_pem())
 }
 
 fn health_check(address: &str, certificate: String) -> Result<i32, tonic::Status> {
@@ -818,8 +775,8 @@ async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) 
     }
 }
 
-async fn exercise_client_destination(address: &str, certificate: String, token: &str) {
-    let transport = infra_outbound_grpc::Client::try_new(
+async fn exercise_client_destination(address: &str, certificate: &str, token: &str) {
+    let transport = infra_outbound_grpc::Client::builder(
         &format!("https://{address}"),
         infra_outbound_grpc::ClientSecurity::Tls(infra_outbound_grpc::ClientTlsMaterial {
             ca_certificate_pem: Some(certificate),
@@ -827,6 +784,7 @@ async fn exercise_client_destination(address: &str, certificate: String, token: 
         }),
         Duration::from_secs(5),
     )
+    .build()
     .expect("observed client");
     let mut client = EchoServiceClient::new(transport);
     let mut request = Request::new(UnaryRequest {
@@ -939,7 +897,7 @@ fn assert_server_privacy_outputs(
 
 fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str, trusted: bool) -> u16 {
     let collector = Collector::start(&oidc.runtime);
-    let (certificate, private_key) = tls_material();
+    let material = TlsMaterial::new("127.0.0.1");
     let mut environment = vec![
         ("APP__LOG__FORMAT", format),
         ("APP__LOG__LEVEL", level),
@@ -952,14 +910,15 @@ fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str, trusted
     if trusted {
         environment.push(("APP__GRPC__TRUST_TRACE_CONTEXT", "true"));
     }
-    let mut example = Example::spawn_with(oidc, &certificate, &private_key, &environment);
+    let mut example =
+        Example::spawn_with(oidc, &material.cert_pem, &material.key_pem, &environment);
     let _ = example.await_address("http listener bound");
     let _ = example.await_address("diagnostics listener bound");
     let address = example.await_address("grpc listener bound");
     example.await_line("service_ready");
     oidc.runtime.block_on(async {
-        exercise_server_privacy(&address, &certificate, &oidc.token).await;
-        exercise_client_destination(&address, certificate, &oidc.token).await;
+        exercise_server_privacy(&address, &material.root_pem, &oidc.token).await;
+        exercise_client_destination(&address, &material.root_pem, &oidc.token).await;
     });
     example.terminate();
     let (code, stderr, logs) = example.wait_within(Duration::from_secs(15));
@@ -978,13 +937,13 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
         .runtime
         .block_on(infra_telemetry::install_tracer_provider(
             &infra_telemetry::TracingOptions {
-                service_name: "grpc-process-client".to_owned(),
-                service_version: "test".to_owned(),
-                vcs_revision: "test".to_owned(),
-                instance_id: Some("grpc-client-fixture".to_owned()),
-                deployment_environment: "test".to_owned(),
+                service_name: "grpc-process-client",
+                service_version: "test",
+                vcs_revision: "test",
+                instance_id: Some("grpc-client-fixture"),
+                deployment_environment: "test",
                 sampler: infra_telemetry::ResolvedSampler::AlwaysOn,
-                otlp_endpoint: Some(client_collector.endpoint.clone()),
+                otlp_endpoint: Some(&client_collector.endpoint),
                 otlp_headers: None,
             },
         ))
@@ -1004,9 +963,9 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
             .block_on(provider.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))),
         infra_telemetry::ProviderShutdown::Completed
     );
-    std::assert_matches!(
+    assert_eq!(
         logger.shutdown(Instant::now() + Duration::from_secs(2)),
-        infra_telemetry::LoggerShutdown::Completed(_)
+        infra_telemetry::LoggerShutdown::Completed
     );
     let client_exported = client_collector.finish(&oidc.runtime);
     let client_spans = exported_spans(&client_exported);
@@ -1038,8 +997,8 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
 fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     let _ = example_binary();
     let oidc = OidcFixture::new(1);
-    let (certificate, private_key) = tls_material();
-    let mut example = Example::spawn(&oidc, &certificate, &private_key);
+    let material = TlsMaterial::new("127.0.0.1");
+    let mut example = Example::spawn(&oidc, &material.cert_pem, &material.key_pem);
     let (http, diagnostics, grpc) = listener_addresses(&mut example);
     let ready = format!("http://{http}/health/ready");
     assert!(
@@ -1047,11 +1006,11 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         "HTTP readiness never became ready"
     );
     assert_eq!(
-        health_check(&grpc, certificate.clone()).expect("TLS health check"),
+        health_check(&grpc, material.root_pem.clone()).expect("TLS health check"),
         ServingStatus::Serving as i32
     );
     assert_eq!(
-        unary(&grpc, certificate.clone(), &oidc.token).expect("authenticated unary"),
+        unary(&grpc, material.root_pem.clone(), &oidc.token).expect("authenticated unary"),
         "process echo"
     );
     let (status, metrics) =
@@ -1074,7 +1033,7 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         .build()
         .expect("build gRPC observer runtime");
     let mut watch = runtime
-        .block_on(hold_watch(&grpc, certificate, oidc.token.clone()))
+        .block_on(hold_watch(&grpc, material.root_pem, oidc.token.clone()))
         .expect("open health watch");
 
     example.terminate();
@@ -1158,7 +1117,7 @@ fn registered_background_fixture() {
         return;
     };
     let control = std::env::var(BACKGROUND_CONTROL).expect("fixture control address");
-    let code = service::run_with_grpc_resource(
+    let code = service::run_with_grpc(
         [std::ffi::OsString::from("background-fixture")],
         move |services, _, background| {
             register_background_fixture(services, background, scenario, control).map_err(Into::into)
@@ -1188,7 +1147,7 @@ fn registered_feature_work_joins_and_reports_primary_or_cleanup_failure() {
         ("startup_refusal", 1),
     ];
     let oidc = OidcFixture::new(scenarios.len());
-    let (certificate, private_key) = tls_material();
+    let material = TlsMaterial::new("127.0.0.1");
     for (scenario, expected_code) in scenarios {
         let listener = oidc
             .runtime
@@ -1205,8 +1164,8 @@ fn registered_feature_work_joins_and_reports_primary_or_cleanup_failure() {
         let mut example = Example::spawn_command(
             command,
             &oidc,
-            &certificate,
-            &private_key,
+            &material.cert_pem,
+            &material.key_pem,
             &[
                 (BACKGROUND_SCENARIO, scenario),
                 (BACKGROUND_CONTROL, address.as_str()),

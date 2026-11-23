@@ -1,14 +1,15 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Request, StatusCode, header};
+use observe_test_support::{EventCapture, SpanCapture};
+use operation_context::OperationContext;
 
 use tls_test_support::TlsMaterial;
 
-use crate::{Error, Limits, UrlTemplate, test_support::*};
+use crate::{
+    DispatchError, Error, ExchangeError, TransportErrorKind, UrlTemplate, test_support::*,
+};
 
 const REQUEST_SENTINELS: [&str; 6] = [
     "sentinel-path",
@@ -24,12 +25,10 @@ async fn exercise_completed_attempts() {
     let client = fixture_client_with_limits(
         "127.0.0.1:0".parse().expect("unused address"),
         &material,
-        Limits {
-            response_body_bytes: 2,
-            ..limits()
-        },
+        limits().with_response_body_bytes(2).expect("valid limit"),
     );
-    let unpolled = client.execute(request(), deadline());
+    let context = default_context();
+    let unpolled = client.execute(&context, request());
     drop(unpolled);
 
     let (address, server) = tls_server(
@@ -38,7 +37,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let success = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await;
     assert!(success.is_ok());
     server.await.expect("success fixture joins");
@@ -49,7 +48,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let not_found = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("HTTP error statuses remain responses");
     assert_eq!(not_found.status(), http::StatusCode::NOT_FOUND);
@@ -61,7 +60,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let custom_error = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("600 status remains a response");
     assert_eq!(custom_error.status().as_u16(), 600);
@@ -73,7 +72,7 @@ async fn exercise_completed_attempts() {
     )
     .await;
     let custom_error = fixture_client(address, &material)
-        .execute(request(), deadline())
+        .execute(&default_context(), request())
         .await
         .expect("999 status remains a response");
     assert_eq!(custom_error.status().as_u16(), 999);
@@ -81,9 +80,12 @@ async fn exercise_completed_attempts() {
 
     std::assert_matches!(
         client
-            .execute(request_to("https://other.fixture.test/items"), deadline())
+            .execute(
+                &default_context(),
+                request_to("https://other.fixture.test/items")
+            )
             .await,
-        Err(Error::InvalidTarget)
+        Err(ExchangeError::BeforeResponse(Error::InvalidTarget))
     );
 
     let (address, server) = tls_server(
@@ -104,14 +106,14 @@ async fn exercise_completed_attempts() {
         fixture_client_with_limits(
             address,
             &material,
-            Limits {
-                response_body_bytes: 2,
-                ..limits()
-            },
+            limits().with_response_body_bytes(2).expect("valid limit"),
         )
-        .execute(request, deadline())
+        .execute(&default_context(), request)
         .await,
-        Err(Error::ResponseBodyTooLarge)
+        Err(ExchangeError::AfterResponse {
+            status: StatusCode::BAD_GATEWAY,
+            source: Error::ResponseBodyTooLarge,
+        })
     );
     server.await.expect("body-limit fixture joins");
 }
@@ -119,10 +121,9 @@ async fn exercise_completed_attempts() {
 #[tokio::test]
 async fn observation_records_polled_attempts_once_without_request_data() {
     let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
+    let diagnostics = SpanCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = diagnostics.install_name("outbound_http");
     exercise_completed_attempts().await;
 
     let scrape = recorder.handle().render();
@@ -174,7 +175,7 @@ async fn observation_records_polled_attempts_once_without_request_data() {
         "a request without a template has no template label"
     );
 
-    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    let spans = diagnostics.snapshot();
     assert_eq!(
         spans.len(),
         5,
@@ -182,29 +183,28 @@ async fn observation_records_polled_attempts_once_without_request_data() {
     );
     let body_failure = spans
         .iter()
-        .find(|fields| {
-            fields
-                .get("error.type")
+        .find(|span| {
+            span.field("error.type")
                 .is_some_and(|value| value.contains("response_body_too_large"))
         })
         .expect("body-limit attempt span");
     assert!(
         body_failure
-            .get("http.response.status_code")
+            .field("http.response.status_code")
             .is_some_and(|value| value.contains("502"))
     );
     assert!(
         body_failure
-            .get("http.request.method")
+            .field("http.request.method")
             .is_some_and(|value| value.contains("_OTHER"))
     );
     assert!(
         body_failure
-            .get("otel.status_code")
+            .field("otel.status_code")
             .is_some_and(|value| value.contains("ERROR"))
     );
-    for fields in spans.iter() {
-        let fields = format!("{fields:?}");
+    for span in &spans {
+        let fields = format!("{:?}", span.fields);
         for secret in REQUEST_SENTINELS {
             assert!(!fields.contains(secret), "span disclosed request data");
         }
@@ -233,10 +233,11 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
     )
     .await;
-    let mut request = request_to("https://provider.fixture.test/items/sentinel-path");
-    request.extensions_mut().insert(UrlTemplate("/items/{id}"));
+    let request = UrlTemplate("/items/{id}").attach(request_to(
+        "https://provider.fixture.test/items/sentinel-path",
+    ));
     fixture_client(address, &material)
-        .execute(request, deadline())
+        .execute(&default_context(), request)
         .await
         .expect("HTTP error statuses remain responses");
     let wire = captured.await.expect("captured request");
@@ -275,19 +276,18 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
     );
 }
 
-#[tokio::test]
-async fn observation_records_timeout_cancellation_and_polled_drop_once() {
-    let recorder = observation_recorder();
-    let diagnostics = SpanDiagnostics::default();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-    let material = TlsMaterial::new(FIXTURE_HOST);
-    let (address, server) = tls_server_stall_after_headers(&material).await;
-    let timed = fixture_client(address, &material)
-        .execute(request(), deadline())
+async fn exercise_stalled_attempts(material: &TlsMaterial) {
+    let (address, server) = tls_server_stall_after_headers(material).await;
+    let timed = fixture_client(address, material)
+        .execute(&default_context(), request())
         .await;
-    std::assert_matches!(timed, Err(Error::Timeout));
+    std::assert_matches!(
+        timed,
+        Err(ExchangeError::AfterResponse {
+            status: StatusCode::OK,
+            source: Error::Timeout,
+        })
+    );
     server.abort();
     assert!(
         server
@@ -297,16 +297,17 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     );
 
     for cancel in [false, true] {
-        let (address, server) = tls_server_stall_after_headers(&material).await;
-        let client = fixture_client(address, &material);
-        let context = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+        let (address, server) = tls_server_stall_after_headers(material).await;
+        let client = fixture_client(address, material);
+        let context = OperationContext::with_timeout(Duration::from_secs(1));
         let (seen, status) = tokio::sync::oneshot::channel();
-        let mut exchange =
-            Box::pin(
-                client.execute_with_response_status(request(), &context, |code| {
-                    seen.send(code).unwrap();
-                }),
-            );
+        let prepared = client.prepare(&context, request()).expect("prepared");
+        let mut exchange = Box::pin(prepared.send_checked(
+            || Ok::<(), std::convert::Infallible>(()),
+            |code| {
+                seen.send(code).unwrap();
+            },
+        ));
         tokio::select! {
             biased;
             result = &mut exchange => panic!("stalled exchange completed unexpectedly: {result:?}"),
@@ -316,7 +317,13 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
         }
         if cancel {
             context.cancel();
-            std::assert_matches!(exchange.await, Err(Error::Cancelled));
+            std::assert_matches!(
+                exchange.await,
+                Err(DispatchError::Exchange(ExchangeError::AfterResponse {
+                    status: StatusCode::OK,
+                    source: Error::Cancelled,
+                }))
+            );
         } else {
             drop(exchange);
         }
@@ -328,6 +335,16 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
                 .is_cancelled()
         );
     }
+}
+
+#[tokio::test]
+async fn observation_records_timeout_cancellation_and_polled_drop_once() {
+    let recorder = observation_recorder();
+    let diagnostics = SpanCapture::new();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber = diagnostics.install_name("outbound_http");
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    exercise_stalled_attempts(&material).await;
 
     let scrape = recorder.handle().render();
     assert_eq!(
@@ -353,47 +370,19 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     );
     assert_eq!(recorded_count(&scrape, &[]), 3);
     assert!(!scrape.contains("error_type=\"cancelled\""));
-    let spans = diagnostics.0.lock().expect("span diagnostic lock");
+    let spans = diagnostics.snapshot();
     assert_eq!(spans.len(), 3);
     assert_eq!(
         spans
             .iter()
-            .filter(|fields| {
-                fields
-                    .get("outbound.outcome")
+            .filter(|span| {
+                span.field("outbound.outcome")
                     .is_some_and(|value| value.contains("cancelled"))
-                    && !fields.contains_key("error.type")
+                    && span.field("error.type").is_none()
             })
             .count(),
         2
     );
-}
-
-type EventFields = (Option<&'static str>, SpanFields);
-
-#[derive(Clone, Default)]
-struct EventDiagnostics(Arc<Mutex<Vec<EventFields>>>);
-
-impl<S> tracing_subscriber::Layer<S> for EventDiagnostics
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        context: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        if !event.metadata().target().starts_with("infra_outbound_http") {
-            return;
-        }
-        let mut fields = FieldVisitor(SpanFields::new());
-        event.record(&mut fields);
-        let span = context.event_span(event).map(|span| span.name());
-        self.0
-            .lock()
-            .expect("event diagnostic lock")
-            .push((span, fields.0));
-    }
 }
 
 async fn exercise_transport_failures() -> Vec<String> {
@@ -403,15 +392,27 @@ async fn exercise_transport_failures() -> Vec<String> {
             .body(Bytes::from_static(b"sentinel-body"))
             .expect("sensitive fixture request")
     };
-    let root_cause = |result: Result<http::Response<Bytes>, Error>, reason: &str| {
-        let error = result.expect_err("transport failure");
+    let root_cause = |result: Result<http::Response<Bytes>, ExchangeError>,
+                      kind: TransportErrorKind,
+                      reason: &str| {
+        let error = result.expect_err("transport failure").into_error();
         std::assert_matches!(error, Error::Transport { .. }, "{error:?}");
+        assert_eq!(error.transport_kind(), Some(kind));
         assert_eq!(error.diagnostic_reason(), reason);
         shared_rules::error_chain::sources(&error)
             .last()
             .expect("transport source")
             .to_string()
     };
+    for non_transport in [
+        Error::InvalidTarget,
+        Error::Timeout,
+        Error::Cancelled,
+        Error::ResponseBodyTooLarge,
+    ] {
+        assert_eq!(non_transport.transport_kind(), None);
+    }
+
     let mut roots = Vec::new();
     let material = TlsMaterial::new(FIXTURE_HOST);
 
@@ -419,19 +420,21 @@ async fn exercise_transport_failures() -> Vec<String> {
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let untrusted = TlsMaterial::new(FIXTURE_HOST);
     let untrusted = fixture_client(address, &untrusted)
-        .execute(sensitive_request(), deadline())
+        .execute(&default_context(), sensitive_request())
         .await;
     roots.push(root_cause(
         untrusted,
+        TransportErrorKind::Tls,
         "HTTP transport failed during the TLS exchange",
     ));
     server.await.expect("untrusted fixture joins");
 
     let unresolved = fixture_client_resolving(FIXTURE_HOST, vec![], &material, limits())
-        .execute(sensitive_request(), deadline())
+        .execute(&default_context(), sensitive_request())
         .await;
     roots.push(root_cause(
         unresolved,
+        TransportErrorKind::Connect,
         "HTTP transport failed during connection setup",
     ));
 
@@ -443,15 +446,13 @@ async fn exercise_transport_failures() -> Vec<String> {
     let overflow = fixture_client_with_limits(
         address,
         &material,
-        Limits {
-            response_header_count: 1,
-            ..limits()
-        },
+        limits().with_response_header_count(1).expect("valid limit"),
     )
-    .execute(sensitive_request(), deadline())
+    .execute(&default_context(), sensitive_request())
     .await;
     roots.push(root_cause(
         overflow,
+        TransportErrorKind::Protocol,
         "HTTP transport failed while parsing the response",
     ));
     server.await.expect("parser fixture joins");
@@ -459,23 +460,23 @@ async fn exercise_transport_failures() -> Vec<String> {
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no").await;
     let truncated = fixture_client(address, &material)
-        .execute(sensitive_request(), deadline())
+        .execute(&default_context(), sensitive_request())
         .await;
-    roots.push(root_cause(truncated, "HTTP transport failed"));
+    roots.push(root_cause(
+        truncated,
+        TransportErrorKind::Other,
+        "HTTP transport failed",
+    ));
     server.await.expect("truncated fixture joins");
     roots
 }
 
 #[tokio::test]
 async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_span() {
-    use tracing_subscriber::layer::SubscriberExt as _;
-
     let recorder = observation_recorder();
-    let diagnostics = EventDiagnostics::default();
+    let diagnostics = EventCapture::new();
     let _recorder = metrics::set_default_local_recorder(&recorder);
-    let _subscriber =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(diagnostics.clone()));
-    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let _subscriber = diagnostics.install_target_prefix("infra_outbound_http");
     let roots = exercise_transport_failures().await;
 
     let scrape = recorder.handle().render();
@@ -501,13 +502,13 @@ async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_
         );
     }
 
-    let events = diagnostics.0.lock().expect("event diagnostic lock");
+    let events = diagnostics.snapshot();
     let causes: Vec<&str> = events
         .iter()
-        .map(|(span, fields)| {
-            assert_eq!(*span, Some("outbound_http"));
-            assert_eq!(fields["message"], "outbound_http_transport_failed");
-            fields["error"].as_str()
+        .map(|event| {
+            assert_eq!(event.span, Some("outbound_http"));
+            assert_eq!(event.message(), Some("outbound_http_transport_failed"));
+            event.fields["error"].as_str()
         })
         .collect();
     let [tls, connect, _protocol, _transport] = causes.as_slice() else {

@@ -2,30 +2,38 @@ use std::error::Error as _;
 
 use super::*;
 use crate::{
-    ConfigurationError, DiscoveryTransportError, KeycloakError, PreparationError,
-    TransportBuildFailure, TransportFailure, verify_keycloak_metadata,
+    DiscoveryError, DiscoveryTransportError, PreparationError, TransportBuildFailure,
+    TransportFailure, verify_oidc_metadata,
 };
+
+fn discovery_options(issuer: &str, fixture: &Fixture) -> (IssuerUrl, HttpOptions) {
+    let issuer = IssuerUrl::parse_http(issuer).unwrap();
+    let mut options = fixture.options();
+    options.auth.audience = issuer.clone();
+    (issuer, options)
+}
 
 #[tokio::test]
 async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
     let issuer_peer = Fixture::new().await;
     let provider = Fixture::new().await;
     let issuer = issuer_peer.origin.join("realms/operations/").unwrap();
-    let options = Options {
-        assertion_audience: issuer.to_string(),
-        ..provider.options()
-    };
+    let (issuer_url, options) = discovery_options(issuer.as_str(), &provider);
     let metadata = serde_json::json!({
         "issuer": issuer.as_str(),
         "token_endpoint": options.token_url.replacen("http:", "HTTP:", 1),
     });
     *issuer_peer.state.resource_response.lock().unwrap() = json_response(StatusCode::OK, &metadata);
-    let registration = Registration::prepare_keycloak_for_test_http(options)
+    let registration = Registration::prepare_with_oidc_discovery_for_test_http(issuer_url, options)
         .await
         .unwrap();
     for scope in ["catalog", "billing"] {
-        let (tokens, driver) =
-            registration.service_tokens(service_target(&[scope]), provider.resource_origin());
+        let (tokens, driver) = service_tokens_http(
+            &registration,
+            service_target(&[scope]),
+            provider.resource_origin(),
+        )
+        .unwrap();
         provider.drive(driver);
         let client = tokens.http(provider.resource_client()).unwrap();
         assert_eq!(
@@ -50,9 +58,9 @@ async fn one_secret_free_realm_lookup_verifies_a_separate_token_origin() {
 
 #[derive(Clone, Copy)]
 enum Expected {
-    Discovery(&'static str),
-    Status(StatusCode),
     Metadata(&'static str),
+    Status(StatusCode),
+    Decode(&'static str),
     ResponseLimit,
 }
 
@@ -60,24 +68,7 @@ enum Expected {
 async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
     let peer = Fixture::new().await;
     let issuer = peer.origin.join("realms/operations").unwrap().to_string();
-    let options = Options {
-        assertion_audience: issuer.clone(),
-        ..peer.options()
-    };
-    for (audience, invalid_key) in [
-        (issuer.as_str(), "assertion_audience"),
-        (ASSERTION_AUDIENCE, "token_url"),
-    ] {
-        let result = Registration::prepare_keycloak(Options {
-            assertion_audience: audience.to_owned(),
-            ..options.clone()
-        })
-        .await;
-        assert!(
-            matches!(result, Err(KeycloakError::Configuration(ConfigurationError { key, .. })) if key == invalid_key)
-        );
-    }
-    assert_eq!(peer.resource_request_count(), 0);
+    let (issuer_url, options) = discovery_options(&issuer, &peer);
     let metadata = |issuer: &str, endpoint: &str| {
         json_response(
             StatusCode::OK,
@@ -92,38 +83,41 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
     );
     let oversized_unavailable = format!(
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        TOKEN_LIMITS.response_body_bytes + 1,
+        TOKEN_LIMITS.response_body_bytes() + 1,
     );
     for (body, expected) in [
         (
-            metadata(&issuer.replacen("http:", "HTTP:", 1), &options.token_url),
-            Expected::Discovery("issuer differs from assertion_audience"),
+            metadata(
+                &issuer.replacen("http:", "HTTP:", 1),
+                options.token_url.as_str(),
+            ),
+            Expected::Metadata("issuer differs from configured issuer"),
         ),
         (
             metadata(&issuer, peer.origin.join("other").unwrap().as_str()),
-            Expected::Discovery("token_endpoint is invalid or differs from token_url"),
+            Expected::Metadata("token_endpoint is invalid or differs from token_url"),
         ),
         (
             metadata(&issuer, &options.token_url.replacen("://", "://@", 1)),
-            Expected::Discovery("token_endpoint is invalid or differs from token_url"),
+            Expected::Metadata("token_endpoint is invalid or differs from token_url"),
         ),
         (
             json_response(StatusCode::OK, &serde_json::json!({"issuer": issuer})),
-            Expected::Metadata("missing field"),
+            Expected::Decode("missing field"),
         ),
         (
             json_response(
                 StatusCode::OK,
-                &serde_json::json!({"issuer": 8_240_081, "token_endpoint": options.token_url}),
+                &serde_json::json!({"issuer": 8_240_081, "token_endpoint": options.token_url.as_str()}),
             ),
-            Expected::Metadata("8240081"),
+            Expected::Decode("8240081"),
         ),
         (
             json_response(
                 StatusCode::OK,
-                &serde_json::json!([issuer, options.token_url]),
+                &serde_json::json!([issuer, options.token_url.as_str()]),
             ),
-            Expected::Discovery("invalid issuer metadata"),
+            Expected::Metadata("invalid issuer metadata"),
         ),
         (redirect.into_bytes(), Expected::Status(StatusCode::FOUND)),
         (
@@ -137,16 +131,19 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
         (
             response(
                 StatusCode::OK,
-                &vec![b' '; TOKEN_LIMITS.response_body_bytes + 1],
+                &vec![b' '; TOKEN_LIMITS.response_body_bytes() + 1],
             ),
             Expected::ResponseLimit,
         ),
     ] {
         *peer.state.resource_response.lock().unwrap() = body;
         let attempts = peer.resource_request_count();
-        let error = Registration::prepare_keycloak_for_test_http(options.clone())
-            .await
-            .unwrap_err();
+        let error = Registration::prepare_with_oidc_discovery_for_test_http(
+            issuer_url.clone(),
+            options.clone(),
+        )
+        .await
+        .unwrap_err();
         assert_discovery_error(&error, expected);
         assert_redacted(&error, &[peer.origin.as_str(), "private-response-body"]);
         assert_eq!(peer.resource_request_count(), attempts + 1);
@@ -155,19 +152,19 @@ async fn inconsistent_unavailable_or_unbounded_metadata_refuses_registration() {
     peer.finish().await;
 }
 
-fn assert_discovery_error(error: &KeycloakError, expected: Expected) {
+fn assert_discovery_error(error: &DiscoveryError, expected: Expected) {
     assert!(error.to_string().contains("discovery"));
     match expected {
-        Expected::Discovery(reason) => std::assert_matches!(
+        Expected::Metadata(reason) => std::assert_matches!(
             error,
-            KeycloakError::Discovery(actual) if *actual == reason
+            DiscoveryError::Metadata(actual) if *actual == reason
         ),
         Expected::Status(status) => {
-            std::assert_matches!(error, KeycloakError::DiscoveryStatus(actual) if *actual == status);
+            std::assert_matches!(error, DiscoveryError::Status(actual) if *actual == status);
             assert!(error.to_string().contains(status.as_str()));
         }
-        Expected::Metadata(detail) => {
-            std::assert_matches!(error, KeycloakError::DiscoveryMetadata(_));
+        Expected::Decode(detail) => {
+            std::assert_matches!(error, DiscoveryError::Decode(_));
             let cause = error
                 .diagnostic_cause()
                 .unwrap()
@@ -179,7 +176,7 @@ fn assert_discovery_error(error: &KeycloakError, expected: Expected) {
         Expected::ResponseLimit => {
             std::assert_matches!(
                 error,
-                KeycloakError::DiscoveryTransport(failure) if failure.kind() == TransportFailure::ResponseLimit
+                DiscoveryError::Transport(failure) if failure.kind() == TransportFailure::ResponseLimit
             );
             std::assert_matches!(
                 error
@@ -195,12 +192,10 @@ fn assert_discovery_error(error: &KeycloakError, expected: Expected) {
 #[tokio::test]
 async fn discovery_deadline_is_a_distinct_transport_category() {
     let peer = Fixture::new().await;
-    let options = Options {
-        assertion_audience: peer.origin.join("realms/operations").unwrap().to_string(),
-        ..peer.options()
-    };
+    let issuer = peer.origin.join("realms/operations").unwrap().to_string();
+    let (issuer_url, options) = discovery_options(&issuer, &peer);
     let gate = peer.block_resources();
-    let setup = Registration::prepare_keycloak_for_test_http(options);
+    let setup = Registration::prepare_with_oidc_discovery_for_test_http(issuer_url, options);
     tokio::pin!(setup);
     poll_pending(setup.as_mut()).await;
     tokio::select! {
@@ -211,7 +206,7 @@ async fn discovery_deadline_is_a_distinct_transport_category() {
     let error = setup.await.unwrap_err();
     std::assert_matches!(
         &error,
-        KeycloakError::DiscoveryTransport(failure) if failure.kind() == TransportFailure::Timeout
+        DiscoveryError::Transport(failure) if failure.kind() == TransportFailure::Timeout
     );
     std::assert_matches!(
         error
@@ -229,8 +224,8 @@ async fn discovery_deadline_is_a_distinct_transport_category() {
 async fn preflight_reports_a_safe_category_when_connection_closes_before_headers() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let issuer = format!("https://{address}/realms/private-realm");
-    let endpoint = format!("{issuer}/token");
+    let issuer = IssuerUrl::parse(&format!("https://{address}/realms/private-realm")).unwrap();
+    let endpoint = TokenUrl::parse(&format!("{}/token", issuer.as_str())).unwrap();
     let close_connection = async {
         let (socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
@@ -238,14 +233,11 @@ async fn preflight_reports_a_safe_category_when_connection_closes_before_headers
             .unwrap();
         drop(socket);
     };
-    let (result, ()) = tokio::join!(
-        verify_keycloak_metadata(&issuer, &endpoint),
-        close_connection
-    );
+    let (result, ()) = tokio::join!(verify_oidc_metadata(&issuer, &endpoint), close_connection);
     let error = result.unwrap_err();
     std::assert_matches!(
         &error,
-        KeycloakError::DiscoveryTransport(failure) if failure.kind() == TransportFailure::Transport
+        DiscoveryError::Transport(failure) if failure.kind() == TransportFailure::Transport
     );
     assert!(error.to_string().contains("transport failed"));
     assert_eq!(
@@ -260,8 +252,9 @@ async fn preflight_reports_a_safe_category_when_connection_closes_before_headers
 fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
     const PRIVATE_DETAIL: &str = "sensitive-provider-detail";
     let source = || Box::new(std::io::Error::other(PRIVATE_DETAIL));
-    let build_failure = PreparationError::from(TransportBuildFailure::token_url(
-        infra_outbound_http::BuildError::Tls { source: source() },
+    let build_failure = PreparationError::from(TransportBuildFailure::new(
+        "token_url",
+        infra_outbound_http::test_support::tls_error(source()),
     ));
     assert!(
         build_failure
@@ -278,7 +271,20 @@ fn startup_diagnostics_retain_causes_outside_the_redacted_error_chain() {
             .to_string(),
         PRIVATE_DETAIL
     );
-    let request_failure = KeycloakError::DiscoveryTransport(DiscoveryTransportError::new(
+    let issuer_failure = DiscoveryError::from(TransportBuildFailure::issuer(
+        infra_outbound_http::test_support::tls_error(source()),
+    ));
+    assert!(issuer_failure.to_string().contains("for issuer"));
+    assert_redacted(&issuer_failure, &[PRIVATE_DETAIL]);
+    assert_eq!(
+        issuer_failure
+            .diagnostic_cause()
+            .and_then(std::error::Error::source)
+            .unwrap()
+            .to_string(),
+        PRIVATE_DETAIL
+    );
+    let request_failure = DiscoveryError::Transport(DiscoveryTransportError::new(
         infra_outbound_http::Error::Transport { source: source() },
     ));
     assert_redacted(&request_failure, &[PRIVATE_DETAIL]);

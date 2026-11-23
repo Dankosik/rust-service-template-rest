@@ -1,5 +1,5 @@
 interface:
   display_name: "Grilling"
-  short_description: "Stress-test a plan in frontier rounds"
+  short_description: "Stress-test a plan or design via interview"
 policy:
   allow_implicit_invocation: false

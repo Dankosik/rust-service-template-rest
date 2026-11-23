@@ -1,5 +1,5 @@
 use super::exporter::{
-    CERTIFICATE_VARS, CLIENT_CERTIFICATE_VARS, CLIENT_KEY_VARS, SettingScope, TrustFile,
+    CERTIFICATE_VARS, CLIENT_CERTIFICATE_VARS, CLIENT_KEY_VARS, EnvScope, TrustFile,
 };
 use super::*;
 
@@ -13,7 +13,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 pub(super) fn tracer_provider(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
     env: impl Fn(&str) -> Option<OsString>,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
@@ -115,15 +115,15 @@ async fn expired_or_short_shutdown_still_attempts_sdk_and_reports_unfinished_wor
     }
 }
 
-pub(super) fn options(endpoint: &str) -> TracingOptions {
+pub(super) fn options(endpoint: &str) -> TracingOptions<'_> {
     TracingOptions {
-        service_name: "svc".into(),
-        service_version: "1.0.0".into(),
-        vcs_revision: "abc".into(),
-        instance_id: Some(String::new()),
-        deployment_environment: "test".into(),
+        service_name: "svc",
+        service_version: "1.0.0",
+        vcs_revision: "abc",
+        instance_id: Some(""),
+        deployment_environment: "test",
         sampler: ResolvedSampler::AlwaysOn,
-        otlp_endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
+        otlp_endpoint: (!endpoint.is_empty()).then_some(endpoint),
         otlp_headers: None,
     }
 }
@@ -142,7 +142,7 @@ fn span_processor_uses_positive_sizes_and_preserves_valid_overrides() {
         (vec![(batch, "")], 16_384, 512, vec![]),
         (vec![(batch, "4096")], 16_384, 4096, vec![]),
     ] {
-        let (config, invalid) = batch_config(&env(&vars));
+        let (config, invalid) = batch_config_from_env(&env(&vars));
         let config = format!("{config:?}");
         assert!(config.contains(&format!("max_queue_size: {queue_size},")));
         assert!(config.contains(&format!("max_export_batch_size: {batch_size},")));
@@ -195,7 +195,7 @@ fn finished_exports_are_counted_by_outcome() {
         let export = |exporter: Fixed, timeout: Duration, spans: usize| {
             let _ = ObservedExporter {
                 inner: exporter,
-                timeout,
+                export_timeout: timeout,
                 drain: Arc::default(),
             }
             .export(Vec::from_fn(spans, |_| span()))
@@ -251,7 +251,7 @@ fn finished_exports_are_counted_by_outcome() {
 #[test]
 fn resource_carries_typed_identity_and_defaults_to_a_stable_process_uuid() {
     let mut options = options("");
-    options.instance_id = Some("instance-1".to_owned());
+    options.instance_id = Some("instance-1");
     let resource = resource(&options);
     let get = |key: &str| {
         resource
@@ -279,7 +279,7 @@ fn resource_carries_typed_identity_and_defaults_to_a_stable_process_uuid() {
     let generated = super::resource(&options).get(&instance_key).unwrap();
     let uuid = Uuid::parse_str(&generated.to_string()).unwrap();
     assert_eq!(uuid.get_version(), Some(uuid::Version::Random));
-    options.instance_id = Some("  ".to_owned());
+    options.instance_id = Some("  ");
     assert_eq!(
         super::resource(&options).get(&instance_key),
         Some(generated)

@@ -1,11 +1,12 @@
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _};
-use health::{Readiness, ReadinessControl, RefreshPolicy};
+use health::{BoxedProbe, Readiness, ReadinessControl, RefreshPolicy};
 use infra_http::HardenOptions;
 use infra_http_transport::{ConnectionLimits, Drained, Http1Options, Server};
-use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
+use infra_postgres::{CloseOutcome, Pool, PostgresProbe};
 use integration_tests::{poll_until, propagate_join_panic};
+use sqlx::PgPool;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -36,22 +37,22 @@ const POLICY: RefreshPolicy = match RefreshPolicy::try_new(
     Err(_) => panic!("valid refresh policy"),
 };
 
-async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {
-    let mut connection = infra_postgres::acquire(pool, "recovery consumer").await?;
+async fn value(pool: &Pool) -> Result<String, sqlx::Error> {
+    let mut connection = pool.acquire("recovery consumer").await?;
     sqlx::query_scalar("SELECT value FROM recovery_value")
         .fetch_one(&mut *connection)
         .await
 }
 
 #[utoipa::path(get, path = "/useful", responses((status = 200), (status = 503)))]
-async fn http_value(State(pool): State<PgPool>) -> axum::response::Response {
+async fn http_value(State(pool): State<Pool>) -> axum::response::Response {
     match value(&pool).await {
         Ok(value) => value.into_response(),
         Err(_) => infra_http::Problem::new(infra_http::Code::ServiceUnavailable).into_response(),
     }
 }
 
-fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Application {
+fn http_router(pool: Pool, readiness: &ReadinessControl) -> infra_http::Application {
     infra_http::http_route!(http_value)
         .unwrap()
         .with_state(pool)
@@ -74,7 +75,7 @@ fn http_router(pool: PgPool, readiness: &ReadinessControl) -> infra_http::Applic
 }
 
 struct Instance {
-    pool: PgPool,
+    pool: Pool,
     readiness: ReadinessControl,
     cancel: CancellationToken,
     refresh: JoinHandle<()>,
@@ -88,8 +89,11 @@ struct Instance {
 }
 
 impl Instance {
-    async fn start(pool: PgPool) -> Self {
-        let probes = Readiness::new(vec![Box::new(PostgresProbe::new(pool.clone()))], POLICY);
+    async fn start(pool: Pool) -> Self {
+        let probes = Readiness::new(
+            vec![BoxedProbe::new(PostgresProbe::new(pool.clone()))],
+            POLICY,
+        );
         let readiness = probes.control();
         let refresher = probes.prepare().await.unwrap().activate().unwrap();
         assert!(readiness.reader().verdict().is_ok());
@@ -275,11 +279,13 @@ impl Instance {
                 .unwrap(),
             Drained::Complete
         );
-        assert_eq!(self.pool.options().get_max_connections(), 1);
         assert_eq!(
-            infra_postgres::close(&self.pool, CALL).await,
-            CloseOutcome::Complete
+            infra_postgres::test_support::as_sqlx(&self.pool)
+                .options()
+                .get_max_connections(),
+            1
         );
+        assert_eq!(self.pool.close(CALL).await, CloseOutcome::Complete);
     }
 }
 
@@ -368,9 +374,8 @@ async fn publish(pool: &PgPool, expected: &str) {
 }
 
 #[expect(
-    clippy::disallowed_methods,
     clippy::print_stdout,
-    reason = "hold raw pool capacity and print observed recovery timing with --no-capture"
+    reason = "print observed recovery timing with --no-capture"
 )]
 #[sqlx::test(migrations = false)]
 async fn consumers_recover_from_local_pressure_shared_interruption_and_admission(pool: PgPool) {
@@ -392,7 +397,10 @@ async fn consumers_recover_from_local_pressure_shared_interruption_and_admission
     a.useful("initial").await;
     b.useful("initial").await;
 
-    let mut held = a.pool.acquire().await.unwrap();
+    let mut held = infra_postgres::test_support::as_sqlx(&a.pool)
+        .acquire()
+        .await
+        .unwrap();
     let started = Instant::now();
     a.state(false).await;
     assert_eq!(
@@ -459,7 +467,7 @@ mod grpc {
         echo_service_client::EchoServiceClient,
         echo_service_server::{EchoService, EchoServiceServer},
     };
-    use infra_grpc::{Limits, Services};
+    use infra_grpc::{Limits, ServerOptions, Services};
     use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
     use std::pin::Pin;
     use tonic::{Request, Response, Status};
@@ -468,7 +476,7 @@ mod grpc {
         health_client::HealthClient,
     };
 
-    struct DatabaseEcho(PgPool);
+    struct DatabaseEcho(Pool);
     type Output<T> = Pin<Box<dyn futures_util::Stream<Item = Result<T, Status>> + Send>>;
 
     #[tonic::async_trait]
@@ -541,7 +549,7 @@ mod grpc {
     }
 
     impl Consumer {
-        pub(super) async fn start(pool: PgPool, reader: health::ReadinessReader) -> Self {
+        pub(super) async fn start(pool: Pool, reader: health::ReadinessReader) -> Self {
             #[allow(unused_variables, reason = "the bearer profile replaces the test mode")]
             let authentication = infra_grpc::Authentication::None;
             // template:end postgres-grpc-consumers:recovery-grpc-module-3
@@ -554,15 +562,18 @@ mod grpc {
             services
                 .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
                 .unwrap();
-            services
+            #[allow(
+                unused_mut,
+                unused_variables,
+                reason = "the bearer profile registers scope requirements on the handle"
+            )]
+            let mut echo = services
                 .add(EchoServiceServer::new(DatabaseEcho(pool)))
                 .unwrap();
             // template:end postgres-grpc-consumers:recovery-grpc-module-4
             // template:begin postgres-grpc-auth:recovery-scope-requirements
             for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
-                services
-                    .require_scopes(&format!("/example.v1.EchoService/{method}"), &[])
-                    .unwrap();
+                echo.require_scopes(method, &[]).unwrap();
             }
             // template:end postgres-grpc-auth:recovery-scope-requirements
             // template:begin postgres-grpc-consumers:recovery-grpc-module-bounds
@@ -575,20 +586,32 @@ mod grpc {
                 max_connections: NonZeroU32::new(4096),
                 max_connection_age: None,
             });
-            let app = infra_grpc::router(services, reader, authentication, limits, false).unwrap();
+            let app = services
+                .build(
+                    reader,
+                    authentication,
+                    ServerOptions {
+                        limits,
+                        trust_trace_context: false,
+                    },
+                )
+                .unwrap();
             let listener =
                 infra_http_transport::BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let server = app.serve(listener, options, None).unwrap();
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
-                Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),
+                Client::builder(&destination, ClientSecurity::Plaintext, CALL)
+                    .build()
+                    .unwrap(),
             );
             let mut health = HealthClient::new(
-                Client::with_timeout_policy(
+                Client::builder(
                     &destination,
                     ClientSecurity::Plaintext,
                     ClientTimeout::OpeningOnly(CALL),
                 )
+                .build()
                 .unwrap(),
             );
             let watch = timeout(CALL, health.watch(health_request()))
@@ -701,22 +724,8 @@ mod grpc {
         };
         use infra_http_transport::{BoundListener, TlsOptions};
         use std::{num::NonZeroUsize, sync::Arc};
-        use tokio_rustls::rustls::{
-            self,
-            pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-        };
         let material = tls_test_support::TlsMaterial::new("provider.test");
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(material.cert)],
-            PrivatePkcs8KeyDer::from(material.key).into(),
-        )
-        .unwrap();
+        let config = material.server_config_tls13();
         let router = axum::Router::new().route("/introspect", axum::routing::post(|| async {
             let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
             axum::Json(serde_json::json!({"active": true, "iss": "https://issuer.example", "aud": "api", "sub": "consumer", "exp": expiry}))
@@ -746,22 +755,22 @@ mod grpc {
         )
         .unwrap();
         let verifier = prepare_introspection_with_fixture(
-            IntrospectionOptions {
-                issuer: IssuerUrl::parse("https://issuer.example").unwrap(),
-                audiences: vec!["api".to_owned()],
-                endpoint: EndpointUrl::parse(&format!(
+            IntrospectionOptions::try_new(
+                &IssuerUrl::parse("https://issuer.example").unwrap(),
+                vec!["api".to_owned()],
+                EndpointUrl::parse(&format!(
                     "https://provider.test:{}/introspect",
                     server.local_addr().port()
                 ))
                 .unwrap(),
-                client_id: "fixture".to_owned(),
-                client_secret: secrecy::SecretString::from("fixture"),
-                provider_concurrency: const { NonZeroUsize::new(16).expect("16 is nonzero") },
-                cache: None,
-            },
+                "fixture".to_owned(),
+                secrecy::SecretString::from("fixture"),
+                const { NonZeroUsize::new(16).expect("16 is nonzero") },
+                None,
+            )
+            .unwrap(),
             fixture,
-        )
-        .unwrap();
+        );
         (verifier, server, cancel)
     }
     // template:end postgres-grpc-auth:recovery-provider

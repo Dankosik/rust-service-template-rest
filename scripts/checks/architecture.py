@@ -14,6 +14,7 @@ from typing import Any
 from scripts import lib
 
 _PATH_ATTR_RE = re.compile(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]')
+_INCLUDE_MACRO_RE = re.compile(r'\binclude_(?:bytes|str)!\s*\(\s*"([^"]+)"\s*\)')
 
 
 def check_path_attributes(manifests: Sequence[str], root: Path) -> list[str]:
@@ -27,10 +28,15 @@ def check_path_attributes(manifests: Sequence[str], root: Path) -> list[str]:
         for src in sorted(directory.rglob("*.rs")):
             if "target" in src.relative_to(directory).parts or owner(src) != directory:
                 continue
-            for match in _PATH_ATTR_RE.finditer(src.read_text(encoding="utf-8")):
+            text = src.read_text(encoding="utf-8")
+            rel = src.relative_to(root).as_posix()
+            for match in _PATH_ATTR_RE.finditer(text):
                 if owner((src.parent / match.group(1)).resolve()) != directory:
-                    rel = src.relative_to(root).as_posix()
                     issues.append(f"{rel}: #[path] reaches outside its package ({match.group(1)})")
+            for match in _INCLUDE_MACRO_RE.finditer(text):
+                target_owner = owner((src.parent / match.group(1)).resolve())
+                if target_owner is not None and target_owner != directory:
+                    issues.append(f"{rel}: include_*! reaches into another package ({match.group(1)})")
     return issues
 
 
@@ -47,6 +53,7 @@ def check(metadata: Mapping[str, Any], policy: Mapping[str, Any], root: Path) ->
 
     dir_to_manifest = {(root / rel).parent.resolve(): rel for rel in packages}
     issues: list[str] = []
+    normal_edges: set[tuple[str, str]] = set()
 
     for path, pkg in sorted(packages.items()):
         owner = members.get(path)
@@ -67,14 +74,19 @@ def check(metadata: Mapping[str, Any], policy: Mapping[str, Any], root: Path) ->
             if target is None or target not in members:
                 issues.append(f"{label}: local dependency outside classified workspace ({local_path})")
                 continue
+            if rule.get("no_workspace_dependencies"):
+                issues.append(f"{label}: {rule['rule']} forbids workspace dependency ({target})")
+                continue
             if kind == "dev" or rule.get("test_only"):
                 continue
+            normal_edges.add((path, target))
             target_role = members[target]["role"]
             if roles[target_role].get("test_only"):
                 issues.append(f"{label}: production dependency on test-only crate ({target})")
                 continue
             allowed = (
-                target_role in rule.get("allow_roles", ())
+                bool(roles[target_role].get("allow_all_dependents"))
+                or target_role in rule.get("allow_roles", ())
                 or path in members[target].get("allow_dependents", {}).get("members", ())
             )
             for allowances in (rule.get("allow_members", {}), owner.get("allow_members", {})):
@@ -83,6 +95,27 @@ def check(metadata: Mapping[str, Any], policy: Mapping[str, Any], root: Path) ->
                     allowed = True
             if target_role in rule.get("deny_roles", ()) or not allowed:
                 issues.append(f"{label}: {rule['rule']} forbids {target} (role={target_role})")
+
+    for target_path, cfg in sorted(members.items()):
+        if target_path not in packages:
+            continue
+        for dep_path in cfg.get("allow_dependents", {}).get("members", ()):
+            if dep_path not in packages or (dep_path, target_path) not in normal_edges:
+                issues.append(f"{target_path}: stale allow_dependents entry {dep_path}")
+        for allowed_target in cfg.get("allow_members", {}):
+            if allowed_target not in packages or (target_path, allowed_target) not in normal_edges:
+                issues.append(f"{target_path}: stale allow_members entry {allowed_target}")
+
+    for role_name, rcfg in sorted(roles.items()):
+        allow_members = rcfg.get("allow_members", {})
+        if not allow_members:
+            continue
+        role_members = [p for p in packages if members.get(p, {}).get("role") == role_name]
+        for allowed_target in allow_members:
+            if allowed_target not in packages or (
+                role_members and not any((src, allowed_target) in normal_edges for src in role_members)
+            ):
+                issues.append(f"role {role_name}: stale allow_members entry {allowed_target}")
 
     issues.extend(check_path_attributes(list(packages), root))
     return sorted(issues)

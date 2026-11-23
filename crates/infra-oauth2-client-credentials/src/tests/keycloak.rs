@@ -4,9 +4,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, StatusCode, Uri, header};
-use infra_outbound_http::Client;
+use http::{HeaderValue, Method, Request, StatusCode, header};
+use infra_outbound_http::{Client, Origin};
 use jsonwebtoken::jwk::Jwk;
+use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
 use secrecy::SecretString;
 use tokio::{sync::watch, task::JoinHandle, time::Instant};
@@ -14,10 +15,13 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    AcquisitionError, Algorithm, Options, Rejection, TOKEN_LIMITS, acquisition_deadline,
-    exchange_target, service_target, token_context,
+    AcquisitionError, Algorithm, EXCHANGE_CAPACITY, Rejection, TOKEN_LIMITS, acquisition_deadline,
+    exchange_target, nonzero, service_target, token_context,
 };
-use crate::{Registration, ServiceTokenTarget, ServiceTokens, token::Token};
+use crate::{
+    IssuerUrl, OnBehalfOf, PrivateKeyJwt, Registration, ServiceTokenTarget, ServiceTokens,
+    test_support::HttpOptions, token::Token,
+};
 
 const KEY_ID: &str = "key-1";
 const CATALOG: &str = "catalog";
@@ -55,7 +59,8 @@ impl Realm {
             panic!("OAUTH_TEST_KEYCLOAK_URL is unset; run just test-integration-oauth")
         });
         let origin = Url::parse(&origin).unwrap();
-        let http = Client::try_new_for_test_http(&origin, TOKEN_LIMITS).unwrap();
+        let http =
+            infra_outbound_http::test_support::client_http(origin.as_str(), TOKEN_LIMITS).unwrap();
         let (driver_shutdown, _) = watch::channel(());
         let mut realm = Self {
             origin,
@@ -136,7 +141,10 @@ impl Realm {
 
     async fn send(&self, request: Request<Bytes>) -> http::Response<Bytes> {
         self.http
-            .execute(request, Instant::now() + Duration::from_secs(30))
+            .execute(
+                &OperationContext::with_timeout(Duration::from_secs(30)),
+                request,
+            )
             .await
             .unwrap()
     }
@@ -285,17 +293,19 @@ impl Realm {
         key: &KeyPair,
         key_id: &str,
     ) -> Registration {
-        let endpoint = self.token_endpoint(&self.name);
-        let options = Options {
-            token_url: endpoint.to_string(),
+        let issuer = IssuerUrl::parse_http(&self.issuer()).unwrap();
+        let options = HttpOptions {
+            token_url: self.token_endpoint(&self.name).into(),
             client_id: caller(algorithm),
-            private_key: SecretString::from(key.serialize_pem()),
-            key_id: key_id.to_owned(),
-            algorithm,
-            assertion_audience: self.issuer(),
-            provider_concurrency: 32,
+            auth: PrivateKeyJwt {
+                private_key: SecretString::from(key.serialize_pem()),
+                key_id: key_id.to_owned(),
+                algorithm,
+                audience: issuer.clone(),
+            },
+            provider_concurrency: nonzero(32),
         };
-        Registration::prepare_keycloak_for_test_http(options)
+        Registration::prepare_with_oidc_discovery_for_test_http(issuer, options)
             .await
             .unwrap()
     }
@@ -391,8 +401,8 @@ fn caller(algorithm: Algorithm) -> String {
     format!("caller-{algorithm:?}").to_lowercase()
 }
 
-fn resource_origin(recipient: &str) -> Uri {
-    format!("https://{recipient}.example").parse().unwrap()
+fn resource_origin(recipient: &str) -> Origin {
+    Origin::parse_https(&format!("https://{recipient}.example")).unwrap()
 }
 
 fn key_pair(algorithm: Algorithm) -> KeyPair {
@@ -497,10 +507,13 @@ async fn one_registration_issues_recipient_specific_service_tokens_and_exchanges
             .exchange_tokens(
                 exchange_target(&[CATALOG_SCOPE, BILLING_SCOPE], Some(CATALOG)),
                 resource_origin(CATALOG),
-                1024,
+                EXCHANGE_CAPACITY,
             )
             .unwrap()
-            .exchange(&subject, acquisition_deadline(&token_context()))
+            .acquire_for_request(
+                &OnBehalfOf::try_new(subject).unwrap(),
+                acquisition_deadline(&token_context()),
+            )
             .await
             .unwrap();
         let exchanged = claims(&exchanged);
@@ -649,16 +662,16 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
         AcquisitionError::Rejected(Rejection::InvalidScope)
     );
 
-    let subject = SecretString::from("not-a-token");
+    let subject = OnBehalfOf::try_new(SecretString::from("not-a-token")).unwrap();
     assert_eq!(
         registered
             .exchange_tokens(
                 exchange_target(&[CATALOG_SCOPE], Some(CATALOG)),
                 resource_origin(CATALOG),
-                1024,
+                EXCHANGE_CAPACITY,
             )
             .unwrap()
-            .exchange(&subject, acquisition_deadline(&token_context()))
+            .acquire_for_request(&subject, acquisition_deadline(&token_context()))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidRequest)

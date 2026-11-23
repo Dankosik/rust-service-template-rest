@@ -12,6 +12,7 @@ use infra_bearerauthn::{
 };
 use operation_context::OperationContext;
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
+use tower_http::request_id::RequestId;
 use utoipa::{IntoResponses, ToResponse};
 
 use crate::contract::{Access, Policy, layer_routes};
@@ -19,33 +20,7 @@ pub use crate::problem::responses::GatewayTimeout;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 #[derive(Clone, Debug)]
-pub struct VerifiedPrincipal(Principal);
-
-impl VerifiedPrincipal {
-    pub(crate) fn from_extensions(extensions: &Extensions) -> Option<Self> {
-        extensions.get::<Principal>().cloned().map(Self)
-    }
-
-    delegate::delegate! {
-        to self.0 {
-            #[must_use]
-            pub fn issuer(&self) -> &str;
-            #[must_use]
-            pub fn subject(&self) -> Option<&str>;
-            #[must_use]
-            pub fn client_id(&self) -> Option<&str>;
-            #[must_use]
-            pub fn scopes(&self) -> &[String];
-            pub fn claims<'a, T: serde::Deserialize<'a>>(
-                &'a self,
-            ) -> Result<T, infra_bearerauthn::ClaimAccessError>;
-            #[must_use]
-            pub fn expires_at(&self) -> u64;
-            #[must_use]
-            pub fn actor(&self) -> Option<&infra_bearerauthn::Actor>;
-        }
-    }
-}
+pub struct VerifiedPrincipal(pub Principal);
 
 impl<S> FromRequestParts<S> for VerifiedPrincipal
 where
@@ -57,10 +32,24 @@ where
         parts: &mut Parts,
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(
-            Self::from_extensions(&parts.extensions)
-                .ok_or_else(crate::context::missing_extension::<Self>),
-        )
+        std::future::ready(crate::context::extension::<Principal>(parts).map(Self))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedDelegation(pub DelegationCredential);
+
+impl<S> FromRequestParts<S> for VerifiedDelegation
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(crate::context::extension::<DelegationCredential>(parts).map(Self))
     }
 }
 
@@ -98,11 +87,7 @@ async fn authenticate(
     };
     match policy.access(path, request.method()) {
         Some(Access::Public) => next.run(request).await,
-        None => {
-            policy
-                .unregistered_response(Some(path), request.method())
-                .await
-        }
+        None => policy.unregistered_response(Some(path), request.method()),
         Some(Access::Protected(required)) => {
             authenticate_protected(verifier, required, request, next).await
         }
@@ -111,7 +96,6 @@ async fn authenticate(
 
 pub(crate) fn strip_identity(extensions: &mut Extensions) {
     extensions.remove::<Principal>();
-    extensions.remove::<VerifiedPrincipal>();
     extensions.remove::<DelegationCredential>();
 }
 
@@ -131,14 +115,15 @@ async fn authenticate_protected(
             .iter()
             .map(axum::http::HeaderValue::as_bytes);
         verifier
-            .authenticate_presented_with_context(
-                authorization,
-                Transport::Http,
-                context.operation(),
-            )
+            .authenticate_presented(context.operation(), authorization, Transport::Http)
             .await
     };
-    let (principal, delegation) = match authorize(context.operation(), result, required) {
+    let (principal, delegation) = match authorize(
+        context.operation(),
+        result,
+        required,
+        request.extensions().get::<RequestId>(),
+    ) {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
@@ -158,17 +143,24 @@ fn authorize(
     operation: &OperationContext,
     result: Result<(Principal, PresentedToken<'_>), Failure>,
     required: &ProtectedAccess,
+    request_id: Option<&RequestId>,
 ) -> Result<(Principal, Option<DelegationCredential>), Response> {
-    if let Some(stopped) = operation.stopped() {
-        return Err(Problem::from(stopped).into_response());
-    }
-    let (principal, token) = result.map_err(failure_response)?;
+    let (principal, token) = result.map_err(|failure| {
+        if failure == Failure::Unavailable
+            && let Some(stopped) = operation.stopped()
+        {
+            return Problem::from(stopped)
+                .with_request_id(request_id)
+                .into_response();
+        }
+        failure_response(failure, request_id)
+    })?;
     if !required
         .scope_alternatives
         .iter()
-        .any(|scopes| principal.has_scopes(scopes))
+        .any(|scopes| principal.has_scopes(scopes.iter()))
     {
-        return Err(insufficient_scope_response());
+        return Err(insufficient_scope_response(request_id));
     }
     Ok((
         principal,
@@ -181,9 +173,10 @@ fn authorize(
 #[derive(Clone, Copy)]
 pub(super) struct InsufficientScope;
 
-fn insufficient_scope_response() -> Response {
+fn insufficient_scope_response(request_id: Option<&RequestId>) -> Response {
     let mut response = Problem::new(Code::Forbidden)
         .detail_static(INSUFFICIENT_SCOPE_DETAIL)
+        .with_request_id(request_id)
         .into_response();
     response.extensions_mut().insert(InsufficientScope);
     response.headers_mut().insert(
@@ -198,7 +191,7 @@ fn wiring_failure(failure: &'static str) -> Response {
     sanitized_internal_error()
 }
 
-fn failure_response(failure: Failure) -> Response {
+fn failure_response(failure: Failure, request_id: Option<&RequestId>) -> Response {
     let (code, challenge) = match failure {
         Failure::Missing => (Code::AuthenticationRequired, Some("Bearer realm=\"api\"")),
         Failure::Malformed => (
@@ -213,6 +206,7 @@ fn failure_response(failure: Failure) -> Response {
     };
     let mut response = Problem::new(code)
         .detail_static(failure.as_str())
+        .with_request_id(request_id)
         .into_response();
     if let Some(challenge) = challenge {
         response.headers_mut().insert(
@@ -275,7 +269,7 @@ mod tests {
             scope_alternatives: Box::new([]),
             delegate: false,
         };
-        let response = authorize(&context, Err(Failure::Unavailable), &required).unwrap_err();
+        let response = authorize(&context, Err(Failure::Unavailable), &required, None).unwrap_err();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response.headers().contains_key(WWW_AUTHENTICATE));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
@@ -291,8 +285,25 @@ mod tests {
             Failure::Invalid,
             Failure::Unavailable,
         ] {
-            let problem = body_json(failure_response(failure)).await;
+            let problem = body_json(failure_response(failure, None)).await;
             assert_eq!(problem["detail"], failure.to_string());
         }
+    }
+
+    #[tokio::test]
+    async fn missing_delegation_credential_is_a_sanitized_internal_failure() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt as _;
+
+        let handler = |_: VerifiedDelegation| async { "unreachable" };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = Router::new().route("/", get(handler));
+        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
     }
 }

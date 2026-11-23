@@ -1,5 +1,5 @@
 interface:
   display_name: "Idea Refine"
-  short_description: "Converge a raw idea into one direction"
+  short_description: "Converge a raw idea into an MVP bet"
 policy:
   allow_implicit_invocation: false

@@ -3,7 +3,9 @@ use std::{mem::DropGuard, sync::OnceLock};
 use enum_map::EnumMap;
 use operation_context::{OperationContext, Stopped};
 
-use crate::{Failure, PresentedToken, Principal, Verifier, parse_bearer};
+use crate::{
+    Failure, PresentedToken, Principal, Verifier, parse_bearer, verifier::VerificationOutcome,
+};
 
 pub(crate) const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
@@ -81,6 +83,13 @@ impl Refusal {
         }
     }
 
+    const fn failure(self) -> Failure {
+        match self {
+            Self::Failure(failure) => failure,
+            Self::TimedOut | Self::Cancelled => Failure::Unavailable,
+        }
+    }
+
     const fn labels(self) -> (&'static str, &'static str) {
         match self {
             Self::Failure(Failure::Missing) => ("failure", "missing"),
@@ -94,60 +103,62 @@ impl Refusal {
 }
 
 impl Verifier {
-    #[cfg(any(test, feature = "test-support"))]
     pub async fn authenticate<'a>(
         &self,
-        authorization: impl IntoIterator<Item = &'a [u8]>,
-        transport: Transport,
-    ) -> Result<Principal, Failure> {
-        self.authenticate_with_context(
-            authorization,
-            transport,
-            &OperationContext::with_timeout(crate::provider::PROVIDER_TIMEOUT),
-        )
-        .await
-    }
-
-    pub async fn authenticate_with_context<'a>(
-        &self,
-        authorization: impl IntoIterator<Item = &'a [u8]>,
-        transport: Transport,
         context: &OperationContext,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+        transport: Transport,
     ) -> Result<Principal, Failure> {
-        self.authenticate_presented_with_context(authorization, transport, context)
+        self.authenticate_presented(context, authorization, transport)
             .await
             .map(|(principal, _)| principal)
     }
 
-    pub async fn authenticate_presented_with_context<'a>(
+    pub async fn authenticate_presented<'a>(
         &self,
+        context: &OperationContext,
         authorization: impl IntoIterator<Item = &'a [u8]>,
         transport: Transport,
-        context: &OperationContext,
     ) -> Result<(Principal, PresentedToken<'a>), Failure> {
-        let counters = &self.counters.transport;
+        let counters = self.transport_counters();
         let refusal_guard = DropGuard::new(transport, |transport| {
             let refusal = context
                 .stopped()
                 .map_or(Refusal::Cancelled, Refusal::from_stopped);
             counters.record_refusal(transport, refusal);
         });
-        let result = match parse_bearer(authorization) {
-            Ok(token) => self
-                .verify_with_context(&token, context)
-                .await
-                .map(|principal| (principal, token)),
-            Err(failure) => Err(failure),
-        };
+        let admission = self.admit(context, authorization).await;
         DropGuard::dismiss(refusal_guard);
-        if let Err(stopped) = context.check() {
-            counters.record_refusal(transport, Refusal::from_stopped(stopped));
-            return Err(Failure::Unavailable);
+        match admission {
+            Ok(admitted) => {
+                counters.record_success(transport);
+                Ok(admitted)
+            }
+            Err(refusal) => {
+                counters.record_refusal(transport, refusal);
+                Err(refusal.failure())
+            }
         }
-        match &result {
-            Ok(_) => counters.record_success(transport),
-            Err(failure) => counters.record_refusal(transport, Refusal::Failure(*failure)),
+    }
+
+    async fn admit<'a>(
+        &self,
+        context: &OperationContext,
+        authorization: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<(Principal, PresentedToken<'a>), Refusal> {
+        let token = match parse_bearer(authorization) {
+            Ok(token) => token,
+            Err(failure) => {
+                return Err(match context.check() {
+                    Ok(()) => Refusal::Failure(failure),
+                    Err(stopped) => Refusal::from_stopped(stopped),
+                });
+            }
+        };
+        match self.verify_checked(&token, context).await {
+            VerificationOutcome::Verified(principal) => Ok((principal, token)),
+            VerificationOutcome::Failed(failure) => Err(Refusal::Failure(failure)),
+            VerificationOutcome::Stopped(stopped) => Err(Refusal::from_stopped(stopped)),
         }
-        result
     }
 }

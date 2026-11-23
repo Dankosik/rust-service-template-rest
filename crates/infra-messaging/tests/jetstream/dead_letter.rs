@@ -23,30 +23,25 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     let _local_recorder = metrics::set_default_local_recorder(&recorder);
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted");
-    let (called_tx, called_rx) = oneshot::channel();
-    let called_tx = Arc::new(Mutex::new(Some(called_tx)));
+    let (called_tx, mut called_rx) = tokio::sync::mpsc::channel(1);
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, move |_, _| {
-            let sender = called_tx
-                .lock()
-                .expect("test handler signal lock must not be poisoned")
-                .take();
-            if let Some(sender) = sender {
-                let _ = sender.send(());
-            }
-            async { Err(HandlerError::Permanent) }
-        })
+        .register(
+            &fixture.route,
+            move |_: Event<ExampleEvent>, _: OperationContext| {
+                let _ = called_tx.try_send(());
+                std::future::ready(Err(HandlerError::Permanent))
+            },
+        )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -59,10 +54,10 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     let before = UNIX_EPOCH.elapsed().expect("wall clock after Unix epoch");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
-    timeout(Duration::from_secs(3), called_rx)
+    timeout(Duration::from_secs(3), called_rx.recv())
         .await
         .expect("permanent handler must receive one delivery")
         .expect("handler signal must remain connected");
@@ -116,7 +111,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     assert_eq!(redrive.publication_id(), repeated.publication_id());
     let redrive_ack = messaging
         .producer()
-        .publish(&redrive, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &redrive)
         .await
         .expect("redrive publication receives a JetStream acknowledgment");
     assert_eq!(redrive_ack.stream, fixture.stream);
@@ -144,29 +139,31 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
                 Some(consumer_options(&fixture)),
                 1024,
             ),
-            deadline(),
-            cancel.clone(),
+            &context(deadline(), &cancel),
         )
         .await
         .unwrap();
         let mut registered = fixture.registry.clone();
         registered
-            .register(&fixture.route, |_, _| async {
-                Err(HandlerError::Permanent)
-            })
+            .register(
+                &fixture.route,
+                |_: Event<ExampleEvent>, _: OperationContext| async {
+                    Err(HandlerError::Permanent)
+                },
+            )
             .unwrap();
         let prepared = fixture
             .publication
             .prepare(&event("lost-transfer-ack"))
             .unwrap();
         let mut handle = messaging
-            .consumer(registered, deadline(), &cancel)
+            .consumer(registered, &context(deadline(), &cancel))
             .await
             .unwrap()
             .start(&cancel);
         messaging
             .producer()
-            .publish(&prepared, &context(deadline(), &cancel))
+            .publish(&context(deadline(), &cancel), &prepared)
             .await
             .unwrap();
         let first = wait_for_dead_letter(&fixture).await;
@@ -206,24 +203,26 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
 async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_to_dlq() {
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
     let mut handlers = fixture.registry.clone();
     handlers
-        .register(&fixture.route, move |_, _| {
-            calls_for_handler.fetch_add(1, Ordering::SeqCst);
-            async { Ok(()) }
-        })
+        .register(
+            &fixture.route,
+            move |_: Event<ExampleEvent>, _: OperationContext| {
+                calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(handlers, deadline(), &cancel)
+        .consumer(handlers, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -250,8 +249,7 @@ async fn malformed_and_unknown_envelopes_bypass_the_typed_handler_and_transfer_t
         .publication
         .prepare(&event("event-unknown"))
         .expect("unknown-type fixture starts from a valid production envelope");
-    let mut unknown_headers = infra_messaging::wire::encode_prepared(&unknown)
-        .expect("unknown-type fixture has valid identity headers");
+    let mut unknown_headers = infra_messaging::wire::encode_prepared(&unknown);
     unknown_headers.insert("Event-Type", "test.example.unknown");
     fixture
         .jetstream
@@ -288,24 +286,26 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
     let exporter = install_tracing();
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
     let mut handlers = fixture.registry.clone();
     handlers
-        .register(&fixture.route, move |_, _| {
-            calls_for_handler.fetch_add(1, Ordering::SeqCst);
-            async { Ok(()) }
-        })
+        .register(
+            &fixture.route,
+            move |_: Event<ExampleEvent>, _: OperationContext| {
+                calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(handlers, deadline(), &cancel)
+        .consumer(handlers, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -314,15 +314,13 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
         .publication
         .prepare(&event("event-newer-schema"))
         .expect("newer-schema fixture starts from a valid production envelope");
-    let mut newer_headers = infra_messaging::wire::encode_prepared(&newer)
-        .expect("newer-schema fixture has valid identity headers");
+    let mut newer_headers = infra_messaging::wire::encode_prepared(&newer);
     newer_headers.insert("Event-Schema", "v2");
     let undecodable = fixture
         .publication
         .prepare(&event("event-undecodable"))
         .expect("undecodable fixture starts from a valid production envelope");
-    let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable)
-        .expect("undecodable fixture has valid identity headers");
+    let undecodable_headers = infra_messaging::wire::encode_prepared(&undecodable);
     let undecodable_payload = Bytes::from_static(br#"{"value":7}"#);
 
     let mut transferred = 0;
@@ -380,21 +378,21 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
         .await
         .expect("fixture DLQ fill receives an acknowledgment");
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted");
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, |_, _| async {
-            Err(HandlerError::Permanent)
-        })
+        .register(
+            &fixture.route,
+            |_: Event<ExampleEvent>, _: OperationContext| async { Err(HandlerError::Permanent) },
+        )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -404,7 +402,7 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
 
@@ -440,11 +438,10 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
 async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking_the_source() {
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("unsealed streams satisfy admission");
     let started = Arc::new(Notify::new());
@@ -454,7 +451,7 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
         .register(&fixture.route, {
             let started = Arc::clone(&started);
             let reject = Arc::clone(&reject);
-            move |_, _| {
+            move |_: Event<ExampleEvent>, _: OperationContext| {
                 let started = Arc::clone(&started);
                 let reject = Arc::clone(&reject);
                 async move {
@@ -466,7 +463,7 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
         })
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("consumer is admitted against an unsealed DLQ")
         .start(&cancel);
@@ -476,7 +473,7 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
         .expect("fixture event is prepared");
     let ack = messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
     timeout(Duration::from_secs(3), started.notified())
@@ -528,11 +525,10 @@ async fn dead_letter_stream_sealed_after_start_stops_the_consumer_without_acking
 async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted");
     let prepared = fixture
@@ -541,7 +537,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &prepared)
         .await
         .expect("fixture event publication is acknowledged");
     redeliver_until_attempt(&fixture, 6).await;
@@ -550,13 +546,16 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     let calls_for_handler = Arc::clone(&handler_calls);
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, move |_, _| {
-            calls_for_handler.fetch_add(1, Ordering::SeqCst);
-            async { Err(HandlerError::Retryable) }
-        })
+        .register(
+            &fixture.route,
+            move |_: Event<ExampleEvent>, _: OperationContext| {
+                calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                async { Err(HandlerError::Retryable) }
+            },
+        )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -595,11 +594,10 @@ async fn retain_record_before_shrinking_source(
         .update_stream(source_config.clone())
         .await
         .expect("the original stream limit fits the retained event");
-    let producer = Box::pin(Messaging::connect(
+    let producer = Messaging::connect(
         options(fixture, None, 16 * 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), cancel),
+    )
     .await
     .expect("fixture producer is admitted against the original source bound");
     let oversized = Registry::default()
@@ -609,7 +607,7 @@ async fn retain_record_before_shrinking_source(
         .expect("fixture event is valid for the original producer bound");
     producer
         .producer()
-        .publish(&oversized, &context(deadline(), cancel))
+        .publish(&context(deadline(), cancel), &oversized)
         .await
         .expect("source retains the event before the operator shrinks its bound");
     close(producer).await;
@@ -637,24 +635,26 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     source.update_consumer(limits).await.unwrap();
     let mut worker = consumer_options(&fixture);
     worker.concurrency = std::num::NonZeroUsize::new(3).unwrap();
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(worker), 32),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("fixture source stream is admitted for the smaller delivery bound");
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = Arc::clone(&handler_calls);
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, move |_, _| {
-            calls_for_handler.fetch_add(1, Ordering::SeqCst);
-            async { Ok(()) }
-        })
+        .register(
+            &fixture.route,
+            move |_: Event<ExampleEvent>, _: OperationContext| {
+                calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            },
+        )
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
@@ -675,7 +675,7 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
         .expect("ordinary event fits the reduced limit");
     let ack = messaging
         .producer()
-        .publish(&next, &context(deadline(), &cancel))
+        .publish(&context(deadline(), &cancel), &next)
         .await
         .expect("ordinary event publishes after the oversized record is settled");
     wait_for_source_ack_at_least(&fixture, ack.sequence).await;
@@ -694,19 +694,16 @@ async fn retained_record_above_durable_pull_limit_stops_without_settlement() {
     let fixture = Fixture::create(Topology::WithDurable).await;
     let cancel = CancellationToken::new();
     let retained = retain_record_before_shrinking_source(&fixture, &cancel).await;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 32),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .unwrap();
     let mut registered = fixture.registry.clone();
-    registered
-        .register(&fixture.route, |_, _| async { Ok(()) })
-        .unwrap();
+    registered.register(&fixture.route, accept).unwrap();
     let admitted = messaging
-        .consumer(registered, deadline(), &cancel)
+        .consumer(registered, &context(deadline(), &cancel))
         .await
         .unwrap();
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
@@ -751,19 +748,18 @@ async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowl
         .update_stream(dlq_config)
         .await
         .expect("DLQ admits newly published source records after the limit reduction");
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 8 * 1024),
-        deadline(),
-        cancel.clone(),
-    ))
+        &context(deadline(), &cancel),
+    )
     .await
     .expect("current stream limits satisfy admission");
     let mut registry = fixture.registry.clone();
     registry
-        .register(&fixture.route, |_, _| async { Ok(()) })
+        .register(&fixture.route, accept)
         .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry, deadline(), &cancel)
+        .consumer(registry, &context(deadline(), &cancel))
         .await
         .expect("current stream limits satisfy consumer admission")
         .start(&cancel);

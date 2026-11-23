@@ -2,9 +2,7 @@ mod format;
 mod output;
 mod sdk_diagnostics;
 
-pub use output::{
-    DropReason, LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons, SinkOperation,
-};
+pub use output::{LoggerGuard, LoggerShutdown, LoggerShutdownReasons};
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
@@ -62,7 +60,7 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
             .with_tracked_inactivity(false)
     });
     let (output, guard) = output::start(std::io::stdout()).map_err(LoggingError::WorkerStart)?;
-    let format = format::FormatLayer::new(output, options.format, otel.is_some());
+    let format_layer = format::FormatLayer::new(output, options.format, otel.is_some());
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
     let registry = registry.with(hotpath::sqlx_tracing_layer());
@@ -72,14 +70,18 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
         .with(aws_sdk_log_cap(options.level))
         // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
-        .with(format);
+        .with(format_layer);
     let max_level = subscriber.max_level_hint().unwrap_or(LevelFilter::TRACE);
     tracing_log::LogTracer::builder()
         .with_max_level(max_level.as_log())
         .init()
         .map_err(|_| LoggingError::LogLoggerInstalled)?;
-    tracing::subscriber::set_global_default(subscriber)
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::set_global_default(dispatch.clone())
         .map_err(|_| LoggingError::AlreadyInstalled)?;
+    if let Some(installed_layer) = dispatch.downcast_ref::<format::FormatLayer>() {
+        installed_layer.pin_global_dispatch(&dispatch);
+    }
     Ok(guard)
 }
 
@@ -108,84 +110,18 @@ pub(crate) fn publish_observations() {
     sdk_diagnostics::publish();
 }
 
-enum DirectiveFilter {
+enum AdmissionFilter {
     Targets(Targets),
     Env(Box<EnvFilter>),
 }
 
-impl<S> Layer<S> for DirectiveFilter
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::register_callsite(targets, metadata),
-            Self::Env(filter) => <EnvFilter as Layer<S>>::register_callsite(filter, metadata),
-        }
-    }
-
-    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
-            Self::Env(filter) => filter.enabled(metadata, ctx),
-        }
-    }
-
-    fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::event_enabled(targets, event, ctx),
-            Self::Env(filter) => filter.event_enabled(event, ctx),
-        }
-    }
-
-    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => {
-                <Targets as Layer<S>>::on_new_span(targets, attrs, id, ctx);
-            }
-            Self::Env(filter) => filter.on_new_span(attrs, id, ctx),
-        }
-    }
-
-    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_record(targets, id, values, ctx),
-            Self::Env(filter) => filter.on_record(id, values, ctx),
-        }
-    }
-
-    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_enter(targets, id, ctx),
-            Self::Env(filter) => filter.on_enter(id, ctx),
-        }
-    }
-
-    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_exit(targets, id, ctx),
-            Self::Env(filter) => filter.on_exit(id, ctx),
-        }
-    }
-
-    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
-        match self {
-            Self::Targets(targets) => <Targets as Layer<S>>::on_close(targets, id, ctx),
-            Self::Env(filter) => filter.on_close(id, ctx),
-        }
-    }
-}
-
 fn admission_filter(directive: &str) -> Result<AdmissionFilter, LoggingError> {
     let filter = EnvFilter::try_new(directive).map_err(|_| LoggingError::Directive)?;
-    let inner = match static_targets(directive) {
-        Some(targets) => DirectiveFilter::Targets(targets),
-        None => DirectiveFilter::Env(Box::new(filter)),
-    };
-    Ok(AdmissionFilter(inner))
+    Ok(match static_targets(directive) {
+        Some(targets) => AdmissionFilter::Targets(targets),
+        None => AdmissionFilter::Env(Box::new(filter)),
+    })
 }
-
-struct AdmissionFilter(DirectiveFilter);
 
 fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
     metadata.is_span() && *metadata.level() <= Level::INFO
@@ -194,23 +130,23 @@ fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
 enum Admission {
     Always,
     Never,
-    Deferred,
-    Directive,
+    PerEvent,
+    ByFilter,
 }
 
 fn admission(metadata: &Metadata<'_>) -> Admission {
-    if sdk_diagnostics::is_denied_target(metadata.target()) {
+    if sdk_diagnostics::is_dependency_target(metadata.target()) {
         if sdk_diagnostics::is_known_diagnostic(metadata) {
             Admission::Always
         } else {
             Admission::Never
         }
     } else if metadata.target() == "log" {
-        Admission::Deferred
+        Admission::PerEvent
     } else if is_span_at_info_or_above(metadata) {
         Admission::Always
     } else {
-        Admission::Directive
+        Admission::ByFilter
     }
 }
 
@@ -219,44 +155,75 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        let interest = <DirectiveFilter as Layer<S>>::register_callsite(&self.0, metadata);
+        let interest = match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::register_callsite(targets, metadata),
+            Self::Env(filter) => <EnvFilter as Layer<S>>::register_callsite(filter, metadata),
+        };
         match admission(metadata) {
             Admission::Always => Interest::always(),
             Admission::Never => Interest::never(),
-            Admission::Deferred => Interest::sometimes(),
-            Admission::Directive => interest,
+            Admission::PerEvent => Interest::sometimes(),
+            Admission::ByFilter => interest,
         }
     }
 
     fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
         match admission(metadata) {
-            Admission::Always | Admission::Deferred => true,
+            Admission::Always | Admission::PerEvent => true,
             Admission::Never => false,
-            Admission::Directive => self.0.enabled(metadata, ctx),
+            Admission::ByFilter => match self {
+                Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
+                Self::Env(filter) => filter.enabled(metadata, ctx),
+            },
         }
     }
 
     fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
         let normalized = event.normalized_metadata();
         let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
-        if sdk_diagnostics::is_denied_target(metadata.target()) {
+        if sdk_diagnostics::is_dependency_target(metadata.target()) {
             sdk_diagnostics::observe(event, metadata);
             return false;
         }
-        self.0.enabled(metadata, ctx.clone()) && self.0.event_enabled(event, ctx)
+        match self {
+            Self::Targets(targets) => <Targets as Layer<S>>::enabled(targets, metadata, ctx),
+            Self::Env(filter) => {
+                filter.enabled(metadata, ctx.clone()) && filter.event_enabled(event, ctx)
+            }
+        }
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
         Some(LevelFilter::TRACE)
     }
 
-    delegate::delegate! {
-        to self.0 {
-            fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>);
-            fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>);
-            fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>);
-            fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>);
-            fn on_close(&self, id: span::Id, ctx: Context<'_, S>);
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_new_span(attrs, id, ctx);
+        }
+    }
+
+    fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_record(id, values, ctx);
+        }
+    }
+
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_enter(id, ctx);
+        }
+    }
+
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_exit(id, ctx);
+        }
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        if let Self::Env(filter) = self {
+            filter.on_close(id, ctx);
         }
     }
 }
@@ -280,7 +247,7 @@ fn is_within_target(target: &str, prefix: &str) -> bool {
 
 // template:begin object-storage:telemetry-sdk-log-cap
 fn aws_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
-    let named: Vec<String> = directive
+    let named_aws_targets: Vec<String> = directive
         .split(',')
         .filter_map(|segment| {
             let target = segment.split(['=', '[']).next()?.trim();
@@ -291,7 +258,9 @@ fn aws_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
         let target = metadata.target();
         *metadata.level() <= tracing::Level::INFO
             || !target.starts_with("aws_")
-            || named.iter().any(|name| is_within_target(target, name))
+            || named_aws_targets
+                .iter()
+                .any(|name| is_within_target(target, name))
     })
 }
 // template:end object-storage:telemetry-sdk-log-cap

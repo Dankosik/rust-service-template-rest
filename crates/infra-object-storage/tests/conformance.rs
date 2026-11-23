@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_object_storage::{
-    ContentType, CredentialSource, MutationError, MutationFailure, ObjectKey, ObjectStorage,
-    ObjectStorageError, ObjectStorageOptions, Provider, PutOptions,
+    AccessKey, AmazonCredentials, ContentType, MutationError, MutationFailure, ObjectKey,
+    ObjectStorage, ObjectStorageError, ObjectStorageOptions, Provider, PutOptions,
 };
 use operation_context::OperationContext;
 use secrecy::{ExposeSecret, SecretString};
@@ -19,11 +19,15 @@ fn var(name: &str) -> String {
     std::env::var(format!("APP__OBJECT_STORAGE__{name}")).unwrap_or_default()
 }
 
+fn optional_var(name: &str) -> Option<String> {
+    let value = var(name);
+    (!value.trim().is_empty()).then_some(value)
+}
+
 struct Target {
     provider: Provider,
     bucket: String,
-    access_key_id: String,
-    secret_access_key: SecretString,
+    access_key: AccessKey,
 }
 
 impl Target {
@@ -34,22 +38,30 @@ impl Target {
             "live conformance writes to a real bucket: set OBJECT_STORAGE_CONFORMANCE_WRITES=allow"
         );
         let expected = std::env::var("OBJECT_STORAGE_CONFORMANCE_PROVIDER").unwrap_or_default();
+        let access_key = AccessKey {
+            access_key_id: var("ACCESS_KEY_ID"),
+            secret_access_key: SecretString::from(var("SECRET_ACCESS_KEY")),
+        };
         let provider = match var("PROVIDER").as_str() {
             "amazon_s3" => Provider::AmazonS3 {
                 region: var("REGION"),
                 expected_bucket_owner: var("EXPECTED_BUCKET_OWNER"),
+                credentials: AmazonCredentials::AccessKey(access_key.clone()),
             },
             "cloudflare_r2" => Provider::CloudflareR2 {
                 endpoint: var("ENDPOINT"),
+                credentials: access_key.clone(),
             },
             "railway" => Provider::Railway {
                 endpoint: var("ENDPOINT"),
-                region: var("REGION"),
+                region: optional_var("REGION"),
+                credentials: access_key.clone(),
             },
             "s3_compatible" => Provider::S3Compatible {
                 endpoint: var("ENDPOINT"),
-                region: var("REGION"),
+                region: optional_var("REGION"),
                 path_style: var("PATH_STYLE") == "true",
+                credentials: access_key.clone(),
             },
             other => panic!("APP__OBJECT_STORAGE__PROVIDER {other:?} is not a live provider"),
         };
@@ -61,8 +73,7 @@ impl Target {
         Self {
             provider,
             bucket: var("BUCKET"),
-            access_key_id: var("ACCESS_KEY_ID"),
-            secret_access_key: SecretString::from(var("SECRET_ACCESS_KEY")),
+            access_key,
         }
     }
 
@@ -70,10 +81,6 @@ impl Target {
         ObjectStorage::try_new(ObjectStorageOptions {
             provider: self.provider.clone(),
             bucket: self.bucket.clone(),
-            credentials: CredentialSource::AccessKey {
-                access_key_id: self.access_key_id.clone(),
-                secret_access_key: self.secret_access_key.clone(),
-            },
             max_object_bytes: 8 * 1024 * 1024,
             max_concurrency: 4,
             operation_timeout: Duration::from_secs(15),
@@ -85,8 +92,8 @@ impl Target {
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::v2026_01_12())
             .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                &self.access_key_id,
-                self.secret_access_key.expose_secret(),
+                &self.access_key.access_key_id,
+                self.access_key.secret_access_key.expose_secret(),
                 None,
                 None,
                 "conformance",
@@ -102,31 +109,26 @@ impl Target {
                 let region = region.trim();
                 config.region(aws_sdk_s3::config::Region::new(region.to_owned()))
             }
-            Provider::CloudflareR2 { endpoint } => config
+            Provider::CloudflareR2 { endpoint, .. } => config
                 .region(aws_sdk_s3::config::Region::new("auto"))
                 .endpoint_url(endpoint),
-            Provider::Railway { endpoint, region } => {
-                let region = region.trim();
+            Provider::Railway {
+                endpoint, region, ..
+            } => {
+                let region = region.as_deref().map_or("auto", str::trim);
                 config
-                    .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
-                        "auto".to_owned()
-                    } else {
-                        region.to_owned()
-                    }))
+                    .region(aws_sdk_s3::config::Region::new(region.to_owned()))
                     .endpoint_url(endpoint)
             }
             Provider::S3Compatible {
                 endpoint,
                 region,
                 path_style,
+                ..
             } => {
-                let region = region.trim();
+                let region = region.as_deref().map_or("us-east-1", str::trim);
                 config
-                    .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
-                        "us-east-1".to_owned()
-                    } else {
-                        region.to_owned()
-                    }))
+                    .region(aws_sdk_s3::config::Region::new(region.to_owned()))
                     .force_path_style(*path_style)
                     .endpoint_url(endpoint)
             }

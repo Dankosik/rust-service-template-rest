@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -10,19 +9,20 @@ use std::{
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use enum_map::EnumMap;
+use foldhash::HashMap;
 use jsonwebtoken::{
     Algorithm,
     jwk::{
-        AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
-        RSAKeyParameters,
+        AlgorithmParameters, EllipticCurve, EllipticCurveKeyParameters, Jwk, KeyAlgorithm,
+        KeyOperations, OtherKeyParameters, PublicKeyUse, RSAKeyParameters,
     },
 };
 use serde::Deserialize;
 use tokio::time::Instant;
 
 use crate::{
-    EndpointUrl, IssuerUrl, JsonObject, PreparationError, PreparationPhase, PreparationReason,
-    ProviderFailure, VerificationError, VerificationReason,
+    DiscoveryError, EndpointUrl, IssuerUrl, JsonObject, JwksError, PreparationError,
+    PreparationPhase, VerificationError, VerificationReason,
     jwt::discover_jwks_uri,
     provider::{Document, ProviderClient},
 };
@@ -84,7 +84,7 @@ struct JwtKey {
 }
 
 pub(crate) struct KeySet {
-    by_algorithm: HashMap<JwtAlgorithm, AlgorithmKeys>,
+    by_algorithm: EnumMap<JwtAlgorithm, AlgorithmKeys>,
     generation: u64,
     acquired_at: tokio::time::Instant,
 }
@@ -99,7 +99,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
     pub(crate) fn is_empty(&self) -> bool {
-        self.by_algorithm.is_empty()
+        self.by_algorithm.values().all(|keys| keys.all.is_empty())
     }
 
     pub(crate) fn require_fresh(
@@ -122,10 +122,10 @@ impl KeySet {
         &self,
         input: &SignatureInput<'_>,
     ) -> Result<(), SignatureVerificationError> {
-        let keys = self
-            .by_algorithm
-            .get(&input.algorithm)
-            .ok_or(SignatureVerificationError::NoCandidate)?;
+        let keys = &self.by_algorithm[input.algorithm];
+        if keys.all.is_empty() {
+            return Err(SignatureVerificationError::NoCandidate);
+        }
         let verifies =
             |key: &ParsedPublicKey| key.verify_sig(input.message, input.signature).is_ok();
         let signature_matches = if let Some(kid) = input.kid {
@@ -195,12 +195,9 @@ impl ParsedKeySet {
     }
 }
 
-fn parse_jwks_entries(
-    bytes: &[u8],
-    configured: AllowedAlgorithms,
-) -> Result<ParsedKeySet, KeySetFailure> {
+fn parse_jwks_entries(bytes: &[u8], allowed: AllowedAlgorithms) -> Result<ParsedKeySet, JwksError> {
     let JsonObject(raw) =
-        serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
+        serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| JwksError::Parse)?;
     let mut rejected = EnumMap::<KeyRejection, u64>::default();
     let mut keys = Vec::new();
     for value in raw.keys {
@@ -210,7 +207,7 @@ fn parse_jwks_entries(
                 admit_key(
                     jwk,
                     value.get("alg").and_then(serde_json::Value::as_str),
-                    configured,
+                    allowed,
                 )
             });
         match key {
@@ -218,22 +215,23 @@ fn parse_jwks_entries(
             Err(reason) => rejected[reason] += 1,
         }
     }
-    if configured
-        .into_iter()
-        .filter(|&(algorithm, enabled)| enabled && algorithm.family() == KeyFamily::Rsa)
-        .nth(1)
-        .is_some()
-    {
-        let conflicts = reject_conflicting_rsa_keys(&mut keys);
-        if conflicts != 0 {
-            rejected[KeyRejection::AlgorithmBinding] += conflicts;
-        }
+    if enabled_in_family(allowed, KeyFamily::Rsa).nth(1).is_some() {
+        rejected[KeyRejection::AlgorithmBinding] += reject_conflicting_rsa_keys(&mut keys);
     }
     Ok(ParsedKeySet { keys, rejected })
 }
 
-fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, KeySetFailure> {
-    for (reason, &count) in &parsed.rejected {
+fn enabled_in_family(
+    allowed: AllowedAlgorithms,
+    family: KeyFamily,
+) -> impl Iterator<Item = JwtAlgorithm> {
+    allowed.into_iter().filter_map(move |(algorithm, enabled)| {
+        (enabled && algorithm.family() == family).then_some(algorithm)
+    })
+}
+
+fn report_rejections(rejected: &EnumMap<KeyRejection, u64>) {
+    for (reason, &count) in rejected {
         if count == 0 {
             continue;
         }
@@ -244,12 +242,16 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
         );
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
+}
+
+fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, JwksError> {
+    report_rejections(&parsed.rejected);
     if parsed.has_non_encryption_rejections_without_keys() {
-        return Err(KeySetFailure::NoUsableKeys);
+        return Err(JwksError::NoUsableKeys);
     }
-    let mut by_algorithm = HashMap::<JwtAlgorithm, AlgorithmKeys>::new();
+    let mut by_algorithm = EnumMap::<JwtAlgorithm, AlgorithmKeys>::default();
     for key in parsed.keys {
-        let keys = by_algorithm.entry(key.algorithm).or_default();
+        let keys = &mut by_algorithm[key.algorithm];
         if let Some(kid) = key.kid {
             keys.by_kid.entry(kid).or_default().push(keys.all.len());
         }
@@ -263,7 +265,7 @@ fn build_key_set(parsed: ParsedKeySet, acquired_at: Instant) -> Result<KeySet, K
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
+fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, JwksError> {
     let parsed = parse_jwks_entries(bytes, allowed_algorithms(configured))?;
     build_key_set(parsed, Instant::now())
 }
@@ -275,10 +277,7 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
         Conflicting,
     }
 
-    let mut bindings =
-        HashMap::<Box<[u8]>, RsaBinding, foldhash::quality::RandomState>::with_hasher(
-            foldhash::quality::RandomState::default(),
-        );
+    let mut bindings = HashMap::<Box<[u8]>, RsaBinding>::default();
     for key in keys
         .iter()
         .filter(|key| key.algorithm.family() == KeyFamily::Rsa)
@@ -301,7 +300,7 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
 fn admit_key(
     jwk: Jwk,
     raw_alg: Option<&str>,
-    configured: AllowedAlgorithms,
+    allowed: AllowedAlgorithms,
 ) -> Result<JwtKey, KeyRejection> {
     if is_encryption_only(&jwk, raw_alg) {
         return Err(KeyRejection::EncryptionOnly);
@@ -310,7 +309,7 @@ fn admit_key(
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithm = bind_algorithm(jwk.common.key_algorithm, family, configured)
+    let algorithm = bind_algorithm(jwk.common.key_algorithm, family, allowed)
         .ok_or(KeyRejection::AlgorithmBinding)?;
     let public_key = algorithm
         .parse_public_key(&jwk.algorithm)
@@ -325,17 +324,15 @@ fn admit_key(
 fn bind_algorithm(
     explicit: Option<KeyAlgorithm>,
     family: KeyFamily,
-    configured: AllowedAlgorithms,
+    allowed: AllowedAlgorithms,
 ) -> Option<JwtAlgorithm> {
     if let Some(explicit) = explicit {
         Algorithm::try_from(explicit)
             .ok()
             .and_then(JwtAlgorithm::from_jsonwebtoken)
-            .filter(|&algorithm| configured[algorithm] && algorithm.family() == family)
+            .filter(|&algorithm| allowed[algorithm] && algorithm.family() == family)
     } else {
-        let mut matching = configured.into_iter().filter_map(|(algorithm, enabled)| {
-            (enabled && algorithm.family() == family).then_some(algorithm)
-        });
+        let mut matching = enabled_in_family(allowed, family);
         let algorithm = matching.next()?;
         matching.next().is_none().then_some(algorithm)
     }
@@ -351,22 +348,23 @@ fn is_encryption_only(jwk: &Jwk, raw_alg: Option<&str>) -> bool {
     if operations.is_some_and(|ops| !has_only_encryption_operations(ops)) {
         return false;
     }
-    if !encryption_use && operations.is_none() && raw_alg.is_none() {
+    let declares_encryption = encryption_use || operations.is_some() || raw_alg.is_some();
+    if !declares_encryption {
         return false;
     }
-
     if matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
-        return matches!(
+        matches!(
             raw_alg,
             None | Some("RSA1_5" | "RSA-OAEP" | "RSA-OAEP-256" | "RSA-OAEP-384" | "RSA-OAEP-512")
         ) && JwtAlgorithm::Rs256
             .parse_public_key(&jwk.algorithm)
-            .is_some();
+            .is_some()
+    } else {
+        matches!(
+            raw_alg,
+            None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
+        ) && has_key_agreement_material(&jwk.algorithm)
     }
-    matches!(
-        raw_alg,
-        None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
-    ) && has_key_agreement_material(&jwk.algorithm)
 }
 
 fn has_only_encryption_operations(operations: &[KeyOperations]) -> bool {
@@ -386,38 +384,46 @@ fn has_only_encryption_operations(operations: &[KeyOperations]) -> bool {
 
 fn has_key_agreement_material(parameters: &AlgorithmParameters) -> bool {
     match parameters {
-        AlgorithmParameters::EllipticCurve(ec) => {
-            let verifier = match ec.curve {
-                EllipticCurve::P256 => &signature::ECDSA_P256_SHA256_FIXED,
-                EllipticCurve::P384 => &signature::ECDSA_P384_SHA384_FIXED,
-                EllipticCurve::P521 => &signature::ECDSA_P521_SHA512_FIXED,
-                _ => return false,
-            };
-            ec.x.len() == ec.y.len()
-                && jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y).is_ok_and(|key| {
-                    key.try_get_as_bytes()
-                        .is_ok_and(|point| ParsedPublicKey::new(verifier, point).is_ok())
-                })
-        }
+        AlgorithmParameters::EllipticCurve(ec) => is_valid_ec_agreement_point(ec),
         AlgorithmParameters::Other(key)
             if key.fields.get("kty").and_then(serde_json::Value::as_str) == Some("OKP") =>
         {
-            const X25519_PUBLIC_KEY_BYTES: usize = 32;
-            const X448_PUBLIC_KEY_BYTES: usize = 56;
-            let length = match key.fields.get("crv").and_then(serde_json::Value::as_str) {
-                Some("X25519") => X25519_PUBLIC_KEY_BYTES,
-                Some("X448") => X448_PUBLIC_KEY_BYTES,
-                _ => return false,
-            };
-            let Some(x) = key.fields.get("x").and_then(serde_json::Value::as_str) else {
-                return false;
-            };
-            let mut bytes = [0_u8; X448_PUBLIC_KEY_BYTES];
-            URL_SAFE_NO_PAD.decode_slice(x, &mut bytes) == Ok(length)
-                && bytes[..length].iter().any(|&byte| byte != 0)
+            is_nonzero_okp_agreement_key(key)
         }
         _ => false,
     }
+}
+
+fn is_valid_ec_agreement_point(ec: &EllipticCurveKeyParameters) -> bool {
+    const MAX_EC_POINT_BYTES: usize = 1 + 66 * 2;
+    let (verifier, coord_len) = match ec.curve {
+        EllipticCurve::P256 => (&signature::ECDSA_P256_SHA256_FIXED, 32),
+        EllipticCurve::P384 => (&signature::ECDSA_P384_SHA384_FIXED, 48),
+        EllipticCurve::P521 => (&signature::ECDSA_P521_SHA512_FIXED, 66),
+        _ => return false,
+    };
+    let mut point = [0_u8; MAX_EC_POINT_BYTES];
+    point[0] = 0x04;
+    let (x_out, y_out) = point[1..=coord_len * 2].split_at_mut(coord_len);
+    URL_SAFE_NO_PAD.decode_slice(&ec.x, x_out) == Ok(coord_len)
+        && URL_SAFE_NO_PAD.decode_slice(&ec.y, y_out) == Ok(coord_len)
+        && ParsedPublicKey::new(verifier, &point[..=coord_len * 2]).is_ok()
+}
+
+fn is_nonzero_okp_agreement_key(key: &OtherKeyParameters) -> bool {
+    const X25519_PUBLIC_KEY_BYTES: usize = 32;
+    const X448_PUBLIC_KEY_BYTES: usize = 56;
+    let length = match key.fields.get("crv").and_then(serde_json::Value::as_str) {
+        Some("X25519") => X25519_PUBLIC_KEY_BYTES,
+        Some("X448") => X448_PUBLIC_KEY_BYTES,
+        _ => return false,
+    };
+    let Some(x) = key.fields.get("x").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let mut bytes = [0_u8; X448_PUBLIC_KEY_BYTES];
+    URL_SAFE_NO_PAD.decode_slice(x, &mut bytes) == Ok(length)
+        && bytes[..length].iter().any(|&byte| byte != 0)
 }
 
 fn permits_signature_verification(jwk: &Jwk) -> bool {
@@ -522,6 +528,7 @@ fn without_leading_zeros(bytes: &[u8]) -> Option<&[u8]> {
     Some(&bytes[start..])
 }
 
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum JwksSource {
     Configured(EndpointUrl),
     Discovery(IssuerUrl),
@@ -534,59 +541,63 @@ impl JwksSource {
         algorithms: AllowedAlgorithms,
         deadline: Instant,
     ) -> Result<Arc<KeySet>, KeySetFailure> {
-        let (uri, acquired_at) = match self {
+        let (uri, discovery_started_at) = match self {
             Self::Configured(uri) => (Cow::Borrowed(uri), None),
             Self::Discovery(issuer) => {
                 let started = Instant::now();
-                let discovered = discover_jwks_uri(provider, issuer, deadline)
-                    .await
-                    .map_err(KeySetFailure::Discovery)?;
+                let discovered = discover_jwks_uri(provider, issuer, deadline).await?;
                 if Instant::now() >= deadline {
-                    return Err(KeySetFailure::Discovery(PreparationError::new(
-                        PreparationPhase::Discovery,
-                        PreparationReason::Timeout,
-                    )));
+                    return Err(KeySetFailure::DiscoveryTimeout);
                 }
                 (Cow::Owned(discovered), Some(started))
             }
         };
         let bytes = provider
-            .get_document(uri.url(), Document::Jwks, Some(deadline))
+            .get_document(uri.url(), Document::Jwks, deadline)
             .await
-            .map_err(KeySetFailure::Fetch)?;
+            .map_err(JwksError::Fetch)?;
         let parsed = parse_jwks_entries(&bytes, algorithms)?;
-        let keys = build_key_set(parsed, acquired_at.unwrap_or_else(Instant::now))?;
+        let keys = build_key_set(parsed, discovery_started_at.unwrap_or_else(Instant::now))?;
         Ok(Arc::new(keys))
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum KeySetFailure {
-    Discovery(PreparationError),
-    Fetch(ProviderFailure),
-    Parse,
-    NoUsableKeys,
+    Discovery(DiscoveryError),
+    DiscoveryTimeout,
+    Jwks(JwksError),
+}
+
+impl From<DiscoveryError> for KeySetFailure {
+    fn from(error: DiscoveryError) -> Self {
+        Self::Discovery(error)
+    }
+}
+
+impl From<JwksError> for KeySetFailure {
+    fn from(error: JwksError) -> Self {
+        Self::Jwks(error)
+    }
 }
 
 impl From<KeySetFailure> for PreparationError {
     fn from(failure: KeySetFailure) -> Self {
-        let reason = match failure {
-            KeySetFailure::Discovery(error) => return error,
-            KeySetFailure::Fetch(failure) => PreparationReason::Fetch(failure),
-            KeySetFailure::Parse => PreparationReason::Parse,
-            KeySetFailure::NoUsableKeys => PreparationReason::NoUsableKeys,
-        };
-        Self::new(PreparationPhase::Jwks, reason)
+        match failure {
+            KeySetFailure::Discovery(error) => Self::Discovery(error),
+            KeySetFailure::DiscoveryTimeout => Self::Timeout(PreparationPhase::Discovery),
+            KeySetFailure::Jwks(error) => Self::Jwks(error),
+        }
     }
 }
 
 impl KeySetFailure {
-    pub(crate) fn label(&self) -> &'static str {
+    pub(crate) const fn label(&self) -> &'static str {
         match self {
-            Self::Discovery(_) => "discovery",
-            Self::Fetch(_) => "fetch",
-            Self::Parse => "parse",
-            Self::NoUsableKeys => "no_usable_keys",
+            Self::Discovery(_) | Self::DiscoveryTimeout => "discovery",
+            Self::Jwks(JwksError::Fetch(_)) => "fetch",
+            Self::Jwks(JwksError::Parse) => "parse",
+            Self::Jwks(JwksError::NoUsableKeys) => "no_usable_keys",
         }
     }
 }
@@ -644,7 +655,7 @@ pub(crate) mod tests {
         JWT_SIGNING_DER, ensure_crypto_provider, jwk, key_set, rsa_signing,
     };
     use super::{
-        JwtAlgorithm, KeySetFailure, SignatureInput, SignatureVerificationError, parse_key_set,
+        JwksError, JwtAlgorithm, SignatureInput, SignatureVerificationError, parse_key_set,
     };
     use crate::test_metrics::{Diagnostics, labeled};
 
@@ -824,7 +835,7 @@ pub(crate) mod tests {
                 if withdrawn {
                     Ok(true)
                 } else {
-                    Err(KeySetFailure::NoUsableKeys)
+                    Err(JwksError::NoUsableKeys)
                 },
                 "{metadata}"
             );
@@ -835,7 +846,7 @@ pub(crate) mod tests {
         ]});
         assert_eq!(
             parse_key_set(&serde_json::to_vec(&keys).unwrap(), &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::NoUsableKeys)
+            Some(JwksError::NoUsableKeys)
         );
     }
 
@@ -851,12 +862,12 @@ pub(crate) mod tests {
             (
                 serde_json::json!({"use":"enc", "kty":"EC","crv":"P-256","x":ec["x"],"y":ec["y"]}),
                 "ES512",
-                Err(KeySetFailure::NoUsableKeys),
+                Err(JwksError::NoUsableKeys),
             ),
             (
                 serde_json::json!({"kty":"OKP","crv":"X25519","x":"!"}),
                 "ECDH-ES",
-                Err(KeySetFailure::NoUsableKeys),
+                Err(JwksError::NoUsableKeys),
             ),
         ] {
             key["alg"] = algorithm.into();
@@ -898,7 +909,7 @@ pub(crate) mod tests {
     fn an_unreadable_key_set_is_refused() {
         assert_eq!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]).err(),
-            Some(KeySetFailure::Parse)
+            Some(JwksError::Parse)
         );
     }
 
@@ -915,7 +926,7 @@ pub(crate) mod tests {
                 parse_key_set(&bytes, &[JwtAlgorithm::Rs256])
             })
         });
-        assert_eq!(parsed.err(), Some(KeySetFailure::NoUsableKeys));
+        assert_eq!(parsed.err(), Some(JwksError::NoUsableKeys));
         let counters = diagnostics.take_counters();
         assert!(
             counters.iter().any(|(key, value)| {

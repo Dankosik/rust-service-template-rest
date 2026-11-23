@@ -1,4 +1,6 @@
-use std::{collections::hash_map::Entry, sync::Arc, time::Duration};
+use std::{
+    collections::hash_map::Entry, mem::DropGuard, num::NonZeroU32, sync::Arc, time::Duration,
+};
 
 use foldhash::HashMap;
 use moka::Expiry;
@@ -7,23 +9,23 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
 use super::{AcquisitionDeadline, RegistrationState, timeout_as_unavailable};
-use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, token::Token};
+use crate::{AcquisitionError, ConfigurationError, ExchangeTokenTarget, OnBehalfOf, token::Token};
 
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
-const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
+const MAX_EXCHANGE_CACHE_CAPACITY: u32 = 65_536;
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("ExchangeTokens([REDACTED])")]
-pub struct ExchangeTokens(Arc<ExchangeOwner>);
+pub struct ExchangeTokens(Arc<ExchangeState>);
 
-struct ExchangeOwner {
+struct ExchangeState {
     registration: Arc<RegistrationState>,
     target: ExchangeTokenTarget,
     resource_origin: http::Uri,
-    state: ExchangeState,
+    store: ExchangeStore,
 }
 
-impl ExchangeOwner {
+impl ExchangeState {
     async fn fetch(
         &self,
         key: SubjectKey,
@@ -42,25 +44,26 @@ impl ExchangeOwner {
         }
         let token = result.map_err(timeout_as_unavailable)?;
         if token.is_reusable(Instant::now()) {
-            self.state.cache.insert(key, token.clone()).await;
+            self.store.cache.insert(key, token.clone());
         }
         Ok(token)
     }
 }
 
 type ExchangedTokenCache =
-    moka::future::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>;
+    moka::sync::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>;
 
-struct ExchangeState {
+struct ExchangeStore {
     cache: ExchangedTokenCache,
     flights: ExchangeFlights,
 }
 
-impl ExchangeState {
-    fn new(capacity: u32) -> Self {
+impl ExchangeStore {
+    fn new(capacity: NonZeroU32) -> Self {
+        let capacity = capacity.get();
         let minimum_weight = EXCHANGE_CACHE_BYTES / capacity;
         Self {
-            cache: moka::future::Cache::builder()
+            cache: moka::sync::Cache::builder()
                 .max_capacity(u64::from(minimum_weight * capacity))
                 .weigher(move |_: &SubjectKey, token: &Arc<Token>| {
                     u32::try_from(token.header.as_bytes().len())
@@ -73,10 +76,9 @@ impl ExchangeState {
         }
     }
 
-    async fn reusable(&self, key: SubjectKey) -> Option<Arc<Token>> {
+    fn reusable(&self, key: SubjectKey) -> Option<Arc<Token>> {
         self.cache
             .get(&key)
-            .await
             .filter(|token| token.is_reusable(Instant::now()))
     }
 
@@ -87,12 +89,7 @@ impl ExchangeState {
             Entry::Vacant(entry) => {
                 let (sender, receiver) = watch::channel(None);
                 entry.insert(receiver);
-                ExchangeFlight::Leader(ExchangeLeader {
-                    flights: &self.flights,
-                    key,
-                    sender,
-                    completed: None,
-                })
+                ExchangeFlight::Leader(ExchangeLeader::new(&self.flights, key, sender))
             }
         }
     }
@@ -107,25 +104,40 @@ enum ExchangeFlight<'a> {
     Waiter(ExchangeReceiver),
 }
 
-struct ExchangeLeader<'a> {
+struct LeaderFlight<'a> {
     flights: &'a ExchangeFlights,
     key: SubjectKey,
     sender: watch::Sender<Option<ExchangeResult>>,
-    completed: Option<ExchangeResult>,
 }
 
-impl ExchangeLeader<'_> {
-    fn publish(mut self, result: ExchangeResult) {
-        self.completed = Some(result);
+impl LeaderFlight<'_> {
+    fn abandon(self) {
+        self.flights.lock().remove(&self.key);
     }
 }
 
-impl Drop for ExchangeLeader<'_> {
-    fn drop(&mut self) {
-        self.flights.lock().remove(&self.key);
-        if let Some(result) = self.completed.take() {
-            self.sender.send_replace(Some(result));
-        }
+struct ExchangeLeader<'a>(DropGuard<LeaderFlight<'a>, fn(LeaderFlight<'a>)>);
+
+impl<'a> ExchangeLeader<'a> {
+    fn new(
+        flights: &'a ExchangeFlights,
+        key: SubjectKey,
+        sender: watch::Sender<Option<ExchangeResult>>,
+    ) -> Self {
+        Self(DropGuard::new(
+            LeaderFlight {
+                flights,
+                key,
+                sender,
+            },
+            LeaderFlight::abandon,
+        ))
+    }
+
+    fn publish(self, result: ExchangeResult) {
+        let flight = DropGuard::dismiss(self.0);
+        flight.flights.lock().remove(&flight.key);
+        flight.sender.send_replace(Some(result));
     }
 }
 
@@ -169,60 +181,111 @@ impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
     }
 }
 
+enum FastLookup {
+    Hit(Arc<Token>),
+    Pending(PendingLookup),
+}
+
+enum PendingLookup {
+    Missed(SubjectKey),
+    Deferred,
+}
+
 impl ExchangeTokens {
     pub(super) fn try_new(
         registration: Arc<RegistrationState>,
         target: ExchangeTokenTarget,
         resource_origin: http::Uri,
-        capacity: u32,
+        capacity: NonZeroU32,
     ) -> Result<Self, ConfigurationError> {
-        if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&capacity) {
+        if capacity.get() > MAX_EXCHANGE_CACHE_CAPACITY {
             return Err(ConfigurationError {
                 key: "exchange_cache_capacity",
                 reason: "must be from 1 to 65536",
             });
         }
-        Ok(Self(Arc::new(ExchangeOwner {
+        Ok(Self(Arc::new(ExchangeState {
             registration,
             target,
             resource_origin,
-            state: ExchangeState::new(capacity),
+            store: ExchangeStore::new(capacity),
         })))
     }
 
-    pub(super) fn registration(&self) -> &RegistrationState {
-        &self.0.registration
+    pub(crate) fn resource_origin(&self) -> &http::Uri {
+        &self.0.resource_origin
     }
 
-    pub(super) fn resource_origin(&self) -> &http::Uri {
-        &self.0.resource_origin
+    pub(crate) fn check_active(
+        &self,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<(), AcquisitionError> {
+        self.0.registration.check_active(deadline)
+    }
+
+    pub(crate) async fn acquire_for_request(
+        &self,
+        subject: &OnBehalfOf,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> Result<Arc<Token>, AcquisitionError> {
+        self.check_active(deadline)?;
+        let outcome = match self.lookup_if_budgeted(subject.as_secret()) {
+            FastLookup::Hit(token) => Ok(token),
+            FastLookup::Pending(pending) => {
+                let mut registration_closed = self.0.registration.closed.clone();
+                tokio::select! {
+                    biased;
+                    stopped = deadline.context.wait_stopped() => return Err(stopped.into()),
+                    _ = registration_closed.changed() => Err(AcquisitionError::Unavailable),
+                    result = self.exchange_pending(pending, subject.as_secret(), deadline) => result,
+                }
+            }
+        };
+        self.check_active(deadline)?;
+        let token = outcome?;
+        token.check_expiry(Instant::now())?;
+        Ok(token)
+    }
+
+    fn lookup_if_budgeted(&self, subject: &SecretString) -> FastLookup {
+        if !tokio::task::coop::has_budget_remaining() {
+            return FastLookup::Pending(PendingLookup::Deferred);
+        }
+        let key = SubjectKey::of(subject);
+        self.0.store.reusable(key).map_or(
+            FastLookup::Pending(PendingLookup::Missed(key)),
+            FastLookup::Hit,
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn cache(&self) -> &ExchangedTokenCache {
-        &self.0.state.cache
+        &self.0.store.cache
     }
 
-    pub(crate) async fn exchange(
+    async fn exchange_pending(
         &self,
+        pending: PendingLookup,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        let key = SubjectKey::of(subject);
-        let registration = self.registration();
-        registration.check_active(deadline)?;
-        let result = if let Some(token) = self.0.state.reusable(key).await {
-            Ok(token)
-        } else {
-            tokio::time::timeout_at(
-                deadline.cutoff,
-                self.acquire_exchange(key, subject, deadline),
-            )
-            .await
-            .map_err(|_| deadline.expiry_error())?
+        let key = match pending {
+            PendingLookup::Missed(key) => key,
+            PendingLookup::Deferred => {
+                let key = SubjectKey::of(subject);
+                self.0.registration.check_active(deadline)?;
+                if let Some(token) = self.0.store.reusable(key) {
+                    return Ok(token);
+                }
+                key
+            }
         };
-        registration.check_active(deadline)?;
-        result
+        tokio::time::timeout_at(
+            deadline.cutoff,
+            self.acquire_exchange(key, subject, deadline),
+        )
+        .await
+        .map_err(|_| deadline.expiry_error())?
     }
 
     async fn acquire_exchange(
@@ -231,13 +294,13 @@ impl ExchangeTokens {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> ExchangeResult {
-        let registration = self.registration();
-        let state = &self.0.state;
+        let registration = &self.0.registration;
+        let store = &self.0.store;
         loop {
             registration.check_active(deadline)?;
-            match state.join(key) {
+            match store.join(key) {
                 ExchangeFlight::Leader(leader) => {
-                    let result = if let Some(token) = state.reusable(key).await {
+                    let result = if let Some(token) = store.reusable(key) {
                         Ok(token)
                     } else {
                         self.0.fetch(key, subject, deadline).await
@@ -255,7 +318,7 @@ impl ExchangeTokens {
                             return Ok(token.clone());
                         }
                         Some(Err(error)) => return Err(*error),
-                        _ => {}
+                        Some(Ok(_)) | None => {}
                     }
                 }
             }
@@ -270,16 +333,21 @@ mod tests {
     #[tokio::test]
     async fn short_tokens_cannot_use_the_weight_remainder_for_an_extra_subject()
     -> Result<(), AcquisitionError> {
-        const CAPACITY: u32 = 4_160;
-        let cache = ExchangeState::new(CAPACITY).cache;
-        let token = Arc::new(Token::bearer("short", Instant::now(), Some(3600))?);
-        for subject in 0..=CAPACITY {
+        const CAPACITY: NonZeroU32 = NonZeroU32::new(4_160).unwrap();
+        let cache = ExchangeStore::new(CAPACITY).cache;
+        let token = Arc::new(Token::bearer(
+            "short",
+            Instant::now(),
+            Some(3600),
+            Instant::now(),
+        )?);
+        for subject in 0..=CAPACITY.get() {
             let mut key = [0; 32];
             key[..4].copy_from_slice(&subject.to_be_bytes());
-            cache.insert(SubjectKey(key), token.clone()).await;
+            cache.insert(SubjectKey(key), token.clone());
         }
-        cache.run_pending_tasks().await;
-        assert!(cache.entry_count() <= u64::from(CAPACITY));
+        cache.run_pending_tasks();
+        assert!(cache.entry_count() <= u64::from(CAPACITY.get()));
         Ok(())
     }
 }

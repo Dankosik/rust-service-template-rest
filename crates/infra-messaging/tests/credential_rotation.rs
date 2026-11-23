@@ -13,7 +13,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use domain_events::{Event, EventPayload};
 use futures_util::FutureExt as _;
 use health::Probe as _;
-use infra_messaging::{CloseOutcome, Credentials, Messaging, MessagingOptions, Registry, Route};
+use infra_messaging::{
+    CloseOutcome, Credentials, Messaging, MessagingOptions, Registry, Route, TransportSecurity,
+};
 use nkeys::KeyPair;
 use operation_context::{Deadline, OperationContext};
 use serde_json::json;
@@ -155,7 +157,9 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     .await;
 
     let closed = if let Some(messaging) = messaging {
-        messaging.close(deadline(), &CancellationToken::new()).await
+        messaging
+            .close(&OperationContext::from_deadline(Deadline::at(deadline())))
+            .await
     } else {
         CloseOutcome::Complete
     };
@@ -191,21 +195,19 @@ async fn rotation_scenario(
     old.publish_file(&path).await;
     let cancel = CancellationToken::new();
     *client = Some(
-        Box::pin(Messaging::connect(
+        Messaging::connect(
             MessagingOptions {
                 connection_name: "synthetic-credential-rotation".to_owned(),
                 servers: vec![url.to_owned()],
                 credentials: Some(Credentials::File(path.clone())),
                 root_ca_path: None,
-                allow_plaintext: true,
-                tls_first: false,
+                security: TransportSecurity::AllowPlaintext,
                 source_stream: stream.to_owned(),
                 max_payload_bytes: 1024,
                 consumer: None,
             },
-            deadline(),
-            cancel.clone(),
-        ))
+            &context(&cancel),
+        )
         .await
         .unwrap(),
     );
@@ -223,7 +225,7 @@ async fn rotation_scenario(
     let first = publication.prepare(&event("before-expiry")).unwrap();
     messaging
         .producer()
-        .publish(&first, &context(&cancel))
+        .publish(&context(&cancel), &first)
         .await
         .expect("old credentials must work before their native expiration");
 
@@ -253,7 +255,7 @@ async fn rotation_scenario(
         loop {
             if messaging
                 .producer()
-                .publish(&after, &context(&cancel))
+                .publish(&context(&cancel), &after)
                 .await
                 .is_ok()
             {

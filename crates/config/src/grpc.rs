@@ -6,17 +6,17 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{
-    BlankAsNone, BlankSecretAsNone, ListenAddr, StrictBool, StrictCount, StrictDuration, StrictEnum,
+    BlankAsNone, BlankAsNoneVerbatim, ListenAddr, StrictBool, StrictCount, StrictDuration,
 };
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
+    DEFAULT_REQUEST_TIMEOUT, ListenerKind, RawListenerLimits,
 };
 use crate::validate::{Rejected, Violations, required};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum GrpcSecurity {
+enum GrpcSecurity {
     /// The operator supplies the enclosing network trust boundary.
     Plaintext,
     Tls,
@@ -33,33 +33,37 @@ pub(crate) struct GrpcInput {
     trust_trace_context: bool,
     /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
     /// Hostnames are refused; load does not look them up. Blank is absent.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone<ListenAddr>")]
     addr: Option<SocketAddr>,
-    #[serde(default)]
-    #[serde_as(as = "Option<StrictEnum>")]
     security: Option<GrpcSecurity>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     certificate: Option<String>,
-    #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     private_key: Option<SecretString>,
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     client_ca: Option<String>,
+    /// Budget for one call. It must fit inside the HTTP drain budget left
+    /// after readiness propagation.
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_REQUEST_TIMEOUT))]
     request_timeout: Duration,
+    /// Calls in handlers at once. Calls above the limit wait up to
+    /// `admission_wait`. Zero disables the limit.
     #[serde_as(as = "StrictCount")]
     #[educe(Default(expression = DEFAULT_MAX_IN_FLIGHT))]
     max_in_flight: u32,
+    /// Longest wait for a handler slot. It cannot outlast `request_timeout`.
+    /// Zero sheds at once.
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_ADMISSION_WAIT))]
     admission_wait: Duration,
+    /// Accepted connections at once. Zero accepts without a bound.
     #[serde_as(as = "StrictCount")]
     #[educe(Default(expression = DEFAULT_MAX_CONNECTIONS))]
     max_connections: u32,
+    /// Age after which a connection is told to finish and close, so its client
+    /// reconnects and is balanced again. Defaults to 30 minutes. Zero leaves
+    /// connection age unbounded.
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_mins(30)))]
     max_connection_age: Duration,
@@ -69,12 +73,12 @@ impl GrpcInput {
     pub(crate) fn admit(
         self,
         drain_budget: Option<Duration>,
-        violations: &mut Violations,
+        v: &mut Violations,
     ) -> Result<Option<GrpcConfig>, Rejected> {
         if !self.enabled {
             return Ok(None);
         }
-        let addr = violations.record(required("grpc.addr", self.addr, ENABLED));
+        let addr = v.record(required("grpc.addr", self.addr, ENABLED_CONDITION));
         let limits = RawListenerLimits {
             request_timeout: self.request_timeout,
             max_in_flight: self.max_in_flight,
@@ -82,13 +86,13 @@ impl GrpcInput {
             max_connections: self.max_connections,
             max_connection_age: self.max_connection_age,
         }
-        .admit("grpc", drain_budget, "calls", violations);
+        .admit(ListenerKind::GRPC, drain_budget, v);
         let security = Self::admit_security(
             self.security,
             self.certificate,
             self.private_key,
             self.client_ca,
-            violations,
+            v,
         );
         Ok(Some(GrpcConfig {
             trust_trace_context: self.trust_trace_context,
@@ -107,10 +111,10 @@ impl GrpcInput {
         certificate: Option<String>,
         private_key: Option<SecretString>,
         client_ca: Option<String>,
-        violations: &mut Violations,
+        v: &mut Violations,
     ) -> Result<GrpcListenerSecurity, Rejected> {
-        match violations.record(required("grpc.security", security, ENABLED))? {
-            GrpcSecurity::Plaintext => match violations.reject_present(
+        match v.record(required("grpc.security", security, ENABLED_CONDITION))? {
+            GrpcSecurity::Plaintext => match v.reject_present(
                 &[
                     ("grpc.certificate", certificate.is_some()),
                     ("grpc.private_key", private_key.is_some()),
@@ -123,9 +127,9 @@ impl GrpcInput {
             },
             GrpcSecurity::Tls => {
                 let certificate =
-                    violations.record(required("grpc.certificate", certificate, TLS_SELECTED));
+                    v.record(required("grpc.certificate", certificate, TLS_CONDITION));
                 let private_key =
-                    violations.record(required("grpc.private_key", private_key, TLS_SELECTED));
+                    v.record(required("grpc.private_key", private_key, TLS_CONDITION));
                 Ok(GrpcListenerSecurity::Tls(GrpcTlsMaterial {
                     certificate: certificate?,
                     private_key: private_key?,
@@ -156,16 +160,6 @@ pub enum GrpcListenerSecurity {
     Tls(GrpcTlsMaterial),
 }
 
-impl GrpcListenerSecurity {
-    #[must_use]
-    pub const fn mode(&self) -> &'static str {
-        match self {
-            Self::Plaintext => "plaintext",
-            Self::Tls(_) => "tls",
-        }
-    }
-}
-
 #[derive(Clone, derive_more::Debug)]
 pub struct GrpcTlsMaterial {
     #[debug(skip)]
@@ -176,8 +170,8 @@ pub struct GrpcTlsMaterial {
     pub client_ca: Option<String>,
 }
 
-const ENABLED: &str = "grpc.enabled is true";
-const TLS_SELECTED: &str = "grpc.security is tls";
+const ENABLED_CONDITION: &str = "grpc.enabled is true";
+const TLS_CONDITION: &str = "grpc.security is tls";
 
 #[cfg(test)]
 mod tests;

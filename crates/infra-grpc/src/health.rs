@@ -12,20 +12,23 @@ pub(crate) type HealthServer = tonic_health::pb::health_server::HealthServer<Ada
 #[derive(Debug)]
 pub(crate) struct Adapter {
     readiness: ReadinessReader,
-    services: BTreeSet<&'static str>,
+    service_names: BTreeSet<&'static str>,
 }
 
 impl Adapter {
-    pub(crate) fn new(readiness: ReadinessReader, mut services: BTreeSet<&'static str>) -> Self {
-        services.insert(tonic_health::pb::health_server::SERVICE_NAME);
+    pub(crate) fn new(
+        readiness: ReadinessReader,
+        mut service_names: BTreeSet<&'static str>,
+    ) -> Self {
+        service_names.insert(tonic_health::pb::health_server::SERVICE_NAME);
         Self {
             readiness,
-            services,
+            service_names,
         }
     }
 
-    fn known(&self, name: &str) -> bool {
-        name.is_empty() || self.services.contains(name)
+    fn is_known(&self, name: &str) -> bool {
+        name.is_empty() || self.service_names.contains(name)
     }
 }
 
@@ -36,7 +39,7 @@ impl Health for Adapter {
         request: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
         let service = request.get_ref().service.as_str();
-        if !self.known(service) {
+        if !self.is_known(service) {
             return Err(Status::not_found("service not registered"));
         }
         let status = serving(self.readiness.is_ready());
@@ -49,7 +52,7 @@ impl Health for Adapter {
         &self,
         request: Request<HealthCheckRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        let known = self.known(&request.get_ref().service);
+        let known = self.is_known(&request.get_ref().service);
         let stream: Self::WatchStream = Box::pin(watch(self.readiness.clone(), known));
         Ok(Response::new(stream))
     }

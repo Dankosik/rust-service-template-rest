@@ -1,16 +1,18 @@
 /// RFC 7518 §6.2.1.2, §6.2.1.3
 const P256_COORDINATE_BYTES: usize = 32;
 const UNCOMPRESSED_POINT_TAG: u8 = 0x04;
+const UNCOMPRESSED_POINT_BYTES: usize = 1 + 2 * P256_COORDINATE_BYTES;
 
 /// SEC 1 §2.3.3
 #[must_use]
-pub fn p256_point(x: &[u8], y: &[u8]) -> Option<[u8; 1 + 2 * P256_COORDINATE_BYTES]> {
+pub fn p256_point(x: &[u8], y: &[u8]) -> Option<[u8; UNCOMPRESSED_POINT_BYTES]> {
     let x: &[u8; P256_COORDINATE_BYTES] = x.try_into().ok()?;
     let y: &[u8; P256_COORDINATE_BYTES] = y.try_into().ok()?;
-    let mut point = [0; 1 + 2 * P256_COORDINATE_BYTES];
+    let mut point = [0; UNCOMPRESSED_POINT_BYTES];
     point[0] = UNCOMPRESSED_POINT_TAG;
-    point[1..=P256_COORDINATE_BYTES].copy_from_slice(x);
-    point[1 + P256_COORDINATE_BYTES..].copy_from_slice(y);
+    let (point_x, point_y) = point[1..].split_at_mut(P256_COORDINATE_BYTES);
+    point_x.copy_from_slice(x);
+    point_y.copy_from_slice(y);
     Some(point)
 }
 

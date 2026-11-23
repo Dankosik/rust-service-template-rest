@@ -13,27 +13,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
 use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
+use infra_bearerauthn::test_support::JWT_SIGNING_DER;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
-use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose};
 use serde_json::{Value, json};
+use tls_test_support::TlsMaterial;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, sleep_until, timeout};
-use tokio_rustls::{
-    TlsAcceptor,
-    rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer},
-};
+use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, transport::Channel};
 
 type Result<T> = std::result::Result<T, String>;
 
 const REQUEST_BUDGET: Duration = Duration::from_secs(8);
-const JWT_KEY: &[u8] =
-    include_bytes!("../../infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der");
 const CHEAP_BODY: &str = const_str_1k();
 
 const fn const_str_1k() -> &'static str {
@@ -159,27 +155,8 @@ struct Peers {
 impl Peers {
     async fn start(evidence: &Evidence) -> Result<Self> {
         let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
-        let mut root_params = CertificateParams::default();
-        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let root = CertifiedIssuer::self_signed(root_params, KeyPair::generate().map_err(failure)?)
-            .map_err(failure)?;
-        let key = KeyPair::generate().map_err(failure)?;
-        let cert = CertificateParams::new(vec!["host.docker.internal".to_owned()])
-            .map_err(failure)?
-            .signed_by(&key, &root)
-            .map_err(failure)?;
-        let tls = ServerConfig::builder_with_provider(
-            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .map_err(failure)?
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![cert.der().clone()],
-            PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
-        )
-        .map_err(failure)?;
+        let material = TlsMaterial::new("host.docker.internal");
+        let acceptor = material.acceptor();
         let oidc = TcpListener::bind("0.0.0.0:0").await.map_err(failure)?;
         let s3 = TcpListener::bind("0.0.0.0:0").await.map_err(failure)?;
         let issuer = format!(
@@ -190,7 +167,7 @@ impl Peers {
             "http://host.docker.internal:{}",
             s3.local_addr().map_err(failure)?.port()
         );
-        let signing = EncodingKey::from_rsa_der(JWT_KEY);
+        let signing = EncodingKey::from_rsa_der(JWT_SIGNING_DER);
         let mut jwk = Jwk::from_encoding_key(&signing, Algorithm::RS256).map_err(failure)?;
         jwk.common.key_id = Some("runtime-progress".to_owned());
         let jwks = json!({"keys": [jwk]}).to_string();
@@ -201,14 +178,14 @@ impl Peers {
             &signing,
         ).map_err(failure)?;
         let root_path = evidence.directory.join("oidc-root.pem");
-        tokio::fs::write(&root_path, root.pem())
+        tokio::fs::write(&root_path, &material.root_pem)
             .await
             .map_err(failure)?;
         let stop = CancellationToken::new();
         let tasks = vec![
             tokio::spawn(serve_peer(
                 oidc,
-                Some(TlsAcceptor::from(Arc::new(tls))),
+                Some(acceptor),
                 discovery,
                 jwks,
                 stop.clone(),

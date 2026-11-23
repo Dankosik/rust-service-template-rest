@@ -1,4 +1,3 @@
-#![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,
     clippy::panic,
@@ -18,28 +17,28 @@ use std::time::SystemTime;
 use async_nats::jetstream::{self, consumer, stream};
 use domain_events::{Event, EventPayload};
 use infra_jobs::{Engine, EnqueueError, Kinds};
-use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
+use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued, OutboxEvent, ReconcileOutcome};
 use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
 use infra_messaging::{
-    ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingError, MessagingOptions,
-    Registry, Route,
+    ConsumerOptions, EventHandler, HandlerError, Messaging, MessagingError, MessagingOptions,
+    PrepareError, Registry, Route, TransportSecurity,
 };
-use infra_postgres::{Isolation, PgPool, TxError, in_tx};
+use infra_postgres::{Isolation, Pool, TxError};
 use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, KindsBuilder};
 use infra_webhooks::inbound::{
-    Consumer as WebhookConsumer, Consumers, Incoming, Processor, Receiver, Verifier,
+    Consumer as WebhookConsumer, Consumers, Incoming, Receiver, Verifiers,
 };
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
+use integration_tests::jobs::EngineRun;
 use integration_tests::{close_pools, dsn_for, poll_until};
 use nats_test_support::{AckDroppingRelay, DroppedAck};
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
-use tokio_util::sync::{CancellationToken, DropGuard};
-use tokio_util::task::TaskTracker;
+use tokio_util::sync::CancellationToken;
 
 #[path = "messaging_outbox/upgrade.rs"]
 mod upgrade;
@@ -125,7 +124,11 @@ impl Fixture {
             .expect("fixture publication route is valid");
         if with_consumer {
             let mut handled = registry.clone();
-            handled.register(&route, |_, _| async { Ok(()) }).unwrap();
+            handled
+                .register(&route, |_: Event<Created>, _: OperationContext| async {
+                    Ok(())
+                })
+                .unwrap();
             jetstream
                 .get_stream(&stream)
                 .await
@@ -135,7 +138,7 @@ impl Fixture {
                     durable_name: Some(durable.clone()),
                     filter_subject: subject.clone(),
                     metadata: handled.durable_metadata(&dlq_stream, &dlq_subject),
-                    ack_wait: Duration::from_secs(46),
+                    ack_wait: infra_messaging::DURABLE_ACK_WAIT,
                     max_deliver: -1,
                     max_ack_pending: 1,
                     ..Default::default()
@@ -157,12 +160,12 @@ impl Fixture {
         }
     }
 
-    fn connect_producer(&self) -> impl Future<Output = Result<Messaging, MessagingError>> {
-        Box::pin(Messaging::connect(
+    async fn connect_producer(&self) -> Result<Messaging, MessagingError> {
+        Messaging::connect(
             messaging_options(self),
-            Instant::now() + WAIT,
-            CancellationToken::new(),
-        ))
+            &OperationContext::with_timeout(WAIT),
+        )
+        .await
     }
 
     async fn remove_source(&self) {
@@ -250,8 +253,7 @@ fn messaging_options_with_servers(fixture: &Fixture, servers: Vec<String>) -> Me
         servers,
         credentials: None,
         root_ca_path: None,
-        allow_plaintext: true,
-        tls_first: false,
+        security: TransportSecurity::AllowPlaintext,
         source_stream: fixture.stream.clone(),
         max_payload_bytes: 1024,
         consumer: None,
@@ -270,7 +272,7 @@ fn consumer_options(fixture: &Fixture, durable: &str) -> MessagingOptions {
     options
 }
 
-async fn template_pool(pool: &PgPool, max_connections: u32) -> PgPool {
+async fn template_pool(pool: &PgPool, max_connections: u32) -> Pool {
     integration_tests::template_pool(
         &dsn_for(pool).await,
         APP,
@@ -280,14 +282,7 @@ async fn template_pool(pool: &PgPool, max_connections: u32) -> PgPool {
     .await
 }
 
-struct EngineRun {
-    started: infra_jobs::Started,
-    tracker: TaskTracker,
-    cancel: CancellationToken,
-    _cancel_guard: DropGuard,
-}
-
-async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
+async fn start(pool: &Pool, registry: Kinds) -> EngineRun {
     start_engine(Engine::new(pool.clone(), registry, NonZeroU32::MIN)).await
 }
 
@@ -296,49 +291,31 @@ async fn start_engine(engine: Engine) -> EngineRun {
         .check_startup()
         .await
         .expect("outbox engine admits the shared jobs store");
-    let tracker = TaskTracker::new();
-    let cancel = CancellationToken::new();
-    let started = engine.start(&tracker, &cancel);
-    tracker.close();
-    let cancel_guard = cancel.clone().drop_guard();
-    EngineRun {
-        started,
-        tracker,
-        cancel,
-        _cancel_guard: cancel_guard,
-    }
+    EngineRun::start(engine)
 }
 
-async fn finish(run: EngineRun, pools: &[&PgPool]) {
-    run.started.stop_claiming();
-    timeout(WAIT, run.started.drained())
-        .await
-        .expect("the engine drains");
-    run.cancel.cancel();
-    timeout(WAIT, run.tracker.wait())
-        .await
-        .expect("engine background tasks join");
+async fn finish(run: EngineRun, pools: &[&Pool]) {
+    run.drain_and_join(WAIT).await;
     close_pools(pools).await;
 }
 
 async fn close(messaging: Messaging) {
-    let cancel = CancellationToken::new();
     assert_eq!(
         messaging
-            .close(Instant::now() + CLOSE_BUDGET, &cancel)
+            .close(&OperationContext::with_timeout(CLOSE_BUDGET))
             .await,
         infra_messaging::CloseOutcome::Complete
     );
 }
 
-async fn job(pool: &PgPool, key: &str) -> JobRow {
+async fn job(pool: &Pool, key: &str) -> JobRow {
     let row = sqlx::query(
         "SELECT id::text AS id, state, attempts, failure_reason, error_summary \
          FROM background_jobs WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)
     .bind(key)
-    .fetch_one(pool)
+    .fetch_one(infra_postgres::test_support::as_sqlx(pool))
     .await
     .expect("outbox job is stored");
     JobRow {
@@ -366,7 +343,7 @@ async fn outbox_count(pool: &PgPool) -> i64 {
         .expect("outbox row count")
 }
 
-fn prepared(fixture: &Fixture, id: &str, value: &str) -> infra_messaging::PreparedEvent {
+fn prepared(fixture: &Fixture, id: &str, value: &str) -> OutboxEvent {
     fixture
         .publication
         .clone()
@@ -381,7 +358,7 @@ enum Step {
     #[display("caller refused the transaction")]
     Refused,
     #[display("envelope: {_0}")]
-    Envelope(EnvelopeError),
+    Envelope(PrepareError),
     #[display("outbox: {_0}")]
     Outbox(OutboxEnqueueError),
     #[display("jobs: {_0}")]
@@ -423,7 +400,7 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
             "event-float-retry",
             Payload::Number(Some(f64::NAN)),
             Payload::Number(None),
-            EnvelopeError::Serialization,
+            PrepareError::Serialization,
             b"null".to_vec(),
         ),
         (
@@ -432,41 +409,48 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
             Payload::Json(
                 serde_json::value::RawValue::from_string(raw127.clone()).expect("raw JSON"),
             ),
-            EnvelopeError::PayloadStructure,
+            PrepareError::PayloadStructure,
             raw127.into_bytes(),
         ),
     ];
     for (id, invalid, corrected, expected_error, expected_bytes) in cases {
-        let before = outbox_count(&jobs).await;
+        let before = outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await;
         let mut event = Event {
             id: id.to_owned(),
             occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000)
                 .expect("fixed occurrence"),
             payload: invalid,
         };
-        let rejected = in_tx(&jobs, async |tx| -> Result<_, Step> {
-            match publication.prepare(&event) {
-                Ok(prepared) => Ok(Ok(prepared.enqueue(tx).await?)),
-                Err(error) => Ok(Err(error)),
-            }
-        })
-        .await
-        .expect("refusal leaves the caller transaction usable");
+        let rejected = jobs
+            .in_tx(async |tx| -> Result<_, Step> {
+                match publication.prepare(&event) {
+                    Ok(prepared) => Ok(Ok(prepared.enqueue(tx).await?)),
+                    Err(error) => Ok(Err(error)),
+                }
+            })
+            .await
+            .expect("refusal leaves the caller transaction usable");
         assert_eq!(rejected, Err(expected_error));
-        assert_eq!(outbox_count(&jobs).await, before);
+        assert_eq!(
+            outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+            before
+        );
 
         event.payload = corrected;
         let prepared = publication.prepare(&event).expect("corrected payload");
         assert_eq!(prepared.payload().as_ref(), expected_bytes);
         assert_eq!(
-            in_tx(&jobs, async |tx| -> Result<_, Step> {
+            jobs.in_tx(async |tx| -> Result<_, Step> {
                 prepared.enqueue(tx).await.map_err(Step::from)
             })
             .await
             .expect("the refused identity remains available"),
             OutboxEnqueued::Created
         );
-        assert_eq!(outbox_count(&jobs).await, before + 1);
+        assert_eq!(
+            outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+            before + 1
+        );
     }
     close_pools(&[&jobs]).await;
 }
@@ -495,28 +479,32 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         .expect("producer-only messaging admits the provisioned stream");
     let business = template_pool(&pool, 3).await;
     sqlx::query("CREATE TABLE business_effects (id text PRIMARY KEY)")
-        .execute(&business)
+        .execute(infra_postgres::test_support::as_sqlx(&business))
         .await
         .expect("business table");
 
     let rolled_back = prepared(&fixture, "event-rollback", "rollback");
-    let rollback = in_tx(&business, async |tx| -> Result<(), Step> {
-        sqlx::query("INSERT INTO business_effects (id) VALUES ('rollback')")
-            .execute(&mut *tx)
-            .await?;
-        assert_eq!(rolled_back.enqueue(tx).await?, OutboxEnqueued::Created);
-        Err(Step::Refused)
-    })
-    .await;
+    let rollback = business
+        .in_tx(async |tx| -> Result<(), Step> {
+            sqlx::query("INSERT INTO business_effects (id) VALUES ('rollback')")
+                .execute(&mut *tx)
+                .await?;
+            assert_eq!(rolled_back.enqueue(tx).await?, OutboxEnqueued::Created);
+            Err(Step::Refused)
+        })
+        .await;
     std::assert_matches!(rollback, Err(Step::Refused));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM business_effects")
-            .fetch_one(&business)
+            .fetch_one(infra_postgres::test_support::as_sqlx(&business))
             .await
             .expect("business effects after rollback"),
         0
     );
-    assert_eq!(outbox_count(&business).await, 0);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&business)).await,
+        0
+    );
 
     let route = Route::<AccountUpdated>::new(fixture.subject.clone());
     let publication = Registry::default()
@@ -536,16 +524,20 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     let committed = publication
         .prepare(&event)
         .expect("original account update");
-    let committed_outcome = in_tx(&business, async |tx| -> Result<_, Step> {
-        sqlx::query("INSERT INTO business_effects (id) VALUES ('commit')")
-            .execute(&mut *tx)
-            .await?;
-        committed.enqueue(tx).await.map_err(Step::from)
-    })
-    .await
-    .expect("business transaction commits alongside publication intent");
+    let committed_outcome = business
+        .in_tx(async |tx| -> Result<_, Step> {
+            sqlx::query("INSERT INTO business_effects (id) VALUES ('commit')")
+                .execute(&mut *tx)
+                .await?;
+            committed.enqueue(tx).await.map_err(Step::from)
+        })
+        .await
+        .expect("business transaction commits alongside publication intent");
     assert_eq!(committed_outcome, OutboxEnqueued::Created);
-    assert_eq!(outbox_count(&business).await, 1);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&business)).await,
+        1
+    );
 
     let publisher = template_pool(&pool, 3).await;
     let run = start(
@@ -593,7 +585,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM business_effects WHERE id = 'commit'")
-            .fetch_one(&business)
+            .fetch_one(infra_postgres::test_support::as_sqlx(&business))
             .await
             .expect("committed business effect"),
         1
@@ -623,9 +615,9 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
 
 async fn verify_completed_identity(
     messaging: &Messaging,
-    business: &PgPool,
-    reordered: &infra_messaging::PreparedEvent,
-    same: &infra_messaging::PreparedEvent,
+    business: &Pool,
+    reordered: &OutboxEvent,
+    same: &OutboxEvent,
     job_id: &str,
 ) {
     let cleanup = Engine::new(
@@ -637,32 +629,35 @@ async fn verify_completed_identity(
         if !retained {
             sqlx::query("UPDATE background_jobs SET finished_at = now() - interval '2 days' WHERE id::text = $1")
                 .bind(job_id)
-                .execute(business)
+                .execute(infra_postgres::test_support::as_sqlx(business))
                 .await
                 .unwrap();
             assert_eq!(cleanup.remove_expired().await.unwrap(), 1);
         }
-        let conflicting = in_tx(business, async |tx| -> Result<_, Step> {
-            sqlx::query("INSERT INTO business_effects (id) VALUES ('conflicting')")
-                .execute(&mut *tx)
-                .await?;
-            reordered.enqueue(tx).await.map_err(Step::from)
-        })
-        .await;
+        let conflicting = business
+            .in_tx(async |tx| -> Result<_, Step> {
+                sqlx::query("INSERT INTO business_effects (id) VALUES ('conflicting')")
+                    .execute(&mut *tx)
+                    .await?;
+                reordered.enqueue(tx).await.map_err(Step::from)
+            })
+            .await;
         std::assert_matches!(
             conflicting,
             Err(Step::Outbox(OutboxEnqueueError::EventIdConflict))
         );
-        let duplicate = in_tx(business, async |tx| -> Result<_, Step> {
-            same.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .unwrap();
+        let duplicate = business
+            .in_tx(async |tx| -> Result<_, Step> { same.enqueue(tx).await.map_err(Step::from) })
+            .await
+            .unwrap();
         assert_eq!(duplicate, OutboxEnqueued::Duplicate);
-        assert_eq!(outbox_count(business).await, i64::from(retained));
+        assert_eq!(
+            outbox_count(infra_postgres::test_support::as_sqlx(business)).await,
+            i64::from(retained)
+        );
     }
     let business_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM business_effects")
-        .fetch_one(business)
+        .fetch_one(infra_postgres::test_support::as_sqlx(business))
         .await
         .unwrap();
     assert_eq!(business_rows, 1);
@@ -678,19 +673,22 @@ async fn independent_publishers_deliver_their_own_event_for_the_same_local_id(po
         .prepare(&event(local_id, "unbound"))
         .unwrap();
     let reconcile = async || {
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            unscoped.enqueue(tx).await.map_err(Step::from)
+        jobs.in_tx(async |tx| -> Result<_, Step> {
+            unscoped
+                .reconcile_legacy_outbox(tx)
+                .await
+                .map_err(Step::from)
         })
         .await
     };
     let (a, b) = tokio::join!(reconcile(), reconcile());
     for outcome in [a, b] {
-        std::assert_matches!(
-            outcome,
-            Err(Step::Outbox(OutboxEnqueueError::PublisherRequired))
-        );
+        std::assert_matches!(outcome, Ok(ReconcileOutcome::Missing));
     }
-    assert_eq!(outbox_count(&jobs).await, 0);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+        0
+    );
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let start_time = Instant::now();
     for (sequence, publisher, value) in [
@@ -720,11 +718,12 @@ async fn independent_publishers_deliver_their_own_event_for_the_same_local_id(po
             let route = fixture.publication.clone().for_outbox(publisher);
             let prepared = route.prepare(&authored).unwrap();
             assert_eq!(prepared.message_id(), expected_id);
-            let observed = in_tx(&jobs, async |tx| -> Result<_, Step> {
-                prepared.enqueue(tx).await.map_err(Step::from)
-            })
-            .await
-            .unwrap();
+            let observed = jobs
+                .in_tx(async |tx| -> Result<_, Step> {
+                    prepared.enqueue(tx).await.map_err(Step::from)
+                })
+                .await
+                .unwrap();
             assert_eq!(observed, outcome);
             poll_until("publisher receives a broker ACK", WAIT, POLL, async || {
                 (job(&jobs, &event_key(prepared.message_id())).await.state == "completed")
@@ -746,7 +745,10 @@ async fn independent_publishers_deliver_their_own_event_for_the_same_local_id(po
         close(messaging).await;
     }
     assert!(start_time.elapsed() < fixture.duplicate_window);
-    assert_eq!(outbox_count(&jobs).await, 2);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+        2
+    );
     close_pools(&[&jobs]).await;
     fixture.cleanup().await;
 }
@@ -760,19 +762,15 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
     let equal = prepared(&fixture, "event-identity", "same");
 
     assert_eq!(
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            first.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .expect("first immutable intent commits"),
+        jobs.in_tx(async |tx| -> Result<_, Step> { first.enqueue(tx).await.map_err(Step::from) })
+            .await
+            .expect("first immutable intent commits"),
         OutboxEnqueued::Created
     );
     assert_eq!(
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            equal.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .expect("same immutable intent is accepted while its key is live"),
+        jobs.in_tx(async |tx| -> Result<_, Step> { equal.enqueue(tx).await.map_err(Step::from) })
+            .await
+            .expect("same immutable intent is accepted while its key is live"),
         OutboxEnqueued::Duplicate
     );
     let same_id = race_ordered_enqueues(
@@ -801,15 +799,18 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
         same_version,
         Err(Step::Outbox(OutboxEnqueueError::OrderConflict))
     );
-    assert_eq!(outbox_count(&jobs).await, 3);
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+        3
+    );
     close_pools(&[&competing, &jobs]).await;
     fixture.cleanup().await;
 }
 
 async fn race_ordered_enqueues(
     fixture: &Fixture,
-    jobs: &PgPool,
-    competing: &PgPool,
+    jobs: &Pool,
+    competing: &Pool,
     aggregate: &'static str,
     first_id: &str,
     second_id: &str,
@@ -822,26 +823,28 @@ async fn race_ordered_enqueues(
     let first_entered = Arc::clone(&entered);
     let first_release = Arc::clone(&release);
     let first_task = tokio::spawn(async move {
-        in_tx(&first_pool, async |tx| -> Result<_, Step> {
-            let result = held.enqueue_ordered(tx, aggregate, 1).await?;
-            first_entered.notify_one();
-            first_release.notified().await;
-            Ok(result)
-        })
-        .await
+        first_pool
+            .in_tx(async |tx| -> Result<_, Step> {
+                let result = held.enqueue_ordered(tx, aggregate, 1).await?;
+                first_entered.notify_one();
+                first_release.notified().await;
+                Ok(result)
+            })
+            .await
     });
     timeout(WAIT, entered.notified())
         .await
         .expect("the first concurrent immutable intent enters its transaction");
     let second_pool = competing.clone();
     let second_task = tokio::spawn(async move {
-        in_tx(&second_pool, async |tx| -> Result<_, Step> {
-            conflicting
-                .enqueue_ordered(tx, aggregate, 1)
-                .await
-                .map_err(Step::from)
-        })
-        .await
+        second_pool
+            .in_tx(async |tx| -> Result<_, Step> {
+                conflicting
+                    .enqueue_ordered(tx, aggregate, 1)
+                    .await
+                    .map_err(Step::from)
+            })
+            .await
     });
     poll_until(
         "the conflicting insert waits for the live unique key",
@@ -854,7 +857,7 @@ async fn race_ordered_enqueues(
                AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()",
             )
             .bind(APP)
-            .fetch_one(jobs)
+            .fetch_one(infra_postgres::test_support::as_sqlx(jobs))
             .await
             .expect("concurrent lock observation");
             (waiting > 0).then_some(())
@@ -880,22 +883,19 @@ async fn race_ordered_enqueues(
 async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(pool: PgPool) {
     let fixture = Fixture::create().await;
     let relay = AckDroppingRelay::start(&fixture.stream).await;
-    let first_messaging = Box::pin(Messaging::connect(
+    let first_messaging = Messaging::connect(
         messaging_options_with_servers(&fixture, vec![relay.url.clone()]),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
+        &OperationContext::with_timeout(WAIT),
+    )
     .await
     .expect("producer-only messaging admits through the transparent relay");
     let jobs = template_pool(&pool, 3).await;
     let intent = prepared(&fixture, "event-lost-ack", "ambiguous");
     let key = event_key(intent.message_id());
     assert_eq!(
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            intent.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .expect("outbox intent commits before the ambiguous acknowledgement"),
+        jobs.in_tx(async |tx| -> Result<_, Step> { intent.enqueue(tx).await.map_err(Step::from) })
+            .await
+            .expect("outbox intent commits before the ambiguous acknowledgement"),
         OutboxEnqueued::Created
     );
     let first_pool = template_pool(&pool, 3).await;
@@ -938,7 +938,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
 
     sqlx::query("UPDATE background_jobs SET not_before = statement_timestamp() - interval '1 second' WHERE id::text = $1")
         .bind(&retrying.id)
-        .execute(&jobs)
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("ambiguous intent is made due for its same-ID retry");
     let retry_messaging = fixture
@@ -987,11 +987,12 @@ async fn outbox_retries_after_a_route_changing_stream_update(pool: PgPool) {
     let jobs = template_pool(&pool, 3).await;
     let intent = prepared(&fixture, "live-transform", "preserve route");
     let key = event_key(intent.message_id());
-    in_tx(&jobs, async |tx| -> Result<_, Step> {
-        intent.enqueue(tx).await.map_err(Step::from)
-    })
-    .await
-    .unwrap();
+    assert_eq!(
+        jobs.in_tx(async |tx| -> Result<_, Step> { intent.enqueue(tx).await.map_err(Step::from) })
+            .await
+            .unwrap(),
+        OutboxEnqueued::Created
+    );
     let run = start(&jobs, kinds).await;
     let attempt = poll_until("relay attempts publication", WAIT, POLL, async || {
         let row = job(&jobs, &key).await;
@@ -1022,14 +1023,13 @@ async fn outbox_retries_after_a_route_changing_stream_update(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_intent(pool: PgPool) {
     let fixture = Fixture::create().await;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         MessagingOptions {
             max_payload_bytes: 64,
             ..messaging_options(&fixture)
         },
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
+        &OperationContext::with_timeout(WAIT),
+    )
     .await
     .expect("producer-only messaging admits before the controlled outage");
     let jobs = template_pool(&pool, 3).await;
@@ -1039,20 +1039,24 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
         .unwrap()
         .for_outbox(PUBLISHER_ID);
     let too_large = event("oversized-new-intent", &"x".repeat(53));
-    let before = outbox_count(&jobs).await;
-    let refused = in_tx(&jobs, async |tx| -> Result<(), Step> {
-        publication.prepare(&too_large)?.enqueue(tx).await?;
-        Ok(())
-    })
-    .await;
-    std::assert_matches!(refused, Err(Step::Envelope(EnvelopeError::PayloadTooLarge)));
-    assert_eq!(outbox_count(&jobs).await, before);
+    let before = outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await;
+    let refused = jobs
+        .in_tx(async |tx| -> Result<(), Step> {
+            let _ = publication.prepare(&too_large)?.enqueue(tx).await?;
+            Ok(())
+        })
+        .await;
+    std::assert_matches!(refused, Err(Step::Envelope(PrepareError::PayloadTooLarge)));
+    assert_eq!(
+        outbox_count(infra_postgres::test_support::as_sqlx(&jobs)).await,
+        before
+    );
     let intent = publication
         .prepare(&event("event-exhausted", &"x".repeat(52)))
         .unwrap();
     assert_eq!(intent.payload().len(), 64);
     let oversized = prepared(&fixture, "event-oversized", &"x".repeat(64));
-    in_tx(&jobs, async |tx| -> Result<_, Step> {
+    jobs.in_tx(async |tx| -> Result<_, Step> {
         assert_eq!(intent.enqueue(tx).await?, OutboxEnqueued::Created);
         assert_eq!(oversized.enqueue(tx).await?, OutboxEnqueued::Created);
         Ok(())
@@ -1078,7 +1082,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
         )
         .bind(&id)
         .bind(generation)
-        .execute(&jobs)
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .expect("make a scheduled retry due");
         assert_eq!(updated.rows_affected(), 1);
@@ -1101,7 +1105,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
             )
             .bind(&id)
             .bind(generation)
-            .execute(&jobs)
+            .execute(infra_postgres::test_support::as_sqlx(&jobs))
             .await
             .expect("stage the intervening retry history");
             assert_eq!(seeded.rows_affected(), 1);
@@ -1122,7 +1126,7 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
                 .bind(&id)
                 .bind(generation)
                 .bind(attempt)
-                .fetch_optional(&jobs)
+                .fetch_optional(infra_postgres::test_support::as_sqlx(&jobs))
                 .await
                 .expect("read the stored delay from the transition's PostgreSQL clock")
             })
@@ -1150,8 +1154,8 @@ async fn route_limit_refuses_before_commit_and_a_later_reduction_refuses_old_int
     fixture.restore_source().await;
     make_due(generation).await;
     let interrupted = prepared(&fixture, "final-lease", "interrupted");
-    in_tx(&jobs, async |tx| -> Result<(), Step> {
-        interrupted.enqueue(tx).await?;
+    jobs.in_tx(async |tx| -> Result<(), Step> {
+        assert_eq!(interrupted.enqueue(tx).await?, OutboxEnqueued::Created);
         sqlx::query(
             "UPDATE background_jobs SET state='running', attempts=25,
              claim_generation=nextval('background_jobs_claim_generation'),
@@ -1209,7 +1213,7 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     let first = prepared(&fixture, "A1", &"a".repeat(100));
     let second = prepared(&fixture, "A2", "second");
     let independent = prepared(&fixture, "B1", "independent");
-    in_tx(&jobs, async |tx| -> Result<_, Step> {
+    jobs.in_tx(async |tx| -> Result<_, Step> {
         std::assert_matches!(
             second.enqueue_ordered(tx, "A", 2).await,
             Err(OutboxEnqueueError::OrderConflict)
@@ -1218,7 +1222,7 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     })
     .await
     .unwrap();
-    in_tx(&jobs, async |tx| -> Result<_, Step> {
+    jobs.in_tx(async |tx| -> Result<_, Step> {
         assert_eq!(
             first.enqueue_ordered(tx, "A", 1).await?,
             OutboxEnqueued::Created
@@ -1227,7 +1231,7 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     })
     .await
     .unwrap();
-    in_tx(&jobs, async |tx| -> Result<_, Step> {
+    jobs.in_tx(async |tx| -> Result<_, Step> {
         std::assert_matches!(
             independent.enqueue_ordered(tx, "A", 1).await,
             Err(OutboxEnqueueError::OrderConflict)
@@ -1255,13 +1259,13 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     let connect = async |limit| {
         let mut options = messaging_options(&fixture);
         options.max_payload_bytes = limit;
-        Messaging::connect(options, Instant::now() + WAIT, CancellationToken::new())
+        Messaging::connect(options, &OperationContext::with_timeout(WAIT))
             .await
             .unwrap()
     };
     let publisher_a = template_pool(&pool, 3).await;
     let publisher_b = template_pool(&pool, 3).await;
-    let start_publisher = async |pool: &PgPool, messaging: &Messaging| {
+    let start_publisher = async |pool: &Pool, messaging: &Messaging| {
         let kinds = infra_messaging::outbox::kinds(messaging.outbox_producer().unwrap()).unwrap();
         start(pool, kinds).await
     };
@@ -1289,11 +1293,13 @@ async fn ordered_redrive_keeps_successors_behind_their_failed_predecessor(pool: 
     );
     let (id, generation): (String, String) = sqlx::query_as(
         "SELECT id::text, claim_generation::text FROM background_jobs WHERE kind=$1 AND unique_key=$2"
-    ).bind(OUTBOX_KIND).bind(event_key(first.message_id())).fetch_one(&jobs).await.unwrap();
+    ).bind(OUTBOX_KIND).bind(event_key(first.message_id())).fetch_one(infra_postgres::test_support::as_sqlx(&jobs)).await.unwrap();
     let target = RecoveryTarget::try_new(&id, OUTBOX_KIND, &generation).unwrap();
-    let discard = in_tx(&jobs, async |tx| operator::discard(tx, &target).await).await;
+    let discard = jobs
+        .in_tx(async |tx| operator::discard(tx, &target).await)
+        .await;
     std::assert_matches!(discard, Err(OperatorError::Conflict));
-    in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
+    jobs.in_tx(async |tx| operator::redrive(tx, &target).await)
         .await
         .unwrap();
     let recovered = connect(1024).await;
@@ -1372,11 +1378,14 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         .collect();
     for id in ["substituted", "malformed-outer"] {
         let intent = prepared(&fixture, id, "original");
-        in_tx(&jobs, async |tx| -> Result<_, Step> {
-            intent.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .unwrap();
+        assert_eq!(
+            jobs.in_tx(async |tx| -> Result<_, Step> {
+                intent.enqueue(tx).await.map_err(Step::from)
+            })
+            .await
+            .unwrap(),
+            OutboxEnqueued::Created
+        );
         let changed = sqlx::query(
             "UPDATE background_jobs SET payload_text = CASE WHEN $2 THEN '{' ELSE
              jsonb_set(payload_text::jsonb, '{payload_base64}', to_jsonb($3::text), false)::text END
@@ -1385,7 +1394,7 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
         .bind(event_key(intent.message_id()))
         .bind(id == "malformed-outer")
         .bind(&valid_body)
-        .execute(&jobs)
+        .execute(infra_postgres::test_support::as_sqlx(&jobs))
         .await
         .unwrap();
         assert_eq!(changed.rows_affected(), 1);
@@ -1434,38 +1443,34 @@ async fn stored_intent_rejects_corruption_and_publishes_valid_json_bytes_unchang
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(pool: PgPool) {
     let fixture = Fixture::create_with_consumer(true).await;
-    let messaging = Box::pin(Messaging::connect(
+    let messaging = Messaging::connect(
         consumer_options(&fixture, &fixture.durable),
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
+        &OperationContext::with_timeout(WAIT),
+    )
     .await
     .expect("messaging consumer topology admits");
     let effects = template_pool(&pool, 3).await;
-    create_effect_store(&effects).await;
+    create_effect_store(infra_postgres::test_support::as_sqlx(&effects)).await;
     let invoked = Arc::new(AtomicUsize::new(0));
     let registry = effect_registry(&fixture, &effects, &invoked);
     let cancel = CancellationToken::new();
     let mut handle = messaging
-        .consumer(registry, Instant::now() + WAIT, &cancel)
+        .consumer(
+            registry,
+            &OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone()),
+        )
         .await
         .expect("consumer admits")
         .start(&cancel);
     let event = prepared(&fixture, "event-durable-effect", "same");
     messaging
         .producer()
-        .publish(
-            &event,
-            &OperationContext::new(
-                Some(Deadline::at(Instant::now() + WAIT)),
-                CancellationToken::new(),
-            ),
-        )
+        .publish(&OperationContext::with_timeout(WAIT), event.as_prepared())
         .await
         .expect("first publication ACKs");
     poll_until("first durable effect commits", WAIT, POLL, async || {
         let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM messaging_effects")
-            .fetch_one(&effects)
+            .fetch_one(infra_postgres::test_support::as_sqlx(&effects))
             .await
             .expect("effect count");
         (effects == 1).then_some(())
@@ -1474,13 +1479,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     tokio::time::sleep(fixture.duplicate_window + Duration::from_millis(20)).await;
     messaging
         .producer()
-        .publish(
-            &event,
-            &OperationContext::new(
-                Some(Deadline::at(Instant::now() + WAIT)),
-                CancellationToken::new(),
-            ),
-        )
+        .publish(&OperationContext::with_timeout(WAIT), event.as_prepared())
         .await
         .expect("same-ID publication after broker window ACKs");
     poll_until(
@@ -1493,12 +1492,15 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     assert_eq!(fixture.published().await, 2);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM messaging_effects")
-            .fetch_one(&effects)
+            .fetch_one(infra_postgres::test_support::as_sqlx(&effects))
             .await
             .expect("deduped effect count"),
         1
     );
-    assert_eq!(business_effects(&effects).await, 1);
+    assert_eq!(
+        business_effects(infra_postgres::test_support::as_sqlx(&effects)).await,
+        1
+    );
     handle.drain();
     handle
         .finish(Instant::now() + CLOSE_BUDGET)
@@ -1524,19 +1526,27 @@ async fn create_effect_store(pool: &PgPool) {
         .expect("initial business value");
 }
 
-fn effect_registry(fixture: &Fixture, pool: &PgPool, invoked: &Arc<AtomicUsize>) -> Registry {
-    let effect_pool = pool.clone();
-    let invoked = Arc::clone(invoked);
-    let mut registry = fixture.registry.clone();
-    registry
-        .register(&fixture.route, move |event, _| {
-            let pool = effect_pool.clone();
-            let invoked = Arc::clone(&invoked);
-            async move {
-                in_tx(&pool, async |tx| -> Result<(), Step> {
+fn effect_registry(fixture: &Fixture, pool: &Pool, invoked: &Arc<AtomicUsize>) -> Registry {
+    struct EffectHandler {
+        pool: Pool,
+        invoked: Arc<AtomicUsize>,
+    }
+
+    impl EventHandler<Created> for EffectHandler {
+        async fn handle(
+            &self,
+            event: Event<Created>,
+            _context: OperationContext,
+        ) -> Result<(), HandlerError> {
+            self.pool
+                .in_tx(async |tx| -> Result<(), Step> {
                     let inserted = sqlx::query(
-                    "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                ).bind(&event.id).execute(&mut *tx).await?.rows_affected();
+                        "INSERT INTO messaging_effects (logical_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&event.id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
                     if inserted == 1 {
                         sqlx::query("UPDATE messaging_business SET applied = applied + 1")
                             .execute(&mut *tx)
@@ -1546,10 +1556,20 @@ fn effect_registry(fixture: &Fixture, pool: &PgPool, invoked: &Arc<AtomicUsize>)
                 })
                 .await
                 .map_err(|_| HandlerError::Retryable)?;
-                invoked.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        })
+            self.invoked.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let mut registry = fixture.registry.clone();
+    registry
+        .register(
+            &fixture.route,
+            EffectHandler {
+                pool: pool.clone(),
+                invoked: Arc::clone(invoked),
+            },
+        )
         .expect("durably idempotent handler registers");
     registry
 }
@@ -1568,32 +1588,33 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     let fixture = Fixture::create().await;
     create_effect_store(&pool).await;
     let invocations = Arc::new(AtomicUsize::new(0));
-    let first_registry = effect_registry(&fixture, &pool, &invocations);
+    let effect_pool = infra_postgres::test_support::pool_from_sqlx(pool.clone());
+    let first_registry = effect_registry(&fixture, &effect_pool, &invocations);
     let mut second_registry = fixture.registry.clone();
     let reject_once = AtomicBool::new(true);
     let (accepted, mut recovered) = tokio::sync::mpsc::channel(1);
     second_registry
-        .register(&fixture.route, move |event, _| {
-            std::future::ready(if reject_once.swap(false, Ordering::Relaxed) {
-                Err(HandlerError::Permanent)
-            } else {
-                accepted.try_send(event.id).unwrap();
-                Ok(())
-            })
-        })
+        .register(
+            &fixture.route,
+            move |event: Event<Created>, _: OperationContext| {
+                std::future::ready(if reject_once.swap(false, Ordering::Relaxed) {
+                    Err(HandlerError::Permanent)
+                } else {
+                    accepted.try_send(event.id).unwrap();
+                    Ok(())
+                })
+            },
+        )
         .unwrap();
 
     let cancel = CancellationToken::new();
     let subscribe = async |durable: &str, registry: Registry| {
-        let messaging = Box::pin(Messaging::connect(
-            consumer_options(&fixture, durable),
-            Instant::now() + WAIT,
-            cancel.clone(),
-        ))
-        .await
-        .unwrap();
+        let context = OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone());
+        let messaging = Messaging::connect(consumer_options(&fixture, durable), &context)
+            .await
+            .unwrap();
         let worker = messaging
-            .consumer(registry, Instant::now() + WAIT, &cancel)
+            .consumer(registry, &context)
             .await
             .unwrap()
             .start(&cancel);
@@ -1625,7 +1646,10 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     let original = prepared(&fixture, "fanout-event", "original");
     let publisher = first.0.producer();
     let ack = publisher
-        .publish(&original, &OperationContext::with_timeout(WAIT))
+        .publish(
+            &OperationContext::with_timeout(WAIT),
+            original.as_prepared(),
+        )
         .await
         .unwrap();
     wait_for_both_acks(ack.sequence).await;
@@ -1650,7 +1674,7 @@ async fn dlq_redrive_reaches_both_durables_and_applies_the_first_subscribers_eff
     })
     .unwrap();
     let replay = publisher
-        .publish(&redrive, &OperationContext::with_timeout(WAIT))
+        .publish(&OperationContext::with_timeout(WAIT), &redrive)
         .await
         .unwrap();
     assert!(replay.sequence > ack.sequence);
@@ -1692,22 +1716,17 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
         AckDroppingRelay::start_source_ack(&fixture.stream, &fixture.durable, dropped).await;
     let mut options = consumer_options(&fixture, &fixture.durable);
     options.servers = vec![relay.url.clone()];
-    let messaging = Box::pin(Messaging::connect(
-        options,
-        Instant::now() + WAIT,
-        CancellationToken::new(),
-    ))
-    .await
-    .expect("consumer connects through the settlement relay");
+    let messaging = Messaging::connect(options, &OperationContext::with_timeout(WAIT))
+        .await
+        .expect("consumer connects through the settlement relay");
     let effects = template_pool(&pool, 3).await;
-    create_effect_store(&effects).await;
+    create_effect_store(infra_postgres::test_support::as_sqlx(&effects)).await;
     let invoked = Arc::new(AtomicUsize::new(0));
     let cancel = CancellationToken::new();
     let consumer = messaging
         .consumer(
             effect_registry(&fixture, &effects, &invoked),
-            Instant::now() + WAIT,
-            &cancel,
+            &OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone()),
         )
         .await
         .expect("real durable consumer admits");
@@ -1719,14 +1738,14 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
     let ack = messaging
         .producer()
         .publish(
-            &event,
-            &OperationContext::new(Some(Deadline::at(Instant::now() + WAIT)), cancel.clone()),
+            &OperationContext::new(Some(Deadline::after(WAIT)), cancel.clone()),
+            event.as_prepared(),
         )
         .await
         .unwrap();
     relay.wait_for_drop().await;
     assert_eq!(
-        business_effects(&effects).await,
+        business_effects(infra_postgres::test_support::as_sqlx(&effects)).await,
         1,
         "the effect committed before settlement"
     );
@@ -1758,7 +1777,10 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
         .finish(Instant::now() + WAIT)
         .await
         .expect("settlement work drains");
-    assert_eq!(business_effects(&effects).await, 1);
+    assert_eq!(
+        business_effects(infra_postgres::test_support::as_sqlx(&effects)).await,
+        1
+    );
     assert_eq!(
         invoked.load(Ordering::SeqCst),
         match dropped {
@@ -1773,15 +1795,13 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, dropped: DroppedAc
 }
 
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-fixture
-fn webhook_receiver(pool: PgPool) -> Receiver {
-    Receiver::new(
-        pool,
-        [(
-            WEBHOOK_ENDPOINT.to_owned(),
-            Arc::new(KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key"))
-                as Arc<dyn Verifier>,
-        )],
-    )
+fn webhook_receiver(pool: Pool) -> Receiver {
+    let mut verifiers = Verifiers::new();
+    verifiers.bind(
+        WEBHOOK_ENDPOINT,
+        KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key"),
+    );
+    verifiers.into_receiver(pool)
 }
 
 fn admission_deadline() -> Instant {
@@ -1792,23 +1812,8 @@ fn webhook_headers(message_id: &str, body: &[u8]) -> http::HeaderMap {
     let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let keys = KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key");
     let mut headers = http::HeaderMap::new();
-    headers.insert(
-        "webhook-id",
-        http::HeaderValue::from_str(message_id).expect("message id"),
-    );
-    headers.insert(
-        "webhook-timestamp",
-        http::HeaderValue::from_str(&timestamp.to_string()).expect("timestamp"),
-    );
-    headers.insert(
-        "webhook-signature",
-        http::HeaderValue::from_str(
-            &keys
-                .signatures(message_id.as_bytes(), timestamp, body)
-                .expect("signature"),
-        )
-        .expect("signature header"),
-    );
+    keys.write_headers(&mut headers, message_id.as_bytes(), timestamp, body)
+        .expect("signed webhook headers");
     headers
 }
 
@@ -1818,7 +1823,6 @@ struct HeldWebhookConsumer {
     release: Notify,
 }
 
-#[infra_webhooks::inbound::async_trait]
 impl WebhookConsumer for HeldWebhookConsumer {
     async fn process(
         &self,
@@ -1849,19 +1853,19 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
         .expect("producer-only messaging admits the fixture stream");
     let shared_pool = template_pool(&pool, 6).await;
     sqlx::query("CREATE TABLE webhook_effects (message_id bytea NOT NULL)")
-        .execute(&shared_pool)
+        .execute(infra_postgres::test_support::as_sqlx(&shared_pool))
         .await
         .expect("webhook effect table");
     let held = Arc::new(HeldWebhookConsumer::default());
     let mut consumers = Consumers::new();
     consumers
-        .bind(
-            WEBHOOK_ENDPOINT,
-            Arc::clone(&held) as Arc<dyn WebhookConsumer>,
-        )
+        .bind(WEBHOOK_ENDPOINT, Arc::clone(&held))
         .expect("first binding");
     let mut webhook_kinds = KindsBuilder::new();
-    Processor::new(consumers).register(&mut webhook_kinds);
+    consumers
+        .into_processor([WEBHOOK_ENDPOINT])
+        .expect("bound webhook endpoint")
+        .register(&mut webhook_kinds);
     let mut engine = Engine::new(
         shared_pool.clone(),
         webhook_kinds.validate().expect("webhook registry is valid"),
@@ -1894,11 +1898,10 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
 
     let intent = prepared(&fixture, "event-independent-capacity", "published");
     assert_eq!(
-        in_tx(&shared_pool, async |tx| -> Result<_, Step> {
-            intent.enqueue(tx).await.map_err(Step::from)
-        })
-        .await
-        .expect("outbox intent commits while real webhook work occupies its slot"),
+        shared_pool
+            .in_tx(async |tx| -> Result<_, Step> { intent.enqueue(tx).await.map_err(Step::from) })
+            .await
+            .expect("outbox intent commits while real webhook work occupies its slot"),
         OutboxEnqueued::Created
     );
     poll_until(
@@ -1918,7 +1921,14 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
 // template:end inbound-webhooks:outbox-test-messaging-outbox-webhook-capacity
 
 fn event_key(id: &str) -> String {
+    use std::fmt::Write as _;
+
     use sha2::{Digest as _, Sha256};
 
-    infra_messaging::wire::prefixed_digest_hex("event-", &Sha256::digest(id.as_bytes()).into())
+    let mut key = String::with_capacity("event-".len() + 64);
+    key.push_str("event-");
+    for byte in Sha256::digest(id.as_bytes()) {
+        let _ = write!(&mut key, "{byte:02x}");
+    }
+    key
 }

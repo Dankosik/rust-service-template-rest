@@ -25,7 +25,7 @@ use crate::{
 mod prepare;
 
 pub(crate) use prepare::discover_jwks_uri;
-pub use prepare::{JwtOptions, RefreshTask, prepare_jwt};
+pub use prepare::{JwtOptions, RefreshDriver, prepare_jwt};
 
 #[cfg(feature = "test-support")]
 pub use fixtures::JwtFixture;
@@ -127,16 +127,30 @@ pub enum TokenProfile {
     Rfc9068,
 }
 
-#[derive(Eq, PartialEq)]
-struct TokenKey(Zeroizing<Box<[u8]>>);
+impl TokenProfile {
+    fn admits_typ(self, typ: Option<&str>) -> bool {
+        match self {
+            Self::Rfc9068 => typ.is_some_and(|typ| rfc7515::typ_is(typ, "at+jwt")),
+            // RFC 8725 §3.11
+            Self::ResourceServer => typ.is_none_or(|typ| {
+                rfc7515::typ_subtype(typ).is_some_and(|subtype| {
+                    subtype.eq_ignore_ascii_case("jwt") || subtype.eq_ignore_ascii_case("at+jwt")
+                })
+            }),
+        }
+    }
+}
 
-impl Borrow<[u8]> for TokenKey {
+#[derive(Eq, PartialEq)]
+struct TokenCacheKey(Zeroizing<Box<[u8]>>);
+
+impl Borrow<[u8]> for TokenCacheKey {
     fn borrow(&self) -> &[u8] {
         self.0.as_ref()
     }
 }
 
-impl Hash for TokenKey {
+impl Hash for TokenCacheKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.as_ref().hash(state);
     }
@@ -151,10 +165,10 @@ struct CachedVerification {
 
 struct CachedVerificationExpiry;
 
-impl Expiry<TokenKey, CachedVerification> for CachedVerificationExpiry {
+impl Expiry<TokenCacheKey, CachedVerification> for CachedVerificationExpiry {
     fn expire_after_create(
         &self,
-        _token: &TokenKey,
+        _token: &TokenCacheKey,
         cached: &CachedVerification,
         created_at: MonotonicInstant,
     ) -> Option<Duration> {
@@ -167,6 +181,76 @@ struct AdmittedHeader {
     algorithm: JwtAlgorithm,
 }
 
+enum SignatureFailure {
+    Malformed,
+    Miss(SignatureVerificationError),
+}
+
+impl From<SignatureFailure> for VerificationError {
+    fn from(failure: SignatureFailure) -> Self {
+        match failure {
+            SignatureFailure::Malformed => Self::invalid(VerificationReason::Signature),
+            SignatureFailure::Miss(miss) => miss.into(),
+        }
+    }
+}
+
+struct SignedMessage<'a> {
+    signing_input: &'a [u8],
+    encoded_payload: &'a [u8],
+    encoded_signature: &'a [u8],
+    header: AdmittedHeader,
+}
+
+#[derive(Clone, Copy)]
+struct ClockSample {
+    monotonic: MonotonicInstant,
+    unix: Duration,
+}
+
+impl ClockSample {
+    fn take(
+        unix_now: &impl Fn() -> Result<Duration, VerificationError>,
+    ) -> Result<Self, VerificationError> {
+        Ok(Self {
+            monotonic: MonotonicInstant::now(),
+            unix: unix_now()?,
+        })
+    }
+}
+
+struct SignedClaims {
+    keys: Arc<KeySet>,
+    verified: VerifiedClaims,
+    clock: ClockSample,
+}
+
+fn verify_encoded_signature(
+    keys: &KeySet,
+    signed: &SignedMessage<'_>,
+) -> Result<(), SignatureFailure> {
+    let mut decoded = SmallVec::<[u8; MAX_SIGNATURE_BYTES]>::from_elem(
+        0_u8,
+        base64::decoded_len_estimate(signed.encoded_signature.len()).min(MAX_SIGNATURE_BYTES),
+    );
+    let length = URL_SAFE_NO_PAD
+        .decode_slice(signed.encoded_signature, &mut decoded)
+        .map_err(|_| SignatureFailure::Malformed)?;
+    keys.verify(&SignatureInput {
+        message: signed.signing_input,
+        signature: &decoded[..length],
+        kid: signed.header.kid.as_deref(),
+        algorithm: signed.header.algorithm,
+    })
+    .map_err(SignatureFailure::Miss)
+}
+
+fn decode_payload(encoded_payload: &[u8]) -> Result<Vec<u8>, VerificationError> {
+    URL_SAFE_NO_PAD
+        .decode(encoded_payload)
+        .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))
+}
+
 #[derive(derive_more::Debug)]
 #[debug("JwtVerifier(..)")]
 pub(crate) struct JwtVerifier {
@@ -175,7 +259,7 @@ pub(crate) struct JwtVerifier {
     algorithms: AllowedAlgorithms,
     key_store: Arc<KeyStore>,
     jwks_max_age: Duration,
-    cache: Cache<TokenKey, CachedVerification, foldhash::quality::RandomState>,
+    cache: Cache<TokenCacheKey, CachedVerification, foldhash::quality::RandomState>,
 }
 
 impl JwtVerifier {
@@ -216,21 +300,22 @@ impl JwtVerifier {
         let bytes = token.as_bytes();
         let keys = self.key_store.current();
         keys.require_fresh(self.jwks_max_age)?;
-        if let Some(cached) = self.cache.get(bytes) {
-            if cached.key_generation == keys.generation() {
+        match self.cache.get(bytes) {
+            Some(cached) if cached.key_generation == keys.generation() => {
                 let result = cached.verified.into_principal_checked_at(unix_now()?);
                 if matches!(&result, Err(error) if error.reason == VerificationReason::Expired) {
                     self.cache.invalidate(bytes);
                 }
                 return result;
             }
-            self.cache.invalidate(bytes);
+            Some(_) => self.cache.invalidate(bytes),
+            None => {}
         }
         let keys = Guard::into_inner(keys);
         let cached = self.verify_uncached(token, &unix_now, keys).await?;
         let principal = cached.verified.principal.clone();
         self.cache
-            .insert(TokenKey(Zeroizing::new(Box::from(bytes))), cached);
+            .insert(TokenCacheKey(Zeroizing::new(Box::from(bytes))), cached);
         Ok(principal)
     }
 
@@ -241,67 +326,68 @@ impl JwtVerifier {
         keys: Arc<KeySet>,
     ) -> Result<CachedVerification, VerificationError> {
         let rfc7515::Compact {
-            signing_input: message,
-            header,
-            payload,
-            signature,
+            signing_input,
+            header: encoded_header,
+            payload: encoded_payload,
+            signature: encoded_signature,
         } = rfc7515::compact(token.as_bytes())
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
-        let admitted = self.admit_header(header)?;
-        let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
-        let signature = URL_SAFE_NO_PAD
-            .decode_slice(signature, &mut signature_bytes)
-            .map(|length| &signature_bytes[..length])
-            .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
-        let decode_payload = || {
-            URL_SAFE_NO_PAD
-                .decode(payload)
-                .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))
+        let signed = SignedMessage {
+            signing_input,
+            encoded_payload,
+            encoded_signature,
+            header: self.admit_header(encoded_header)?,
         };
-        let validate_claims = |payload: Vec<u8>, now: Duration| {
-            validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
-        };
-        let input = SignatureInput {
-            message,
-            signature,
-            kid: admitted.kid.as_deref(),
-            algorithm: admitted.algorithm,
-        };
-        let (signing_keys, verified, sampled_at, now) = if let Err(miss) = keys.verify(&input) {
-            let Ok(preflight) =
-                decode_payload().and_then(|payload| validate_claims(payload, unix_now()?))
-            else {
-                return Err(miss.into());
-            };
-            let signing_keys = self
-                .verify_after_signature_miss(&keys, &input, miss)
-                .await?;
-            let sampled_at = MonotonicInstant::now();
-            let now = unix_now()?;
-            preflight.check_at(now)?;
-            (signing_keys, preflight, sampled_at, now)
-        } else {
-            let payload = decode_payload()?;
-            let sampled_at = MonotonicInstant::now();
-            let now = unix_now()?;
-            (keys, validate_claims(payload, now)?, sampled_at, now)
-        };
-        signing_keys.require_fresh(self.jwks_max_age)?;
-        let ttl =
-            MAX_VERIFIED_CACHE_TTL.min(verified.principal.expiry_from_epoch().saturating_sub(now));
-        Ok(CachedVerification {
-            expires_at: sampled_at + ttl,
+        let SignedClaims {
+            keys,
             verified,
-            key_generation: signing_keys.generation(),
+            clock,
+        } = match verify_encoded_signature(&keys, &signed) {
+            Ok(()) => {
+                let payload = decode_payload(signed.encoded_payload)?;
+                let clock = ClockSample::take(unix_now)?;
+                SignedClaims {
+                    verified: self.validate_claims(payload, clock.unix)?,
+                    keys,
+                    clock,
+                }
+            }
+            Err(SignatureFailure::Miss(miss)) => {
+                self.verify_after_signature_miss(&keys, &signed, miss, unix_now)
+                    .await?
+            }
+            Err(malformed @ SignatureFailure::Malformed) => return Err(malformed.into()),
+        };
+        keys.require_fresh(self.jwks_max_age)?;
+        let ttl = MAX_VERIFIED_CACHE_TTL.min(
+            verified
+                .principal
+                .expiry_from_epoch()
+                .saturating_sub(clock.unix),
+        );
+        Ok(CachedVerification {
+            expires_at: clock.monotonic + ttl,
+            verified,
+            key_generation: keys.generation(),
         })
     }
 
-    fn admit_header(&self, header: &[u8]) -> Result<AdmittedHeader, VerificationError> {
+    fn validate_claims(
+        &self,
+        payload: Vec<u8>,
+        now: Duration,
+    ) -> Result<VerifiedClaims, VerificationError> {
+        validate_jwt_claims(payload, &self.claim_policy, self.token_profile, now)
+    }
+
+    fn admit_header(&self, encoded_header: &[u8]) -> Result<AdmittedHeader, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
-        let mut decoded =
-            SmallVec::<[u8; 256]>::from_elem(0_u8, base64::decoded_len_estimate(header.len()));
+        let mut decoded = SmallVec::<[u8; 256]>::from_elem(
+            0_u8,
+            base64::decoded_len_estimate(encoded_header.len()),
+        );
         let length = URL_SAFE_NO_PAD
-            .decode_slice(header, &mut decoded)
+            .decode_slice(encoded_header, &mut decoded)
             .map_err(|_| malformed())?;
         let header: Header = serde_json::from_slice(&decoded[..length]).map_err(|_| malformed())?;
         // RFC 7515 §4.1.11
@@ -311,17 +397,7 @@ impl JwtVerifier {
         let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
             .filter(|&algorithm| self.algorithms[algorithm])
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
-        let typ = header.typ.as_deref();
-        let admitted_type = match self.token_profile {
-            TokenProfile::Rfc9068 => typ.is_some_and(|typ| rfc7515::typ_is(typ, "at+jwt")),
-            // RFC 8725 §3.11
-            TokenProfile::ResourceServer => typ.is_none_or(|typ| {
-                rfc7515::typ_subtype(typ).is_some_and(|subtype| {
-                    subtype.eq_ignore_ascii_case("jwt") || subtype.eq_ignore_ascii_case("at+jwt")
-                })
-            }),
-        };
-        if !admitted_type {
+        if !self.token_profile.admits_typ(header.typ.as_deref()) {
             return Err(VerificationError::invalid(VerificationReason::Profile));
         }
         Ok(AdmittedHeader {
@@ -333,23 +409,38 @@ impl JwtVerifier {
     async fn verify_after_signature_miss(
         &self,
         checked: &Arc<KeySet>,
-        input: &SignatureInput<'_>,
+        signed: &SignedMessage<'_>,
         miss: SignatureVerificationError,
-    ) -> Result<Arc<KeySet>, VerificationError> {
-        match self.key_store.refresh_for_signature_miss(checked).await {
+        unix_now: &impl Fn() -> Result<Duration, VerificationError>,
+    ) -> Result<SignedClaims, VerificationError> {
+        let Ok(preflight) = decode_payload(signed.encoded_payload)
+            .and_then(|payload| self.validate_claims(payload, unix_now()?))
+        else {
+            return Err(miss.into());
+        };
+        let keys = match self.key_store.refresh_for_signature_miss(checked).await {
             SignatureRefresh::NewerSet(key_set) => {
                 key_set.require_fresh(self.jwks_max_age)?;
-                key_set.verify(input)?;
-                Ok(key_set)
+                verify_encoded_signature(&key_set, signed)?;
+                key_set
             }
             SignatureRefresh::NoNewerSet => {
                 checked.require_fresh(self.jwks_max_age)?;
-                Err(miss.into())
+                return Err(miss.into());
             }
-            SignatureRefresh::WorkerLost => Err(VerificationError::unavailable(
-                VerificationReason::RefreshWorkerLost,
-            )),
-        }
+            SignatureRefresh::WorkerLost => {
+                return Err(VerificationError::unavailable(
+                    VerificationReason::RefreshWorkerLost,
+                ));
+            }
+        };
+        let clock = ClockSample::take(unix_now)?;
+        preflight.check_at(clock.unix)?;
+        Ok(SignedClaims {
+            keys,
+            verified: preflight,
+            clock,
+        })
     }
 }
 
@@ -692,6 +783,22 @@ mod tests {
                 format!("{message}.{}", URL_SAFE_NO_PAD.encode([7_u8; 1025])),
                 VerificationReason::Signature,
             ),
+            (
+                format!(
+                    "{}.{payload}.{}",
+                    header(r#"{"alg":"RS256","kid":"missing"}"#),
+                    URL_SAFE_NO_PAD.encode([7_u8; 1024])
+                ),
+                VerificationReason::UnknownKey,
+            ),
+            (
+                format!(
+                    "{}.{payload}.{}",
+                    header(r#"{"alg":"RS256","kid":"missing"}"#),
+                    URL_SAFE_NO_PAD.encode([7_u8; 1025])
+                ),
+                VerificationReason::Signature,
+            ),
         ] {
             assert_eq!(
                 check(&verifier, &token).await.unwrap_err(),
@@ -917,7 +1024,9 @@ mod tests {
         tokio::task::yield_now().await;
         verifier.key_store.finish(
             1,
-            Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+            Err(KeySetFailure::Jwks(crate::JwksError::Fetch(
+                crate::ProviderFailure::Timeout,
+            ))),
         );
         assert_eq!(call.await.unwrap(), Err(VerificationReason::UnknownKey));
         assert_eq!(
@@ -1499,16 +1608,19 @@ mod tests {
             let verifier = crate::Verifier::jwt(engine);
             assert_eager_success_registrations(&diagnostics.registered_counters());
             runtime.block_on(async {
+                let live = operation_context::OperationContext::with_timeout(
+                    crate::provider::PROVIDER_TIMEOUT,
+                );
                 for transport in [Transport::Http, Transport::Grpc] {
                     verifier
-                        .authenticate([header.as_bytes()], transport)
+                        .authenticate(&live, [header.as_bytes()], transport)
                         .await
                         .unwrap();
                 }
                 for _ in 0..2 {
                     assert_eq!(
                         verifier
-                            .authenticate(std::iter::empty(), Transport::Http)
+                            .authenticate(&live, std::iter::empty(), Transport::Http)
                             .await
                             .err(),
                         Some(Failure::Missing)
@@ -1516,7 +1628,7 @@ mod tests {
                 }
                 assert_eq!(
                     verifier
-                        .authenticate([b"Bearer =".as_slice()], Transport::Grpc)
+                        .authenticate(&live, [b"Bearer =".as_slice()], Transport::Grpc)
                         .await
                         .err(),
                     Some(Failure::Malformed)
@@ -1524,7 +1636,7 @@ mod tests {
                 let expired = operation_context::OperationContext::with_timeout(Duration::ZERO);
                 assert_eq!(
                     verifier
-                        .authenticate_with_context([header.as_bytes()], Transport::Grpc, &expired)
+                        .authenticate(&expired, [header.as_bytes()], Transport::Grpc)
                         .await
                         .err(),
                     Some(Failure::Unavailable)
@@ -1533,13 +1645,16 @@ mod tests {
                 cancelled.cancel();
                 assert_eq!(
                     verifier
-                        .authenticate_with_context([header.as_bytes()], Transport::Grpc, &cancelled)
+                        .authenticate(&cancelled, [header.as_bytes()], Transport::Grpc)
                         .await
                         .err(),
                     Some(Failure::Unavailable)
                 );
-                let mut pending =
-                    Box::pin(verifier.authenticate([unknown_header.as_bytes()], Transport::Http));
+                let mut pending = Box::pin(verifier.authenticate(
+                    &live,
+                    [unknown_header.as_bytes()],
+                    Transport::Http,
+                ));
                 assert!(futures_util::poll!(pending.as_mut()).is_pending());
                 drop(pending);
             });
@@ -1786,7 +1901,9 @@ mod tests {
         let unseen = parse_bearer([unseen.as_bytes()]).unwrap();
         verifier.verify(&cached).await.unwrap();
         tokio::time::advance(Duration::from_hours(1) - Duration::from_nanos(1)).await;
-        verifier.key_store.finish(1, Err(KeySetFailure::Parse));
+        verifier
+            .key_store
+            .finish(1, Err(KeySetFailure::Jwks(crate::JwksError::Parse)));
         verifier.verify(&cached).await.unwrap();
         tokio::time::advance(Duration::from_nanos(1)).await;
         for token in [&cached, &unseen] {
@@ -1972,7 +2089,7 @@ mod tests {
             let insertion_delay = Duration::from_millis(250);
             let ttl = moka::Expiry::expire_after_create(
                 &super::CachedVerificationExpiry,
-                &super::TokenKey(zeroize::Zeroizing::new(Box::from(token.as_bytes()))),
+                &super::TokenCacheKey(zeroize::Zeroizing::new(Box::from(token.as_bytes()))),
                 &cached,
                 cached.expires_at.checked_sub(expected_held).unwrap() + insertion_delay,
             );

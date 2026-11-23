@@ -1,19 +1,18 @@
-use std::{future::poll_fn, sync::Arc, task::Poll};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use compact_str::CompactString;
 use foldhash::HashSet;
 use http::HeaderValue;
-use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobId, json_payload_len};
+use infra_jobs::{EnqueueError, JobId, PayloadSizer};
 use infra_postgres::{Tx, TxMode};
 
 use super::{Delivery, delivery_version};
 use crate::protocol::MAX_BODY_BYTES;
 
-const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
-const JSON_STRING_QUOTES_BYTES: usize = 2;
-
 pub const JSON_CONTENT_TYPE: &str = "application/json";
+pub(crate) const JSON_CONTENT_TYPE_HEADER: HeaderValue =
+    HeaderValue::from_static(JSON_CONTENT_TYPE);
 
 #[derive(Clone, Debug)]
 pub struct Producer {
@@ -32,21 +31,19 @@ impl Producer {
         &self,
         tx: &mut Tx<'_, impl TxMode>,
         endpoint_id: &str,
-        body: Vec<u8>,
+        body: impl Into<Bytes>,
         content_type: &str,
     ) -> Result<JobId, OutboundError> {
+        let body = body.into();
         self.preflight(endpoint_id, body.len(), content_type)
             .await?;
         let delivery = Delivery {
             version: delivery_version(),
             endpoint_id: CompactString::from(endpoint_id),
             content_type: CompactString::from(content_type),
-            body: Bytes::from(body),
+            body,
         };
-        match infra_jobs::enqueue(tx, &delivery, EnqueueOptions::default()).await? {
-            Enqueued::Created(id) => Ok(id),
-            Enqueued::Duplicate => Err(OutboundError::UnexpectedDuplicate),
-        }
+        Ok(infra_jobs::enqueue(tx, &delivery).await?)
     }
 
     async fn preflight(
@@ -64,61 +61,23 @@ impl Producer {
             return Err(OutboundError::UnknownEndpoint);
         }
 
-        let empty_len = Delivery::empty_serialized_len().map_err(EnqueueError::Serialize)?;
-        let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        let content_type_len = escaped_len(content_type, &mut budget, |fragment| {
-            HeaderValue::from_bytes(fragment.as_bytes())
-                .map(drop)
-                .map_err(|_| OutboundError::InvalidContentType)
-        })
-        .await?;
-        let endpoint_id_len = escaped_len(endpoint_id, &mut budget, |_| Ok(())).await?;
-        let serialized_len = empty_len + encoded_body_len + content_type_len + endpoint_id_len;
-        if serialized_len > infra_jobs::MAX_PAYLOAD_BYTES {
-            return Err(EnqueueError::PayloadTooLarge {
-                bytes: serialized_len,
-            }
-            .into());
+        let empty_len = Delivery::empty_serialized_len()?;
+        let mut sizer = PayloadSizer::with_base(empty_len + encoded_body_len);
+        if content_type == JSON_CONTENT_TYPE {
+            sizer.add_str(JSON_CONTENT_TYPE).await?;
+        } else {
+            sizer
+                .add_str_with(content_type, |fragment| {
+                    HeaderValue::from_bytes(fragment.as_bytes())
+                        .map(drop)
+                        .map_err(|_| OutboundError::InvalidContentType)
+                })
+                .await?;
         }
+        sizer.add_str(endpoint_id).await?;
+        sizer.check_limit()?;
         Ok(())
     }
-}
-
-async fn escaped_len(
-    field: &str,
-    budget: &mut usize,
-    mut admit: impl FnMut(&str) -> Result<(), OutboundError>,
-) -> Result<usize, OutboundError> {
-    let mut len = 0;
-    let mut rest = field;
-    while !rest.is_empty() {
-        let end = rest.floor_char_boundary(*budget);
-        if end == 0 {
-            yield_once().await;
-            *budget = PREFLIGHT_BYTES_PER_POLL;
-            continue;
-        }
-        let (fragment, tail) = rest.split_at(end);
-        admit(fragment)?;
-        len +=
-            json_payload_len(fragment).map_err(EnqueueError::Serialize)? - JSON_STRING_QUOTES_BYTES;
-        *budget -= end;
-        rest = tail;
-    }
-    Ok(len)
-}
-
-async fn yield_once() {
-    let mut yielded = false;
-    poll_fn(|cx| {
-        if yielded {
-            return Poll::Ready(());
-        }
-        yielded = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -131,8 +90,6 @@ pub enum OutboundError {
     InvalidContentType,
     #[error("outbound webhook enqueue failed")]
     Enqueue(#[from] EnqueueError),
-    #[error("outbound webhook enqueue unexpectedly deduplicated")]
-    UnexpectedDuplicate,
 }
 
 #[cfg(test)]
@@ -194,6 +151,47 @@ mod tests {
         assert_matches!(
             outbound.preflight("partner", 0, &content_type).await,
             Err(super::OutboundError::InvalidContentType)
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_sizes_json_content_type_identically_to_serialized_delivery() {
+        let mut delivery = super::Delivery {
+            version: super::delivery_version(),
+            endpoint_id: String::new().into(),
+            content_type: super::JSON_CONTENT_TYPE.into(),
+            body: bytes::Bytes::from(vec![0xff; super::MAX_BODY_BYTES]),
+        };
+        let base_bytes = serde_json::to_vec(&delivery).unwrap().len();
+        let exact_endpoint = "e".repeat(infra_jobs::MAX_PAYLOAD_BYTES - base_bytes);
+        let over_endpoint = format!("{exact_endpoint}e");
+        delivery.endpoint_id = exact_endpoint.as_str().into();
+        assert_eq!(
+            serde_json::to_vec(&delivery).unwrap().len(),
+            infra_jobs::MAX_PAYLOAD_BYTES
+        );
+        let outbound = super::Producer::new([exact_endpoint.clone(), over_endpoint.clone()]);
+        assert!(
+            outbound
+                .preflight(
+                    &exact_endpoint,
+                    super::MAX_BODY_BYTES,
+                    super::JSON_CONTENT_TYPE,
+                )
+                .await
+                .is_ok()
+        );
+        assert_matches!(
+            outbound
+                .preflight(
+                    &over_endpoint,
+                    super::MAX_BODY_BYTES,
+                    super::JSON_CONTENT_TYPE,
+                )
+                .await,
+            Err(super::OutboundError::Enqueue(
+                infra_jobs::EnqueueError::PayloadTooLarge { bytes }
+            )) if bytes == infra_jobs::MAX_PAYLOAD_BYTES + 1
         );
     }
 

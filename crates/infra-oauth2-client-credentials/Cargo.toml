@@ -15,7 +15,7 @@ workspace = true
 test-support = ["infra-outbound-http/test-support"]
 # template:begin outbound-auth-grpc:oauth-grpc-feature
 default = ["grpc"]
-grpc = ["dep:futures-util", "dep:infra-outbound-grpc", "dep:tonic", "dep:tower"]
+grpc = ["dep:infra-outbound-grpc", "dep:tonic", "dep:tower"]
 # template:end outbound-auth-grpc:oauth-grpc-feature
 # The Keycloak suite runs only through the explicit integration owner
 # (`just test-integration-oauth`).
@@ -29,7 +29,6 @@ foldhash = { workspace = true, features = ["std"] }
 operation-context = { workspace = true }
 parking_lot = { workspace = true }
 # template:begin outbound-auth-grpc:oauth-grpc-dependencies
-futures-util = { workspace = true, optional = true }
 infra-outbound-grpc = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
@@ -40,7 +39,7 @@ http = { workspace = true }
 infra-outbound-http = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 metrics = { workspace = true }
-moka = { workspace = true, features = ["future"] }
+moka = { workspace = true, features = ["sync"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -64,6 +63,6 @@ tower = { workspace = true, features = ["util"] }
 # template:end outbound-auth-grpc:oauth-grpc-test-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
 metrics-util = { workspace = true, features = ["debugging"] }
+observe-test-support = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
-tracing-subscriber = { workspace = true, features = ["std", "registry"] }

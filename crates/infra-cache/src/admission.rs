@@ -6,20 +6,30 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use secrecy::ExposeSecret;
 
 use crate::credentials::{PasswordFile, read_regular_file, read_secret_file};
-use crate::dial::Tls;
-use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
+use crate::dial::{Tls, Transport};
+use crate::error::StartErrorKind;
+use crate::{CacheOptions, ClientCertificate, ServerEndpoint};
 
 const MAX_PEM_CHAIN_BYTES: usize = 1024 * 1024;
 const MAX_PRIVATE_KEY_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Admitted {
     pub(crate) server: ServerEndpoint,
-    pub(crate) tls: Option<Tls>,
+    pub(crate) transport: Transport,
     pub(crate) settings: redis::RedisConnectionInfo,
     pub(crate) password_file: Option<PasswordFile>,
 }
 
-pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
+enum AdmittedAddress {
+    Plaintext(ServerEndpoint),
+    Tls {
+        server: ServerEndpoint,
+        root_ca_path: Option<PathBuf>,
+        client_certificate: Option<ClientCertificate>,
+    },
+}
+
+pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, StartErrorKind> {
     let CacheOptions {
         dsn,
         password_file,
@@ -32,31 +42,27 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     let info = dsn
         .expose_secret()
         .into_connection_info()
-        .map_err(|_| CacheError::InvalidDsn)?;
+        .map_err(|_| StartErrorKind::InvalidDsn)?;
     if info.redis_settings().db() < 0 {
-        return Err(CacheError::InvalidDsn);
+        return Err(StartErrorKind::InvalidDsn);
     }
-    let server = admit_address(
-        &info,
-        allow_plaintext,
-        root_ca_path.is_some(),
-        client_certificate.is_some(),
-    )?;
+    let address = admit_address(&info, allow_plaintext, root_ca_path, client_certificate)?;
     let password_file =
         admit_password(info.redis_settings(), password_file, allow_unauthenticated)?;
-    let tls = if server.tls {
-        let roots = root_ca_path.as_deref().map(read_root_ca).transpose()?;
-        let identity = client_certificate
-            .as_ref()
-            .map(read_client_certificate)
-            .transpose()?;
-        Some(Tls {
-            connector: tls_connector(roots, identity)?,
-            server_name: ServerName::try_from(server.host.clone())
-                .map_err(|_| CacheError::InvalidDsn)?,
-        })
-    } else {
-        None
+    let (server, transport) = match address {
+        AdmittedAddress::Plaintext(server) => (server, Transport::Plaintext),
+        AdmittedAddress::Tls {
+            server,
+            root_ca_path,
+            client_certificate,
+        } => {
+            let transport = tls_transport(
+                &server,
+                root_ca_path.as_deref(),
+                client_certificate.as_ref(),
+            )?;
+            (server, transport)
+        }
     };
     let settings = info
         .redis_settings()
@@ -64,7 +70,7 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
         .set_protocol(redis::ProtocolVersion::RESP3);
     Ok(Admitted {
         server,
-        tls,
+        transport,
         settings,
         password_file,
     })
@@ -73,65 +79,81 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
 fn admit_address(
     info: &redis::ConnectionInfo,
     allow_plaintext: bool,
-    has_root_ca: bool,
-    has_client_certificate: bool,
-) -> Result<ServerEndpoint, CacheError> {
-    match info.addr() {
-        redis::ConnectionAddr::Tcp(host, port) => {
-            if !allow_plaintext {
-                return Err(CacheError::PlaintextRefused);
-            }
-            if has_root_ca {
-                return Err(CacheError::CaRequiresTls);
-            }
-            if has_client_certificate {
-                return Err(CacheError::ClientCertificateRequiresTls);
-            }
-            Ok(ServerEndpoint {
-                host: host.clone(),
-                port: *port,
-                database_index: info.redis_settings().db(),
-                tls: false,
-            })
+    root_ca_path: Option<PathBuf>,
+    client_certificate: Option<ClientCertificate>,
+) -> Result<AdmittedAddress, StartErrorKind> {
+    let (host, port, tls) = match info.addr() {
+        redis::ConnectionAddr::Tcp(host, port) => (host, *port, false),
+        redis::ConnectionAddr::TcpTls { insecure: true, .. } => {
+            return Err(StartErrorKind::InsecureTlsRefused);
         }
-        redis::ConnectionAddr::TcpTls { insecure: true, .. } => Err(CacheError::InsecureTlsRefused),
-        redis::ConnectionAddr::TcpTls {
-            host,
-            port,
-            insecure: false,
-            ..
-        } => Ok(ServerEndpoint {
-            host: host.clone(),
-            port: *port,
-            database_index: info.redis_settings().db(),
-            tls: true,
-        }),
-        _ => Err(CacheError::UnsupportedAddress),
+        redis::ConnectionAddr::TcpTls { host, port, .. } => (host, *port, true),
+        _ => return Err(StartErrorKind::UnsupportedAddress),
+    };
+    let server = ServerEndpoint {
+        host: host.clone(),
+        port,
+        database_index: info.redis_settings().db(),
+    };
+    if tls {
+        return Ok(AdmittedAddress::Tls {
+            server,
+            root_ca_path,
+            client_certificate,
+        });
     }
+    if !allow_plaintext {
+        return Err(StartErrorKind::PlaintextRefused);
+    }
+    if root_ca_path.is_some() {
+        return Err(StartErrorKind::CaRequiresTls);
+    }
+    if client_certificate.is_some() {
+        return Err(StartErrorKind::ClientCertificateRequiresTls);
+    }
+    Ok(AdmittedAddress::Plaintext(server))
+}
+
+fn tls_transport(
+    server: &ServerEndpoint,
+    root_ca_path: Option<&Path>,
+    client_certificate: Option<&ClientCertificate>,
+) -> Result<Transport, StartErrorKind> {
+    let roots = root_ca_path.map(read_root_ca).transpose()?;
+    let identity = client_certificate
+        .map(read_client_certificate)
+        .transpose()?;
+    Ok(Transport::Tls(Tls {
+        connector: tls_connector(roots, identity)?,
+        server_name: ServerName::try_from(server.host.clone())
+            .map_err(|_| StartErrorKind::InvalidDsn)?,
+    }))
 }
 
 fn admit_password(
     settings: &redis::RedisConnectionInfo,
     password_file: Option<PathBuf>,
     allow_unauthenticated: bool,
-) -> Result<Option<PasswordFile>, CacheError> {
+) -> Result<Option<PasswordFile>, StartErrorKind> {
     let has_password = settings
         .password()
         .is_some_and(|password| !password.is_empty());
     match password_file {
-        Some(_) if has_password => Err(CacheError::PasswordInDsn),
+        Some(_) if has_password => Err(StartErrorKind::PasswordInDsn),
         Some(path) => PasswordFile::admit(path, settings.username()).map(Some),
         None if has_password || allow_unauthenticated => Ok(None),
-        None => Err(CacheError::UnauthenticatedRefused),
+        None => Err(StartErrorKind::UnauthenticatedRefused),
     }
 }
 
-fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, CacheError> {
+fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, StartErrorKind> {
     let bytes = read_regular_file(path, MAX_PEM_CHAIN_BYTES)
-        .map_err(|error| CacheError::CaFile { kind: error.kind() })?;
+        .map_err(|error| StartErrorKind::CaFile { kind: error.kind() })?;
     let mut roots = rustls::RootCertStore::empty();
-    for certificate in pem_certificates(&bytes).ok_or(CacheError::InvalidCa)? {
-        roots.add(certificate).map_err(|_| CacheError::InvalidCa)?;
+    for certificate in pem_certificates(&bytes).ok_or(StartErrorKind::InvalidCa)? {
+        roots
+            .add(certificate)
+            .map_err(|_| StartErrorKind::InvalidCa)?;
     }
     Ok(roots)
 }
@@ -141,43 +163,47 @@ struct ClientIdentity {
     key: PrivateKeyDer<'static>,
 }
 
-fn read_client_certificate(certificate: &ClientCertificate) -> Result<ClientIdentity, CacheError> {
+fn read_client_certificate(
+    certificate: &ClientCertificate,
+) -> Result<ClientIdentity, StartErrorKind> {
     use rustls::pki_types::pem::PemObject;
 
     let client_cert = read_regular_file(&certificate.cert_path, MAX_PEM_CHAIN_BYTES)
-        .map_err(|error| CacheError::ClientCertificateFile { kind: error.kind() })?;
+        .map_err(|error| StartErrorKind::ClientCertificateFile { kind: error.kind() })?;
     let client_key = read_secret_file(&certificate.key_path, MAX_PRIVATE_KEY_BYTES)
-        .map_err(|error| CacheError::ClientKeyFile { kind: error.kind() })?;
-    let chain = pem_certificates(&client_cert).ok_or(CacheError::InvalidClientCertificate)?;
+        .map_err(|error| StartErrorKind::ClientKeyFile { kind: error.kind() })?;
+    let chain = pem_certificates(&client_cert).ok_or(StartErrorKind::InvalidClientCertificate)?;
     let key =
-        PrivateKeyDer::from_pem_slice(&client_key).map_err(|_| CacheError::InvalidClientKey)?;
+        PrivateKeyDer::from_pem_slice(&client_key).map_err(|_| StartErrorKind::InvalidClientKey)?;
     Ok(ClientIdentity { chain, key })
 }
 
 fn tls_connector(
     roots: Option<rustls::RootCertStore>,
     identity: Option<ClientIdentity>,
-) -> Result<tokio_rustls::TlsConnector, CacheError> {
+) -> Result<tokio_rustls::TlsConnector, StartErrorKind> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
     let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
-    .map_err(|_| CacheError::ClientBuild)?;
+    .map_err(|_| StartErrorKind::ClientBuild)?;
     let builder = match roots {
         Some(roots) => builder.with_root_certificates(roots),
         None => builder
             .with_platform_verifier()
-            .map_err(|_| CacheError::ClientBuild)?,
+            .map_err(|_| StartErrorKind::ClientBuild)?,
     };
     let config =
         match identity {
             Some(ClientIdentity { chain, key }) => builder
                 .with_client_auth_cert(chain, key)
                 .map_err(|error| match error {
-                    rustls::Error::InvalidCertificate(_) => CacheError::InvalidClientCertificate,
-                    _ => CacheError::InvalidClientKey,
+                    rustls::Error::InvalidCertificate(_) => {
+                        StartErrorKind::InvalidClientCertificate
+                    }
+                    _ => StartErrorKind::InvalidClientKey,
                 })?,
             None => builder.with_no_client_auth(),
         };

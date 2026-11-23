@@ -1,29 +1,69 @@
+use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use enum_map::{Enum, EnumMap};
 use metrics::Unit;
-use sqlx::postgres::PgPool;
 
-use super::LOG_TARGET;
-use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, Cleanup};
-use crate::observe::observed;
-use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
+use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, CleanupName};
+use super::{LOG_TARGET, is_valid_label};
+use crate::observed;
+use crate::pool::Pool;
+use crate::transaction::{Isolation, Tx, TxError, TxOptions};
 
 pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 
 const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PopulationName(&'static str);
+
+impl PopulationName {
+    /// ```compile_fail
+    /// const _: infra_postgres::maintenance::PopulationName =
+    ///     infra_postgres::maintenance::PopulationName::new("Not-Valid");
+    /// ```
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        assert!(is_valid_label(name), "invalid population name");
+        Self(name)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for PopulationName {
+    fn borrow(&self) -> &str {
+        self.0
+    }
+}
+
+impl AsRef<str> for PopulationName {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
+impl fmt::Display for PopulationName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenancePopulation {
-    Cleanup(Cleanup),
-    FailedJobs,
+    Cleanup(CleanupName),
+    Retained(PopulationName),
 }
 
 impl MaintenancePopulation {
-    pub(crate) const fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            Self::Cleanup(cleanup) => cleanup.label(),
-            Self::FailedJobs => "failed_jobs",
+            Self::Cleanup(cleanup) => cleanup.as_str(),
+            Self::Retained(population) => population.as_str(),
         }
     }
 }
@@ -34,16 +74,20 @@ pub struct PopulationSample {
     pub oldest_at_unix_seconds: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MaintenanceFailure {
+    #[error("maintenance observation permit timed out")]
     Permit,
+    #[error("postgres connection acquire failed")]
     Acquire,
+    #[error("postgres transaction begin failed")]
     Begin,
+    #[error("postgres observation statement failed")]
     Statement,
+    #[error("postgres transaction commit failed")]
     CommitFailed,
+    #[error("postgres transaction commit outcome unknown")]
     CommitUnknown,
-    TimedOut,
-    ClockInvalid,
 }
 
 impl MaintenanceFailure {
@@ -55,8 +99,6 @@ impl MaintenanceFailure {
             Self::Statement => "statement",
             Self::CommitFailed => "commit_failed",
             Self::CommitUnknown => "commit_unknown",
-            Self::TimedOut => "timeout",
-            Self::ClockInvalid => "clock_invalid",
         }
     }
 }
@@ -211,7 +253,7 @@ impl MaintenanceObserver {
             counter.increment(0);
         }
         if let MaintenancePopulation::Cleanup(cleanup) = population {
-            metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
+            metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.as_str())
                 .increment(0);
         }
         this
@@ -224,8 +266,8 @@ impl MaintenanceObserver {
         let attempt = self.attempt();
         match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, read).await {
             Ok(Ok(sample)) => attempt.record_sample(sample),
-            Ok(Err(failure)) => attempt.failed(failure),
-            Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
+            Ok(Err(failure)) => attempt.failed(FailureCause::Read(failure)),
+            Err(_) => attempt.failed(FailureCause::TimedOut),
         }
     }
 
@@ -275,9 +317,26 @@ impl AttemptOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureCause {
+    Read(MaintenanceFailure),
+    TimedOut,
+    ClockInvalid,
+}
+
+impl FailureCause {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Read(failure) => failure.label(),
+            Self::TimedOut => "timeout",
+            Self::ClockInvalid => "clock_invalid",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum UnsuccessfulOutcome {
-    Failed(MaintenanceFailure),
+    Failed(FailureCause),
     Cancelled,
 }
 
@@ -297,6 +356,18 @@ impl UnsuccessfulOutcome {
     }
 }
 
+fn sample_fits_window(sample: PopulationSample, requested_at: f64, received_at: f64) -> bool {
+    let PopulationSample {
+        observed_at_unix_seconds: observed_at,
+        oldest_at_unix_seconds: oldest,
+    } = sample;
+    observed_at.is_finite()
+        && observed_at > 0.0
+        && observed_at >= requested_at - CLOCK_TOLERANCE_SECONDS
+        && observed_at <= received_at + CLOCK_TOLERANCE_SECONDS
+        && oldest.is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at)
+}
+
 #[derive(Debug)]
 struct MaintenanceAttempt<'a> {
     observer: &'a mut MaintenanceObserver,
@@ -309,37 +380,28 @@ impl MaintenanceAttempt<'_> {
         self.record_sample_at(sample, MaintenanceClock::now());
     }
 
-    fn validated_receipt_time(
+    fn receipt_time_if_consistent(
         &self,
         sample: PopulationSample,
         received: MaintenanceClock,
     ) -> Option<f64> {
         let received_at = received.wall?;
         let requested_at = self.requested.wall?;
-        let PopulationSample {
-            observed_at_unix_seconds: observed_at,
-            oldest_at_unix_seconds: oldest,
-        } = sample;
-        let valid = self.requested.agrees_with(self.observer.previous_clock)
-            && received.agrees_with(self.requested)
-            && observed_at.is_finite()
-            && observed_at > 0.0
-            && observed_at >= requested_at - CLOCK_TOLERANCE_SECONDS
-            && observed_at <= received_at + CLOCK_TOLERANCE_SECONDS
-            && oldest
-                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
-        valid.then_some(received_at)
+        let clocks_agree = self.requested.agrees_with(self.observer.previous_clock)
+            && received.agrees_with(self.requested);
+        (clocks_agree && sample_fits_window(sample, requested_at, received_at))
+            .then_some(received_at)
     }
 
     fn record_sample_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
-        let Some(received_at) = self.validated_receipt_time(sample, received) else {
-            self.failed_at(MaintenanceFailure::ClockInvalid, received);
-            return;
-        };
         let PopulationSample {
             observed_at_unix_seconds: observed_at,
             oldest_at_unix_seconds: oldest,
         } = sample;
+        let Some(received_at) = self.receipt_time_if_consistent(sample, received) else {
+            self.failed_at(FailureCause::ClockInvalid, received);
+            return;
+        };
         self.observer.previous_clock = received;
         self.observer.last_attempt_success.set(0.0);
         self.observer.database_observed.set(observed_at);
@@ -360,18 +422,18 @@ impl MaintenanceAttempt<'_> {
         self.observer.failing = false;
     }
 
-    fn failed(self, failure: MaintenanceFailure) {
-        self.failed_at(failure, MaintenanceClock::now());
+    fn failed(self, cause: FailureCause) {
+        self.failed_at(cause, MaintenanceClock::now());
     }
 
-    fn failed_at(mut self, failure: MaintenanceFailure, clock: MaintenanceClock) {
+    fn failed_at(mut self, cause: FailureCause, clock: MaintenanceClock) {
         self.outcome = AttemptOutcome::Failed;
         self.observer.previous_clock = clock;
-        if failure == MaintenanceFailure::ClockInvalid {
+        if cause == FailureCause::ClockInvalid {
             self.observer.clock_valid.set(0.0);
         }
         self.observer
-            .record_unsuccessful(UnsuccessfulOutcome::Failed(failure));
+            .record_unsuccessful(UnsuccessfulOutcome::Failed(cause));
     }
 }
 
@@ -393,14 +455,13 @@ impl Drop for MaintenanceAttempt<'_> {
 }
 
 pub async fn in_observation_tx<F>(
-    pool: &PgPool,
+    pool: &Pool,
     read: F,
 ) -> Result<PopulationSample, MaintenanceFailure>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<PopulationSample, sqlx::Error>,
 {
-    in_tx_with(
-        pool,
+    pool.in_tx_with(
         TxOptions {
             isolation: Isolation::ReadCommitted,
             read_only: true,
@@ -416,17 +477,17 @@ where
 }
 
 async fn set_observation_timeouts(tx: &mut Tx<'_>) -> Result<(), sqlx::Error> {
-    observed(
+    observed!(
         "set observation statement timeout",
         sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
     )
     .await?;
-    observed(
+    observed!(
         "set observation lock timeout",
         sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
     )
     .await?;
-    observed(
+    observed!(
         "set observation idle timeout",
         sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'").execute(&mut *tx),
     )

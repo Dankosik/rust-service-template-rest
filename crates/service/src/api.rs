@@ -55,10 +55,6 @@ impl Modify for BearerAuth {
 pub enum ContractError {
     #[error(transparent)]
     Finalization(#[from] infra_http::FinalizeError),
-    // template:begin http-idempotency:service-api-contract-error-idempotency
-    #[error(transparent)]
-    Idempotency(#[from] infra_http::idempotency::CompositionError),
-    // template:end http-idempotency:service-api-contract-error-idempotency
     #[error("render the OpenAPI document as YAML: {0}")]
     Yaml(#[source] Box<dyn Error + Send + Sync>),
 }
@@ -91,7 +87,7 @@ pub fn render() -> Result<String, ContractError> {
 mod idempotency_tests {
     use std::convert::Infallible;
 
-    use infra_http::idempotency::{self, CreatedText, FreshCommand, Rollback, Tx};
+    use infra_http::idempotency::{CreatedText, FreshCommand, Rollback, Tx};
 
     use super::*;
 
@@ -110,12 +106,7 @@ mod idempotency_tests {
         ),
         responses(infra_http::authn::ProtectedOperationProblemResponses)
     )]
-    async fn idempotent(
-        _input: idempotency::CommandInput,
-        _principal: infra_http::VerifiedPrincipal,
-        _delegation: Option<infra_http::DelegationCredential>,
-        _state: AppState,
-    ) -> Result<Create, Box<infra_http::Problem>> {
+    async fn idempotent() -> Result<Create, infra_http::Problem> {
         Ok(Create)
     }
 
@@ -129,10 +120,7 @@ mod idempotency_tests {
             self,
             _: &mut Tx<'_>,
         ) -> impl Future<Output = Result<Self::Success, Rollback<Self::Terminal>>> + Send {
-            std::future::ready(Ok(CreatedText {
-                body: "created".into(),
-                headers: axum::http::HeaderMap::new(),
-            }))
+            std::future::ready(Ok(CreatedText::new("created")))
         }
     }
 
@@ -202,8 +190,10 @@ mod idempotency_tests {
         }))
         .unwrap();
         assert_eq!(
-            HttpContract::<AppState>::application(stale).unwrap_err(),
-            infra_http::FinalizeError::ApplicationPaths
+            HttpContract::<AppState>::application(stale)
+                .unwrap_err()
+                .to_string(),
+            "application metadata must contain no registered paths"
         );
     }
 

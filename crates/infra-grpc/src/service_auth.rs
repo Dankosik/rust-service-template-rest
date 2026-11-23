@@ -1,44 +1,29 @@
 use std::sync::Arc;
 
 use axum::extract::Request;
-use axum::response::Response;
-use foldhash::{HashMap, HashSet};
+use foldhash::HashSet;
 use http::header::AUTHORIZATION;
-pub use infra_serviceauth::Caller;
-use infra_serviceauth::{ServiceName, Verifier};
+use infra_serviceauth::{Caller, ServiceName, Verifier};
 use operation_context::OperationContext;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::Failure;
 use crate::call::check_open;
 use crate::router::reject_with_budget;
-use crate::status::internal_status;
+use crate::status::ClassifiedStatus;
 
 const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this method";
-
-pub fn require_caller<T>(request: &tonic::Request<T>) -> Result<&Caller, tonic::Status> {
-    request
-        .extensions()
-        .get::<Caller>()
-        .ok_or_else(internal_status)
-}
 
 pub(crate) fn strip_caller(extensions: &mut http::Extensions) {
     extensions.remove::<Caller>();
 }
 
-pub(crate) type CallerRules = HashMap<String, HashSet<ServiceName>>;
-
-#[expect(
-    clippy::result_large_err,
-    reason = "the error is the refusal response the call returns"
-)]
 pub(crate) async fn admit_caller(
     verifier: &Verifier,
-    caller_rules: &CallerRules,
+    allowed_callers: Option<&HashSet<ServiceName>>,
     context: &OperationContext,
     mut request: Request,
-) -> Result<Request, Response> {
+) -> Result<Request, ClassifiedStatus> {
     check_open(context)?;
     let result = {
         let authorization = request
@@ -55,27 +40,24 @@ pub(crate) async fn admit_caller(
             return Err(reject_with_budget(context, request, verification_status(failure)).await);
         }
     };
-    let path = request.uri().path();
-    let rule = caller_rules.get(path);
-    if !rule.is_some_and(|callers| callers.contains(caller.name())) {
-        let method = if rule.is_some() { path } else { "unknown" };
+    if !allowed_callers.is_some_and(|callers| callers.contains(caller.name())) {
+        let method = allowed_callers.map_or("unknown", |_| request.uri().path());
         tracing::warn!(
             caller = %caller.name(),
             method,
             "service_auth_caller_not_admitted"
         );
         let status = Failure::new(service_failure::Code::Forbidden)
-            .into_status_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
+            .into_classified_as(tonic::Code::PermissionDenied, NOT_ADMITTED_DETAIL);
         return Err(reject_with_budget(context, request, status).await);
     }
-    check_open(context)?;
     tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert::<Caller>(caller);
     Ok(request)
 }
 
-fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
+fn verification_status(failure: infra_serviceauth::Failure) -> ClassifiedStatus {
     Failure::new(match failure {
         infra_serviceauth::Failure::Missing
         | infra_serviceauth::Failure::Malformed
@@ -103,7 +85,7 @@ mod tests {
     const METHOD: &str = "/example.v1.EchoService/Unary";
     const TYPE: &str = "example-svc+jwt";
 
-    fn orders_only_admission() -> (Verifier, CallerRules, String, String) {
+    fn orders_only_admission() -> (Verifier, HashSet<ServiceName>, String, String) {
         let orders = TestKey::new("orders/2026-10");
         let billing = TestKey::new("billing/2026-10");
         let trust = TrustRegistry::parse(&registry(&[
@@ -116,11 +98,7 @@ mod tests {
             JwtType::parse(TYPE).unwrap(),
             trust,
         );
-        let mut rules = HashMap::default();
-        rules.insert(
-            METHOD.to_owned(),
-            HashSet::from_iter([ServiceName::parse("orders").unwrap()]),
-        );
+        let allowed = HashSet::from_iter([ServiceName::parse("orders").unwrap()]);
         let now = now_secs();
         let sign = |key: &TestKey, name: &str| {
             let token = key.sign(
@@ -137,7 +115,7 @@ mod tests {
         };
         (
             verifier,
-            rules,
+            allowed,
             sign(&billing, "billing"),
             sign(&orders, "orders"),
         )
@@ -145,7 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_context_answers_before_caller_admission() {
-        let (verifier, rules, billing_bearer, orders_bearer) = orders_only_admission();
+        let (verifier, allowed, billing_bearer, orders_bearer) = orders_only_admission();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let make_request = |authorization: Option<&str>| {
             let polls = Arc::clone(&body_polls);
@@ -162,54 +140,62 @@ mod tests {
 
         for authorization in [Some(billing_bearer.as_str()), None] {
             let context = OperationContext::with_timeout(Duration::ZERO);
-            let rejected = admit_caller(&verifier, &rules, &context, make_request(authorization))
-                .await
-                .unwrap_err();
-            assert_eq!(
-                tonic::Status::from_header_map(rejected.headers())
-                    .unwrap()
-                    .code(),
-                tonic::Code::DeadlineExceeded
-            );
+            let rejected = admit_caller(
+                &verifier,
+                Some(&allowed),
+                &context,
+                make_request(authorization),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(rejected.code(), tonic::Code::DeadlineExceeded);
         }
 
         let cancelled_context = OperationContext::unbounded();
         cancelled_context.cancellation().cancel();
         let cancelled = admit_caller(
             &verifier,
-            &rules,
+            Some(&allowed),
             &cancelled_context,
             make_request(Some(&billing_bearer)),
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            tonic::Status::from_header_map(cancelled.headers())
-                .unwrap()
-                .code(),
-            tonic::Code::Cancelled
-        );
+        assert_eq!(cancelled.code(), tonic::Code::Cancelled);
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
 
         let live = OperationContext::with_timeout(Duration::from_secs(5));
         let denied = admit_caller(
             &verifier,
-            &rules,
+            Some(&allowed),
             &live,
             make_request(Some(&billing_bearer)),
         )
         .await
         .unwrap_err();
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
         assert_eq!(
-            tonic::Status::from_header_map(denied.headers())
-                .unwrap()
-                .code(),
-            tonic::Code::PermissionDenied
+            denied.catalog_code(),
+            Some(service_failure::Code::Forbidden)
         );
 
-        let admitted = admit_caller(&verifier, &rules, &live, make_request(Some(&orders_bearer)))
+        let unknown = admit_caller(&verifier, None, &live, make_request(Some(&orders_bearer)))
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(unknown.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            unknown.catalog_code(),
+            Some(service_failure::Code::Forbidden)
+        );
+
+        let admitted = admit_caller(
+            &verifier,
+            Some(&allowed),
+            &live,
+            make_request(Some(&orders_bearer)),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             admitted
                 .extensions()

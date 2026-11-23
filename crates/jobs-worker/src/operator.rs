@@ -4,11 +4,11 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use infra_jobs::operator::{
-    self as jobs, FailureReason, InputError, Inspection, InspectionMode, InspectionResult,
-    JobSnapshot, OperatorError, RecoveryTarget,
+    self as jobs, Cursor, FailureReason, HandledKinds, InputError, JobSnapshot, OneInspection,
+    OperatorError, PageInspection, PageQuery, RecoveryTarget,
 };
 use infra_jobs::{JobId, StartupError};
-use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, PgPool, TxOptions};
+use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, Pool, SslPolicy, TxOptions};
 use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -22,7 +22,12 @@ use crate::shutdown::{DEPENDENCY_CLOSE_BUDGET, RUNTIME_SHUTDOWN_TIMEOUT};
 use crate::signals::Signals;
 
 pub(crate) enum Request {
-    Inspect(Inspection),
+    InspectOne(JobId),
+    Failed(PageQuery),
+    Unhandled {
+        handled_kinds: HandledKinds,
+        page: PageQuery,
+    },
     Redrive(RecoveryTarget),
     Discard(RecoveryTarget),
 }
@@ -30,18 +35,17 @@ pub(crate) enum Request {
 impl Request {
     pub(crate) fn try_new(command: OperatorCommand) -> Result<Self, InputError> {
         Ok(match command {
-            OperatorCommand::Inspect { id } => Self::Inspect(Inspection::one(&id)?),
+            OperatorCommand::Inspect { id } => Self::InspectOne(jobs::parse_job_id(&id)?),
             OperatorCommand::Failed { page } => {
-                Self::Inspect(Inspection::failed(page.after.as_deref(), page.limit)?)
+                Self::Failed(PageQuery::try_new(page.after.as_deref(), page.limit)?)
             }
             OperatorCommand::Unhandled {
                 handled_kinds,
                 page,
-            } => Self::Inspect(Inspection::unhandled(
-                &handled_kinds,
-                page.after.as_deref(),
-                page.limit,
-            )?),
+            } => Self::Unhandled {
+                handled_kinds: HandledKinds::parse_csv(&handled_kinds)?,
+                page: PageQuery::try_new(page.after.as_deref(), page.limit)?,
+            },
             OperatorCommand::Redrive(target) => Self::Redrive(recovery_target(&target)?),
             OperatorCommand::Discard(target) => Self::Discard(recovery_target(&target)?),
         })
@@ -49,11 +53,9 @@ impl Request {
 
     fn action(&self) -> &'static str {
         match self {
-            Self::Inspect(query) => match query.mode() {
-                InspectionMode::One => "inspect",
-                InspectionMode::Failed => "failed",
-                InspectionMode::Unhandled => "unhandled",
-            },
+            Self::InspectOne(_) => "inspect",
+            Self::Failed(_) => "failed",
+            Self::Unhandled { .. } => "unhandled",
             Self::Redrive(_) => "redrive",
             Self::Discard(_) => "discard",
         }
@@ -61,16 +63,24 @@ impl Request {
 
     fn is_mutation(&self) -> bool {
         match self {
-            Self::Inspect(_) => false,
+            Self::InspectOne(_) | Self::Failed(_) | Self::Unhandled { .. } => false,
             Self::Redrive(_) | Self::Discard(_) => true,
         }
     }
 
     fn fields(&self) -> RequestFields<'_> {
         match self {
-            Self::Inspect(query) => RequestFields::Inspect {
-                id: query.job_id(),
-                handled_kinds: query.handled_kinds(),
+            Self::InspectOne(id) => RequestFields::Inspect {
+                id: Some(*id),
+                handled_kinds: None,
+            },
+            Self::Failed(_) => RequestFields::Inspect {
+                id: None,
+                handled_kinds: None,
+            },
+            Self::Unhandled { handled_kinds, .. } => RequestFields::Inspect {
+                id: None,
+                handled_kinds: Some(handled_kinds.names()),
             },
             Self::Redrive(target) | Self::Discard(target) => RequestFields::Recovery {
                 id: target.id(),
@@ -134,29 +144,46 @@ impl Request {
         }
     }
 
-    async fn execute(&self, pool: &PgPool) -> Result<Executed, OperatorError> {
+    async fn execute(&self, pool: &Pool) -> Result<Executed, OperatorError> {
+        const READ_ONLY: TxOptions = TxOptions {
+            isolation: Isolation::ReadCommitted,
+            read_only: true,
+        };
         match self {
-            Self::Inspect(query) => {
-                let result = infra_postgres::in_tx_with(
-                    pool,
-                    TxOptions {
-                        isolation: Isolation::ReadCommitted,
-                        read_only: true,
-                    },
-                    async |tx| jobs::inspect(tx, query).await,
-                )
-                .await?;
-                Ok(Executed::Inspected(result))
+            Self::InspectOne(id) => {
+                let result = pool
+                    .in_tx_with(READ_ONLY, async |tx| jobs::inspect_one(tx, *id).await)
+                    .await?;
+                Ok(Executed::One(result))
+            }
+            Self::Failed(page) => {
+                let result = pool
+                    .in_tx_with(READ_ONLY, async |tx| jobs::inspect_failed(tx, *page).await)
+                    .await?;
+                Ok(Executed::Page(result))
+            }
+            Self::Unhandled {
+                handled_kinds,
+                page,
+            } => {
+                let result = pool
+                    .in_tx_with(READ_ONLY, async |tx| {
+                        jobs::inspect_unhandled(tx, handled_kinds, *page).await
+                    })
+                    .await?;
+                Ok(Executed::Page(result))
             }
             Self::Redrive(target) => {
-                let redriven =
-                    infra_postgres::in_tx(pool, async |tx| jobs::redrive(tx, target).await).await?;
+                let redriven = pool
+                    .in_tx(async |tx| jobs::redrive(tx, target).await)
+                    .await?;
                 Ok(Executed::Redriven {
                     new_version: redriven.new_version,
                 })
             }
             Self::Discard(target) => {
-                infra_postgres::in_tx(pool, async |tx| jobs::discard(tx, target).await).await?;
+                pool.in_tx(async |tx| jobs::discard(tx, target).await)
+                    .await?;
                 Ok(Executed::Discarded)
             }
         }
@@ -214,8 +241,9 @@ impl Cause {
 }
 
 enum Executed {
-    Inspected(InspectionResult),
-    Redriven { new_version: String },
+    One(OneInspection),
+    Page(PageInspection),
+    Redriven { new_version: i64 },
     Discarded,
 }
 
@@ -249,7 +277,7 @@ impl From<Failure> for Report {
 impl Report {
     fn receipt<'a>(&'a self, request: &'a Request) -> Receipt<'a> {
         let (outcome, body) = match &self.result {
-            Ok(Executed::Inspected(InspectionResult::One { observed_at, item })) => (
+            Ok(Executed::One(OneInspection { observed_at, item })) => (
                 if item.is_some() {
                     Outcome::Found
                 } else {
@@ -260,7 +288,7 @@ impl Report {
                     item: item.as_ref().map(Snapshot::from),
                 }),
             ),
-            Ok(Executed::Inspected(InspectionResult::Page {
+            Ok(Executed::Page(PageInspection {
                 observed_at,
                 scanned,
                 items,
@@ -272,12 +300,14 @@ impl Report {
                     scanned: *scanned,
                     items: items.iter().map(Snapshot::from).collect(),
                     complete: next_cursor.is_none(),
-                    next_cursor: next_cursor.as_deref(),
+                    next_cursor: *next_cursor,
                 }),
             ),
             Ok(Executed::Redriven { new_version }) => (
                 Outcome::Redriven,
-                Some(ReceiptBody::Redriven { new_version }),
+                Some(ReceiptBody::Redriven {
+                    new_version: *new_version,
+                }),
             ),
             Ok(Executed::Discarded) => (Outcome::Discarded, None),
             Err(Failure {
@@ -337,6 +367,7 @@ enum RequestFields<'a> {
     },
 }
 
+#[serde_as]
 #[derive(Serialize)]
 #[serde(untagged)]
 enum ReceiptBody<'a> {
@@ -349,10 +380,12 @@ enum ReceiptBody<'a> {
         scanned: u16,
         items: Vec<Snapshot<'a>>,
         complete: bool,
-        next_cursor: Option<&'a str>,
+        #[serde_as(as = "Option<DisplayFromStr>")]
+        next_cursor: Option<Cursor>,
     },
     Redriven {
-        new_version: &'a str,
+        #[serde_as(as = "DisplayFromStr")]
+        new_version: i64,
     },
     Failed(FailureFields<'a>),
 }
@@ -420,10 +453,14 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
             return request.failed_before_start(Cause::Signals).into();
         }
     };
-    let Ok(dsn) = Dsn::admit_for_environment(
+    let Ok(dsn) = Dsn::admit_with(
         config.dsn.expose_secret(),
         config.password_file.as_deref(),
-        config.local_development,
+        if config.local_development {
+            SslPolicy::AllowLocalDevelopment
+        } else {
+            SslPolicy::VerifyFull
+        },
     ) else {
         return request.failed_before_start(Cause::Dsn).into();
     };
@@ -431,11 +468,12 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
         config.session_budgets,
         NonZeroU32::MIN,
         "jobs-worker-operator",
+        true,
     );
     let pool = match bounded(
         &mut signals,
         jobs::STARTUP_TIMEOUT,
-        Box::pin(infra_postgres::connect(&dsn, &options)),
+        Box::pin(Pool::connect(&dsn, &options)),
     )
     .await
     {
@@ -448,8 +486,7 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
         Err(cause) => return request.failed_before_start(cause).into(),
     };
     let result = verify_and_execute(&pool, &mut signals, request).await;
-    let cleanup_incomplete =
-        infra_postgres::close(&pool, DEPENDENCY_CLOSE_BUDGET).await != CloseOutcome::Complete;
+    let cleanup_incomplete = pool.close(DEPENDENCY_CLOSE_BUDGET).await != CloseOutcome::Complete;
     Report {
         result,
         cleanup_incomplete,
@@ -457,7 +494,7 @@ async fn run_request(config: &OperatorPostgresConfig, request: &Request) -> Repo
 }
 
 async fn verify_and_execute(
-    pool: &PgPool,
+    pool: &Pool,
     signals: &mut Signals,
     request: &Request,
 ) -> Result<Executed, Failure> {
@@ -536,7 +573,8 @@ struct Snapshot<'a> {
     id: JobId,
     kind: &'a str,
     state: &'static str,
-    version: &'a str,
+    #[serde_as(as = "DisplayFromStr")]
+    version: i64,
     attempts: i32,
     failure_reason: Option<&'static str>,
     created_at: &'a str,
@@ -565,7 +603,7 @@ impl<'a> From<&'a JobSnapshot> for Snapshot<'a> {
             id: *id,
             kind,
             state: state.as_str(),
-            version,
+            version: *version,
             attempts: *attempts,
             failure_reason: failure_reason.map(FailureReason::as_str),
             created_at,
@@ -594,12 +632,12 @@ mod tests {
     }
 
     fn sample_snapshot() -> JobSnapshot {
-        let id = Inspection::one(ID).unwrap().job_id().unwrap();
+        let id = jobs::parse_job_id(ID).unwrap();
         JobSnapshot {
             id,
             kind: "jobs.sample".into(),
             state: JobState::Failed,
-            version: "9007199254740993".into(),
+            version: 9_007_199_254_740_993,
             attempts: 3,
             failure_reason: Some(FailureReason::Exhausted),
             created_at: "2026-11-15T00:00:00.000000Z".into(),
@@ -612,9 +650,9 @@ mod tests {
 
     #[test]
     fn inspection_receipts_preserve_explicit_nulls_and_omit_absent_request_fields() {
-        let one = Request::Inspect(Inspection::one(ID).unwrap());
+        let one = Request::InspectOne(jobs::parse_job_id(ID).unwrap());
         let found = Report {
-            result: Ok(Executed::Inspected(InspectionResult::One {
+            result: Ok(Executed::One(OneInspection {
                 observed_at: OBSERVED_AT.into(),
                 item: Some(sample_snapshot()),
             })),
@@ -645,7 +683,7 @@ mod tests {
         );
 
         let missing = Report {
-            result: Ok(Executed::Inspected(InspectionResult::One {
+            result: Ok(Executed::One(OneInspection {
                 observed_at: OBSERVED_AT.into(),
                 item: None,
             })),
@@ -664,9 +702,12 @@ mod tests {
             })
         );
 
-        let unhandled = Request::Inspect(Inspection::unhandled("zebra,alpha", None, 10).unwrap());
+        let unhandled = Request::Unhandled {
+            handled_kinds: HandledKinds::parse_csv("zebra,alpha").unwrap(),
+            page: PageQuery::try_new(None, 10).unwrap(),
+        };
         let page = Report {
-            result: Ok(Executed::Inspected(InspectionResult::Page {
+            result: Ok(Executed::Page(PageInspection {
                 observed_at: OBSERVED_AT.into(),
                 scanned: 2,
                 items: Vec::new(),
@@ -696,7 +737,7 @@ mod tests {
         let redrive = Request::Redrive(target.clone());
         let redriven = Report {
             result: Ok(Executed::Redriven {
-                new_version: "9007199254740994".into(),
+                new_version: 9_007_199_254_740_994,
             }),
             cleanup_incomplete: false,
         };

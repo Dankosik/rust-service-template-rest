@@ -4,15 +4,17 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde::de::IgnoredAny;
 
 use crate::de::{
-    BlankAsNone, BlankSecretAsNone, StrictBool, StrictCount, StrictDuration, StrictEnum,
+    BlankAsNone, BlankAsNoneVerbatim, Keep, Mode, ModeMarker, Skip, StrictBool, StrictCount,
+    StrictDuration, When,
 };
 use crate::load::{Error, MigrationLoadError};
-use crate::observability::{ObservabilityFields, OtelFields, validate_service_name};
-use crate::validate::{Rejected, Violations, duration_range, int_range, required};
-use crate::{AppConfig, LogConfig};
+use crate::observability::{ObservabilityFields, validate_service_name};
+use crate::validate::{Rejected, Violations, admit_with, duration_range, int_range, required};
+use crate::{AppConfig, BuildInfo, LogConfig};
+
+const DEFAULT_MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::MIN.saturating_add(3);
 
 /// Where a pooled session's `statement_timeout` and
 /// `idle_in_transaction_session_timeout` come from. The adapter verifies the
@@ -29,93 +31,54 @@ pub enum PostgresSessionBudgets {
 }
 
 #[serde_with::serde_as]
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct PostgresFields<
-    Session,
-    MaxConnections,
-    Deadline,
-    Notifications,
-    MigrationDsn = IgnoredAny,
-> {
+#[derive(Debug, Deserialize, educe::Educe)]
+#[educe(Default(bound = false))]
+#[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+pub(crate) struct PostgresFields<Session: Mode, Pool: Mode, Migration: Mode> {
     #[serde_as(as = "StrictBool")]
     pub(crate) enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
     /// Set `APP__POSTGRES__DSN` in the environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
-    #[serde(default)]
-    #[serde_as(as = "BlankSecretAsNone")]
+    #[serde_as(as = "BlankAsNoneVerbatim")]
     dsn: Option<SecretString>,
     /// Optional direct connection URL, including credentials, for the migrator.
-    migration_dsn: MigrationDsn,
+    #[serde_as(as = "When<Migration, BlankAsNoneVerbatim>")]
+    migration_dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the
     /// password. The DSN then carries no password, and the running service
     /// follows the file. Its target must be a regular file of at most 16 KiB.
     /// Missing, empty, or whitespace-only is unset (`None`), the default.
-    #[serde(default)]
     #[serde_as(as = "BlankAsNone")]
     password_file: Option<PathBuf>,
-    session_budgets: Session,
+    #[serde_as(as = "When<Session>")]
+    session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
-    /// the database, not from the service's concurrency.
-    max_connections: MaxConnections,
+    /// the database, not from the service's concurrency. Missing uses 4;
+    /// between 1 and 500.
+    #[serde_as(as = "When<Pool, Option<StrictCount>>")]
+    max_connections: Option<NonZeroU32>,
     /// Enables PostgreSQL LISTEN/NOTIFY for job wakeups. Set to false on producers
     /// and workers using PgBouncer transaction pooling to use periodic polling.
-    notifications: Notifications,
+    #[serde_as(as = "When<Pool, StrictBool>")]
+    #[educe(Default = true)]
+    notifications: bool,
     /// Bound on one `migrate` run after it connected, and on each
     /// `-- no-transaction` migration in it. Raise it for the run that builds
     /// an index concurrently on a large table. Only `migrate` checks the range.
-    migration_deadline: Deadline,
+    #[serde_as(as = "When<Migration, StrictDuration>")]
+    #[educe(Default(expression = Duration::from_mins(5)))]
+    migration_deadline: Duration,
+    #[serde(skip)]
+    _mode: ModeMarker<(Session, Pool, Migration)>,
 }
 
-#[serde_with::serde_as]
-#[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default)]
-#[serde(transparent)]
-pub(crate) struct MaxConnectionsInput(
-    #[serde_as(as = "StrictCount")]
-    #[educe(Default(expression = const { NonZeroU32::new(4).expect("4 is nonzero") }))]
-    NonZeroU32,
-);
-
-#[serde_with::serde_as]
-#[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default)]
-#[serde(transparent)]
-struct MigrationDeadline(
-    #[serde_as(as = "StrictDuration")]
-    #[educe(Default(expression = Duration::from_mins(5)))]
-    Duration,
-);
-
-#[serde_with::serde_as]
-#[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default)]
-#[serde(transparent)]
-pub(crate) struct Notifications(
-    #[serde_as(as = "StrictBool")]
-    #[educe(Default = true)]
-    bool,
-);
-
-#[serde_with::serde_as]
-#[derive(Debug, Default, Deserialize)]
-#[serde(transparent)]
-struct MigrationDsnInput(#[serde_as(as = "BlankSecretAsNone")] Option<SecretString>);
-
-pub(crate) type PostgresInput = PostgresFields<
-    StrictEnum<PostgresSessionBudgets>,
-    MaxConnectionsInput,
-    IgnoredAny,
-    Notifications,
->;
-type MigrationPostgresInput =
-    PostgresFields<IgnoredAny, IgnoredAny, MigrationDeadline, IgnoredAny, MigrationDsnInput>;
+pub(crate) type PostgresInput = PostgresFields<Keep, Keep, Skip>;
+type MigrationPostgresInput = PostgresFields<Skip, Skip, Keep>;
 // template:begin jobs:postgres-operator-input
-pub(crate) type OperatorPostgresInput =
-    PostgresFields<StrictEnum<PostgresSessionBudgets>, IgnoredAny, IgnoredAny, IgnoredAny>;
+pub(crate) type OperatorPostgresInput = PostgresFields<Keep, Skip, Skip>;
 // template:end jobs:postgres-operator-input
 
 #[derive(Clone, Debug)]
@@ -130,11 +93,10 @@ pub struct PostgresConfig {
 fn admit_dsn(
     enabled: bool,
     dsn: Option<SecretString>,
-    violations: &mut Violations,
+    v: &mut Violations,
 ) -> Result<Option<SecretString>, Rejected> {
     if enabled {
-        violations
-            .record(required("postgres.dsn", dsn, "postgres.enabled = true"))
+        v.record(required("postgres.dsn", dsn, "postgres.enabled = true"))
             .map(Some)
     } else {
         Ok(None)
@@ -142,22 +104,20 @@ fn admit_dsn(
 }
 
 impl PostgresInput {
-    pub(crate) fn admit(
-        self,
-        violations: &mut Violations,
-    ) -> Result<Option<PostgresConfig>, Rejected> {
-        let dsn = admit_dsn(self.enabled, self.dsn, violations);
-        violations.check(int_range(
+    pub(crate) fn admit(self, v: &mut Violations) -> Result<Option<PostgresConfig>, Rejected> {
+        let dsn = admit_dsn(self.enabled, self.dsn, v);
+        let max_connections = self.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        v.check(int_range(
             "postgres.max_connections",
-            self.max_connections.0.get(),
+            max_connections.get(),
             1..=500,
         ));
         Ok(dsn?.map(|dsn| PostgresConfig {
             dsn,
             password_file: self.password_file,
-            session_budgets: self.session_budgets.0,
-            max_connections: self.max_connections.0,
-            notifications: self.notifications.0,
+            session_budgets: self.session_budgets,
+            max_connections,
+            notifications: self.notifications,
         }))
     }
 }
@@ -175,14 +135,14 @@ impl OperatorPostgresInput {
     pub(crate) fn admit(
         self,
         local_development: bool,
-        violations: &mut Violations,
+        v: &mut Violations,
     ) -> Result<Option<OperatorPostgresConfig>, Rejected> {
         Ok(
-            admit_dsn(self.enabled, self.dsn, violations)?.map(|dsn| OperatorPostgresConfig {
+            admit_dsn(self.enabled, self.dsn, v)?.map(|dsn| OperatorPostgresConfig {
                 local_development,
                 dsn,
                 password_file: self.password_file,
-                session_budgets: self.session_budgets.0,
+                session_budgets: self.session_budgets,
             }),
         )
     }
@@ -197,24 +157,21 @@ pub struct MigrationPostgresConfig {
 }
 
 impl MigrationPostgresInput {
-    fn admit(
-        self,
-        violations: &mut Violations,
-    ) -> Result<Option<MigrationPostgresConfig>, Rejected> {
-        violations.check(duration_range(
+    fn admit(self, v: &mut Violations) -> Result<Option<MigrationPostgresConfig>, Rejected> {
+        v.check(duration_range(
             "postgres.migration_deadline",
-            self.migration_deadline.0,
+            self.migration_deadline,
             Duration::from_secs(1)..=Duration::from_hours(24),
         ));
-        let (dsn, password_file) = match self.migration_dsn.0 {
+        let (dsn, password_file) = match self.migration_dsn {
             Some(dsn) => (Some(dsn), None),
             None => (self.dsn, self.password_file),
         };
         Ok(
-            admit_dsn(self.enabled, dsn, violations)?.map(|dsn| MigrationPostgresConfig {
+            admit_dsn(self.enabled, dsn, v)?.map(|dsn| MigrationPostgresConfig {
                 dsn,
                 password_file,
-                migration_deadline: self.migration_deadline.0,
+                migration_deadline: self.migration_deadline,
             }),
         )
     }
@@ -223,15 +180,11 @@ impl MigrationPostgresInput {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct MigrationInput {
-    #[serde(deserialize_with = "crate::app::deserialize_migration_app")]
-    pub(crate) app: AppConfig,
+    app: crate::app::AppFields<Keep, Skip>,
     log: LogConfig,
-    observability: MigrationObservabilityInput,
+    observability: ObservabilityFields<Skip>,
     postgres: MigrationPostgresInput,
 }
-
-type MigrationObservabilityInput = ObservabilityFields<IgnoredAny, MigrationOtelInput>;
-type MigrationOtelInput = OtelFields<IgnoredAny, IgnoredAny, IgnoredAny>;
 
 #[derive(Clone, Debug)]
 pub struct MigrationConfig {
@@ -264,20 +217,22 @@ impl MigrationConfig {
 }
 
 impl MigrationInput {
-    pub(crate) fn admit(self) -> Result<MigrationConfig, MigrationLoadError> {
-        let mut violations = Violations::default();
-        let v = &mut violations;
-        self.app.validate(v);
-        self.log.validate(v);
-        let service_name = self.observability.otel.service_name;
-        v.check(validate_service_name(&service_name));
-        let postgres = self.postgres.admit(v);
-        let Some(postgres) = violations.finish(postgres).map_err(Error::from)? else {
-            return Err(MigrationLoadError::PostgresDisabled { log: self.log });
+    pub(crate) fn admit(self, build: BuildInfo) -> Result<MigrationConfig, MigrationLoadError> {
+        let (app, log, service_name, postgres) = admit_with(|v| {
+            let app = self.app.admit(build, v);
+            self.log.validate(v);
+            let service_name = self.observability.otel.service_name;
+            v.check(validate_service_name(&service_name));
+            let postgres = self.postgres.admit(v);
+            Ok((app, self.log, service_name, postgres?))
+        })
+        .map_err(Error::from)?;
+        let Some(postgres) = postgres else {
+            return Err(MigrationLoadError::PostgresDisabled { log });
         };
         Ok(MigrationConfig {
-            app: self.app,
-            log: self.log,
+            app,
+            log,
             service_name,
             postgres,
         })

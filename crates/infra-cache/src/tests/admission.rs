@@ -10,16 +10,18 @@ async fn plaintext_without_the_allow_flag_is_refused() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::PlaintextRefused);
+    assert_eq!(err.0, StartErrorKind::PlaintextRefused);
     assert_no_leak(&err, &["hunter2"]);
 }
 
 #[tokio::test]
 async fn plaintext_and_a_missing_password_are_admitted_when_allowed() {
+    let parsed = crate::admission::admit(options("redis://127.0.0.1:6379", true, true, None))
+        .expect("plaintext admitted");
+    assert!(!parsed.transport.is_tls());
     let cache = admitted("redis://127.0.0.1:6379", true, true).await;
     assert_eq!(cache.link.server.host, "127.0.0.1");
     assert_eq!(cache.link.server.port, 6379);
-    assert!(!cache.link.server.tls);
     let debug = format!("{cache:?}");
     assert!(
         debug.contains("127.0.0.1") && !debug.contains("redis://"),
@@ -32,13 +34,20 @@ async fn a_missing_password_is_refused_without_the_allow_flag() {
     let err = Cache::start(options("rediss://127.0.0.1:6379", false, false, None))
         .await
         .unwrap_err();
-    assert_eq!(err, CacheError::UnauthenticatedRefused);
+    assert_eq!(err.0, StartErrorKind::UnauthenticatedRefused);
 }
 
 #[tokio::test]
 async fn an_authenticated_tls_address_is_admitted_without_a_server() {
+    let parsed = crate::admission::admit(options(
+        "rediss://:hunter2@cache.example:6380",
+        false,
+        false,
+        None,
+    ))
+    .expect("tls admitted");
+    assert!(parsed.transport.is_tls());
     let cache = admitted("rediss://:hunter2@cache.example:6380", false, false).await;
-    assert!(cache.link.server.tls);
     assert_eq!(cache.link.server.port, 6380);
     let rendered = format!("{cache:?} {}", cache.link.server.host);
     assert!(
@@ -50,19 +59,24 @@ async fn an_authenticated_tls_address_is_admitted_without_a_server() {
 #[tokio::test]
 async fn valkey_schemes_are_admitted_like_redis_schemes() {
     assert!(
-        !admitted("valkey://127.0.0.1:6379", true, true)
-            .await
-            .link
-            .server
-            .tls
+        !crate::admission::admit(options("valkey://127.0.0.1:6379", true, true, None))
+            .expect("valkey plaintext admitted")
+            .transport
+            .is_tls()
     );
     assert!(
-        admitted("valkeys://:hunter2@cache.example:6380", false, false)
-            .await
-            .link
-            .server
-            .tls
+        crate::admission::admit(options(
+            "valkeys://:hunter2@cache.example:6380",
+            false,
+            false,
+            None,
+        ))
+        .expect("valkeys tls admitted")
+        .transport
+        .is_tls()
     );
+    admitted("valkey://127.0.0.1:6379", true, true).await;
+    admitted("valkeys://:hunter2@cache.example:6380", false, false).await;
 }
 
 #[tokio::test]
@@ -75,7 +89,7 @@ async fn insecure_tls_fragment_is_refused() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InsecureTlsRefused);
+    assert_eq!(err.0, StartErrorKind::InsecureTlsRefused);
     assert_no_leak(&err, &["hunter2"]);
 }
 
@@ -84,7 +98,7 @@ async fn a_unix_socket_is_unsupported() {
     let err = Cache::start(options("redis+unix:///tmp/cache.sock", true, true, None))
         .await
         .unwrap_err();
-    assert_eq!(err, CacheError::UnsupportedAddress);
+    assert_eq!(err.0, StartErrorKind::UnsupportedAddress);
 }
 
 #[tokio::test]
@@ -97,7 +111,7 @@ async fn a_root_ca_on_plaintext_is_refused_before_the_file_is_read() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::CaRequiresTls);
+    assert_eq!(err.0, StartErrorKind::CaRequiresTls);
 }
 
 #[tokio::test]
@@ -111,7 +125,7 @@ async fn a_missing_root_ca_file_reports_only_the_io_kind() {
     ))
     .await
     .unwrap_err();
-    std::assert_matches!(err, CacheError::CaFile { kind } if kind == std::io::ErrorKind::NotFound,
+    std::assert_matches!(err.0, StartErrorKind::CaFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert_no_leak(&err, &["secret"]);
@@ -128,7 +142,7 @@ async fn a_root_ca_without_a_pem_certificate_is_invalid() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidCa);
+    assert_eq!(err.0, StartErrorKind::InvalidCa);
     assert_no_leak(&err, &["hunter2"]);
 }
 
@@ -143,7 +157,7 @@ async fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidCa);
+    assert_eq!(err.0, StartErrorKind::InvalidCa);
     assert_no_leak(&err, &["hunter2"]);
 }
 
@@ -221,10 +235,10 @@ fn configured_files_accept_regular_symlink_targets_and_refuse_fifos_without_a_wr
         nix::unistd::mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
         let kind = ErrorKind::InvalidInput;
         for (index, expected) in [
-            CacheError::PasswordFile { kind },
-            CacheError::CaFile { kind },
-            CacheError::ClientCertificateFile { kind },
-            CacheError::ClientKeyFile { kind },
+            StartErrorKind::PasswordFile { kind },
+            StartErrorKind::CaFile { kind },
+            StartErrorKind::ClientCertificateFile { kind },
+            StartErrorKind::ClientKeyFile { kind },
         ]
         .into_iter()
         .enumerate()
@@ -235,7 +249,7 @@ fn configured_files_accept_regular_symlink_targets_and_refuse_fifos_without_a_wr
                 .await
                 .expect("refuse a FIFO before the admission deadline")
                 .unwrap_err();
-            assert_eq!(error, expected);
+            assert_eq!(error.0, expected);
         }
     });
 }
@@ -261,7 +275,7 @@ async fn a_client_certificate_on_plaintext_is_refused_before_the_files_are_read(
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::ClientCertificateRequiresTls);
+    assert_eq!(err.0, StartErrorKind::ClientCertificateRequiresTls);
 }
 
 #[tokio::test]
@@ -274,7 +288,7 @@ async fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
     ))
     .await
     .unwrap_err();
-    std::assert_matches!(err, CacheError::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound,
+    std::assert_matches!(err.0, StartErrorKind::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert_no_leak(&err, &["/no/such"]);
@@ -286,7 +300,7 @@ async fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
     ))
     .await
     .unwrap_err();
-    std::assert_matches!(err, CacheError::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound,
+    std::assert_matches!(err.0, StartErrorKind::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert_no_leak(&err, &["/no/such"]);
@@ -303,7 +317,7 @@ async fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidClientCertificate);
+    assert_eq!(err.0, StartErrorKind::InvalidClientCertificate);
 }
 
 #[tokio::test]
@@ -317,7 +331,7 @@ async fn a_client_certificate_in_valid_pem_but_not_x509_blames_the_certificate()
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidClientCertificate);
+    assert_eq!(err.0, StartErrorKind::InvalidClientCertificate);
 }
 
 #[tokio::test]
@@ -331,7 +345,7 @@ async fn a_root_ca_in_valid_pem_but_not_x509_is_invalid() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidCa);
+    assert_eq!(err.0, StartErrorKind::InvalidCa);
 }
 
 #[tokio::test]
@@ -345,7 +359,7 @@ async fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_inva
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidClientKey);
+    assert_eq!(err.0, StartErrorKind::InvalidClientKey);
 
     let garbage = temp_file(b"not a key");
     let err = Cache::start(with_client_certificate(
@@ -355,7 +369,7 @@ async fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_inva
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::InvalidClientKey);
+    assert_eq!(err.0, StartErrorKind::InvalidClientKey);
     assert_no_leak(&err, &["hunter2"]);
 }
 
@@ -365,7 +379,7 @@ async fn invalid_dsns_fail_before_setup_without_echoing_the_password() {
         let err = Cache::start(options(dsn, true, true, None))
             .await
             .unwrap_err();
-        assert_eq!(err, CacheError::InvalidDsn);
+        assert_eq!(err.0, StartErrorKind::InvalidDsn);
         assert_no_leak(&err, &["hunter2"]);
     }
 }
@@ -389,12 +403,20 @@ fn namespace_names_follow_the_grammar() {
     let longest: &'static str = longest.leak();
     let too_long: &'static str = too_long.leak();
     for accepted in ["a", "a_1", "abc_def9", longest] {
-        assert!(Namespace::new(accepted).is_some(), "{accepted:?} is valid");
+        let namespace = Namespace::try_new(accepted).expect("valid namespace");
+        assert_eq!(namespace.as_str(), accepted);
+        assert_eq!(namespace.as_ref(), accepted);
+        assert_eq!(std::borrow::Borrow::<str>::borrow(&namespace), accepted);
+        assert_eq!(namespace.to_string(), accepted);
     }
+    assert!(namespace!("a") < namespace!("a_1"));
     for refused in [
         "", "1a", "_a", "Ab", "aB", "a-b", "a:b", "a b", "é", too_long,
     ] {
-        assert!(Namespace::new(refused).is_none(), "{refused:?} is invalid");
+        assert!(
+            Namespace::try_new(refused).is_none(),
+            "{refused:?} is invalid"
+        );
     }
 }
 
@@ -418,7 +440,7 @@ async fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::PasswordInDsn);
+    assert_eq!(err.0, StartErrorKind::PasswordInDsn);
     assert_no_leak(&err, &["hunter2"]);
 }
 
@@ -428,7 +450,7 @@ async fn an_unreadable_or_empty_password_file_fails_admission() {
     let err = Cache::start(with_password_file("redis://127.0.0.1:6379", missing))
         .await
         .unwrap_err();
-    std::assert_matches!(err, CacheError::PasswordFile { kind } if kind == std::io::ErrorKind::NotFound,
+    std::assert_matches!(err.0, StartErrorKind::PasswordFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert!(!err.to_string().contains("/no/such"), "{err}");
@@ -440,7 +462,7 @@ async fn an_unreadable_or_empty_password_file_fails_admission() {
     ))
     .await
     .unwrap_err();
-    assert_eq!(err, CacheError::PasswordFileEmpty);
+    assert_eq!(err.0, StartErrorKind::PasswordFileEmpty);
 }
 
 #[tokio::test]
@@ -461,15 +483,16 @@ async fn credential_files_over_their_limit_fail_admission() {
             oversized.path().to_owned()
         ))
         .await
-        .unwrap_err(),
-        CacheError::PasswordFile { kind: InvalidData }
+        .unwrap_err()
+        .0,
+        StartErrorKind::PasswordFile { kind: InvalidData }
     );
 
     let roots = temp_file(vec![b'a'; 1024 * 1024 + 1]);
     let mut with_roots = super::options(TLS_DSN, false, false, None);
     with_roots.root_ca_path = Some(roots.path().to_owned());
     assert_eq!(
-        Cache::start(with_roots).await.unwrap_err(),
-        CacheError::CaFile { kind: InvalidData }
+        Cache::start(with_roots).await.unwrap_err().0,
+        StartErrorKind::CaFile { kind: InvalidData }
     );
 }

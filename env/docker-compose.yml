@@ -7,6 +7,7 @@ services:
   # template:begin postgres:compose-postgres-service
   postgres:
     image: postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: app
       POSTGRES_USER: app
@@ -103,3 +104,24 @@ services:
     ports:
       - "${KEYCLOAK_PORT:-127.0.0.1:8080}:8080"
   # template:end outbound-auth:compose-keycloak-service
+  # template:begin clickhouse:compose-clickhouse-service
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.43.13-alpine@sha256:6ae15a7f92842be5c16c77fb8cb099f3527630b2571666ccd97a983c0eab2402
+    environment:
+      CLICKHOUSE_DB: app
+      CLICKHOUSE_USER: app
+      CLICKHOUSE_PASSWORD: app
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "${CLICKHOUSE_PORT:-127.0.0.1:8123}:8123"
+    volumes:
+      - ./clickhouse/config.d/ci.xml:/etc/clickhouse-server/config.d/ci.xml:ro
+      - ./clickhouse/users.d/ci-users.xml:/etc/clickhouse-server/users.d/ci-users.xml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user app --password app --database app --query 'SELECT 1'"]
+      interval: 2s
+      start_interval: 1s
+      start_period: 30s
+      timeout: 3s
+      retries: 20
+  # template:end clickhouse:compose-clickhouse-service

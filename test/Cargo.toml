@@ -1,6 +1,6 @@
 [package]
 name = "integration-tests"
-description = "Executable utility recipes and selected integration proof."
+description = "Cross-crate integration test suites and fixtures."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,9 +21,11 @@ integration = []
 
 # template:begin postgres:test-postgres-dependencies
 [dependencies]
+bytes = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal", "fs"] }
+tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true }
-infra-postgres = { workspace = true }
+infra-postgres = { workspace = true, features = ["test-support"] }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
 # template:end postgres:test-postgres-dependencies
 # template:begin jobs:test-jobs-dependencies
@@ -68,65 +70,38 @@ async-nats = { workspace = true, features = ["jetstream"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
 nats-test-support = { workspace = true }
-operation-context = { workspace = true }
 # template:end outbox:test-messaging-outbox-dependencies
+# template:begin test-operation-context:test-operation-context-dependencies
+operation-context = { workspace = true }
+# template:end test-operation-context:test-operation-context-dependencies
 # template:begin test-digest:test-digest-dependency
 sha2 = { workspace = true }
 # template:end test-digest:test-digest-dependency
 # template:begin outbound-http:test-outbound-http-dependencies
 infra-outbound-http = { workspace = true, features = ["test-support"] }
+wiremock = { workspace = true }
 # template:end outbound-http:test-outbound-http-dependencies
 # template:begin inbound-webhooks:test-inbound-webhooks-dependencies
 http = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # template:end inbound-webhooks:test-inbound-webhooks-dependencies
-url = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
-wiremock = { workspace = true }
-moka = { workspace = true, features = ["future"] }
-backon = { workspace = true, features = ["tokio-sleep"] }
-proptest = { workspace = true, features = ["std"] }
-insta = { workspace = true, features = ["json"] }
-validator = { workspace = true, features = ["derive"] }
-bon = { workspace = true }
-time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
-rust_decimal = { workspace = true, features = ["std", "serde-with-str"] }
-uuid = { workspace = true, features = ["std", "serde", "v4"] }
-json-patch = { workspace = true }
-semver = { workspace = true, features = ["std"] }
-ipnet = { workspace = true, features = ["std"] }
-base64 = { workspace = true, features = ["std"] }
-csv = { workspace = true }
-camino = { workspace = true }
-tempfile = { workspace = true, features = ["getrandom"] }
-walkdir = { workspace = true }
-fs-err = { workspace = true }
-strsim = { workspace = true }
-unicode-segmentation = { workspace = true }
-unicode-normalization = { workspace = true, features = ["std"] }
-regex = { workspace = true, features = ["std", "unicode", "perf"] }
-bstr = { workspace = true, features = ["std"] }
-heck = { workspace = true }
-bytes = { workspace = true, features = ["std"] }
-tokio-util = { workspace = true, features = ["io", "rt"] }
+# template:begin test-runtime:test-runtime-dependencies
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "process", "test-util"] }
+# template:end test-runtime:test-runtime-dependencies
+# template:begin postgres:test-postgres-health-dependency
+axum = { workspace = true, features = ["json", "query"] }
+backon = { workspace = true, features = ["tokio-sleep"] }
+derive_more = { workspace = true, features = ["display", "as_ref", "from", "error"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 infra-http = { workspace = true }
-axum-test = { workspace = true }
-axum-extra = { workspace = true, features = ["typed-header"] }
-axum = { workspace = true, features = ["json", "query"] }
-derive_more = { workspace = true, features = ["display", "as_ref", "from", "error"] }
-serde_with = { workspace = true, features = ["std", "macros"] }
-serde_json = { workspace = true, features = ["std", "raw_value"] }
-serde = { workspace = true, features = ["std", "derive"] }
-indexmap = { workspace = true, features = ["std"] }
-itertools = { workspace = true, features = ["use_std"] }
-# template:begin postgres:test-postgres-health-dependency
 infra-http-transport = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde_json = { workspace = true, features = ["std", "raw_value"] }
+tempfile = { workspace = true, features = ["getrandom"] }
 utoipa = { workspace = true, features = ["macros"] }
 health = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["std", "registry"] }
+observe-test-support = { workspace = true }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 tls-test-support = { workspace = true }
 # template:end postgres:test-postgres-health-dependency
@@ -153,12 +128,14 @@ infra-bearerauthn = { workspace = true, features = ["test-support"] }
 secrecy = { workspace = true }
 # template:end test-introspection-fixtures:test-introspection-fixture-dependencies
 # template:begin http-idempotency-mounted:test-http-idempotency-mounted-dependencies
-hyper = { workspace = true, features = ["server", "http1"] }
-hyper-util = { workspace = true, features = ["tokio", "server", "http1", "service"] }
-async-trait = { workspace = true }
+axum-test = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
 # template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 # template:begin jobs:test-jobs-dev-dependencies
+base64 = { workspace = true, features = ["std"] }
 nix = { workspace = true, features = ["signal"] }
+time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
+uuid = { workspace = true, features = ["std", "serde", "v4"] }
 # template:end jobs:test-jobs-dev-dependencies
 
 # template:begin jobs:test-jobs-worker-fixture
@@ -176,3 +153,43 @@ path = "src/bin/reading_counter_fixture.rs"
 required-features = ["integration"]
 test = false
 # template:end jobs-reference:test-reading-counter-fixture
+
+# template:begin postgres:test-postgres-integration-target
+[[test]]
+name = "postgres"
+path = "tests/postgres.rs"
+required-features = ["integration"]
+# template:end postgres:test-postgres-integration-target
+
+# template:begin http-idempotency:test-http-idempotency-integration-target
+[[test]]
+name = "http_idempotency"
+path = "tests/http_idempotency/main.rs"
+required-features = ["integration"]
+# template:end http-idempotency:test-http-idempotency-integration-target
+
+# template:begin jobs:test-jobs-integration-target
+[[test]]
+name = "jobs"
+path = "tests/jobs/main.rs"
+required-features = ["integration"]
+# template:end jobs:test-jobs-integration-target
+
+# template:begin webhooks-common:test-webhooks-integration-target
+[[test]]
+name = "webhooks"
+path = "tests/webhooks/main.rs"
+required-features = ["integration"]
+# template:end webhooks-common:test-webhooks-integration-target
+
+# template:begin outbox:test-outbox-integration-targets
+[[test]]
+name = "messaging_outbox"
+path = "tests/messaging_outbox.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "messaging_recovery"
+path = "tests/messaging_recovery.rs"
+required-features = ["integration"]
+# template:end outbox:test-outbox-integration-targets

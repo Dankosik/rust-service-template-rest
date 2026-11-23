@@ -9,10 +9,6 @@ pub struct PresentedToken<'a> {
 }
 
 impl<'a> PresentedToken<'a> {
-    #[allow(
-        dead_code,
-        reason = "the JWT-only profile removes introspection requests"
-    )]
     pub(crate) fn as_str(&self) -> &'a str {
         self.text
     }
@@ -21,13 +17,9 @@ impl<'a> PresentedToken<'a> {
         self.text.as_bytes()
     }
 
-    pub(crate) fn to_secret(&self) -> secrecy::SecretString {
-        self.text.into()
-    }
-
     #[must_use]
     pub fn into_delegation_credential(self) -> DelegationCredential {
-        DelegationCredential(self.to_secret().into())
+        DelegationCredential(secrecy::SecretString::from(self.as_str()).into())
     }
 }
 
@@ -44,10 +36,12 @@ impl DelegationCredential {
 
 /// RFC 6750 §2.1
 pub(crate) fn parse_bearer<'a>(
-    headers: impl IntoIterator<Item = &'a [u8]>,
+    authorization: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<PresentedToken<'a>, Failure> {
-    match rfc6750::token(headers) {
-        Ok(text) => Ok(PresentedToken { text }),
+    match rfc6750::token_bytes(authorization) {
+        Ok(bytes) => std::str::from_utf8(bytes)
+            .map(|text| PresentedToken { text })
+            .map_err(|_| Failure::Malformed),
         Err(NoBearer::Missing) => Err(Failure::Missing),
         Err(NoBearer::Malformed) => Err(Failure::Malformed),
     }
@@ -60,8 +54,18 @@ mod tests {
 
     #[test]
     fn a_presented_token_is_redacted_in_debug() {
+        use secrecy::ExposeSecret as _;
+
         let token = parse_bearer([b"Bearer fixture-token".as_slice()]).unwrap();
         assert_eq!(format!("{token:?}"), "PresentedToken([REDACTED])");
+        assert_eq!(token.as_bytes(), b"fixture-token");
+        assert_eq!(token.as_str(), "fixture-token");
+        let credential = token.into_delegation_credential();
+        assert_eq!(
+            format!("{credential:?}"),
+            "DelegationCredential([REDACTED])"
+        );
+        assert_eq!(credential.access_token().expose_secret(), "fixture-token");
     }
 
     #[test]

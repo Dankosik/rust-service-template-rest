@@ -283,8 +283,6 @@ dependencies = [
 [[package]]
 name = "aws-runtime"
 version = "1.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a0cc2144962cc5e358467b16e3d82981b1d424a7c3d34602be0036103814a1a"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -831,6 +829,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bnum"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119771309b95163ec7aaf79810da82f7cd0599c19722d48b9c03894dca833966"
+
+[[package]]
 name = "bon"
 version = "3.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1016,6 +1020,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
+name = "cityhash-rs"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93a719913643003b84bd13022b4b7e703c09342cd03b679c4641c7d2e50dc34d"
+
+[[package]]
 name = "clang-sys"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1065,6 +1075,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "clickhouse"
+version = "0.15.3"
+dependencies = [
+ "bnum",
+ "bstr",
+ "bytes",
+ "cityhash-rs",
+ "clickhouse-macros",
+ "clickhouse-types",
+ "futures-channel",
+ "futures-util",
+ "half",
+ "hashbrown 0.17.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lz4_flex",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "twox-hash",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "clickhouse-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff6669899e23cb87b43daf7996f0ea3b9c07d0fb933d745bb7b815b052515ae3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals 0.29.1",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "clickhouse-types"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7ddab58fabf3bdde7b6fa401f72b9abc7566ff015264c89aaaa71cf1d173d06"
+dependencies = [
+ "bytes",
+ "thiserror",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1105,17 +1167,6 @@ dependencies = [
  "serde",
  "static_assertions",
  "zmij",
-]
-
-[[package]]
-name = "config"
-version = "0.15.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38e9fbc53afcec54441422f1c596cd054655b32e70e1cbac956651b7b175a404"
-dependencies = [
- "pathdiff",
- "serde_core",
- "winnow",
 ]
 
 [[package]]
@@ -1288,6 +1339,12 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-common"
@@ -1485,17 +1542,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
  "thiserror",
-]
-
-[[package]]
-name = "delegate"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1867,9 +1913,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2062,7 +2108,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "grpc-contracts"
 version = "0.1.0"
 dependencies = [
- "derive-where",
  "prost",
  "prost-types",
  "tonic",
@@ -2086,6 +2131,17 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
@@ -2117,6 +2173,8 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash",
 ]
 
@@ -2167,10 +2225,10 @@ dependencies = [
 name = "health"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "observe-test-support",
  "proptest",
  "thiserror",
  "tokio",
@@ -2351,7 +2409,6 @@ dependencies = [
  "hyper-util",
  "rustls",
  "rustls-native-certs",
- "rustls-platform-verifier",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -2570,6 +2627,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "moka",
+ "observe-test-support",
  "operation-context",
  "parking_lot",
  "proptest",
@@ -2586,7 +2644,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "url",
  "zeroize",
 ]
@@ -2628,13 +2685,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-clickhouse"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "clickhouse",
+ "derive_more",
+ "enum-map",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "nix",
+ "observe-test-support",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "operation-context",
+ "parking_lot",
+ "rcgen",
+ "rustls",
+ "rustls-platform-verifier",
+ "secrecy",
+ "serde",
+ "shared-rules",
+ "smallvec",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tls-test-support",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "infra-grpc"
 version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
  "bytes",
- "delegate",
  "derive_more",
  "enum-map",
  "foldhash",
@@ -2647,12 +2747,14 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infra-bearerauthn",
+ "infra-grpc-core",
  "infra-http",
  "infra-http-transport",
  "infra-outbound-grpc",
  "infra-serviceauth",
  "metrics",
  "metrics-exporter-prometheus",
+ "observe-test-support",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
@@ -2663,7 +2765,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "secrecy",
- "serde",
  "serde_json",
  "service-failure",
  "shared-rules",
@@ -2686,6 +2787,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-grpc-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "metrics",
+ "opentelemetry",
+ "parking_lot",
+ "rustls",
+ "secrecy",
+ "shared-rules",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-opentelemetry-instrumentation-sdk",
+]
+
+[[package]]
 name = "infra-http"
 version = "0.1.0"
 dependencies = [
@@ -2696,7 +2820,6 @@ dependencies = [
  "compact_str",
  "const-hex",
  "const_format",
- "delegate",
  "derive-where",
  "derive_more",
  "enum-map",
@@ -2716,14 +2839,15 @@ dependencies = [
  "mediatype",
  "metrics",
  "metrics-util",
+ "observe-test-support",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
  "parking_lot",
- "pin-project-lite",
  "proptest",
  "regex",
  "rustls",
+ "secrecy",
  "serde",
  "serde_html_form",
  "serde_json",
@@ -2738,12 +2862,14 @@ dependencies = [
  "tls-test-support",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "utoipa-axum",
  "uuid",
@@ -2807,6 +2933,7 @@ dependencies = [
  "memchr",
  "metrics",
  "metrics-util",
+ "observe-test-support",
  "opentelemetry",
  "operation-context",
  "parking_lot",
@@ -2830,7 +2957,6 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "async-nats",
- "async-trait",
  "base64 0.23.1",
  "bstr",
  "bytes",
@@ -2851,6 +2977,7 @@ dependencies = [
  "nats-test-support",
  "nix",
  "nkeys",
+ "observe-test-support",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
@@ -2889,7 +3016,6 @@ dependencies = [
  "derive_more",
  "enum-map",
  "foldhash",
- "futures-util",
  "grpc-contracts",
  "http",
  "hyper",
@@ -2900,6 +3026,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "moka",
+ "observe-test-support",
  "operation-context",
  "parking_lot",
  "rcgen",
@@ -2915,7 +3042,6 @@ dependencies = [
  "tonic-prost",
  "tower",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "zeroize",
@@ -2944,11 +3070,11 @@ dependencies = [
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "observe-test-support",
  "operation-context",
  "parking_lot",
  "pin-project-lite",
  "reqwest",
- "rustls",
  "secrecy",
  "shared-rules",
  "sync_wrapper",
@@ -2975,6 +3101,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper-util",
+ "infra-grpc-core",
  "infra-http-transport",
  "infra-serviceauth",
  "metrics",
@@ -3006,9 +3133,7 @@ name = "infra-outbound-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "delegate",
  "derive_more",
- "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -3016,6 +3141,7 @@ dependencies = [
  "hyper-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "observe-test-support",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
@@ -3023,7 +3149,6 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "shared-rules",
- "smallvec",
  "thiserror",
  "tls-test-support",
  "tokio",
@@ -3033,15 +3158,12 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
 name = "infra-postgres"
 version = "0.1.0"
 dependencies = [
- "arc-swap",
- "async-trait",
  "enum-map",
  "foldhash",
  "futures-util",
@@ -3051,6 +3173,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "metrics-util",
  "nix",
+ "observe-test-support",
  "parking_lot",
  "shared-rules",
  "smallvec",
@@ -3075,7 +3198,6 @@ dependencies = [
  "enum-map",
  "foldhash",
  "http",
- "indexmap 2.14.2",
  "jsonwebtoken",
  "metrics",
  "metrics-util",
@@ -3102,7 +3224,6 @@ dependencies = [
  "bitflags 2.13.2",
  "const-hex",
  "crossbeam-channel",
- "delegate",
  "derive_more",
  "enum-map",
  "futures-util",
@@ -3147,8 +3268,6 @@ name = "infra-webhooks"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "arrayvec",
- "async-trait",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
@@ -3157,9 +3276,9 @@ dependencies = [
  "derive_more",
  "enum-map",
  "foldhash",
+ "futures-util",
  "hotpath",
  "http",
- "http-body-util",
  "httpdate",
  "infra-http",
  "infra-jobs",
@@ -3167,11 +3286,9 @@ dependencies = [
  "infra-postgres",
  "metrics",
  "metrics-util",
- "parking_lot",
  "proptest",
  "serde",
  "serde_json",
- "serde_with",
  "shared-rules",
  "smallvec",
  "sqlx",
@@ -3201,29 +3318,18 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "async-nats",
- "async-trait",
  "axum",
- "axum-extra",
  "axum-test",
  "backon",
  "base64 0.23.1",
- "bon",
- "bstr",
  "bytes",
- "camino",
  "clap",
- "csv",
  "derive_more",
  "domain-events",
- "fs-err",
  "futures-util",
  "grpc-contracts",
  "health",
- "heck",
  "http",
- "hyper",
- "hyper-util",
- "indexmap 2.14.2",
  "infra-bearerauthn",
  "infra-grpc",
  "infra-http",
@@ -3235,31 +3341,21 @@ dependencies = [
  "infra-outbound-http",
  "infra-postgres",
  "infra-webhooks",
- "insta",
- "ipnet",
- "itertools 0.15.0",
  "jobs-worker",
- "json-patch",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
  "migrate",
- "moka",
  "nats-test-support",
  "nix",
+ "observe-test-support",
  "operation-context",
- "proptest",
- "regex",
  "reqwest",
- "rust_decimal",
  "secrecy",
- "semver",
  "serde",
  "serde_json",
- "serde_with",
  "sha2 0.11.1",
  "sqlx",
- "strsim",
  "tempfile",
  "time",
  "tls-test-support",
@@ -3270,14 +3366,9 @@ dependencies = [
  "tonic-health",
  "tower",
  "tracing",
- "tracing-subscriber",
- "unicode-normalization",
- "unicode-segmentation",
  "url",
  "utoipa",
  "uuid",
- "validator",
- "walkdir",
  "wiremock",
 ]
 
@@ -3447,7 +3538,6 @@ dependencies = [
  "infra-webhooks",
  "itertools 0.15.0",
  "migrate",
- "parking_lot",
  "rlimit",
  "secrecy",
  "serde",
@@ -3659,6 +3749,12 @@ name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
+
+[[package]]
+name = "lz4_flex"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f56455fff36934a9500d69062aec1c77037179b6f0669e4d5d6b72b84722d6a3"
 
 [[package]]
 name = "mach2"
@@ -3986,6 +4082,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "observe-test-support"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "metrics-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4142,12 +4248,6 @@ name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
-name = "pathdiff"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pem"
@@ -5078,7 +5178,7 @@ checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
 dependencies = [
  "proc-macro2",
  "quote",
- "serde_derive_internals",
+ "serde_derive_internals 0.30.0",
  "syn 3.0.6",
 ]
 
@@ -5144,18 +5244,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-untagged"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9faf48a4a2d2693be24c6289dbe26552776eb7737074e6722891fadbe6c5058"
-dependencies = [
- "erased-serde",
- "serde",
- "serde_core",
- "typeid",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5173,6 +5261,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -5301,7 +5400,6 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "derive-where",
  "derive_more",
  "domain-events",
  "futures-util",
@@ -5310,6 +5408,7 @@ dependencies = [
  "hotpath",
  "infra-bearerauthn",
  "infra-cache",
+ "infra-clickhouse",
  "infra-grpc",
  "infra-http",
  "infra-http-transport",
@@ -5328,14 +5427,12 @@ dependencies = [
  "nix",
  "opentelemetry-proto",
  "prost",
- "rcgen",
  "rlimit",
  "rstest",
  "secrecy",
  "serde",
  "serde_json",
  "service-config",
- "service-failure",
  "similar 3.2.1",
  "sqlx",
  "tempfile",
@@ -5362,7 +5459,6 @@ version = "0.1.0"
 dependencies = [
  "bytesize",
  "clap",
- "config",
  "const_format",
  "derive_more",
  "educe",
@@ -5372,7 +5468,6 @@ dependencies = [
  "rstest",
  "secrecy",
  "serde",
- "serde-untagged",
  "serde_with",
  "shared-rules",
  "tempfile",
@@ -6007,8 +6102,13 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 name = "tls-test-support"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "hyper",
+ "hyper-util",
  "rcgen",
- "rustls",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
 ]
 
 [[package]]
@@ -6407,6 +6507,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+dependencies = [
+ "rand 0.10.2",
+]
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6526,9 +6635,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -6553,6 +6662,53 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "utility-recipes"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-extra",
+ "axum-test",
+ "backon",
+ "base64 0.23.1",
+ "bon",
+ "bstr",
+ "bytes",
+ "camino",
+ "csv",
+ "derive_more",
+ "fs-err",
+ "futures-util",
+ "heck",
+ "indexmap 2.14.2",
+ "infra-http",
+ "insta",
+ "ipnet",
+ "itertools 0.15.0",
+ "json-patch",
+ "moka",
+ "proptest",
+ "regex",
+ "reqwest",
+ "rust_decimal",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strsim",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "unicode-normalization",
+ "unicode-segmentation",
+ "url",
+ "uuid",
+ "validator",
+ "walkdir",
+ "wiremock",
+]
 
 [[package]]
 name = "utoipa"

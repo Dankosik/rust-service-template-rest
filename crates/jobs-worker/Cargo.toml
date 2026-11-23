@@ -45,7 +45,6 @@ infra-webhooks = { workspace = true }
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:worker-outbound-http-dependency
 infra-telemetry = { workspace = true }
-parking_lot = { workspace = true }
 service-config = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }
@@ -59,5 +58,8 @@ tracing = { workspace = true, features = ["std"] }
 tikv-jemallocator = { workspace = true, features = ["background_threads"] }
 
 [dev-dependencies]
+# template:begin jobs:worker-postgres-test-dependency
+infra-postgres = { workspace = true, features = ["test-support"] }
+# template:end jobs:worker-postgres-test-dependency
 service-config = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }

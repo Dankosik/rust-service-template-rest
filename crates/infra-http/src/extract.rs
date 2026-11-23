@@ -1,3 +1,4 @@
+use axum::RequestExt as _;
 use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
@@ -11,8 +12,8 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
-use crate::context::read_request_bytes;
-use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_problem};
+use crate::context::{RequestContext, read_request_bytes, wiring_failure};
+use crate::problem::{Code, Problem, body_read_problem, sanitized_internal_error};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
 const BODY_SCHEMA_DETAIL: &str = "request body does not match the operation schema";
@@ -35,42 +36,31 @@ where
     type Rejection = Problem;
 
     async fn from_request(request: Request, _state: &S) -> Result<Self, Self::Rejection> {
-        require_json_content_type(request.headers().get(CONTENT_TYPE))?;
-        let bytes =
-            read_request_bytes(request)
-                .await
-                .map_err(|rejection| match rejection.status() {
-                    StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
-                    StatusCode::BAD_REQUEST => body_unreadable(),
-                    _ => wiring_failure("json"),
-                })?;
-        decode_json(&bytes).map(Self)
+        let (parts, body) = request.with_limited_body().into_parts();
+        let with_request_id = |problem: Problem| problem.with_request_id_from(&parts.extensions);
+        require_json_content_type(parts.headers.get(CONTENT_TYPE)).map_err(with_request_id)?;
+        let bytes = read_request_bytes(parts.extensions.get::<RequestContext>(), body)
+            .await
+            .map_err(|error| with_request_id(body_read_problem(&error)))?;
+        decode_json(&bytes).map(Self).map_err(with_request_id)
     }
 }
 
 pub(crate) fn is_json_media_type(value: &str) -> bool {
-    if value.eq_ignore_ascii_case("application/json") {
-        return true;
-    }
-    mediatype::MediaType::parse(value).is_ok_and(|media_type| {
-        media_type.ty == mediatype::names::APPLICATION
-            && (media_type.subty == mediatype::names::JSON
-                || media_type.suffix == Some(mediatype::names::JSON))
-            && media_type
-                .params
-                .iter()
-                .all(|(_, param)| !param.as_str().is_empty())
-    })
+    value.eq_ignore_ascii_case("application/json")
+        || mediatype::MediaType::parse(value).is_ok_and(|media_type| {
+            media_type.ty == mediatype::names::APPLICATION
+                && (media_type.subty == mediatype::names::JSON
+                    || media_type.suffix == Some(mediatype::names::JSON))
+                && media_type
+                    .params
+                    .iter()
+                    .all(|(_, param)| !param.as_str().is_empty())
+        })
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the extractor returns Problem by value"
-)]
 pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> Result<(), Problem> {
-    let json = content_type
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_json_media_type);
+    let json = content_type.is_some_and(|value| value.to_str().is_ok_and(is_json_media_type));
     if json {
         Ok(())
     } else {
@@ -78,13 +68,11 @@ pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> R
     }
 }
 
-pub(crate) fn decode_json<T: DeserializeOwned, E: From<Problem>>(bytes: &[u8]) -> Result<T, E> {
+pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Problem> {
     let mut input = serde_json::Deserializer::from_slice(bytes);
     let value = serde_path_to_error::deserialize(&mut input)
         .map_err(|error| json_problem(&error, bytes))?;
-    input
-        .end()
-        .map_err(|_| Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL))?;
+    input.end().map_err(|_| body_syntax_problem())?;
     Ok(value)
 }
 
@@ -105,7 +93,7 @@ impl<T: Serialize> Json<T> {
                 response_type = std::any::type_name::<T>(),
                 "http_response_serialization_failed"
             );
-            return sanitized_problem().into_response();
+            return sanitized_internal_error();
         };
         (
             status,
@@ -130,14 +118,14 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(decode_query(parts.uri.query().unwrap_or_default()).map(Self))
+        std::future::ready(
+            decode_query(parts.uri.query().unwrap_or_default())
+                .map(Self)
+                .map_err(|problem| problem.with_request_id_from(&parts.extensions)),
+        )
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "the extractor returns Problem by value"
-)]
 pub(crate) fn decode_query<T: DeserializeOwned>(query: &str) -> Result<T, Problem> {
     let fields = serde_html_form::Deserializer::from_bytes(query.as_bytes());
     serde_path_to_error::deserialize(fields).map_err(|error| query_problem(error.path()))
@@ -158,13 +146,14 @@ where
         reason = "this wrapper delegates to the native extractor and maps its rejection"
     )]
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state).await {
-            Ok(axum::extract::Path(TrackedPath(Ok(value)))) => Ok(Self(value)),
-            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => {
-                Err(issue.problem(parts, state).await)
-            }
-            Err(rejection) => Err(path_problem(&rejection, parts, state).await),
-        }
+        let problem = match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state)
+            .await
+        {
+            Ok(axum::extract::Path(TrackedPath(Ok(value)))) => return Ok(Self(value)),
+            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => issue.problem(parts, state).await,
+            Err(rejection) => path_problem(&rejection, parts, state).await,
+        };
+        Err(problem.with_request_id_from(&parts.extensions))
     }
 }
 
@@ -178,8 +167,12 @@ fn json_problem(error: &serde_path_to_error::Error<serde_json::Error>, bytes: &[
             body_pointer(error.path()),
         )
     } else {
-        Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
+        body_syntax_problem()
     }
+}
+
+fn body_syntax_problem() -> Problem {
+    Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
 }
 
 fn query_problem(path: &serde_path_to_error::Path) -> Problem {
@@ -205,7 +198,7 @@ async fn path_problem<S: Send + Sync>(
     let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
         return invalid_path(None);
     };
-    let index = match failed.kind() {
+    let failed_index = match failed.kind() {
         ErrorKind::ParseErrorAtKey { key, .. }
         | ErrorKind::InvalidUtf8InPathParam { key }
         | ErrorKind::DeserializeError { key, .. } => return invalid_path(Some(key)),
@@ -216,11 +209,15 @@ async fn path_problem<S: Send + Sync>(
     let Ok(params) = RawPathParams::from_request_parts(parts, state).await else {
         return invalid_path(None);
     };
+    invalid_path(param_at(&params, failed_index))
+}
+
+fn param_at(params: &RawPathParams, index: Option<usize>) -> Option<&str> {
     let param = match index {
         Some(index) => params.iter().nth(index),
         None => params.iter().exactly_one().ok(),
     };
-    invalid_path(param.map(|(name, _)| name))
+    param.map(|(name, _)| name)
 }
 
 struct TrackedPath<T>(Result<T, PathIssue>);
@@ -294,12 +291,12 @@ impl PathIssue {
                         .iter()
                         .find(|(name, _)| *name == key.as_str())
                         .map(|(name, _)| name),
-                    Some(Segment::Seq { index }) => params.iter().nth(*index).map(|(name, _)| name),
-                    _ => params.iter().exactly_one().ok().map(|(name, _)| name),
+                    Some(Segment::Seq { index }) => param_at(&params, Some(*index)),
+                    _ => param_at(&params, None),
                 };
                 invalid_path(name)
             }
-            _ => invalid_path(None),
+            Self::UnknownField | Self::MissingField(_) | Self::DuplicateField => invalid_path(None),
         }
     }
 }
@@ -313,11 +310,6 @@ fn invalid_path(name: Option<&str>) -> Problem {
 
 fn param_name(prefix: &str, name: &str) -> Option<CompactString> {
     (name.len() <= MAX_PARAM_NAME_BYTES - prefix.len()).then(|| format_compact!("{prefix}{name}"))
-}
-
-fn wiring_failure(extractor: &'static str) -> Problem {
-    tracing::error!(extractor, "http_extractor_wiring_failed");
-    sanitized_problem()
 }
 
 fn with_param(problem: Problem, name: Option<CompactString>) -> Problem {
@@ -690,6 +682,19 @@ mod tests {
             "request_entity_too_large",
         )
         .await;
+
+        let failing = futures_util::stream::once(async {
+            Err::<axum::body::Bytes, _>(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reset",
+            ))
+        });
+        let response = app()
+            .oneshot(post_json(Body::from_stream(failing)))
+            .await
+            .unwrap();
+        let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
+        assert_eq!(body["detail"], "request body could not be read");
     }
 
     #[tokio::test]
@@ -833,6 +838,11 @@ mod tests {
             "APPLICATION/JSON",
         ] {
             assert!(is_json_media_type(accepted), "{accepted:?}");
+            let header = HeaderValue::from_str(accepted).unwrap();
+            assert!(
+                require_json_content_type(Some(&header)).is_ok(),
+                "{accepted:?}"
+            );
         }
         for rejected in [
             "text/json",
@@ -846,6 +856,23 @@ mod tests {
             "application/json; charset=\"unterminated",
         ] {
             assert!(!is_json_media_type(rejected), "{rejected:?}");
+            let header = HeaderValue::from_str(rejected).unwrap();
+            assert_eq!(
+                require_json_content_type(Some(&header)).unwrap_err().code(),
+                Code::UnsupportedMediaType,
+                "{rejected:?}"
+            );
         }
+        let non_ascii_same_len = HeaderValue::from_bytes(b"application/jso\xff").unwrap();
+        assert_eq!(
+            require_json_content_type(Some(&non_ascii_same_len))
+                .unwrap_err()
+                .code(),
+            Code::UnsupportedMediaType
+        );
+        assert_eq!(
+            require_json_content_type(None).unwrap_err().code(),
+            Code::UnsupportedMediaType
+        );
     }
 }

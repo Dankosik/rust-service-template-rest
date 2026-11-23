@@ -1,7 +1,61 @@
+use std::fmt;
 use std::time::Duration;
 
-use infra_jobs::{Job, JobError, JobKind, Policy};
+use infra_jobs::{Engine, Job, JobError, JobKind, KindName, Policy, Started};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::TaskTracker;
+
+pub struct EngineRun {
+    pub started: Started,
+    pub tracker: TaskTracker,
+    pub cancel: CancellationToken,
+    _cancel_guard: DropGuard,
+}
+
+impl fmt::Debug for EngineRun {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EngineRun")
+            .field("tracker", &self.tracker)
+            .field("cancel", &self.cancel)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EngineRun {
+    #[must_use]
+    pub fn start(engine: Engine) -> Self {
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let started = engine.start(&tracker, &cancel);
+        tracker.close();
+        let cancel_guard = cancel.clone().drop_guard();
+        Self {
+            started,
+            tracker,
+            cancel,
+            _cancel_guard: cancel_guard,
+        }
+    }
+
+    pub async fn drain_and_join(self, bound: Duration) {
+        self.started.stop_claiming();
+        tokio::time::timeout(bound, self.started.drained())
+            .await
+            .expect("the engine drains");
+        self.cancel.cancel();
+        tokio::time::timeout(bound, self.tracker.wait())
+            .await
+            .expect("engine background tasks join");
+    }
+
+    pub async fn cancel_and_join(self, bound: Duration) {
+        self.cancel.cancel();
+        tokio::time::timeout(bound, self.tracker.wait())
+            .await
+            .expect("engine background tasks join");
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Probe {
@@ -9,10 +63,8 @@ pub struct Probe {
 }
 
 impl JobKind for Probe {
-    const NAME: &'static str = "test.probe";
+    const NAME: KindName = KindName::new("test.probe");
 }
-
-const _: () = infra_jobs::assert_valid_kind_name(Probe::NAME);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,12 +112,19 @@ pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigser
 
 pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     let id = job.id().to_string();
-    sqlx::query("INSERT INTO probe_attempts (job_id, attempt) VALUES ($1::uuid, $2)")
-        .bind(id)
-        .bind(i32::from(job.attempt()))
-        .execute(job.pool())
-        .await
-        .map_err(|_| JobError::retryable("probe write failed"))?;
+    {
+        let mut conn = job
+            .pool()
+            .acquire("record probe attempt")
+            .await
+            .map_err(|_| JobError::retryable("probe write failed"))?;
+        sqlx::query("INSERT INTO probe_attempts (job_id, attempt) VALUES ($1::uuid, $2)")
+            .bind(id)
+            .bind(i32::from(job.attempt()))
+            .execute(&mut *conn)
+            .await
+            .map_err(|_| JobError::retryable("probe write failed"))?;
+    }
     match job.payload().action {
         ProbeAction::Succeed => Ok(()),
         ProbeAction::FailRetryable => Err(JobError::retryable("probe failed retryably")),
@@ -76,10 +135,15 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
         )
         .expect("probe delay is valid")),
         ProbeAction::SnoozeOnce { millis } => {
+            let mut conn = job
+                .pool()
+                .acquire("read probe attempts")
+                .await
+                .map_err(|_| JobError::retryable("probe lookup failed"))?;
             let deliveries: i64 =
                 sqlx::query_scalar("SELECT count(*) FROM probe_attempts WHERE job_id = $1::uuid")
                     .bind(job.id().to_string())
-                    .fetch_one(job.pool())
+                    .fetch_one(&mut *conn)
                     .await
                     .map_err(|_| JobError::retryable("probe lookup failed"))?;
             if deliveries == 1 {

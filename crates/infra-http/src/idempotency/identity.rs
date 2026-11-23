@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 
 use axum::http::header::CONTENT_TYPE;
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName};
 use infra_idempotency_store::{CallerIdentity, CallerKind, RequestFingerprint};
 use itertools::Itertools as _;
 use sha2::{Digest as _, Sha256};
 
-use super::CommandInput;
+use crate::PrincipalIdentity;
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
@@ -15,35 +16,29 @@ pub(super) const KEY_GRAMMAR: &str = "Send an IETF Structured Field string in do
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";
 
-pub(super) fn caller_identity(
-    issuer: &str,
-    subject: Option<&str>,
-    client_id: Option<&str>,
-) -> Option<CallerIdentity> {
-    let (kind, value) = match (subject, client_id) {
-        (Some(subject), _) => (CallerKind::Subject, subject),
-        (None, Some(client_id)) => (CallerKind::Client, client_id),
-        (None, None) => return None,
+pub(super) fn caller_identity(issuer: &str, identity: PrincipalIdentity<'_>) -> CallerIdentity {
+    let (kind, value) = match identity {
+        PrincipalIdentity::Subject { subject, .. } => (CallerKind::Subject, subject),
+        PrincipalIdentity::ClientOnly(client_id) => (CallerKind::Client, client_id),
     };
-    Some(CallerIdentity {
+    CallerIdentity {
         issuer: issuer.to_owned(),
         kind,
         value: value.to_owned(),
-    })
+    }
 }
 
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
     let value = trim_ows(values.into_iter().exactly_one().ok()?);
     let decoded = if value.first() == Some(&b'"') {
-        let item = sfv::Parser::new(value)
-            .parse_item::<sfv::BareItemFromInput<'_>>()
-            .ok()?;
-        let sfv::BareItemFromInput::String(value) = item else {
+        let Ok(sfv::BareItemFromInput::String(string)) =
+            sfv::Parser::new(value).parse_item::<sfv::BareItemFromInput<'_>>()
+        else {
             return None;
         };
-        match value {
-            Cow::Borrowed(value) => Cow::Borrowed(value.as_str().as_bytes()),
-            Cow::Owned(value) => Cow::Owned(String::from(value).into_bytes()),
+        match string {
+            Cow::Borrowed(string) => Cow::Borrowed(string.as_str().as_bytes()),
+            Cow::Owned(string) => Cow::Owned(String::from(string).into_bytes()),
         }
     } else if value.iter().all(u8::is_ascii_graphic) {
         Cow::Borrowed(value)
@@ -65,9 +60,26 @@ fn trim_ows(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-pub(super) fn request_fingerprint(
-    input: &CommandInput,
+pub(super) fn sensitive_fingerprint_headers(
+    source: &HeaderMap,
     fingerprint_headers: &[HeaderName],
+) -> HeaderMap {
+    let mut retained = HeaderMap::new();
+    for name in std::iter::once(&CONTENT_TYPE).chain(fingerprint_headers) {
+        for value in source.get_all(name) {
+            let mut copy = value.clone();
+            copy.set_sensitive(true);
+            retained.append(name.clone(), copy);
+        }
+    }
+    retained
+}
+
+pub(super) fn request_fingerprint(
+    parts: &Parts,
+    fingerprint_headers: &[HeaderName],
+    body: &[u8],
+    trailers: &HeaderMap,
 ) -> RequestFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(if fingerprint_headers.is_empty() {
@@ -76,25 +88,24 @@ pub(super) fn request_fingerprint(
         REQUEST_WITH_HEADERS_DOMAIN
     });
     hasher.update([0]);
-    frame(&mut hasher, input.method().as_str().as_bytes());
-    frame(&mut hasher, input.raw_path().as_bytes());
-    match input.raw_query() {
+    frame(&mut hasher, parts.method.as_str().as_bytes());
+    frame(&mut hasher, parts.uri.path().as_bytes());
+    match parts.uri.query() {
         Some(query) => {
             hasher.update([1]);
             frame(&mut hasher, query.as_bytes());
         }
         None => hasher.update([0]),
     }
-    frame_header_values(&mut hasher, input.headers(), &CONTENT_TYPE);
+    frame_header(&mut hasher, &parts.headers, &CONTENT_TYPE);
     if !fingerprint_headers.is_empty() {
         hasher.update((fingerprint_headers.len() as u64).to_be_bytes());
         for name in fingerprint_headers {
             frame(&mut hasher, name.as_str().as_bytes());
-            frame_header_values(&mut hasher, input.headers(), name);
+            frame_header(&mut hasher, &parts.headers, name);
         }
     }
-    frame(&mut hasher, input.body());
-    let trailers = input.trailers();
+    frame(&mut hasher, body);
     if !trailers.is_empty() {
         hasher.update(b"trailers/v1\0");
         let mut names = trailers
@@ -111,16 +122,9 @@ pub(super) fn request_fingerprint(
     RequestFingerprint::from_bytes(hasher.finalize().into())
 }
 
-fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderName) {
-    let values = headers.get_all(name);
-    let iter = values.iter();
-    let (lower, upper) = iter.size_hint();
-    let count = if upper == Some(lower) {
-        lower
-    } else {
-        iter.count()
-    };
-    hasher.update((count as u64).to_be_bytes());
+fn frame_header(hasher: &mut Sha256, source: &HeaderMap, name: &HeaderName) {
+    let values = source.get_all(name);
+    hasher.update((values.iter().count() as u64).to_be_bytes());
     for value in values {
         frame(hasher, value.as_bytes());
     }
@@ -139,6 +143,7 @@ mod tests {
     use http_body_util::{BodyExt as _, Full};
     use infra_idempotency_store::Digest;
 
+    use super::super::CommandInput;
     use super::*;
 
     fn legacy_fingerprint(
@@ -224,10 +229,11 @@ mod tests {
     fn scope_and_request_match_the_pinned_framing_vectors() {
         let caller = caller_identity(
             "https://issuer.example",
-            Some("fixture-subject"),
-            Some("client"),
-        )
-        .expect("verified caller");
+            PrincipalIdentity::Subject {
+                subject: "fixture-subject",
+                client_id: Some("client"),
+            },
+        );
         assert_eq!(
             infra_idempotency_store::ScopeKey::new(caller, b"k-123").digest(),
             &decode_digest("98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94")

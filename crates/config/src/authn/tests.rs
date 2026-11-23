@@ -44,7 +44,7 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
         audience,
         algorithms,
         ..
-    } = &loaded.authn
+    } = loaded.authn()
     else {
         panic!("expected OIDC JWT configuration");
     };
@@ -56,9 +56,10 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
 
     write(&dir, "APP__AUTHN__AUDIENCE", "conflicting");
     let conflict = load_from(&options, BUILD, environment).unwrap_err();
-    assert_matches!(
-        &conflict,
-        crate::Error::Validate(errors) if errors.names("authn.audiences"),
+    assert!(
+        conflict
+            .validation_errors()
+            .is_some_and(|errors| errors.names("authn.audiences")),
         "{conflict}"
     );
 }
@@ -163,7 +164,7 @@ fn jwt_load_accepts_a_quoted_date_or_list_from_a_later_file() {
             ..LoadOptions::default()
         };
         let cfg = load_from(&options, BUILD, env(&[])).unwrap();
-        let AuthnConfig::OidcJwt { audience, .. } = &cfg.authn else {
+        let AuthnConfig::OidcJwt { audience, .. } = cfg.authn() else {
             panic!("expected OIDC JWT configuration");
         };
         assert_eq!(audience.as_slice(), expected);
@@ -315,18 +316,38 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
     let config = admit_with(|v| config.admit(v)).unwrap();
     let AuthnConfig::OidcIntrospection {
         provider_concurrency,
-        cache_enabled,
-        cache_capacity,
-        cache_ttl,
+        cache,
         ..
     } = &config
     else {
         panic!("expected OIDC introspection configuration");
     };
     assert_eq!(provider_concurrency.get(), 32);
-    assert!(!cache_enabled);
-    assert_eq!(*cache_capacity, 256);
-    assert_eq!(*cache_ttl, Duration::from_secs(30));
+    assert_eq!(*cache, None);
+
+    let with_default_cache = parse(
+        r#"
+        mode = "oidc-introspection"
+        issuer = "issuer"
+        audience = ["service"]
+        introspection_endpoint = "endpoint"
+        introspection_client_id = "client"
+        introspection_client_secret = "secret"
+        cache_enabled = true
+        "#,
+    )
+    .unwrap();
+    let with_default_cache = admit_with(|v| with_default_cache.admit(v)).unwrap();
+    let AuthnConfig::OidcIntrospection { cache, .. } = &with_default_cache else {
+        panic!("expected OIDC introspection configuration");
+    };
+    assert_eq!(
+        *cache,
+        Some(IntrospectionCacheConfig {
+            capacity: NonZeroUsize::new(256).unwrap(),
+            ttl: Duration::from_secs(30),
+        })
+    );
 
     let missing_secret = parse(
         r#"
@@ -484,17 +505,19 @@ fn introspection_environment_decodes_and_redacts_the_secret() {
             introspection_client_id,
             introspection_client_secret,
             provider_concurrency,
-            cache_enabled,
-            cache_capacity,
-            cache_ttl,
+            cache,
             ..
-        } = &cfg.authn
+        } = cfg.authn()
         else {
             panic!("expected OIDC introspection configuration");
         };
-        assert_eq!(*cache_enabled, expected);
-        assert_eq!(*cache_capacity, 64);
-        assert_eq!(*cache_ttl, Duration::from_secs(90));
+        assert_eq!(
+            *cache,
+            expected.then_some(IntrospectionCacheConfig {
+                capacity: NonZeroUsize::new(64).unwrap(),
+                ttl: Duration::from_secs(90),
+            })
+        );
         assert_eq!(provider_concurrency.get(), 7);
         assert_eq!(audience.as_slice(), ["00123"]);
         assert_eq!(introspection_client_id, "false");
@@ -514,22 +537,23 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
         .unwrap();
     single.1 = literal.into();
     let config = load_from(&options, BUILD, environment.clone()).unwrap();
-    let AuthnConfig::OidcIntrospection { audience, .. } = &config.authn else {
+    let AuthnConfig::OidcIntrospection { audience, .. } = config.authn() else {
         panic!("expected OIDC introspection configuration");
     };
     assert_eq!(audience.as_slice(), [literal]);
 
     environment.push(("APP__AUTHN__AUDIENCES".into(), literal.into()));
     let error = load_from(&options, BUILD, environment.clone()).unwrap_err();
-    assert_matches!(
-        &error,
-        crate::Error::Validate(errors) if errors.names("authn.audiences"),
+    assert!(
+        error
+            .validation_errors()
+            .is_some_and(|errors| errors.names("authn.audiences")),
         "{error}"
     );
 
     environment.retain(|(name, _)| name != "APP__AUTHN__AUDIENCE");
     let config = load_from(&options, BUILD, environment.clone()).unwrap();
-    let AuthnConfig::OidcIntrospection { audience, .. } = &config.authn else {
+    let AuthnConfig::OidcIntrospection { audience, .. } = config.authn() else {
         panic!("expected OIDC introspection configuration");
     };
     assert_eq!(audience.as_slice(), ["api-a", "api-b"]);
@@ -561,9 +585,10 @@ fn introspection_environment_rejects_out_of_range_cache_settings_even_when_disab
             introspection_environment(&[("APP__AUTHN__CACHE_ENABLED", "false"), (variable, value)]),
         )
         .unwrap_err();
-        assert_matches!(
-            &error,
-            crate::Error::Validate(error) if error.names(expected_key),
+        assert!(
+            error
+                .validation_errors()
+                .is_some_and(|error| error.names(expected_key)),
             "{error}"
         );
     }
@@ -650,7 +675,7 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
         jwks_uri,
         jwks_max_age,
         ..
-    } = &jwt.authn
+    } = jwt.authn()
     else {
         panic!("expected OIDC JWT configuration");
     };
@@ -689,7 +714,7 @@ fn the_projected_jwt_overlay_selects_rfc9068_with_service_supplied_trust_inputs(
         ]),
     )
     .unwrap();
-    let AuthnConfig::OidcJwt { token_profile, .. } = &cfg.authn else {
+    let AuthnConfig::OidcJwt { token_profile, .. } = cfg.authn() else {
         panic!("expected OIDC JWT configuration");
     };
     assert_eq!(*token_profile, TokenProfile::Rfc9068);

@@ -1,9 +1,10 @@
 use metrics::{Key, Level, Metadata, Recorder as _};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use observe_test_support::{Series, counter, gauge};
 
 use super::*;
-use crate::test_metrics::{self, Series};
 
+const TEST_CLEANUP: CleanupName = CleanupName::new("jobs");
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
 struct TestMetrics {
@@ -46,12 +47,11 @@ impl TestMetrics {
             format!("postgres_maintenance_{name}"),
             &[("population", "jobs")],
         );
-        test_metrics::gauge(&self.snapshot(), &target).unwrap_or_else(|| panic!("missing {target}"))
+        gauge(&self.snapshot(), &target).unwrap_or_else(|| panic!("missing {target}"))
     }
 
     fn counter(&self, target: &Key) -> u64 {
-        test_metrics::counter(&self.snapshot(), target)
-            .unwrap_or_else(|| panic!("missing {target}"))
+        counter(&self.snapshot(), target).unwrap_or_else(|| panic!("missing {target}"))
     }
 
     fn observation_count(&self, outcome: &'static str) -> u64 {
@@ -66,7 +66,7 @@ impl TestMetrics {
 async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
     let metrics = TestMetrics::new();
     let _recording = metrics::set_default_local_recorder(&metrics.recorder);
-    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
+    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(TEST_CLEANUP));
     let observed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the test clock is after the epoch")
@@ -92,8 +92,7 @@ async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
 fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
     let metrics = TestMetrics::new();
     metrics::with_local_recorder(&metrics.recorder, || {
-        let mut observer =
-            MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
+        let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(TEST_CLEANUP));
         assert!(metrics.gauge("present").is_nan());
         assert!(metrics.gauge("oldest_timestamp_seconds").is_nan());
         assert_eq!(metrics.gauge("last_success_timestamp_seconds"), 0.0);
@@ -113,9 +112,9 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
         });
         let receipt = metrics.gauge("last_success_timestamp_seconds");
         for cause in [
-            MaintenanceFailure::Acquire,
-            MaintenanceFailure::TimedOut,
-            MaintenanceFailure::CommitUnknown,
+            FailureCause::Read(MaintenanceFailure::Acquire),
+            FailureCause::TimedOut,
+            FailureCause::Read(MaintenanceFailure::CommitUnknown),
         ] {
             observer.attempt().failed(cause);
             assert_eq!(metrics.gauge("present"), 1.0);
@@ -161,7 +160,7 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
         let metrics = TestMetrics::new();
         metrics::with_local_recorder(&metrics.recorder, || {
             let mut observer =
-                MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
+                MaintenanceObserver::start(MaintenancePopulation::Cleanup(TEST_CLEANUP));
             let base = tokio::time::Instant::now();
             let original = MaintenanceClock {
                 wall: Some(1000.0),

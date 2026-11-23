@@ -4,7 +4,7 @@ use secrecy::SecretString;
 
 use super::{InboundWebhookEndpointInput, InboundWebhooksInput};
 use crate::LoadOptions;
-use crate::load::{Error, is_env_addressable, load_from, load_worker_from};
+use crate::load::{ErrorKind, is_env_addressable, load_from, load_worker_from};
 use crate::test_support::{BUILD, env, load_env, write};
 use crate::validate::{ValidationErrors, validate_with};
 
@@ -24,7 +24,7 @@ fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhook
         },
     );
     if is_env_addressable(active_key) {
-        config.secrets.0.insert(
+        config.secrets.insert(
             active_key.to_owned(),
             SecretString::from("fixture-secret".to_owned()),
         );
@@ -32,7 +32,7 @@ fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhook
     if let Some(previous) = previous_key
         && is_env_addressable(previous)
     {
-        config.secrets.0.insert(
+        config.secrets.insert(
             previous.to_owned(),
             SecretString::from("fixture-previous-secret".to_owned()),
         );
@@ -42,7 +42,7 @@ fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhook
 
 #[test]
 fn defaults_are_inert() {
-    assert!(load_env(&[]).inbound_webhooks.is_empty());
+    assert!(load_env(&[]).inbound_webhooks().is_empty());
 }
 
 #[test]
@@ -99,7 +99,12 @@ fn service_requires_non_blank_secrets_for_referenced_inbound_keys() {
     )
     .unwrap_err();
     let rendered = err.to_string();
-    assert_matches!(&err, Error::Validate(errors) if errors.names("inbound_webhooks.secrets.partner_v2") && errors.names("inbound_webhooks.secrets.partner_v1"), "{rendered}");
+    let errors = err.validation_errors().unwrap();
+    assert!(
+        errors.names("inbound_webhooks.secrets.partner_v2")
+            && errors.names("inbound_webhooks.secrets.partner_v1"),
+        "{rendered}"
+    );
     assert!(
         rendered.contains("; set APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2"),
         "{rendered}"
@@ -130,20 +135,14 @@ fn worker_requires_only_endpoint_ids_and_ignores_service_signing_fields() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        cfg.inbound_webhook_endpoints
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["orders", "partner"]
-    );
+    assert_eq!(cfg.inbound_webhook_endpoints(), ["orders", "partner"]);
     let err = load_worker_from(
         &LoadOptions::default(),
         BUILD,
         env(&[("APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__TYPO", "hidden")]),
     )
     .unwrap_err();
-    assert_matches!(err, Error::Deserialize(_));
+    assert_matches!(err.0, ErrorKind::Deserialize(_));
 }
 
 #[test]
@@ -170,7 +169,7 @@ fn service_binds_active_and_previous_secrets_to_each_endpoint() {
         ("APP__POSTGRES__ENABLED", "true"),
         ("APP__POSTGRES__DSN", "postgres://localhost/app"),
     ]);
-    let endpoint = &cfg.inbound_webhooks["partner"];
+    let endpoint = &cfg.inbound_webhooks()["partner"];
     assert_eq!(endpoint.active_key.reference, "partner_v2");
     assert_eq!(endpoint.active_key.secret.expose_secret(), "fixture-secret");
     let previous = endpoint.previous_key.as_ref().unwrap();
@@ -209,7 +208,7 @@ fn an_empty_inbound_previous_key_variable_unsets_the_file_value() {
         ]),
     )
     .unwrap();
-    assert!(cfg.inbound_webhooks["partner"].previous_key.is_none());
+    assert!(cfg.inbound_webhooks()["partner"].previous_key.is_none());
 }
 
 #[test]
@@ -221,7 +220,7 @@ fn inbound_webhooks_secrets_without_a_reference_are_not_echoed() {
     )
     .unwrap_err();
     let rendered = err.to_string();
-    assert_matches!(&err, Error::Deserialize(_), "{rendered}");
+    assert_matches!(&err.0, ErrorKind::Deserialize(_), "{rendered}");
     assert!(rendered.contains("inbound_webhooks.secrets"), "{rendered}");
     assert!(!rendered.contains("fixture-secret-value"), "{rendered}");
 }

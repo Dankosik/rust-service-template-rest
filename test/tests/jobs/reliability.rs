@@ -2,14 +2,15 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt as _;
-use infra_postgres::{PgPool, in_tx};
+use infra_postgres::Pool;
 use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{
     self as reading, Channel, Error, Operation, PreparedRequest,
 };
+use sqlx::PgPool;
 use tokio::sync::Notify;
 
-use super::commit_proxy::{Boundary, CommitProxy, Fault};
+use integration_tests::commit_proxy::{Boundary, CommitProxy, Fault};
 
 fn operation(index: u128) -> Operation {
     Operation {
@@ -21,7 +22,7 @@ fn operation(index: u128) -> Operation {
     }
 }
 
-async fn setup(pool: &PgPool) -> PgPool {
+async fn setup(pool: &PgPool) -> Pool {
     let admitted = super::template_pool(&integration_tests::dsn_for(pool).await, 4).await;
     reading::migrate(&admitted).await.expect("fixture schema");
     admitted
@@ -48,7 +49,9 @@ async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
     use tokio::process::Command;
 
     const LIMIT: usize = 128 * 1024 + 256;
-    reading::migrate(&pool).await.unwrap();
+    reading::migrate(&infra_postgres::test_support::pool_from_sqlx(pool.clone()))
+        .await
+        .unwrap();
     let db = integration_tests::url_for(&pool, integration_tests::DATABASE_URL).await;
     for (size, code, requests) in [(LIMIT + 1, 1, 0), (LIMIT, 0, 1)] {
         let mut batch = serde_json::to_vec(&[operation(11)]).unwrap();
@@ -100,11 +103,12 @@ async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPo
     let publication =
         reading::publication(&mut infra_messaging::Registry::default(), reading::SUBJECT).unwrap();
     let prepared = PreparedRequest::try_new(operation(10), &publication).expect("valid request");
-    let rolled_back: Result<(), Error> = in_tx(&admitted, async |tx| {
-        reading::accept_in_tx(tx, &prepared, &outbound, "reading").await?;
-        Err(Error::Control)
-    })
-    .await;
+    let rolled_back: Result<(), Error> = admitted
+        .in_tx(async |tx| {
+            reading::accept_in_tx(tx, &prepared, &outbound, "reading").await?;
+            Err(Error::Control)
+        })
+        .await;
     std::assert_matches!(rolled_back, Err(Error::Control));
     assert_eq!(counts(&pool).await, (0, 0, 0));
     assert_eq!(super::job_count(&pool).await, 0);
@@ -152,18 +156,19 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
         let first_reached = Arc::clone(&reached);
         let first_release = Arc::clone(&release);
         let first = tokio::spawn(async move {
-            in_tx(&first_pool, async |tx| {
-                let effect =
-                    reading::apply_effect_in_tx(tx, Channel::Local, &first_operation).await?;
-                first_reached.notify_one();
-                first_release.notified().await;
-                if commit {
-                    Ok(effect)
-                } else {
-                    Err(Error::Control)
-                }
-            })
-            .await
+            first_pool
+                .in_tx(async |tx| {
+                    let effect =
+                        reading::apply_effect_in_tx(tx, Channel::Local, &first_operation).await?;
+                    first_reached.notify_one();
+                    first_release.notified().await;
+                    if commit {
+                        Ok(effect)
+                    } else {
+                        Err(Error::Control)
+                    }
+                })
+                .await
         });
         super::bounded("first marker is uncommitted", reached.notified()).await;
         let second_pool = admitted.clone();
@@ -224,7 +229,7 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
     super::close_pools(&[&admitted]).await;
 }
 
-async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
+async fn proxied_pool(pool: &PgPool) -> (CommitProxy, Pool) {
     let (proxy, proxied) = CommitProxy::start_for(pool).await;
     let admitted = super::template_pool(&proxied, 2).await;
     (proxy, admitted)

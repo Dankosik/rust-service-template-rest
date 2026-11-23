@@ -14,7 +14,7 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         jwt_type,
         trust,
         signing_key,
-    } = &config.service_auth
+    } = config.service_auth()
     else {
         return Ok(PreparedServiceAuth {
             verifier: None,
@@ -97,10 +97,11 @@ mod tests {
             .authenticate([authorization.as_bytes()])
             .unwrap();
         assert_eq!(caller.name().as_str(), "orders");
+        let orders: ServiceName = "orders".parse().unwrap();
         assert!(
             prepared
                 .tokens
-                .receiver("orders", "https://orders.internal".parse().unwrap())
+                .receiver(orders.clone(), "https://orders.internal".parse().unwrap())
                 .unwrap()
                 .authorization()
                 .unwrap()
@@ -111,14 +112,14 @@ mod tests {
         assert!(
             receiving_only
                 .tokens
-                .receiver("orders", "https://orders.internal".parse().unwrap())
+                .receiver(orders.clone(), "https://orders.internal".parse().unwrap())
                 .is_err()
         );
         let off = prepare(&test_config(&[])).unwrap();
         assert!(off.verifier.is_none());
         assert_eq!(
             off.tokens
-                .receiver("orders", "https://orders.internal".parse().unwrap())
+                .receiver(orders, "https://orders.internal".parse().unwrap())
                 .unwrap()
                 .authorization(),
             Ok(None)

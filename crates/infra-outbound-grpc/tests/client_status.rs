@@ -9,7 +9,7 @@ use std::{num::NonZeroUsize, time::Duration};
 
 use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
-use infra_outbound_grpc::{Client, ClientSecurity, ClientTimeout};
+use infra_outbound_grpc::{Client, ClientSecurity, transport::PreparedCall};
 use tower::Service as _;
 
 const CLIENT_METHOD_LIMIT: usize = 256;
@@ -34,26 +34,29 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
     check_transport_statuses(&destination).await;
     check_decoded_statuses(&destination).await;
     check_unpolled_stream_statuses(&destination, &handle).await;
-    let mut refusing = Client::with_opening_limit(
-        &destination,
-        ClientSecurity::Plaintext,
-        ClientTimeout::FullRpc(WAIT),
-        Some(NonZeroUsize::MIN),
-    )
-    .unwrap();
+    let mut refusing = Client::builder(&destination, ClientSecurity::Plaintext, WAIT)
+        .opening_limit(NonZeroUsize::MIN)
+        .build()
+        .unwrap();
     check_opening_refusals(&mut refusing);
-    let mut proxied = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let mut proxied = Client::builder(&destination, ClientSecurity::Plaintext, WAIT)
+        .build()
+        .unwrap();
     check_proxy_status(&mut proxied).await;
     let oversized: &'static str = Box::leak("x".repeat(257).into_boxed_str());
     record_unverified_methods(&destination, oversized);
     let boundary: &'static str = Box::leak("b".repeat(256).into_boxed_str());
-    let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let mut client = Client::builder(&destination, ClientSecurity::Plaintext, WAIT)
+        .build()
+        .unwrap();
     drop(client.call(client_request(
         &format!("/{boundary}/{boundary}"),
         Some((boundary, boundary)),
     )));
     fill_method_series(&destination);
-    let mut client = Client::try_new(&destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let mut client = Client::builder(&destination, ClientSecurity::Plaintext, WAIT)
+        .build()
+        .unwrap();
     drop(client.call(client_request(
         "/test.Observation/Header",
         Some(("test.Observation", "Header")),
@@ -154,11 +157,12 @@ async fn check_transport_statuses(destination: &str) {
         ("Cancelled", tonic::Code::Cancelled),
         ("Deadline", tonic::Code::DeadlineExceeded),
     ] {
-        let mut client = Client::try_new(
+        let mut client = Client::builder(
             destination,
             ClientSecurity::Plaintext,
             Duration::from_millis(200),
         )
+        .build()
         .unwrap();
         let request = client_request(
             &format!("/test.Observation/{method}"),
@@ -166,12 +170,12 @@ async fn check_transport_statuses(destination: &str) {
         );
         let response = tokio::time::timeout(WAIT, client.call(request))
             .await
-            .unwrap()
-            .unwrap();
+            .expect("gRPC call completes within budget")
+            .expect("gRPC call returns response");
         if method == "Header" {
             assert_eq!(
                 tonic::Status::from_header_map(response.headers())
-                    .unwrap()
+                    .expect("header-only response carries grpc-status")
                     .code(),
                 expected
             );
@@ -180,16 +184,16 @@ async fn check_transport_statuses(destination: &str) {
             if method == "Trailer" {
                 let data = tokio::time::timeout(WAIT, body.frame())
                     .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap()
+                    .expect("trailer response yields a data frame within budget")
+                    .expect("trailer response stream yields a frame")
+                    .expect("trailer response frame decodes")
                     .into_data()
-                    .unwrap();
+                    .expect("first frame is data");
                 assert_eq!(data, bytes::Bytes::from_static(b"data"));
             }
             let status = tokio::time::timeout(WAIT, trailer_status(&mut body))
                 .await
-                .unwrap();
+                .expect("trailer status arrives within budget");
             assert_eq!(status, expected);
             assert!(body.frame().await.is_none());
         }
@@ -197,15 +201,17 @@ async fn check_transport_statuses(destination: &str) {
 }
 
 async fn check_decoded_statuses(destination: &str) {
-    let adapter = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let adapter = Client::builder(destination, ClientSecurity::Plaintext, WAIT)
+        .build()
+        .unwrap();
     let mut raw = client_request(ECHO_UNARY_PATH, Some(("example.v1.EchoService", "Unary")));
     raw.headers_mut()
         .insert("x-test-reply", "malformed-status-head".parse().unwrap());
     let (report, wire_code) = tokio::sync::oneshot::channel();
-    let response = adapter
-        .prepare_call(raw)
+    let response = PreparedCall::prepare(&adapter, raw)
         .unwrap()
-        .send_with_dispatch_check(|| Ok(()), move |code| report.send(code).unwrap())
+        .on_status(move |code| report.send(code).unwrap())
+        .send()
         .await
         .unwrap();
     drop(response);
@@ -258,7 +264,9 @@ async fn check_unpolled_stream_statuses(
     handle: &metrics_exporter_prometheus::PrometheusHandle,
 ) {
     let parent = tokio_util::sync::CancellationToken::new();
-    let client = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
+    let client = Client::builder(destination, ClientSecurity::Plaintext, WAIT)
+        .build()
+        .unwrap();
     let mut generated =
         grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(client);
     let mut request = tonic::Request::new(grpc_contracts::example::v1::ServerStreamRequest {
@@ -325,10 +333,10 @@ fn check_opening_refusals(refusing: &mut Client) {
         tonic::Code::ResourceExhausted
     );
     drop(abandoned);
-    let status = refusing
-        .prepare_call(unary_request())
+    let status = PreparedCall::prepare(refusing, unary_request())
         .unwrap()
-        .refuse(tonic::Status::unavailable("credentials unavailable"));
+        .try_step(|_, _| Err(tonic::Status::unavailable("credentials unavailable")))
+        .unwrap_err();
     assert_eq!(status.code(), tonic::Code::Unavailable);
 }
 
@@ -363,7 +371,9 @@ fn record_unverified_methods(destination: &str, oversized: &'static str) {
             Some(("overlong.Service", oversized)),
         ),
     ] {
-        let mut client = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
+        let mut client = Client::builder(destination, ClientSecurity::Plaintext, WAIT)
+            .build()
+            .unwrap();
         drop(client.call(client_request(&path, method)));
     }
 }
@@ -371,7 +381,9 @@ fn record_unverified_methods(destination: &str, oversized: &'static str) {
 fn fill_method_series(destination: &str) {
     for index in 0..=CLIENT_METHOD_LIMIT {
         let method: &'static str = Box::leak(format!("Method{index}").into_boxed_str());
-        let mut client = Client::try_new(destination, ClientSecurity::Plaintext, WAIT).unwrap();
+        let mut client = Client::builder(destination, ClientSecurity::Plaintext, WAIT)
+            .build()
+            .unwrap();
         drop(client.call(client_request(
             &format!("/bounded.Service/{method}"),
             Some(("bounded.Service", method)),
@@ -480,11 +492,12 @@ fn assert_observation_totals(rendered: &str, boundary: &str, oversized: &str) {
 
 async fn check_expired_unpolled_call() {
     tokio::time::pause();
-    let mut client = Client::try_new(
+    let mut client = Client::builder(
         "http://127.0.0.1:1",
         ClientSecurity::Plaintext,
         Duration::from_secs(1),
     )
+    .build()
     .unwrap();
     let pending = client.call(client_request("/unpolled.Service/Unary", None));
     tokio::time::advance(Duration::from_secs(1)).await;

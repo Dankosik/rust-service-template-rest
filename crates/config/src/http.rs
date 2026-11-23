@@ -1,28 +1,22 @@
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::Deserialize;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
+use crate::de::{Keep, Mode, ModeMarker, StrictDuration, When};
 use crate::listener_limits::{
     DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
-    DEFAULT_REQUEST_TIMEOUT, RawListenerLimits,
+    DEFAULT_REQUEST_TIMEOUT, ListenerKind, RawListenerLimits,
 };
-use crate::validate::{ValidationError, Violations, duration_range, int_range};
+use crate::validate::{Rejected, ValidationError, Violations, duration_range, nonzero_usize_range};
 
-#[serde_with::serde_as]
-#[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default)]
-#[serde(transparent)]
-pub(crate) struct ReadinessPropagationDelay(
-    #[serde_as(as = "crate::de::StrictDuration")]
-    #[educe(Default(expression = Duration::from_secs(15)))]
-    Duration,
-);
+const MAX_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_BODY_BYTES: usize = 1024 * 1024 * 1024;
 
-pub(crate) type HttpInput = HttpFields<ReadinessPropagationDelay>;
+pub(crate) type HttpInput = HttpFields;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShutdownTail {
@@ -42,9 +36,9 @@ impl ShutdownTail {
 
 #[serde_with::serde_as]
 #[derive(Debug, Deserialize, educe::Educe)]
-#[educe(Default(bound(Propagation: Default)))]
-#[serde(deny_unknown_fields, default)]
-pub(crate) struct HttpFields<Propagation> {
+#[educe(Default(bound = false))]
+#[serde(bound(deserialize = ""), deny_unknown_fields, default)]
+pub(crate) struct HttpFields<Propagation: Mode = Keep> {
     /// Listen address as an IP `host:port`, or `:port` for IPv4
     /// all-interfaces (`0.0.0.0`). Hostnames are refused.
     #[serde_as(as = "crate::de::ListenAddr")]
@@ -52,30 +46,32 @@ pub(crate) struct HttpFields<Propagation> {
     addr: SocketAddr,
     /// Total time the platform allows between SIGTERM and SIGKILL.
     /// `drain_timeout` plus the process's [`ShutdownTail`] must fit inside it.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(45)))]
     grace_period: Duration,
     /// Bound for the HTTP drain. In the service this includes
     /// `readiness_propagation_delay`. The worker budgets its drain separately.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(25)))]
     drain_timeout: Duration,
     /// Time the service keeps serving after readiness flips off so a load
     /// balancer observes `/health/ready` failing before the listener stops
     /// accepting connections. The worker ignores this field.
-    readiness_propagation_delay: Propagation,
+    #[serde_as(as = "When<Propagation, StrictDuration>")]
+    #[educe(Default(expression = Duration::from_secs(15)))]
+    readiness_propagation_delay: Duration,
     /// Time limit for reading a complete HTTP/1.1 request head. It also bounds
     /// keep-alive idle time. Set it above the upstream load balancer's idle
     /// timeout to avoid 502s when it reuses a connection the listener closed.
     /// The default clears the common 60s timeout. Google Cloud load balancers
     /// hold backend connections for 600s.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(75)))]
     header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
     /// reads. Features that stream responses own the lifetime of their bodies
     /// and any resources held after the response head.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_REQUEST_TIMEOUT))]
     request_timeout: Duration,
     /// Read-buffer ceiling for one request head. Overflow answers with a
@@ -95,7 +91,7 @@ pub(crate) struct HttpFields<Propagation> {
     max_in_flight: u32,
     /// Longest wait for a handler slot. It consumes part of the request budget
     /// and cannot outlast `request_timeout`. Zero sheds at once.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = DEFAULT_ADMISSION_WAIT))]
     admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
@@ -108,12 +104,14 @@ pub(crate) struct HttpFields<Propagation> {
     /// Age after which a connection is told to finish and close, so its client
     /// reconnects and is balanced again. Each connection's age is spread by
     /// up to 10% either way. Zero leaves connection age unbounded.
-    #[serde_as(as = "crate::de::StrictDuration")]
+    #[serde_as(as = "StrictDuration")]
     max_connection_age: Duration,
     #[serde_as(as = "crate::de::StrictBool")]
     access_log_health_probes: bool,
     #[serde_as(as = "crate::de::StrictBool")]
     trust_trace_context: bool,
+    #[serde(skip)]
+    _mode: ModeMarker<Propagation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,8 +119,8 @@ pub struct HttpListenerConfig {
     pub addr: SocketAddr,
     pub header_read_timeout: Duration,
     pub request_timeout: Duration,
-    pub max_header_bytes: ByteSize,
-    pub max_body_bytes: ByteSize,
+    pub max_header_bytes: NonZeroUsize,
+    pub max_body_bytes: NonZeroUsize,
     pub max_in_flight: Option<NonZeroU32>,
     pub admission_wait: Duration,
     pub max_connections: Option<NonZeroU32>,
@@ -147,22 +145,23 @@ impl HttpConfig {
 
     #[must_use]
     pub const fn effective_drain_budget(&self) -> Duration {
-        self.drain_timeout
-            .saturating_sub(self.readiness_propagation_delay)
+        drain_budget(self.drain_timeout, self.readiness_propagation_delay)
     }
 }
 
-enum DrainTimeoutBasis {
-    Usable,
-    Unusable,
+#[cfg(test)]
+pub(crate) const NO_SHUTDOWN_TAIL: ShutdownTail = ShutdownTail::new(Duration::ZERO, "");
+
+const fn drain_budget(drain_timeout: Duration, readiness_propagation_delay: Duration) -> Duration {
+    drain_timeout.saturating_sub(readiness_propagation_delay)
 }
 
 fn validate_grace_and_drain(
     grace_period: Duration,
     drain_timeout: Duration,
-    tail: Option<ShutdownTail>,
+    tail: ShutdownTail,
     v: &mut Violations,
-) -> DrainTimeoutBasis {
+) -> Result<(), Rejected> {
     let range = Duration::from_secs(1)..=Duration::from_mins(10);
     let grace = v.record(duration_range(
         "http.grace_period",
@@ -170,23 +169,18 @@ fn validate_grace_and_drain(
         range.clone(),
     ));
     let drain = v.record(duration_range("http.drain_timeout", drain_timeout, range));
-    let (Ok(()), Ok(())) = (grace, drain) else {
-        return DrainTimeoutBasis::Unusable;
-    };
+    grace.and(drain)?;
     if drain_timeout > grace_period {
-        v.reject(ValidationError::new(
+        return Err(v.reject(ValidationError::new(
             "http.drain_timeout",
             format!(
                 "must be <= http.grace_period ({}), got {}",
                 crate::de::display_duration(grace_period),
                 crate::de::display_duration(drain_timeout)
             ),
-        ));
-        return DrainTimeoutBasis::Unusable;
+        )));
     }
-    if let Some(tail) = tail
-        && grace_period < drain_timeout.saturating_add(tail.duration)
-    {
+    if grace_period < drain_timeout.saturating_add(tail.duration) {
         v.reject(ValidationError::new(
             "http.grace_period",
             format!(
@@ -198,29 +192,29 @@ fn validate_grace_and_drain(
             ),
         ));
     }
-    DrainTimeoutBasis::Usable
+    Ok(())
 }
 
-impl<Propagation> HttpFields<Propagation> {
+impl<Propagation: Mode> HttpFields<Propagation> {
     fn admit_listener(
         &self,
         drain_budget: Option<Duration>,
         v: &mut Violations,
-    ) -> HttpListenerConfig {
+    ) -> Result<HttpListenerConfig, Rejected> {
         v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
             Duration::from_millis(100)..=Duration::from_mins(15),
         ));
-        v.check(int_range(
+        let max_header_bytes = v.record(nonzero_usize_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
-            u64::from(HTTP1_MIN_READ_BUFFER_BYTES)..=ByteSize::mib(1).as_u64(),
+            usize::from(HTTP1_MIN_READ_BUFFER_BYTES)..=MAX_HEADER_BYTES,
         ));
-        v.check(int_range(
+        let max_body_bytes = v.record(nonzero_usize_range(
             "http.max_body_bytes",
             self.max_body_bytes.as_u64(),
-            1..=ByteSize::gib(1).as_u64(),
+            1..=MAX_BODY_BYTES,
         ));
         let limits = RawListenerLimits {
             request_timeout: self.request_timeout,
@@ -229,62 +223,68 @@ impl<Propagation> HttpFields<Propagation> {
             max_connections: self.max_connections,
             max_connection_age: self.max_connection_age,
         }
-        .admit("http", drain_budget, "requests", v);
-        HttpListenerConfig {
+        .admit(ListenerKind::HTTP, drain_budget, v);
+        Ok(HttpListenerConfig {
             addr: self.addr,
             header_read_timeout: self.header_read_timeout,
             request_timeout: limits.request_timeout,
-            max_header_bytes: self.max_header_bytes,
-            max_body_bytes: self.max_body_bytes,
+            max_header_bytes: max_header_bytes?,
+            max_body_bytes: max_body_bytes?,
             max_in_flight: limits.max_in_flight,
             admission_wait: limits.admission_wait,
             max_connections: limits.max_connections,
             max_connection_age: limits.max_connection_age,
             access_log_health_probes: self.access_log_health_probes,
             trust_trace_context: self.trust_trace_context,
-        }
+        })
     }
 }
 
 impl HttpInput {
+    pub(crate) fn admit_drain_budget(
+        &self,
+        tail: ShutdownTail,
+        v: &mut Violations,
+    ) -> Option<Duration> {
+        validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v)
+            .and_then(|()| self.admit_propagation_delay(v))
+            .ok()
+    }
+
     pub(crate) fn admit(
         self,
-        tail: Option<ShutdownTail>,
+        drain_budget: Option<Duration>,
         v: &mut Violations,
-    ) -> (HttpConfig, Option<Duration>) {
-        let drain_basis = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
-        let readiness_propagation_delay = self.readiness_propagation_delay.0;
-        let drain_budget = match drain_basis {
-            DrainTimeoutBasis::Unusable => None,
-            DrainTimeoutBasis::Usable if readiness_propagation_delay >= self.drain_timeout => {
-                v.reject(ValidationError::new(
-                    "http.readiness_propagation_delay",
-                    format!(
-                        "must be less than http.drain_timeout ({}), got {}",
-                        crate::de::display_duration(self.drain_timeout),
-                        crate::de::display_duration(readiness_propagation_delay)
-                    ),
-                ));
-                None
-            }
-            DrainTimeoutBasis::Usable => Some(
-                self.drain_timeout
-                    .saturating_sub(readiness_propagation_delay),
-            ),
-        };
-        let listener = self.admit_listener(drain_budget, v);
-        let config = HttpConfig {
+    ) -> Result<HttpConfig, Rejected> {
+        let listener = self.admit_listener(drain_budget, v)?;
+        Ok(HttpConfig {
             listener,
             grace_period: self.grace_period,
             drain_timeout: self.drain_timeout,
-            readiness_propagation_delay,
-        };
-        (config, drain_budget)
+            readiness_propagation_delay: self.readiness_propagation_delay,
+        })
+    }
+
+    fn admit_propagation_delay(&self, v: &mut Violations) -> Result<Duration, Rejected> {
+        if self.readiness_propagation_delay >= self.drain_timeout {
+            return Err(v.reject(ValidationError::new(
+                "http.readiness_propagation_delay",
+                format!(
+                    "must be less than http.drain_timeout ({}), got {}",
+                    crate::de::display_duration(self.drain_timeout),
+                    crate::de::display_duration(self.readiness_propagation_delay)
+                ),
+            )));
+        }
+        Ok(drain_budget(
+            self.drain_timeout,
+            self.readiness_propagation_delay,
+        ))
     }
 }
 
 // template:begin worker:worker-http-config
-pub(crate) type WorkerHttpInput = HttpFields<serde::de::IgnoredAny>;
+pub(crate) type WorkerHttpInput = HttpFields<crate::de::Skip>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerHttpConfig {
@@ -301,14 +301,18 @@ impl WorkerHttpConfig {
 }
 
 impl WorkerHttpInput {
-    pub(crate) fn admit(self, tail: Option<ShutdownTail>, v: &mut Violations) -> WorkerHttpConfig {
+    pub(crate) fn admit(
+        self,
+        tail: ShutdownTail,
+        v: &mut Violations,
+    ) -> Result<WorkerHttpConfig, Rejected> {
         let _ = validate_grace_and_drain(self.grace_period, self.drain_timeout, tail, v);
-        let listener = self.admit_listener(None, v);
-        WorkerHttpConfig {
+        let listener = self.admit_listener(None, v)?;
+        Ok(WorkerHttpConfig {
             listener,
             grace_period: self.grace_period,
             drain_timeout: self.drain_timeout,
-        }
+        })
     }
 }
 // template:end worker:worker-http-config
@@ -320,7 +324,10 @@ mod tests {
     use crate::validate::admit_with;
 
     fn admit(input: HttpInput) -> Result<HttpConfig, ValidationErrors> {
-        admit_with(|v| Ok(input.admit(None, v).0))
+        admit_with(|v| {
+            let drain_budget = input.admit_drain_budget(super::NO_SHUTDOWN_TAIL, v);
+            input.admit(drain_budget, v)
+        })
     }
 
     #[test]
@@ -355,7 +362,11 @@ mod tests {
             drain_timeout: Duration::from_secs(25),
             ..HttpInput::default()
         };
-        let errors = admit_with(|v| Ok(tight.admit(Some(tail), v).0)).unwrap_err();
+        let errors = admit_with(|v| {
+            let drain_budget = tight.admit_drain_budget(tail, v);
+            tight.admit(drain_budget, v)
+        })
+        .unwrap_err();
         assert!(errors.names("http.grace_period"), "{errors}");
         assert!(
             errors
@@ -404,7 +415,7 @@ mod tests {
     #[test]
     fn propagation_delay_must_leave_drain_budget() {
         let input = HttpInput {
-            readiness_propagation_delay: ReadinessPropagationDelay(Duration::from_secs(25)),
+            readiness_propagation_delay: Duration::from_secs(25),
             ..HttpInput::default()
         };
         assert!(
@@ -468,9 +479,9 @@ mod tests {
             ("APP__HTTP__DRAIN_TIMEOUT", "1s"),
             ("APP__HTTP__READINESS_PROPAGATION_DELAY", "not a duration"),
         ]);
-        assert_eq!(loaded.http.drain_timeout, Duration::from_secs(1));
+        assert_eq!(loaded.http().drain_timeout, Duration::from_secs(1));
         assert_eq!(
-            loaded.http.listener().request_timeout,
+            loaded.http().listener().request_timeout,
             Duration::from_secs(8)
         );
     }
@@ -479,7 +490,7 @@ mod tests {
     fn worker_http_ignores_shared_propagation_delay_in_toml_and_rejects_unknown_keys() {
         let ignored = "drain_timeout = \"10s\"\nreadiness_propagation_delay = { bad = 1 }\n";
         let input: WorkerHttpInput = toml::from_str(ignored).unwrap();
-        let worker = admit_with(|v| Ok(input.admit(None, v))).unwrap();
+        let worker = admit_with(|v| input.admit(super::NO_SHUTDOWN_TAIL, v)).unwrap();
         assert_eq!(worker.drain_timeout, Duration::from_secs(10));
         assert!(toml::from_str::<HttpInput>(ignored).is_err());
         assert!(toml::from_str::<WorkerHttpInput>("bogus = 1\n").is_err());

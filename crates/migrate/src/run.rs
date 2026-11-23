@@ -130,8 +130,8 @@ impl RunFailure {
 pub const RECORD_TARGET: &str = "migrate_record";
 
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
-    deadline_instant(options.deadline)?;
-    let session = SessionOptions {
+    ensure_deadline_representable(options.deadline)?;
+    let session_options = SessionOptions {
         application_name: options.application_name,
         statement_timeout: options.statement_timeout,
         idle_in_transaction_timeout: options.statement_timeout,
@@ -141,10 +141,13 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             ("client_connection_check_interval", "1s"),
         ],
     };
-    let mut conn = tokio::time::timeout(ACQUIRE_TIMEOUT, connect_session(options.dsn, &session))
-        .await
-        .map_err(|_| RunError::ConnectTimeout(ACQUIRE_TIMEOUT))?
-        .map_err(RunError::Connect)?;
+    let mut conn = tokio::time::timeout(
+        ACQUIRE_TIMEOUT,
+        connect_session(options.dsn, &session_options),
+    )
+    .await
+    .map_err(|_| RunError::ConnectTimeout(ACQUIRE_TIMEOUT))?
+    .map_err(RunError::Connect)?;
     let deadline_at = deadline_instant(options.deadline)?;
     let mut report = Report::default();
     let outcome = tokio::time::timeout_at(
@@ -157,6 +160,10 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
     }
     drop(tokio::time::timeout_at(deadline_at, conn.close()).await);
     Ok(report)
+}
+
+fn ensure_deadline_representable(deadline: Duration) -> Result<(), RunError> {
+    deadline_instant(deadline).map(drop)
 }
 
 fn deadline_instant(deadline: Duration) -> Result<tokio::time::Instant, RunError> {
@@ -229,15 +236,15 @@ async fn apply_outside_transaction(
 }
 
 async fn invalid_indexes(conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
-    observed(
+    let indexes = observed!(
         "SELECT pg_index",
         sqlx::query_scalar!(
             r#"SELECT c.oid::regclass::text AS "name!" FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relkind = 'i' ORDER BY 1"#
         )
         .fetch_all(conn),
     )
-    .await
-    .map_err(MigrateError::Execute)
+    .await?;
+    Ok(indexes)
 }
 
 async fn set_session_timeouts(
@@ -245,7 +252,7 @@ async fn set_session_timeouts(
     statement_timeout: Duration,
     lock_timeout: Duration,
 ) -> Result<(), MigrateError> {
-    observed(
+    observed!(
         "SELECT set_config",
         sqlx::query!(
             "SELECT set_config('statement_timeout', $1, false) AS statement_timeout, set_config('lock_timeout', $2, false) AS lock_timeout",
@@ -254,8 +261,7 @@ async fn set_session_timeouts(
         )
         .fetch_one(conn),
     )
-    .await
-    .map_err(MigrateError::Execute)?;
+    .await?;
     Ok(())
 }
 

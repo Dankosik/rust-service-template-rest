@@ -87,8 +87,9 @@ fn credentials_require_a_matching_explicit_https_collector() {
             general_headers,
         ),
     ] {
+        let headers = typed_headers.map(secrecy::SecretString::from);
         let mut opts = options(typed);
-        opts.otlp_headers = typed_headers.map(secrecy::SecretString::from);
+        opts.otlp_headers = headers.as_ref();
         let error = tracer_provider_for_test(&opts, pairs)
             .unwrap_err()
             .to_string();
@@ -98,9 +99,9 @@ fn credentials_require_a_matching_explicit_https_collector() {
 }
 
 fn tracer_provider_for_test(
-    options: &TracingOptions,
+    options: &TracingOptions<'_>,
     pairs: &[(&str, &str)],
-) -> Result<super::super::TracerProviderHandle, TracingError> {
+) -> Result<super::super::TracerProviderHandle, super::super::TracingError> {
     tracer_provider(options, env(pairs), &CollectorTrust::from_env(env(pairs)))
 }
 
@@ -115,34 +116,37 @@ fn typed_collector_requires_each_client_identity_file_to_have_a_matching_standar
     );
     for (pairs, expected) in [
         (
-            &[(CLIENT_CERTIFICATE_VARS[0], identity)][..],
-            CLIENT_CERTIFICATE_VARS[0],
+            &[(CLIENT_CERTIFICATE_VARS[0].1, identity)][..],
+            CLIENT_CERTIFICATE_VARS[0].1,
         ),
-        (&[(CLIENT_KEY_VARS[1], identity)][..], CLIENT_KEY_VARS[1]),
         (
-            &[common, (CLIENT_CERTIFICATE_VARS[0], identity)][..],
-            CLIENT_CERTIFICATE_VARS[0],
+            &[(CLIENT_KEY_VARS[1].1, identity)][..],
+            CLIENT_KEY_VARS[1].1,
+        ),
+        (
+            &[common, (CLIENT_CERTIFICATE_VARS[0].1, identity)][..],
+            CLIENT_CERTIFICATE_VARS[0].1,
         ),
         (
             &[
                 common,
                 signal,
-                (CLIENT_CERTIFICATE_VARS[0], identity),
-                (CLIENT_KEY_VARS[1], identity),
+                (CLIENT_CERTIFICATE_VARS[0].1, identity),
+                (CLIENT_KEY_VARS[1].1, identity),
             ][..],
-            CLIENT_KEY_VARS[1],
+            CLIENT_KEY_VARS[1].1,
         ),
         (
             &[
                 (OTEL_EXPORTER_OTLP_ENDPOINT, "https://collector"),
                 (OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, "https://other/traces"),
-                (CLIENT_KEY_VARS[1], identity),
+                (CLIENT_KEY_VARS[1].1, identity),
             ][..],
-            CLIENT_KEY_VARS[1],
+            CLIENT_KEY_VARS[1].1,
         ),
     ] {
         let error = tracer_provider_for_test(&options, pairs).unwrap_err();
-        std::assert_matches!(error, TracingError::UnboundCredential { name } if name == expected);
+        std::assert_matches!(error.0, TracingErrorKind::UnboundCredential { name } if name == expected);
         assert!(!error.to_string().contains(identity));
     }
 }
@@ -164,7 +168,7 @@ fn both_endpoint_sources_reject_malformed_or_secret_urls_without_echoing_them() 
             ("", &[(OTEL_EXPORTER_OTLP_ENDPOINT, raw)][..]),
         ] {
             let error = tracer_provider_for_test(&options(typed), pairs).unwrap_err();
-            std::assert_matches!(error, TracingError::InvalidEndpoint { .. });
+            std::assert_matches!(error.0, TracingErrorKind::InvalidEndpoint { .. });
             assert!(!format!("{error:?} {error}").contains("private-marker"));
         }
     }
@@ -206,13 +210,13 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
         trust,
         CollectorTrust {
             certificate: Some(TrustFile {
-                scope: SettingScope::Signal,
-                variable: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+                scope: EnvScope::Signal,
+                name: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
                 path: "/traces/ca.pem".into(),
             }),
             client_certificate: Some(TrustFile {
-                scope: SettingScope::Common,
-                variable: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+                scope: EnvScope::Common,
+                name: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
                 path: "/general/client.pem".into(),
             }),
             client_key: None,
@@ -226,12 +230,7 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
 
 #[test]
 fn header_pairs_parse_and_blank_entries_are_skipped() {
-    let headers = parse_headers(&Setting {
-        scope: SettingScope::Typed,
-        name: TYPED_HEADERS,
-        raw: Cow::Borrowed(OsStr::new("authorization=Basic%20x, x-tenant = t1 ,")),
-    })
-    .unwrap();
+    let headers = parse_headers("authorization=Basic%20x, x-tenant = t1 ,", TYPED_HEADERS).unwrap();
     assert_eq!(
         headers.get("authorization").map(String::as_str),
         Some("Basic%20x")
@@ -253,13 +252,8 @@ fn malformed_header_entries_fail_by_position() {
         ("auth=private%+A", 1),
         ("auth=private%00", 1),
     ] {
-        let err = parse_headers(&Setting {
-            scope: SettingScope::Typed,
-            name: TYPED_HEADERS,
-            raw: Cow::Borrowed(OsStr::new(raw)),
-        })
-        .unwrap_err();
-        std::assert_matches!(err, TracingError::InvalidHeader { position: p, .. } if p == position,
+        let err = parse_headers(raw, TYPED_HEADERS).unwrap_err();
+        std::assert_matches!(err, TracingErrorKind::InvalidHeader { position: p, .. } if p == position,
             "{raw:?}: {err}"
         );
     }
@@ -286,6 +280,6 @@ fn compression_falls_back_and_remembers_only_ignored_variable_names() {
             vec![traces, general],
         ),
     ] {
-        assert_eq!(compression(&env(pairs)), (expected, ignored));
+        assert_eq!(compression_from_env(&env(pairs)), (expected, ignored));
     }
 }

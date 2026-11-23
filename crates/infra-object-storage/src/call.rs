@@ -2,42 +2,53 @@ use std::time::Duration;
 
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
-use operation_context::{Deadline, OperationContext, Stopped};
-use tokio::time::Instant;
+use operation_context::{BoundedContext, BoundedStop};
 
-use crate::error::Call;
+use crate::error::{Failure, OutcomeError};
 
 const MAX_ATTEMPTS: u32 = 3;
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
 const READ_ATTEMPT_DIVISOR: u32 = 2;
 
-pub(crate) fn call_policy(
-    call: Call,
+#[derive(Clone, Copy)]
+pub(crate) enum RetryPolicy {
+    Read,
+    SingleAttempt,
+}
+
+pub(crate) fn read_retry_config() -> RetryConfig {
+    RetryConfig::standard()
+        .with_max_attempts(MAX_ATTEMPTS)
+        .with_max_backoff(MAX_BACKOFF)
+}
+
+pub(crate) fn single_attempt_retry_config() -> RetryConfig {
+    RetryConfig::standard().with_max_attempts(1)
+}
+
+pub(crate) fn call_timeout(
+    policy: RetryPolicy,
     remaining: Duration,
     ceiling: Duration,
-) -> (TimeoutConfig, RetryConfig) {
-    let (attempt_timeout, retry_config) = match call {
-        Call::Read => (
-            remaining.min(ceiling / READ_ATTEMPT_DIVISOR),
-            RetryConfig::standard()
-                .with_max_attempts(MAX_ATTEMPTS)
-                .with_max_backoff(MAX_BACKOFF),
-        ),
-        Call::UnconditionalMutation | Call::CreateOnly => {
-            (remaining, RetryConfig::standard().with_max_attempts(1))
-        }
+) -> TimeoutConfig {
+    let attempt_timeout = match policy {
+        RetryPolicy::Read => remaining.min(ceiling / READ_ATTEMPT_DIVISOR),
+        RetryPolicy::SingleAttempt => remaining,
     };
-    let timeout = TimeoutConfig::builder()
+    TimeoutConfig::builder()
         .operation_timeout(remaining)
         .operation_attempt_timeout(attempt_timeout)
         .connect_timeout(CONNECT_TIMEOUT.min(attempt_timeout))
-        .build();
-    (timeout, retry_config)
+        .build()
+}
+
+pub(crate) fn check_active<E: OutcomeError>(context: &BoundedContext) -> Result<(), Failure<E>> {
+    context.check().map_err(Failure::not_applied_stop)
 }
 
 pub(crate) async fn within<T>(
-    context: &CallContext,
+    context: &BoundedContext,
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, Interrupted> {
     use std::future::Future as _;
@@ -65,9 +76,9 @@ pub(crate) async fn within<T>(
 }
 
 pub(crate) async fn within_mutation<T>(
-    context: &CallContext,
+    context: &BoundedContext,
     future: impl std::future::Future<Output = T>,
-) -> Result<(T, Option<CallStop>), Interrupted> {
+) -> Result<(T, Option<BoundedStop>), Interrupted> {
     let mut future = std::pin::pin!(future);
     within(context, async {
         let reply = future.as_mut().await;
@@ -78,53 +89,6 @@ pub(crate) async fn within_mutation<T>(
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Interrupted {
-    pub(crate) stopped: CallStop,
+    pub(crate) stopped: BoundedStop,
     pub(crate) polled: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum CallStop {
-    Parent(Stopped),
-    Timeout,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct CallContext {
-    deadline: Deadline,
-    context: OperationContext,
-    uses_parent_deadline: bool,
-}
-
-impl CallContext {
-    pub(crate) fn new(parent: &OperationContext, timeout: Duration) -> Self {
-        let now = Instant::now();
-        let (deadline, uses_parent_deadline) = match parent.deadline() {
-            Some(deadline) if deadline.remaining_at(now) <= timeout => (deadline, true),
-            _ => (Deadline::new(now, timeout), false),
-        };
-        Self {
-            deadline,
-            context: OperationContext::new(Some(deadline), parent.cancellation().child_token()),
-            uses_parent_deadline,
-        }
-    }
-
-    pub(crate) fn remaining(&self) -> Duration {
-        self.deadline.remaining()
-    }
-
-    pub(crate) fn stopped(&self) -> Option<CallStop> {
-        self.context.stopped().map(|stopped| self.classify(stopped))
-    }
-
-    pub(crate) async fn wait_stopped(&self) -> CallStop {
-        self.classify(self.context.wait_stopped().await)
-    }
-
-    fn classify(&self, stopped: Stopped) -> CallStop {
-        match stopped {
-            Stopped::Deadline if !self.uses_parent_deadline => CallStop::Timeout,
-            _ => CallStop::Parent(stopped),
-        }
-    }
 }

@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
@@ -56,10 +57,6 @@ impl Violations {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "removing every profile with conditional input leaves the method without a caller"
-    )]
     pub(crate) fn record<T>(&mut self, result: Result<T, ValidationError>) -> Result<T, Rejected> {
         result.map_err(|error| self.reject(error))
     }
@@ -84,7 +81,7 @@ impl Violations {
         rejected
     }
 
-    pub(crate) fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
+    fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
         match admitted {
             Ok(value) if self.0.is_empty() => Ok(value),
             Ok(_) | Err(_) => Err(ValidationErrors(self.0)),
@@ -101,6 +98,10 @@ pub(crate) fn admit_with<T>(
 }
 
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "only optional profiles call validate_with in unit tests"
+)]
 pub(crate) fn validate_with(
     validate: impl FnOnce(&mut Violations),
 ) -> Result<(), ValidationErrors> {
@@ -110,20 +111,26 @@ pub(crate) fn validate_with(
     })
 }
 
+pub(crate) fn out_of_range(
+    key: &str,
+    low: impl std::fmt::Display,
+    high: impl std::fmt::Display,
+    got: impl std::fmt::Display,
+) -> ValidationError {
+    ValidationError::new(key, format!("must be between {low} and {high}, got {got}"))
+}
+
 pub(crate) fn duration_range(
     key: &str,
     value: Duration,
     range: RangeInclusive<Duration>,
 ) -> Result<(), ValidationError> {
     if !range.contains(&value) {
-        return Err(ValidationError::new(
+        return Err(out_of_range(
             key,
-            format!(
-                "must be between {} and {}, got {}",
-                crate::de::display_duration(*range.start()),
-                crate::de::display_duration(*range.end()),
-                crate::de::display_duration(value)
-            ),
+            crate::de::display_duration(*range.start()),
+            crate::de::display_duration(*range.end()),
+            crate::de::display_duration(value),
         ));
     }
     Ok(())
@@ -135,16 +142,26 @@ pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
     range: RangeInclusive<T>,
 ) -> Result<(), ValidationError> {
     if !range.contains(&value) {
-        return Err(ValidationError::new(
-            key,
-            format!(
-                "must be between {} and {}, got {value}",
-                range.start(),
-                range.end()
-            ),
-        ));
+        return Err(out_of_range(key, range.start(), range.end(), value));
     }
     Ok(())
+}
+
+pub(crate) fn nonzero_usize_range<T>(
+    key: &str,
+    value: T,
+    range: RangeInclusive<usize>,
+) -> Result<NonZeroUsize, ValidationError>
+where
+    T: Copy + TryInto<usize> + std::fmt::Display,
+{
+    if let Ok(narrow) = value.try_into()
+        && let Some(nonzero) = NonZeroUsize::new(narrow)
+        && range.contains(&narrow)
+    {
+        return Ok(nonzero);
+    }
+    Err(out_of_range(key, range.start(), range.end(), value))
 }
 
 pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
@@ -235,6 +252,28 @@ mod tests {
     #[case::above_maximum(11, false)]
     fn int_range_is_inclusive(#[case] value: u64, #[case] valid: bool) {
         assert_eq!(int_range("limit", value, 1..=10).is_ok(), valid);
+    }
+
+    #[rstest::rstest]
+    #[case::zero(0_u64, false)]
+    #[case::minimum(1_u64, true)]
+    #[case::maximum(10_u64, true)]
+    #[case::above_maximum(11_u64, false)]
+    #[case::above_usize(u64::MAX, false)]
+    fn nonzero_usize_range_parses_inclusive_bounds(#[case] value: u64, #[case] valid: bool) {
+        match nonzero_usize_range("limit", value, 1..=10) {
+            Ok(parsed) => {
+                assert!(valid);
+                assert_eq!(parsed.get(), usize::try_from(value).unwrap());
+            }
+            Err(error) => {
+                assert!(!valid);
+                assert_eq!(
+                    error.to_string(),
+                    format!("limit: must be between 1 and 10, got {value}")
+                );
+            }
+        }
     }
 
     #[rstest::rstest]
