@@ -46,7 +46,9 @@ impl RequestContext {
 pub fn query_problem(error: QueryError, not_found: impl FnOnce() -> Problem) -> Problem {
     match error {
         QueryError::NotFound => not_found(),
-        QueryError::Busy | QueryError::Unavailable => Problem::new(Code::ServiceUnavailable),
+        QueryError::Busy | QueryError::Unavailable | QueryError::ResourceLimit => {
+            Problem::new(Code::ServiceUnavailable)
+        }
         QueryError::Stopped(stopped) => Problem::from(stopped),
         QueryError::TooManyRows
         | QueryError::TooLarge

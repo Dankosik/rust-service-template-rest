@@ -65,6 +65,8 @@ pub enum QueryError {
     Busy,
     #[error("clickhouse query failed because the service is unavailable")]
     Unavailable,
+    #[error("clickhouse query exceeded a server time or memory limit")]
+    ResourceLimit,
     #[error("clickhouse rejected the query")]
     Rejected,
     #[error("clickhouse response could not be decoded")]
@@ -243,7 +245,9 @@ const fn clickhouse_code_reason(code: u32) -> FailureReason {
         497 => FailureReason::Access,
         164 => FailureReason::Readonly,
         16 | 47 | 53 | 60 | 81 => FailureReason::Schema,
-        62 | 456 | 457 => FailureReason::QueryInvalid,
+        36 | 43 | 46 | 62 | 70 | 117 | 130 | 153 | 215 | 386 | 456 | 457 => {
+            FailureReason::QueryInvalid
+        }
         158 | 307 | 396 => FailureReason::ResultLimit,
         159 => FailureReason::ServerTimeout,
         241 => FailureReason::MemoryLimit,
@@ -251,6 +255,21 @@ const fn clickhouse_code_reason(code: u32) -> FailureReason {
         319 => FailureReason::ServerUnknownStatus,
         _ => FailureReason::ServerError,
     }
+}
+
+pub(crate) const fn is_auth_failure(detail: FailureDetail) -> bool {
+    matches!(
+        detail.status_code,
+        Some(ResponseStatusCode::ClickHouse(516) | ResponseStatusCode::Http(401))
+    )
+}
+
+fn is_result_rows_limit_message(message: &str) -> bool {
+    message.contains("Limit for result exceeded") && message.contains("max rows")
+}
+
+pub(crate) fn is_header_schema_mismatch(message: &str) -> bool {
+    extract_exception_code(message) == Some(117) && message.contains("while reading header")
 }
 
 const fn http_status_reason(status: u16) -> FailureReason {
@@ -296,10 +315,14 @@ pub(crate) fn is_hyper_connect_error(error: &clickhouse::error::Error) -> bool {
 
 pub(crate) fn classify_query_error(
     error: &clickhouse::error::Error,
+    cardinality_capped: bool,
 ) -> ObservedFailure<QueryError> {
     match error {
         clickhouse::error::Error::RowNotFound => {
             ObservedFailure::with_reason(QueryError::NotFound, FailureReason::NotFound)
+        }
+        clickhouse::error::Error::ResultBytesLimitExceeded => {
+            ObservedFailure::with_reason(QueryError::TooLarge, FailureReason::ResultLimit)
         }
         clickhouse::error::Error::InvalidParams(_) => {
             ObservedFailure::with_reason(QueryError::Rejected, FailureReason::QueryInvalid)
@@ -318,9 +341,17 @@ pub(crate) fn classify_query_error(
         }
         clickhouse::error::Error::BadResponse(message) => {
             if let Some(code) = extract_exception_code(message) {
+                if cardinality_capped && code == 396 && is_result_rows_limit_message(message) {
+                    return ObservedFailure::new(
+                        QueryError::TooManyRows,
+                        FailureDetail::with_clickhouse_code(FailureReason::TooManyRows, code),
+                    );
+                }
                 let error = match code {
                     158 | 307 | 396 => QueryError::TooLarge,
-                    47 | 53 | 60 | 62 | 81 | 164 | 456 | 457 | 497 | 516 => QueryError::Rejected,
+                    159 | 241 => QueryError::ResourceLimit,
+                    16 | 36 | 43 | 46 | 47 | 53 | 60 | 62 | 70 | 81 | 117 | 130 | 153 | 164
+                    | 215 | 386 | 456 | 457 | 497 | 516 => QueryError::Rejected,
                     _ => QueryError::Unavailable,
                 };
                 ObservedFailure::new(
@@ -404,6 +435,7 @@ pub(crate) fn classify_metadata_error(
 
 pub(crate) fn classify_post_dispatch_insert_error(
     error: &clickhouse::error::Error,
+    single_row: bool,
 ) -> ObservedFailure<InsertError> {
     if is_hyper_connect_error(error) {
         return ObservedFailure::with_reason(
@@ -413,18 +445,23 @@ pub(crate) fn classify_post_dispatch_insert_error(
     }
     if let clickhouse::error::Error::BadResponse(message) = error {
         if let Some(code) = extract_exception_code(message) {
+            let header_mismatch = is_header_schema_mismatch(message);
             let mapped = match code {
-                252 => InsertError::NotApplied(InsertFailure::TooManyParts),
+                252 if single_row => InsertError::NotApplied(InsertFailure::TooManyParts),
                 307 => InsertError::NotApplied(InsertFailure::TooLarge),
-                16 | 47 | 53 | 60 | 81 | 164 | 497 | 516 => {
+                c if matches!(c, 16 | 47 | 53 | 60 | 81 | 164 | 497 | 516)
+                    || (c == 117 && (header_mismatch || single_row)) =>
+                {
                     InsertError::NotApplied(InsertFailure::Rejected)
                 }
                 _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
             };
-            return ObservedFailure::new(
-                mapped,
-                FailureDetail::with_clickhouse_code(clickhouse_code_reason(code), code),
-            );
+            let reason = if header_mismatch {
+                FailureReason::Schema
+            } else {
+                clickhouse_code_reason(code)
+            };
+            return ObservedFailure::new(mapped, FailureDetail::with_clickhouse_code(reason, code));
         }
         if let Some(status) = extract_http_status_from_bad_response(message) {
             let mapped = match status {

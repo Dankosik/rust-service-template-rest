@@ -19,13 +19,14 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use operation_context::{BoundedContext, BoundedStop};
 use secrecy::SecretString;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 #[doc(hidden)]
 pub use clickhouse as __clickhouse;
 pub use clickhouse::Row;
+pub use clickhouse::types::{Decimal32, Decimal64, Decimal128};
 pub mod serde {
     pub use clickhouse::serde::{time, uuid};
 }
@@ -35,8 +36,7 @@ use self::credentials::ActiveCredentials;
 use self::error::StartErrorKind;
 pub use self::error::{InsertError, InsertFailure, QueryError, StartError, UnknownOutcome};
 pub use self::insert::{
-    AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, InsertOutcomes, InsertReport,
-    WriteRow,
+    AsyncInsertOptions, BatchInsertOptions, InsertOutcomes, InsertReport, WriteRow,
 };
 use self::metadata::TableSlotRegistry;
 pub use self::observe::HISTOGRAMS;
@@ -73,7 +73,8 @@ pub struct ClickHouseOptions {
     pub query_settings: QuerySettings,
     pub query_timeout: Duration,
     pub insert_timeout: Duration,
-    pub max_concurrency: usize,
+    pub max_read_concurrency: usize,
+    pub max_write_concurrency: usize,
     pub max_result_rows: u64,
     pub max_result_bytes: usize,
     pub http_response_buffer_size: usize,
@@ -107,6 +108,7 @@ impl Drop for ClientHandle {
 
 pub(crate) struct Shared {
     credentials: ArcSwap<ActiveCredentials>,
+    password_refresh_trigger: Option<Arc<Notify>>,
     table_slots: TableSlotRegistry,
     endpoint: EndpointMetadata,
     metrics: ClientMetrics,
@@ -118,10 +120,24 @@ pub(crate) struct Shared {
     http_response_buffer_size: usize,
     max_memory_usage: Option<u64>,
     propagate_trace_context: bool,
-    permits: Arc<Semaphore>,
+    read_permits: Arc<Semaphore>,
+    write_permits: Arc<Semaphore>,
     closing: AtomicBool,
     shutdown: CancellationToken,
     tasks: TaskTracker,
+}
+
+impl Shared {
+    pub(crate) fn notify_auth_failure(&self) {
+        if let Some(trigger) = &self.password_refresh_trigger {
+            trigger.notify_one();
+        }
+    }
+}
+
+pub(crate) fn format_execution_timeout_secs(remaining: Duration) -> String {
+    let millis = remaining.as_millis().max(1);
+    format!("{}.{:03}", millis / 1_000, millis % 1_000)
 }
 
 impl ClickHouse {
@@ -140,12 +156,17 @@ impl ClickHouse {
     fn from_admitted(admitted: Admitted) -> Self {
         observe::describe();
         let metrics = ClientMetrics::register();
+        let password_refresh_trigger = admitted
+            .password_file
+            .as_ref()
+            .map(|_| Arc::new(Notify::new()));
         let shared = Arc::new(Shared {
             credentials: ArcSwap::from_pointee(ActiveCredentials {
                 cred_epoch: 1,
                 read_client: admitted.client,
                 password: admitted.password,
             }),
+            password_refresh_trigger: password_refresh_trigger.clone(),
             table_slots: TableSlotRegistry::new(),
             endpoint: admitted.endpoint,
             metrics,
@@ -157,15 +178,19 @@ impl ClickHouse {
             http_response_buffer_size: admitted.http_response_buffer_size,
             max_memory_usage: admitted.max_memory_usage,
             propagate_trace_context: admitted.propagate_trace_context,
-            permits: Arc::new(Semaphore::new(admitted.max_concurrency)),
+            read_permits: Arc::new(Semaphore::new(admitted.max_read_concurrency)),
+            write_permits: Arc::new(Semaphore::new(admitted.max_write_concurrency)),
             closing: AtomicBool::new(false),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
         });
-        if let Some(password_file) = admitted.password_file {
+        if let (Some(password_file), Some(trigger)) =
+            (admitted.password_file, password_refresh_trigger)
+        {
             shared.tasks.spawn(credentials::run_password_refresh(
                 Arc::clone(&shared),
                 password_file,
+                trigger,
             ));
         }
         Self {

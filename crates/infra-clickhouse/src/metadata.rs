@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use operation_context::BoundedContext;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -10,7 +10,7 @@ use crate::credentials::ActiveCredentials;
 use crate::error::{InsertError, ObservedFailure, classify_metadata_error, extract_exception_code};
 use crate::insert::{WriteRow, pre_dispatch_stop};
 use crate::observe::OperationGuard;
-use crate::within_bounded;
+use crate::{QuerySettings, Shared, format_execution_timeout_secs, within_bounded};
 
 pub(crate) const MAX_TABLE_SLOTS: usize = 256;
 
@@ -315,32 +315,59 @@ impl Drop for PrimeGuard {
     }
 }
 
+fn configure_prepare_client(
+    mut client: clickhouse::Client,
+    query_id: &str,
+    shared: &Shared,
+    guard: &OperationGuard<'_>,
+    remaining: Duration,
+) -> clickhouse::Client {
+    if shared.propagate_trace_context {
+        client = guard.inject_trace_context(client);
+    }
+    client = client.with_setting("query_id", query_id);
+    if shared.query_settings == QuerySettings::Client {
+        client = client
+            .with_setting(
+                "max_execution_time",
+                format_execution_timeout_secs(remaining),
+            )
+            .with_setting("timeout_overflow_mode", "throw");
+        if let Some(mem) = shared.max_memory_usage {
+            client = client.with_setting("max_memory_usage", mem.to_string());
+        }
+    }
+    client
+}
+
 pub(crate) async fn prepare_insert<R: WriteRow>(
     slot: &Arc<TableSlot>,
     table: &str,
-    credentials: &ArcSwap<ActiveCredentials>,
+    query_id: &str,
+    shared: &Shared,
     guard: &OperationGuard<'_>,
-    propagate_trace_context: bool,
     bounded: &BoundedContext,
 ) -> Result<(clickhouse::insert::Insert<R>, u64), ObservedFailure<InsertError>> {
+    let mut retried_warm_drift = false;
     loop {
         let notified = slot.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        let creds = credentials.load();
+        let creds = shared.credentials.load();
         match slot.acquire_step(&creds) {
             SlotStep::Ready { generation, client } => {
-                let call_client = if propagate_trace_context {
-                    guard.inject_trace_context(client)
-                } else {
-                    client
-                };
+                let call_client =
+                    configure_prepare_client(client, query_id, shared, guard, bounded.remaining());
                 match within_bounded(bounded, call_client.insert::<R>(table)).await {
                     Ok(Ok(insert)) => return Ok((insert, generation)),
                     Ok(Err(error)) => {
                         if is_schema_drift_error(&error) {
-                            slot.invalidate_if_gen(generation, &credentials.load());
+                            slot.invalidate_if_gen(generation, &shared.credentials.load());
+                            if !retried_warm_drift {
+                                retried_warm_drift = true;
+                                continue;
+                            }
                         }
                         return Err(classify_metadata_error(&error));
                     }
@@ -353,11 +380,8 @@ pub(crate) async fn prepare_insert<R: WriteRow>(
                 client,
             } => {
                 let prime_guard = PrimeGuard::new(Arc::clone(slot), generation, leader_id);
-                let call_client = if propagate_trace_context {
-                    guard.inject_trace_context(client)
-                } else {
-                    client
-                };
+                let call_client =
+                    configure_prepare_client(client, query_id, shared, guard, bounded.remaining());
                 match within_bounded(bounded, call_client.insert::<R>(table)).await {
                     Ok(Ok(insert)) => {
                         prime_guard.mark_populated();
@@ -366,7 +390,7 @@ pub(crate) async fn prepare_insert<R: WriteRow>(
                     Ok(Err(error)) => {
                         drop(prime_guard);
                         if is_schema_drift_error(&error) {
-                            slot.invalidate_if_gen(generation, &credentials.load());
+                            slot.invalidate_if_gen(generation, &shared.credentials.load());
                         }
                         return Err(classify_metadata_error(&error));
                     }
@@ -391,5 +415,6 @@ pub(crate) fn is_schema_drift_error(error: &clickhouse::error::Error) -> bool {
             error,
             clickhouse::error::Error::BadResponse(message)
                 if matches!(extract_exception_code(message), Some(16 | 47 | 53))
+                    || crate::error::is_header_schema_mismatch(message)
         )
 }

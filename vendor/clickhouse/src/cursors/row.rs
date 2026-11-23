@@ -44,6 +44,11 @@ impl<T> RowCursor<T> {
         }
     }
 
+    pub fn with_max_decoded_bytes(mut self, limit: u64) -> Self {
+        self.raw.set_max_decoded_bytes(limit);
+        self
+    }
+
     #[cold]
     #[inline(never)]
     fn poll_read_columns(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>>

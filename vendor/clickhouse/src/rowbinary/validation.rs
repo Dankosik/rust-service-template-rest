@@ -1,8 +1,9 @@
 use crate::error::{Error, Result};
 use crate::types::bf16;
+use crate::types::decimal;
 use crate::types::int256;
 use crate::{Row, row::RowKind, row_metadata::RowMetadata};
-use clickhouse_types::data_types::{Column, DataTypeNode, DecimalType, EnumType};
+use clickhouse_types::data_types::{Column, DataTypeNode, DateTimePrecision, DecimalType, EnumType};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -576,32 +577,51 @@ fn validate_impl<'serde, 'caller, R: Row>(
         SerdeType::I32
             if data_type == &DataTypeNode::Int32
                 || data_type == &DataTypeNode::Date32
-                || matches!(data_type, DataTypeNode::Time)
-                || matches!(
-                    data_type,
-                    DataTypeNode::Decimal(_, _, DecimalType::Decimal32)
-                ) =>
+                || matches!(data_type, DataTypeNode::Time) =>
         {
             Ok(None)
         }
         SerdeType::I64
             if data_type == &DataTypeNode::Int64
-                || matches!(data_type, DataTypeNode::DateTime64(_, _))
                 || matches!(data_type, DataTypeNode::Time64(_))
-                || matches!(
-                    data_type,
-                    DataTypeNode::Decimal(_, _, DecimalType::Decimal64)
-                )
                 || matches!(data_type, DataTypeNode::Interval(_)) =>
         {
             Ok(None)
         }
-        SerdeType::I128
-            if data_type == &DataTypeNode::Int128
-                || matches!(
-                    data_type,
-                    DataTypeNode::Decimal(_, _, DecimalType::Decimal128)
-                ) =>
+        SerdeType::I128 if data_type == &DataTypeNode::Int128 => Ok(None),
+        SerdeType::DateTime64(precision)
+            if matches!(
+                data_type,
+                DataTypeNode::DateTime64(col_prec, _)
+                    if datetime_precision_matches(col_prec, *precision)
+            ) =>
+        {
+            Ok(None)
+        }
+        SerdeType::Decimal32(scale)
+            if matches!(
+                data_type,
+                DataTypeNode::Decimal(_, col_scale, DecimalType::Decimal32)
+                    if col_scale == scale
+            ) =>
+        {
+            Ok(None)
+        }
+        SerdeType::Decimal64(scale)
+            if matches!(
+                data_type,
+                DataTypeNode::Decimal(_, col_scale, DecimalType::Decimal64)
+                    if col_scale == scale
+            ) =>
+        {
+            Ok(None)
+        }
+        SerdeType::Decimal128(scale)
+            if matches!(
+                data_type,
+                DataTypeNode::Decimal(_, col_scale, DecimalType::Decimal128)
+                    if col_scale == scale
+            ) =>
         {
             Ok(None)
         }
@@ -809,6 +829,10 @@ pub(crate) enum SerdeType {
     I32,
     I64,
     I128,
+    DateTime64(u8),
+    Decimal32(u8),
+    Decimal64(u8),
+    Decimal128(u8),
     U8,
     U16,
     U32,
@@ -844,6 +868,10 @@ impl Display for SerdeType {
             SerdeType::I32 => write!(f, "i32"),
             SerdeType::I64 => write!(f, "i64"),
             SerdeType::I128 => write!(f, "i128"),
+            SerdeType::DateTime64(precision) => write!(f, "DateTime64({precision})"),
+            SerdeType::Decimal32(scale) => write!(f, "Decimal32({scale})"),
+            SerdeType::Decimal64(scale) => write!(f, "Decimal64({scale})"),
+            SerdeType::Decimal128(scale) => write!(f, "Decimal128({scale})"),
             SerdeType::U8 => write!(f, "u8"),
             SerdeType::U16 => write!(f, "u16"),
             SerdeType::U32 => write!(f, "u32"),
@@ -922,3 +950,35 @@ impl EnumOrVariantIdentifier for i16 {
 
 const UUID_TUPLE_ELEMENTS: &[DataTypeNode; 2] = &[DataTypeNode::UInt64, DataTypeNode::UInt64];
 const POINT_TUPLE_ELEMENTS: &[DataTypeNode; 2] = &[DataTypeNode::Float64, DataTypeNode::Float64];
+
+fn datetime_precision_matches(col_prec: &DateTimePrecision, expected: u8) -> bool {
+    matches!(
+        (col_prec, expected),
+        (DateTimePrecision::Precision0, 0)
+            | (DateTimePrecision::Precision1, 1)
+            | (DateTimePrecision::Precision2, 2)
+            | (DateTimePrecision::Precision3, 3)
+            | (DateTimePrecision::Precision4, 4)
+            | (DateTimePrecision::Precision5, 5)
+            | (DateTimePrecision::Precision6, 6)
+            | (DateTimePrecision::Precision7, 7)
+            | (DateTimePrecision::Precision8, 8)
+            | (DateTimePrecision::Precision9, 9)
+    )
+}
+
+pub(crate) fn parse_scaled_newtype(name: &str) -> Option<SerdeType> {
+    if let Some(rest) = name.strip_prefix(decimal::DATETIME64_PREFIX) {
+        return rest.parse::<u8>().ok().map(SerdeType::DateTime64);
+    }
+    if let Some(rest) = name.strip_prefix(decimal::DECIMAL32_PREFIX) {
+        return rest.parse::<u8>().ok().map(SerdeType::Decimal32);
+    }
+    if let Some(rest) = name.strip_prefix(decimal::DECIMAL64_PREFIX) {
+        return rest.parse::<u8>().ok().map(SerdeType::Decimal64);
+    }
+    if let Some(rest) = name.strip_prefix(decimal::DECIMAL128_PREFIX) {
+        return rest.parse::<u8>().ok().map(SerdeType::Decimal128);
+    }
+    None
+}

@@ -3,6 +3,9 @@
         <no_dedup>
             <deduplicate_insert>disable</deduplicate_insert>
         </no_dedup>
+        <readonly_client_settings>
+            <readonly>2</readonly>
+        </readonly_client_settings>
     </profiles>
 
     <users>
@@ -34,5 +37,14 @@
             <profile>readonly</profile>
             <quota>default</quota>
         </app_ro>
+
+        <app_ro2>
+            <password>app_ro2</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>readonly_client_settings</profile>
+            <quota>default</quota>
+        </app_ro2>
     </users>
 </clickhouse>

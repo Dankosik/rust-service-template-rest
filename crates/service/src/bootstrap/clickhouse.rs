@@ -27,7 +27,8 @@ pub(super) async fn open(clickhouse: &ClickHouseConfig) -> Result<ClickHouse, St
         },
         query_timeout: clickhouse.query_timeout,
         insert_timeout: clickhouse.insert_timeout,
-        max_concurrency: clickhouse.max_concurrency.get(),
+        max_read_concurrency: clickhouse.max_read_concurrency.get(),
+        max_write_concurrency: clickhouse.max_write_concurrency.get(),
         max_result_rows: clickhouse.max_result_rows.get(),
         max_result_bytes: clickhouse.max_result_bytes.get(),
         http_response_buffer_size: clickhouse.http_response_buffer_size.get(),
@@ -43,9 +44,7 @@ mod tests {
 
     use axum::extract::State;
     use axum::http::StatusCode;
-    use infra_clickhouse::{
-        AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, ClickHouse, CloseOutcome,
-    };
+    use infra_clickhouse::{AsyncInsertOptions, BatchInsertOptions, ClickHouse, CloseOutcome};
     use infra_http::clickhouse::{insert_problem, query_problem};
     use infra_http::{Code, Problem, RequestContext};
 
@@ -95,8 +94,7 @@ mod tests {
                             "events_async",
                             "events",
                             &rows,
-                            AsyncInsertOptions::new()
-                                .deduplication(AsyncDeduplication::ByToken("tok")),
+                            AsyncInsertOptions::with_token("tok"),
                         )
                         .await
                         .map_err(insert_problem)?;
