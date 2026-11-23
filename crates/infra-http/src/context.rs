@@ -37,6 +37,9 @@ pub(super) struct RequestTracking {
     // template:begin object-storage:http-request-put-outcomes
     put_outcomes: std::sync::OnceLock<infra_object_storage::PutOutcomes>,
     // template:end object-storage:http-request-put-outcomes
+    // template:begin clickhouse:http-request-clickhouse-outcomes
+    clickhouse_insert_outcomes: std::sync::OnceLock<infra_clickhouse::InsertOutcomes>,
+    // template:end clickhouse:http-request-clickhouse-outcomes
 }
 
 impl RequestContext {
@@ -82,6 +85,16 @@ impl RequestContext {
         Some(BodyReadTracker::new(Arc::clone(tracking), deadline))
     }
     // template:end object-storage:http-observe-put-outcomes
+
+    // template:begin clickhouse:http-observe-clickhouse-outcomes
+    pub(super) fn clickhouse_insert_outcomes(&self) -> Option<&infra_clickhouse::InsertOutcomes> {
+        self.tracking.as_deref().map(|tracking| {
+            tracking
+                .clickhouse_insert_outcomes
+                .get_or_init(Default::default)
+        })
+    }
+    // template:end clickhouse:http-observe-clickhouse-outcomes
 }
 
 fn stopped_response(
@@ -108,6 +121,14 @@ fn stopped_response(
         ));
     }
     // template:end object-storage:http-stopped-put-outcome
+    // template:begin clickhouse:http-stopped-clickhouse-outcome
+    if tracking
+        .and_then(|tracking| tracking.clickhouse_insert_outcomes.get())
+        .is_some_and(infra_clickhouse::InsertOutcomes::has_unconfirmed_write)
+    {
+        return pending_problem(crate::clickhouse::with_unconfirmed_insert_detail(problem));
+    }
+    // template:end clickhouse:http-stopped-clickhouse-outcome
     pending_problem(problem)
 }
 
@@ -329,6 +350,9 @@ where
     // template:begin object-storage:http-opening-put-outcomes
     let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
+    // template:begin clickhouse:http-opening-clickhouse-outcomes
+    let track_request = track_request || !request.method().is_safe();
+    // template:end clickhouse:http-opening-clickhouse-outcomes
     let tracking: Option<Arc<RequestTracking>> = track_request.then(Arc::default);
     let version = request.version();
     let extensions = request.extensions_mut();

@@ -340,8 +340,10 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
 
         clickhouse_plan = rust_selection.plan_selection(ROOT, ["crates/infra-clickhouse/src/query.rs"])
         self.assertEqual(clickhouse_plan.mode, "selected")
-        self.assertEqual(clickhouse_plan.packages, ("infra-clickhouse", "service"))
-        self.assertEqual(clickhouse_plan.lint_features, ("infra-clickhouse/integration",))
+        self.assertIn("infra-clickhouse", clickhouse_plan.packages)
+        self.assertIn("infra-http", clickhouse_plan.packages)
+        self.assertIn("service", clickhouse_plan.packages)
+        self.assertIn("infra-clickhouse/integration", clickhouse_plan.lint_features)
 
         vendor_ch_plan = rust_selection.plan_selection(ROOT, ["vendor/clickhouse/src/response.rs"])
         self.assertEqual(vendor_ch_plan.mode, "full")

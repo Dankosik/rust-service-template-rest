@@ -515,9 +515,18 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
     .expect("batch ok");
     ch.insert_async(
         &ctx,
-        "async_hash",
+        "async_disabled",
         "events",
         &[SampleRow { id: 2 }],
+        AsyncInsertOptions::new(),
+    )
+    .await
+    .expect("async disabled ok");
+    ch.insert_async(
+        &ctx,
+        "async_hash",
+        "events",
+        &[SampleRow { id: 3 }],
         AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash),
     )
     .await
@@ -526,7 +535,7 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         &ctx,
         "async_tok",
         "events",
-        &[SampleRow { id: 3 }],
+        &[SampleRow { id: 4 }],
         AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("tok-a")),
     )
     .await
@@ -536,14 +545,33 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         let uris = captured_uris.lock().await;
         assert!(
             uris[0].contains("async_insert=0")
-                && uris[0].contains("insert_deduplication_token=tok-b")
+                && uris[0].contains("deduplicate_insert=enable")
+                && uris[0].contains("insert_deduplication_token=tok-b"),
+            "{}",
+            uris[0]
         );
         assert!(
             uris[1].contains("async_insert=1")
                 && uris[1].contains("wait_for_async_insert=1")
-                && uris[1].contains("async_insert_deduplicate=1")
+                && uris[1].contains("deduplicate_insert=disable"),
+            "{}",
+            uris[1]
         );
-        assert!(uris[2].contains("insert_deduplication_token=tok-a"));
+        assert!(
+            uris[2].contains("async_insert=1")
+                && uris[2].contains("wait_for_async_insert=1")
+                && uris[2].contains("deduplicate_insert=enable"),
+            "{}",
+            uris[2]
+        );
+        assert!(
+            uris[3].contains("async_insert=1")
+                && uris[3].contains("wait_for_async_insert=1")
+                && uris[3].contains("deduplicate_insert=enable")
+                && uris[3].contains("insert_deduplication_token=tok-a"),
+            "{}",
+            uris[3]
+        );
     }
 
     assert_eq!(

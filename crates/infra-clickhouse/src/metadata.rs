@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use crate::credentials::ActiveCredentials;
-use crate::error::{InsertError, classify_metadata_error, extract_exception_code};
+use crate::error::{InsertError, ObservedFailure, classify_metadata_error, extract_exception_code};
 use crate::insert::{WriteRow, pre_dispatch_stop};
 use crate::observe::OperationGuard;
 use crate::within_bounded;
@@ -322,7 +322,7 @@ pub(crate) async fn prepare_insert<R: WriteRow>(
     guard: &OperationGuard<'_>,
     propagate_trace_context: bool,
     bounded: &BoundedContext,
-) -> Result<(clickhouse::insert::Insert<R>, u64), InsertError> {
+) -> Result<(clickhouse::insert::Insert<R>, u64), ObservedFailure<InsertError>> {
     loop {
         let notified = slot.notify.notified();
         tokio::pin!(notified);
@@ -342,7 +342,7 @@ pub(crate) async fn prepare_insert<R: WriteRow>(
                         if is_schema_drift_error(&error) {
                             slot.invalidate_if_gen(generation, &credentials.load());
                         }
-                        return Err(InsertError::NotApplied(classify_metadata_error(&error)));
+                        return Err(classify_metadata_error(&error));
                     }
                     Err(stop) => return Err(pre_dispatch_stop(stop)),
                 }
@@ -368,7 +368,7 @@ pub(crate) async fn prepare_insert<R: WriteRow>(
                         if is_schema_drift_error(&error) {
                             slot.invalidate_if_gen(generation, &credentials.load());
                         }
-                        return Err(InsertError::NotApplied(classify_metadata_error(&error)));
+                        return Err(classify_metadata_error(&error));
                     }
                     Err(stop) => {
                         drop(prime_guard);

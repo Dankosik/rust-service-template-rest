@@ -2805,6 +2805,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "infra-bearerauthn",
+ "infra-clickhouse",
  "infra-http-transport",
  "infra-idempotency-store",
  "infra-object-storage",

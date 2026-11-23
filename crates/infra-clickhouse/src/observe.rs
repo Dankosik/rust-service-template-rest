@@ -8,7 +8,9 @@ use operation_context::Stopped;
 use tracing::Span;
 
 use crate::InsertReport;
-use crate::error::{InsertError, InsertFailure, QueryError};
+use crate::error::{
+    FailureDetail, FailureReason, InsertError, InsertFailure, ObservedFailure, QueryError,
+};
 
 const OPERATION_DURATION_METRIC: &str = "clickhouse_operation_duration_seconds";
 
@@ -215,7 +217,10 @@ struct OperationInner<'a> {
     started: Instant,
     metrics: &'a ClientMetrics,
     operation: Operation,
+    summary: &'static str,
+    endpoint: &'a EndpointMetadata,
     span: Span,
+    query_id: Option<String>,
     dispatched: bool,
 }
 
@@ -226,21 +231,77 @@ impl OperationInner<'_> {
         } else {
             Outcome::Cancelled
         };
-        self.finish(outcome);
+        self.finish(
+            outcome,
+            Some(FailureDetail::reason(FailureReason::FutureDropped)),
+        );
     }
 
-    fn finish(self, outcome: Outcome) {
+    fn finish(self, outcome: Outcome, detail: Option<FailureDetail>) {
         self.metrics.in_flight.decrement(1.0);
         if let Some(error_type) = outcome.error_type() {
-            tracing::record_all!(
-                self.span,
-                error.type = error_type,
-                otel.status_code = "ERROR",
-            );
+            let reason = detail.map(|item| item.reason.label());
+            let status_code = detail
+                .and_then(|item| item.status_code)
+                .map(|code| code.to_string());
+            self.span.record("error.type", error_type);
+            self.span.record("otel.status_code", "ERROR");
+            if let Some(reason) = reason {
+                self.span.record("clickhouse.error.reason", reason);
+            }
+            if let Some(status_code) = status_code.as_deref() {
+                self.span.record("db.response.status_code", status_code);
+            }
+            self.emit_failure_event(outcome, error_type, reason, status_code.as_deref());
         }
         self.metrics
             .histogram(self.operation, outcome)
             .record(self.started.elapsed());
+    }
+
+    fn emit_failure_event(
+        &self,
+        outcome: Outcome,
+        error_type: &'static str,
+        reason: Option<&'static str>,
+        status_code: Option<&str>,
+    ) {
+        self.span.in_scope(|| {
+            macro_rules! emit_failure {
+                ($level:expr) => {
+                    tracing::event!(
+                        $level,
+                        db.operation.name = self.operation.db_operation_name(),
+                        db.query.summary = self.summary,
+                        db.namespace = self.endpoint.database.as_str(),
+                        server.address = self.endpoint.host.as_str(),
+                        server.port = self.endpoint.port,
+                        clickhouse.operation = self.operation.label(),
+                        clickhouse.outcome = outcome.label(),
+                        clickhouse.error.reason = reason,
+                        db.response.status_code = status_code,
+                        clickhouse.query_id = self.query_id.as_deref(),
+                        error.type = error_type,
+                        "clickhouse_operation_failed"
+                    )
+                };
+            }
+
+            match outcome {
+                Outcome::Ok => {}
+                Outcome::NotFound
+                | Outcome::TooManyRows
+                | Outcome::TooLarge
+                | Outcome::Cancelled => emit_failure!(tracing::Level::DEBUG),
+                Outcome::TooManyParts
+                | Outcome::Encode
+                | Outcome::Decode
+                | Outcome::Rejected
+                | Outcome::Unavailable
+                | Outcome::Timeout
+                | Outcome::Unknown => emit_failure!(tracing::Level::WARN),
+            }
+        });
     }
 }
 
@@ -251,7 +312,7 @@ impl<'a> OperationGuard<'a> {
         metrics: &'a ClientMetrics,
         operation: Operation,
         summary: &'static str,
-        endpoint: &EndpointMetadata,
+        endpoint: &'a EndpointMetadata,
     ) -> Self {
         metrics.in_flight.increment(1.0);
         let span = tracing::info_span!(
@@ -264,6 +325,9 @@ impl<'a> OperationGuard<'a> {
             db.namespace = endpoint.database.as_str(),
             server.address = endpoint.host.as_str(),
             server.port = endpoint.port,
+            clickhouse.query_id = tracing::field::Empty,
+            db.response.status_code = tracing::field::Empty,
+            clickhouse.error.reason = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
@@ -272,15 +336,19 @@ impl<'a> OperationGuard<'a> {
                 started: Instant::now(),
                 metrics,
                 operation,
+                summary,
+                endpoint,
                 span,
+                query_id: None,
                 dispatched: false,
             },
             OperationInner::abandon,
         ))
     }
 
-    pub(crate) fn span(&self) -> Span {
-        self.0.span.clone()
+    pub(crate) fn record_query_id(&mut self, query_id: String) {
+        self.0.span.record("clickhouse.query_id", query_id.as_str());
+        self.0.query_id = Some(query_id);
     }
 
     pub(crate) fn mark_dispatched(&mut self) {
@@ -306,18 +374,18 @@ impl<'a> OperationGuard<'a> {
 
     pub(crate) fn finish_query<T>(
         self,
-        result: Result<(T, u64, u64), QueryError>,
+        result: Result<(T, u64, u64), ObservedFailure<QueryError>>,
     ) -> Result<T, QueryError> {
         let inner = DropGuard::dismiss(self.0);
         match result {
             Ok((value, rows, decoded_bytes)) => {
                 inner.metrics.record_read_ok(rows, decoded_bytes);
-                inner.finish(Outcome::Ok);
+                inner.finish(Outcome::Ok, None);
                 Ok(value)
             }
-            Err(error) => {
-                inner.finish(query_error_outcome(error));
-                Err(error)
+            Err(failure) => {
+                inner.finish(query_error_outcome(failure.error), Some(failure.detail));
+                Err(failure.error)
             }
         }
     }
@@ -325,18 +393,18 @@ impl<'a> OperationGuard<'a> {
     pub(crate) fn finish_insert(
         self,
         mode: InsertModeLabel,
-        result: Result<InsertReport, InsertError>,
+        result: Result<InsertReport, ObservedFailure<InsertError>>,
     ) -> Result<InsertReport, InsertError> {
         let inner = DropGuard::dismiss(self.0);
         match result {
             Ok(report) => {
                 inner.metrics.record_insert_ok(mode, report.rows);
-                inner.finish(Outcome::Ok);
+                inner.finish(Outcome::Ok, None);
                 Ok(report)
             }
-            Err(error) => {
-                inner.finish(insert_error_outcome(error));
-                Err(error)
+            Err(failure) => {
+                inner.finish(insert_error_outcome(failure.error), Some(failure.detail));
+                Err(failure.error)
             }
         }
     }

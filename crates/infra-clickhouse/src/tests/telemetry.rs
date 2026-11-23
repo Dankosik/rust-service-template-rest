@@ -106,11 +106,34 @@ async fn spawn_telemetry_server() -> TelemetryServer {
                 sn.notify_one();
                 rs.notified().await;
             }
+            if s.contains("hang_forever") {
+                std::future::pending::<()>().await;
+            }
             let (status, resp) = match () {
                 () if s.contains("too_many") => (StatusCode::OK, rbwnat_u64_rows("id", &[1, 2])),
                 () if s.contains("raw_db_err") => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Bytes::from_static(b"Code: 47. DB::Exception: SENSITIVE_RAW_SQL_LEAK_MARKER"),
+                ),
+                () if s.contains("auth_516") => (
+                    StatusCode::FORBIDDEN,
+                    Bytes::from_static(b"Code: 516. DB::Exception: Authentication failed"),
+                ),
+                () if s.contains("access_497") => (
+                    StatusCode::FORBIDDEN,
+                    Bytes::from_static(b"Code: 497. DB::Exception: Not enough privileges"),
+                ),
+                () if s.contains("readonly_164") => (
+                    StatusCode::FORBIDDEN,
+                    Bytes::from_static(b"Code: 164. DB::Exception: Cannot modify setting"),
+                ),
+                () if s.contains("timeout_159") => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Bytes::from_static(b"Code: 159. DB::Exception: Timeout exceeded"),
+                ),
+                () if s.contains("oom_241") => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Bytes::from_static(b"Code: 241. DB::Exception: Memory limit exceeded"),
                 ),
                 () => (StatusCode::OK, rbwnat_u64_rows("id", &[1])),
             };
@@ -309,6 +332,40 @@ async fn exercise_read_telemetry(
     );
 }
 
+async fn exercise_read_failure_diagnostics(ch: &ClickHouse, ctx: &OperationContext) {
+    for (summary, sql, expected) in [
+        ("auth_err", "SELECT auth_516", QueryError::Rejected),
+        ("access_err", "SELECT access_497", QueryError::Rejected),
+        ("readonly_err", "SELECT readonly_164", QueryError::Rejected),
+        (
+            "server_timeout_err",
+            "SELECT timeout_159",
+            QueryError::Unavailable,
+        ),
+        ("oom_err", "SELECT oom_241", QueryError::Unavailable),
+    ] {
+        assert_eq!(
+            ch.query(summary, sql).fetch_one::<SampleRow>(ctx).await,
+            Err(expected),
+            "{summary}"
+        );
+    }
+    assert_eq!(
+        ch.query("client_timeout_err", "SELECT hang_forever")
+            .timeout(Duration::from_millis(25))
+            .fetch_one::<SampleRow>(ctx)
+            .await,
+        Err(QueryError::Unavailable)
+    );
+    let short_parent = OperationContext::with_timeout(Duration::from_millis(25));
+    assert_eq!(
+        ch.query("parent_deadline_err", "SELECT hang_forever")
+            .fetch_one::<SampleRow>(&short_parent)
+            .await,
+        Err(QueryError::Stopped(operation_context::Stopped::Deadline))
+    );
+}
+
 fn otel_attr(span: &SpanData, key: &str) -> Option<String> {
     span.attributes
         .iter()
@@ -316,113 +373,330 @@ fn otel_attr(span: &SpanData, key: &str) -> Option<String> {
         .map(|kv| kv.value.as_str().into_owned())
 }
 
-fn assert_span_contracts(
-    finished: &[SpanData],
-    captured: &[observe_test_support::CapturedSpan],
+struct ExpectedSpan {
+    db_op: &'static str,
+    summary: &'static str,
+    error_type: Option<&'static str>,
+    reason: Option<&'static str>,
+    status_code: Option<&'static str>,
+    expect_query_id: bool,
+    event_level: Option<tracing::Level>,
+}
+
+impl ExpectedSpan {
+    const fn ok(db_op: &'static str, summary: &'static str) -> Self {
+        Self {
+            db_op,
+            summary,
+            error_type: None,
+            reason: None,
+            status_code: None,
+            expect_query_id: true,
+            event_level: None,
+        }
+    }
+
+    const fn err(
+        db_op: &'static str,
+        summary: &'static str,
+        error_type: &'static str,
+        reason: &'static str,
+        status_code: Option<&'static str>,
+        expect_query_id: bool,
+        event_level: tracing::Level,
+    ) -> Self {
+        Self {
+            db_op,
+            summary,
+            error_type: Some(error_type),
+            reason: Some(reason),
+            status_code,
+            expect_query_id,
+            event_level: Some(event_level),
+        }
+    }
+}
+
+const EXPECTED_SPANS: &[ExpectedSpan] = &[
+    ExpectedSpan::ok("SELECT", "read_ok_summary"),
+    ExpectedSpan::err(
+        "SELECT",
+        "too_many_summary",
+        "too_many_rows",
+        "too_many_rows",
+        None,
+        true,
+        tracing::Level::DEBUG,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "raw_err_summary",
+        "rejected",
+        "schema",
+        Some("47"),
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "auth_err",
+        "rejected",
+        "auth",
+        Some("516"),
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "access_err",
+        "rejected",
+        "access",
+        Some("497"),
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "readonly_err",
+        "rejected",
+        "readonly",
+        Some("164"),
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "server_timeout_err",
+        "unavailable",
+        "server_timeout",
+        Some("159"),
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "oom_err",
+        "unavailable",
+        "memory_limit",
+        Some("241"),
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "client_timeout_err",
+        "unavailable",
+        "client_timeout",
+        None,
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::err(
+        "SELECT",
+        "parent_deadline_err",
+        "timeout",
+        "parent_deadline",
+        None,
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::ok("INSERT", "batch_ok"),
+    ExpectedSpan::err(
+        "SELECT",
+        "drop_read",
+        "cancelled",
+        "future_dropped",
+        None,
+        true,
+        tracing::Level::DEBUG,
+    ),
+    ExpectedSpan::err(
+        "INSERT",
+        "drop_pre_dispatch",
+        "cancelled",
+        "future_dropped",
+        None,
+        false,
+        tracing::Level::DEBUG,
+    ),
+    ExpectedSpan::err(
+        "INSERT",
+        "drop_post_dispatch",
+        "outcome_unknown",
+        "future_dropped",
+        None,
+        true,
+        tracing::Level::WARN,
+    ),
+    ExpectedSpan::ok("SELECT", "no_tp_q"),
+];
+
+fn assert_single_span_and_event(
+    spec: &ExpectedSpan,
+    otel: &SpanData,
+    cap: &observe_test_support::CapturedSpan,
+    captured_events: &[observe_test_support::CapturedEvent],
     expected_address: &str,
     expected_port: &str,
 ) {
-    let expected = [
-        ("SELECT", "read_ok_summary", None),
-        ("SELECT", "too_many_summary", Some("too_many_rows")),
-        ("SELECT", "raw_err_summary", Some("rejected")),
-        ("INSERT", "batch_ok", None),
-        ("SELECT", "drop_read", Some("cancelled")),
-        ("INSERT", "drop_pre_dispatch", Some("cancelled")),
-        ("INSERT", "drop_post_dispatch", Some("outcome_unknown")),
-        ("SELECT", "no_tp_q", None),
-    ];
-    assert_eq!(finished.len(), expected.len());
-    assert_eq!(captured.len(), expected.len());
+    let summary = spec.summary;
+    assert_eq!(otel.span_kind, SpanKind::Client, "{summary}");
+    assert_eq!(otel.name.as_ref(), format!("{} {summary}", spec.db_op));
+    for (key, value) in [
+        ("db.system.name", "clickhouse"),
+        ("db.operation.name", spec.db_op),
+        ("db.query.summary", summary),
+        ("db.namespace", "app"),
+        ("server.address", expected_address),
+        ("server.port", expected_port),
+    ] {
+        assert_eq!(
+            otel_attr(otel, key).as_deref(),
+            Some(value),
+            "{summary}:{key}"
+        );
+        let cap_val = if key == "server.port" {
+            cap.field(key)
+        } else {
+            cap.unquoted(key)
+        };
+        assert_eq!(cap_val, Some(value), "{summary}:{key}");
+    }
+    assert_eq!(
+        otel_attr(otel, "clickhouse.query_id").is_some(),
+        spec.expect_query_id,
+        "{summary}"
+    );
+    assert_eq!(
+        cap.unquoted("clickhouse.query_id").is_some(),
+        spec.expect_query_id,
+        "{summary}"
+    );
+    assert_eq!(
+        otel_attr(otel, "db.response.status_code").as_deref(),
+        spec.status_code,
+        "{summary}"
+    );
+    assert_eq!(
+        cap.unquoted("db.response.status_code"),
+        spec.status_code,
+        "{summary}"
+    );
+    assert_eq!(
+        otel_attr(otel, "clickhouse.error.reason").as_deref(),
+        spec.reason,
+        "{summary}"
+    );
+    assert_eq!(
+        cap.unquoted("clickhouse.error.reason"),
+        spec.reason,
+        "{summary}"
+    );
 
-    for (db_op, summary, expected_error) in expected {
+    if let Some(error_type) = spec.error_type {
+        assert_eq!(
+            otel_attr(otel, "error.type").as_deref(),
+            Some(error_type),
+            "{summary}"
+        );
+        assert!(matches!(otel.status, Status::Error { .. }), "{summary}");
+        assert_eq!(cap.unquoted("error.type"), Some(error_type), "{summary}");
+        assert_eq!(cap.unquoted("otel.status_code"), Some("ERROR"), "{summary}");
+
+        let event = captured_events
+            .iter()
+            .find(|ev| ev.unquoted("db.query.summary") == Some(summary))
+            .unwrap_or_else(|| panic!("missing failure event for {summary}"));
+        assert_eq!(
+            event.message(),
+            Some("clickhouse_operation_failed"),
+            "{summary}"
+        );
+        assert_eq!(Some(event.level), spec.event_level, "{summary}");
+        assert_eq!(event.unquoted("error.type"), Some(error_type), "{summary}");
+        assert_eq!(
+            event.unquoted("clickhouse.error.reason"),
+            spec.reason,
+            "{summary}"
+        );
+        assert_eq!(
+            event.unquoted("db.response.status_code"),
+            spec.status_code,
+            "{summary}"
+        );
+        assert_eq!(
+            event.unquoted("clickhouse.query_id"),
+            cap.unquoted("clickhouse.query_id"),
+            "{summary}"
+        );
+    } else {
+        assert_eq!(otel_attr(otel, "error.type"), None, "{summary}");
+        assert_eq!(otel.status, Status::Unset, "{summary}");
+        assert_eq!(cap.unquoted("error.type"), None, "{summary}");
+        assert_eq!(cap.unquoted("otel.status_code"), None, "{summary}");
+        assert!(
+            !captured_events
+                .iter()
+                .any(|ev| ev.unquoted("db.query.summary") == Some(summary)),
+            "unexpected failure event for {summary}"
+        );
+    }
+}
+
+fn assert_span_contracts(
+    finished: &[SpanData],
+    captured: &[observe_test_support::CapturedSpan],
+    captured_events: &[observe_test_support::CapturedEvent],
+    expected_address: &str,
+    expected_port: &str,
+) {
+    assert_eq!(finished.len(), EXPECTED_SPANS.len());
+    assert_eq!(captured.len(), EXPECTED_SPANS.len());
+    let clickhouse_events: Vec<_> = captured_events
+        .iter()
+        .filter(|ev| ev.target.starts_with("infra_clickhouse"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        clickhouse_events.len(),
+        EXPECTED_SPANS
+            .iter()
+            .filter(|spec| spec.event_level.is_some())
+            .count()
+    );
+
+    for spec in EXPECTED_SPANS {
+        let summary = spec.summary;
         let mut otel_matches = finished
             .iter()
             .filter(|s| otel_attr(s, "db.query.summary").as_deref() == Some(summary));
-        let otel = otel_matches.next().unwrap_or_else(|| {
-            panic!("missing exported OTel span for summary {summary}");
-        });
+        let otel = otel_matches
+            .next()
+            .unwrap_or_else(|| panic!("missing exported OTel span for summary {summary}"));
         assert!(
             otel_matches.next().is_none(),
             "duplicate OTel span for {summary}"
-        );
-        assert_eq!(otel.span_kind, SpanKind::Client, "{summary}");
-        assert_eq!(otel.name.as_ref(), format!("{db_op} {summary}"));
-        assert_eq!(
-            otel_attr(otel, "db.system.name").as_deref(),
-            Some("clickhouse"),
-            "{summary}"
-        );
-        assert_eq!(
-            otel_attr(otel, "db.operation.name").as_deref(),
-            Some(db_op),
-            "{summary}"
-        );
-        assert_eq!(
-            otel_attr(otel, "db.query.summary").as_deref(),
-            Some(summary),
-            "{summary}"
-        );
-        assert_eq!(
-            otel_attr(otel, "db.namespace").as_deref(),
-            Some("app"),
-            "{summary}"
-        );
-        assert_eq!(
-            otel_attr(otel, "server.address").as_deref(),
-            Some(expected_address),
-            "{summary}"
-        );
-        assert_eq!(
-            otel_attr(otel, "server.port").as_deref(),
-            Some(expected_port),
-            "{summary}"
         );
 
         let mut cap_matches = captured
             .iter()
             .filter(|s| s.unquoted("db.query.summary") == Some(summary));
-        let cap = cap_matches.next().unwrap_or_else(|| {
-            panic!("missing captured tracing span for summary {summary}");
-        });
+        let cap = cap_matches
+            .next()
+            .unwrap_or_else(|| panic!("missing captured tracing span for summary {summary}"));
         assert!(
             cap_matches.next().is_none(),
             "duplicate captured span for {summary}"
         );
-        assert_eq!(
-            cap.unquoted("db.system.name"),
-            Some("clickhouse"),
-            "{summary}"
-        );
-        assert_eq!(cap.unquoted("db.operation.name"), Some(db_op), "{summary}");
-        assert_eq!(cap.unquoted("db.query.summary"), Some(summary), "{summary}");
-        assert_eq!(cap.unquoted("db.namespace"), Some("app"), "{summary}");
-        assert_eq!(
-            cap.unquoted("server.address"),
-            Some(expected_address),
-            "{summary}"
-        );
-        assert_eq!(cap.field("server.port"), Some(expected_port), "{summary}");
 
-        if let Some(error_type) = expected_error {
-            assert_eq!(
-                otel_attr(otel, "error.type").as_deref(),
-                Some(error_type),
-                "{summary}"
-            );
-            assert!(
-                matches!(otel.status, Status::Error { .. }),
-                "{summary}: expected OTel Status::Error, got {:?}",
-                otel.status
-            );
-            assert_eq!(cap.unquoted("error.type"), Some(error_type), "{summary}");
-            assert_eq!(cap.unquoted("otel.status_code"), Some("ERROR"), "{summary}");
-        } else {
-            assert_eq!(otel_attr(otel, "error.type"), None, "{summary}");
-            assert_eq!(otel.status, Status::Unset, "{summary}");
-            assert_eq!(cap.unquoted("error.type"), None, "{summary}");
-            assert_eq!(cap.unquoted("otel.status_code"), None, "{summary}");
-        }
+        assert_single_span_and_event(
+            spec,
+            otel,
+            cap,
+            &clickhouse_events,
+            expected_address,
+            expected_port,
+        );
     }
 }
 
@@ -436,7 +710,14 @@ fn assert_scrape_and_redaction(
 ) {
     let finished = exporter.get_finished_spans().expect("all spans");
     let captured_spans = spans.snapshot();
-    assert_span_contracts(&finished, &captured_spans, expected_address, expected_port);
+    let captured_events = events.snapshot();
+    assert_span_contracts(
+        &finished,
+        &captured_spans,
+        &captured_events,
+        expected_address,
+        expected_port,
+    );
 
     let scrape = recorder.handle().render();
     assert_eq!(
@@ -450,7 +731,9 @@ fn assert_scrape_and_redaction(
     for (operation, outcome, expected_count) in [
         ("fetch_one", "ok", 2),
         ("fetch_one", "too_many_rows", 1),
-        ("fetch_one", "rejected", 1),
+        ("fetch_one", "rejected", 4),
+        ("fetch_one", "unavailable", 3),
+        ("fetch_one", "timeout", 1),
         ("fetch_one", "cancelled", 1),
         ("insert_batch", "ok", 1),
         ("insert_batch", "cancelled", 1),
@@ -538,6 +821,7 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
 
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
     exercise_read_telemetry(&ch, &ctx, &srv, &recorder, &exporter).await;
+    exercise_read_failure_diagnostics(&ch, &ctx).await;
 
     ch.insert_batch(
         &ctx,

@@ -589,6 +589,8 @@
       "when": {"clickhouse": "http"},
       "remove_when_unselected": [
         "crates/infra-clickhouse/",
+        "crates/infra-http/src/clickhouse.rs",
+        "crates/infra-http/src/clickhouse/",
         "crates/config/src/clickhouse.rs",
         "crates/config/src/clickhouse/",
         "crates/service/src/bootstrap/clickhouse.rs",
