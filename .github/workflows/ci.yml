@@ -516,7 +516,7 @@ jobs:
           - shard: core-auth
             profiles: minimal authn-jwt authn-introspection outbound-oauth
           - shard: adapters-grpc
-            profiles: postgres cache-s3 grpc-service-auth
+            profiles: postgres cache-s3 grpc-service-auth temporal
           - shard: durable-full
             profiles: postgres-full messaging-outbox full
     steps:

@@ -174,6 +174,12 @@ deleted; selected ones stay inert until configured.
   File routes use the [HTTP upload and download helpers](crates/infra-http/src/object_storage.rs)
   with the configured [storage client](crates/infra-object-storage).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
+<!-- template:begin temporal:docs-readme-temporal-profile -->
+- `TEMPORAL=sdk`: durable workflows and heartbeating activities over Temporal
+  gRPC ([`infra-temporal`](crates/infra-temporal)), with a dedicated
+  [`temporal-worker`](crates/temporal-worker) binary and
+  [Temporal decisions](docs/decisions/temporal-decisions.md).
+<!-- template:end temporal:docs-readme-temporal-profile -->
 
 ## Run it
 

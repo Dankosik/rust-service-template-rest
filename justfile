@@ -69,9 +69,9 @@ lint:
     #!/usr/bin/env bash
     set -euo pipefail
     features=()
-    # template:begin postgres:just-lint-postgres
+    # template:begin integration:just-lint-integration-tests
     features+=(--features integration-tests/integration)
-    # template:end postgres:just-lint-postgres
+    # template:end integration:just-lint-integration-tests
     # template:begin messaging:just-lint-messaging
     features+=(--features infra-messaging/integration)
     # template:end messaging:just-lint-messaging
@@ -84,7 +84,9 @@ lint:
     # template:begin outbound-auth:just-lint-outbound-auth
     features+=(--features infra-oauth2-client-credentials/integration)
     # template:end outbound-auth:just-lint-outbound-auth
+    # template:begin temporal:just-lint-temporal
     features+=(--features infra-temporal/integration)
+    # template:end temporal:just-lint-temporal
     cargo clippy --workspace --all-targets --keep-going ${features[@]+"${features[@]}"} --locked -- -D warnings
     RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" \
         cargo doc --keep-going --workspace --no-deps --document-private-items ${features[@]+"${features[@]}"} --locked
@@ -385,10 +387,12 @@ test-integration-oauth *args:
     python3 -m scripts.integration oauth -- "$@"
 # template:end outbound-auth:just-outbound-auth-profile
 
+# template:begin temporal:just-temporal-profile
 # Run Temporal integration suite against throwaway Compose
 [positional-arguments]
 test-integration-temporal *args:
     python3 -m scripts.integration temporal -- "$@"
+# template:end temporal:just-temporal-profile
 
 # template:begin source-template:just-template-targets
 # Materialize selected agent harness files from .agents/

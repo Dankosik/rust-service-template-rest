@@ -8,9 +8,11 @@ tests:
       - &service_up
         series: 'up{job="service",instance="a"}'
         values: "1x300"
+      # template:begin temporal:monitoring-temporal-worker-anchor
       - &temporal_worker_up
         series: 'up{job="temporal-worker",instance="tw"}'
         values: "1x300"
+      # template:end temporal:monitoring-temporal-worker-anchor
       - &api_start
         series: 'process_start_time_seconds{job="service",instance="a"}'
         values: "100x300"
@@ -47,7 +49,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-2
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-2
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="POST",http_route="/v1/items",http_response_status_code="201"}'
         values: "0+199x150"
@@ -64,7 +68,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-3
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-3
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+50x60"
@@ -83,7 +89,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-4
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-4
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_request_method="GET",http_route="/v1/items",http_response_status_code="200"}'
         values: "0+100x30"
@@ -105,7 +113,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-5
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-5
       - *api_start
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
         values: "0+10x12"
@@ -146,7 +156,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-6
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-6
       - series: 'process_start_time_seconds{job="service",instance="a"}'
         values: "100x9 700x10"
       - series: 'http_server_request_duration_seconds_count{job="service",instance="a",http_response_status_code="200"}'
@@ -164,7 +176,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-7
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-7
       - series: 'up{job="service",instance="b"}'
         values: "1x30"
       - series: 'readiness_ready{job="service",instance="a"}'
@@ -191,7 +205,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-8
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-8
       - series: 'telemetry_log_records_dropped_total{job="service",instance="log",reason="queue_full"}'
         values: "0+1x20"
       - series: 'telemetry_log_sink_errors_total{job="service",instance="brief",operation="write"}'
@@ -229,7 +245,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-9
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-9
       - series: 'service_startup_trace_exporter_active{job="service",instance="a"}'
         values: "1x15"
       - series: 'process_start_time_seconds{job="service",instance="a"}'
@@ -286,7 +304,9 @@ tests:
   - name: "A job with no reachable target pages; the lost replica becomes a ticket"
     interval: 1m
     input_series:
+      # template:begin temporal:monitoring-temporal-up-10
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-10
       - series: 'up{job="service",instance="a"}'
         values: "0x30"
       - series: 'up{job="jobs-worker",instance="w"}'
@@ -303,7 +323,9 @@ tests:
   - name: "A service missing from discovery pages as down"
     interval: 1m
     input_series:
+      # template:begin temporal:monitoring-temporal-up-11
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-11
       - series: 'up{job="jobs-worker",instance="w"}'
         values: "1x10"
     promql_expr_test:
@@ -316,7 +338,9 @@ tests:
   - name: "Crash loops, withheld and flapping readiness open tickets; one restart does not"
     interval: 1m
     input_series:
+      # template:begin temporal:monitoring-temporal-up-12
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-12
       - series: 'up{job="service",instance="a"}'
         values: "1x20"
       - series: 'up{job="service",instance="b"}'
@@ -349,7 +373,9 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+      # template:begin temporal:monitoring-temporal-up-13
       - *temporal_worker_up
+      # template:end temporal:monitoring-temporal-up-13
       - series: 'runtime_scheduler_lag_seconds_count{job="service",instance="a"}'
         values: "0+600x30"
       - series: 'runtime_scheduler_lag_seconds_bucket{job="service",instance="a",le="0.1"}'
@@ -396,12 +422,16 @@ tests:
           - labels: 'ALERTS{alertname="MemoryNearLimit",alertstate="firing",job="service",instance="a",severity="ticket"}'
             value: 1
 
-  # template:begin grpc:monitoring-grpc-fixture
+  # template:begin grpc:monitoring-grpc-fixture-head
   - name: "gRPC server faults and slow unary calls burn their budgets; client errors, health checks and streams do not"
     interval: 1m
     input_series:
       - *service_up
+  # template:end grpc:monitoring-grpc-fixture-head
+      # template:begin grpc-temporal:monitoring-grpc-temporal-up-1
       - *temporal_worker_up
+      # template:end grpc-temporal:monitoring-grpc-temporal-up-1
+  # template:begin grpc:monitoring-grpc-fixture-mid
       - *api_start
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_type="unary",grpc_service="example.v1.Example",grpc_method="Get",grpc_code="OK"}'
         values: "0+90x30"
@@ -445,7 +475,11 @@ tests:
     interval: 1m
     input_series:
       - *service_up
+  # template:end grpc:monitoring-grpc-fixture-mid
+      # template:begin grpc-temporal:monitoring-grpc-temporal-up-2
       - *temporal_worker_up
+      # template:end grpc-temporal:monitoring-grpc-temporal-up-2
+  # template:begin grpc:monitoring-grpc-fixture-tail
       - *api_start
       - series: 'grpc_server_handled_total{job="service",instance="a",grpc_service="example.API",grpc_code="OK"}'
         values: "0+10x12"
@@ -462,14 +496,18 @@ tests:
         exp_samples:
           - labels: '{job="service"}'
             value: 1
-  # template:end grpc:monitoring-grpc-fixture
+  # template:end grpc:monitoring-grpc-fixture-tail
 
-  # template:begin postgres:monitoring-postgres-fixture
+  # template:begin postgres:monitoring-postgres-fixture-head
   - name: "Sustained pooled-connection waits open a ticket for that instance only"
     interval: 1m
     input_series:
       - *service_up
+  # template:end postgres:monitoring-postgres-fixture-head
+      # template:begin postgres-temporal:monitoring-postgres-temporal-up
       - *temporal_worker_up
+      # template:end postgres-temporal:monitoring-postgres-temporal-up
+  # template:begin postgres:monitoring-postgres-fixture-tail
       - series: 'db_client_connection_wait_time_seconds_count{job="service",instance="a",db_client_connection_pool_name="postgres"}'
         values: "0+100x40"
       - series: 'db_client_connection_wait_time_seconds_bucket{job="service",instance="a",db_client_connection_pool_name="postgres",le="0.1"}'
@@ -484,14 +522,18 @@ tests:
         exp_samples:
           - labels: 'ALERTS{alertname="PostgresPoolSaturated",alertstate="firing",job="service",instance="a",severity="ticket"}'
             value: 1
-  # template:end postgres:monitoring-postgres-fixture
+  # template:end postgres:monitoring-postgres-fixture-tail
 
-  # template:begin jobs:monitoring-jobs-fixture
+  # template:begin jobs:monitoring-jobs-fixture-head
   - name: "A stalled job kind and a stale queue sample open tickets"
     interval: 1m
     input_series:
       - *service_up
+  # template:end jobs:monitoring-jobs-fixture-head
+      # template:begin jobs-temporal:monitoring-jobs-temporal-up
       - *temporal_worker_up
+      # template:end jobs-temporal:monitoring-jobs-temporal-up
+  # template:begin jobs:monitoring-jobs-fixture-tail
       - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w1"}'
         values: "0+60x20"
       - series: 'jobs_observation_timestamp_seconds{job="jobs-worker",instance="w2"}'
@@ -557,7 +599,7 @@ tests:
         exp_samples:
           - labels: 'ALERTS{alertname="JobsDeadLettered",alertstate="firing",kind="email",severity="ticket"}'
             value: 1
-  # template:end jobs:monitoring-jobs-fixture
+  # template:end jobs:monitoring-jobs-fixture-tail
 
   # template:begin messaging:monitoring-messaging-fixture
   - name: "First and later dead-letter publication attempts open timed tickets naming the reason and outcome"
@@ -604,6 +646,7 @@ tests:
             value: 1
   # template:end messaging:monitoring-messaging-fixture
 
+  # template:begin temporal:monitoring-temporal-fixtures
   - name: "TemporalWorkerUnavailable pages when temporal-worker targets are absent, unreachable, or all unready"
     interval: 1m
     input_series:
@@ -786,3 +829,4 @@ tests:
             value: 1
           - labels: 'ALERTS{alertname="MemoryNearLimit",alertstate="firing",instance="tw",job="temporal-worker",severity="ticket"}'
             value: 1
+  # template:end temporal:monitoring-temporal-fixtures

@@ -80,7 +80,9 @@ def _retained_and_pruned_binaries(root: Path = lib.ROOT) -> tuple[list[str], lis
     for crate, binary in (
         ("crates/migrate", "/migrate"),
         ("crates/jobs-worker", "/jobs-worker"),
+        # template:begin temporal:image-temporal-binary
         ("crates/temporal-worker", "/temporal-worker"),
+        # template:end temporal:image-temporal-binary
     ):
         (retained if (root / crate).is_dir() else pruned).append(binary)
     return retained, pruned
@@ -131,8 +133,10 @@ def _smoke_check(
     container = f"service-runtime-check-{os.getpid()}-{int(time.time())}"
     worker = f"{container}-jobs-worker"
     worker_created = False
+    # template:begin temporal:image-temporal-vars
     temporal_worker = f"{container}-temporal-worker"
     temporal_worker_created = False
+    # template:end temporal:image-temporal-vars
     try:
         docker_args = [
             "docker", "run", "-d", "--name", container,
@@ -222,6 +226,7 @@ def _smoke_check(
                 raise lib.ScriptError(f"jobs-worker unexpected startup refusal (exit {worker_exit})\n{worker_out}")
             print("jobs-worker refused before dependency I/O")
 
+        # template:begin temporal:image-temporal-smoke
         if (lib.ROOT / "crates/temporal-worker").is_dir():
             temporal_worker_created = True
             lib.run([
@@ -238,9 +243,12 @@ def _smoke_check(
             if tw_exit != "1" or expected_tw_msg not in tw_out:
                 raise lib.ScriptError(f"temporal-worker unexpected startup refusal (exit {tw_exit})\n{tw_out}")
             print("temporal-worker refused before dependency I/O")
+        # template:end temporal:image-temporal-smoke
     finally:
+        # template:begin temporal:image-temporal-cleanup
         if temporal_worker_created:
             lib.run(["docker", "rm", "-f", "-v", temporal_worker], capture=True, check=False)
+        # template:end temporal:image-temporal-cleanup
         if worker_created:
             lib.run(["docker", "rm", "-f", "-v", worker], capture=True, check=False)
         lib.run(["docker", "rm", "-f", "-v", container], capture=True, check=False)

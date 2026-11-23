@@ -6,7 +6,10 @@ use crate::load::{
     ErrorKind, InputError, load_from, load_temporal_worker_from,
     load_temporal_worker_with_tail_from,
 };
-use crate::test_support::{BUILD, env, load_env, load_temporal_worker_env, load_worker_env, write};
+// template:begin worker:temporal-worker-tests-import
+use crate::test_support::load_worker_env;
+// template:end worker:temporal-worker-tests-import
+use crate::test_support::{BUILD, env, load_env, load_temporal_worker_env, write};
 
 const TEMPORAL_TAIL: ShutdownTail =
     ShutdownTail::new(Duration::from_millis(16_500), "temporal shutdown tail");
@@ -21,9 +24,11 @@ fn defaults_match_temporal_worker_budgets_while_service_and_jobs_worker_stay_at_
     assert_eq!(service.http().grace_period, Duration::from_secs(45));
     assert_eq!(service.http().drain_timeout, Duration::from_secs(25));
 
+    // template:begin worker:temporal-worker-tests-jobs-worker
     let jobs_worker = load_worker_env(&[]);
     assert_eq!(jobs_worker.http().grace_period, Duration::from_secs(45));
     assert_eq!(jobs_worker.http().drain_timeout, Duration::from_secs(25));
+    // template:end worker:temporal-worker-tests-jobs-worker
 
     let worker = load_with_tail(&[]).unwrap();
     assert_eq!(worker.app().version, "1.2.3");

@@ -12,6 +12,7 @@ license = "MIT"
 git = [{ path = "LICENSE", checksum = "71674605ec4c087fe9eb534e3e4f9e26eb2e4aabcd76a29fd156c6a844d44b3d" }]
 # template:end object-storage:docker-rust-notices-simd
 
+# template:begin temporal:docker-rust-notices-temporal
 [temporalio-client.clarify]
 license = "MIT"
 files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
@@ -43,3 +44,4 @@ files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c1
 [temporalio-workflow.clarify]
 license = "MIT"
 files = [{ path = "LICENSE.txt", checksum = "cf8fe04521deeb6f99f644570bc8bee71c11dc410dbb72bccfb3a51829860c7b" }]
+# template:end temporal:docker-rust-notices-temporal

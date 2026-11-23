@@ -79,8 +79,10 @@ migrate = { workspace = true }
 # template:begin http-idempotency:service-http-idempotency-dependency
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:service-http-idempotency-dependency
+# template:begin temporal:service-temporal-dependency
 infra-temporal = { workspace = true }
 operation-context = { workspace = true }
+# template:end temporal:service-temporal-dependency
 infra-telemetry = { workspace = true }
 service-config = { workspace = true }
 # template:begin service-secrets:service-secrecy-dependency

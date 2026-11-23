@@ -28,7 +28,11 @@ def _db_test_args(root: Path = lib.ROOT) -> list[str]:
     manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     args: list[str] = []
     for target in manifest.get("test", ()):
-        if "integration" in target.get("required-features", ()) and target["name"] != "temporal":
+        # template:begin temporal:integration-db-skip-temporal
+        if target["name"] == "temporal":
+            continue
+        # template:end temporal:integration-db-skip-temporal
+        if "integration" in target.get("required-features", ()):
             args.extend(["--test", target["name"]])
     return args
 
@@ -100,6 +104,7 @@ def cmd_compile(suite: str) -> None:
             ],
             env=lib.clean_pg_env({"OAUTH_TEST_KEYCLOAK_URL": "compile-only"}),
         )
+    # template:begin temporal:integration-compile-temporal
     if (lib.ROOT / "crates/infra-temporal").is_dir():
         temporal_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": "compile-only"})
         lib.run(
@@ -110,6 +115,7 @@ def cmd_compile(suite: str) -> None:
             ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", "--test", "temporal", "--no-run"],
             env=temporal_env,
         )
+    # template:end temporal:integration-compile-temporal
 
 
 def cmd_db(extra: Sequence[str], *, with_sqlx_check: bool = False) -> None:
@@ -372,6 +378,7 @@ def cmd_oauth(extra: Sequence[str]) -> None:
         lib.run(cmd, env=env)
 
 
+# template:begin temporal:integration-cmd-temporal
 def cmd_temporal(extra: Sequence[str]) -> None:
     if not (lib.ROOT / "crates/infra-temporal").is_dir():
         raise lib.ScriptError("temporal profile not present", exit_code=2)
@@ -399,6 +406,7 @@ def cmd_temporal(extra: Sequence[str]) -> None:
         run_env = lib.clean_pg_env({"TEMPORAL_ADDRESS": f"127.0.0.1:{port}"})
         lib.run(adapter_cmd, env=run_env)
         lib.run(fixture_cmd, env=run_env)
+# template:end temporal:integration-cmd-temporal
 
 
 def _verify_sqlx_cli() -> None:
@@ -440,7 +448,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     db_p = sub.add_parser("db")
     db_p.add_argument("--with-sqlx-check", action="store_true")
     db_p.add_argument("cargo_args", nargs=argparse.REMAINDER)
-    for name in ("cache", "object-storage", "messaging", "oauth", "temporal"):
+    for name in (
+        "cache",
+        "object-storage",
+        "messaging",
+        "oauth",
+        # template:begin temporal:integration-subparser-temporal
+        "temporal",
+        # template:end temporal:integration-subparser-temporal
+    ):
         p = sub.add_parser(name)
         p.add_argument("cargo_args", nargs=argparse.REMAINDER)
     sqlx_p = sub.add_parser("sqlx-prepare")
@@ -465,7 +481,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "object-storage": cmd_object_storage,
                     "messaging": cmd_messaging,
                     "oauth": cmd_oauth,
+                    # template:begin temporal:integration-dispatch-temporal
                     "temporal": cmd_temporal,
+                    # template:end temporal:integration-dispatch-temporal
                 }[args.command](extra)
 
     return lib.run_cli(_dispatch)

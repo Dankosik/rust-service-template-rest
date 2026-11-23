@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,7 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(cache_only["sqlx_check"])
         self.assertFalse(cache_only["integration_object_storage"])
         self.assertFalse(cache_only["integration_messaging"])
+        self.assertFalse(cache_only["integration_temporal"])
 
         s3_only = DETECT.classify(ROOT, ["crates/infra-object-storage/src/download.rs"])
         self.assertTrue(s3_only["integration"])
@@ -70,6 +72,7 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(s3_only["sqlx_check"])
         self.assertFalse(s3_only["integration_cache"])
         self.assertFalse(s3_only["integration_messaging"])
+        self.assertFalse(s3_only["integration_temporal"])
 
         aws_runtime_only = DETECT.classify(
             ROOT, ["vendor/aws-runtime/src/content_encoding/body/http_body_1_x.rs"]
@@ -82,6 +85,7 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(aws_runtime_only["integration_db"])
         self.assertFalse(aws_runtime_only["integration_cache"])
         self.assertFalse(aws_runtime_only["integration_messaging"])
+        self.assertFalse(aws_runtime_only["integration_temporal"])
 
         pg_only = DETECT.classify(ROOT, ["crates/infra-postgres/src/pool.rs"])
         self.assertTrue(pg_only["integration"])
@@ -90,17 +94,44 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(pg_only["integration_cache"])
         self.assertFalse(pg_only["integration_object_storage"])
         self.assertFalse(pg_only["integration_messaging"])
+        self.assertFalse(pg_only["integration_temporal"])
+
+        for temporal_path in (
+            "crates/infra-temporal/src/client.rs",
+            "crates/temporal-worker/src/main.rs",
+            "test/tests/temporal.rs",
+        ):
+            temporal_only = DETECT.classify(ROOT, [temporal_path])
+            self.assertTrue(temporal_only["rust"], temporal_path)
+            self.assertTrue(temporal_only["integration"], temporal_path)
+            self.assertTrue(temporal_only["integration_temporal"], temporal_path)
+            self.assertFalse(temporal_only["integration_db"], temporal_path)
+            self.assertFalse(temporal_only["sqlx_check"], temporal_path)
+            self.assertFalse(temporal_only["integration_cache"], temporal_path)
+            self.assertFalse(temporal_only["integration_object_storage"], temporal_path)
+            self.assertFalse(temporal_only["integration_messaging"], temporal_path)
+
+        temporal_fixture = DETECT.classify(ROOT, ["test/src/bin/temporal_worker_fixture.rs"])
+        self.assertTrue(temporal_fixture["rust"])
+        self.assertTrue(temporal_fixture["integration"])
+        self.assertTrue(temporal_fixture["integration_temporal"])
+        self.assertFalse(temporal_fixture["sqlx_check"])
+        self.assertFalse(temporal_fixture["integration_cache"])
+        self.assertFalse(temporal_fixture["integration_object_storage"])
+        self.assertFalse(temporal_fixture["integration_messaging"])
 
         util_test = DETECT.classify(ROOT, ["crates/utility-recipes/tests/utility_values.rs"])
         self.assertTrue(util_test["rust"])
         self.assertFalse(util_test["integration"])
         self.assertFalse(util_test["integration_db"])
+        self.assertFalse(util_test["integration_temporal"])
 
         with tempfile.TemporaryDirectory() as tmp:
             empty = Path(tmp)
             all_empty = DETECT.classify(empty, None)
             self.assertFalse(all_empty["grpc"])
             self.assertFalse(all_empty["migrations"])
+            self.assertFalse(all_empty["integration_temporal"])
             self.assertFalse(all_empty["template"])
             self.assertTrue(all_empty["rust"])
 
@@ -110,6 +141,12 @@ class DetectChangesTests(unittest.TestCase):
             oauth_only = DETECT.classify(empty, None)
             self.assertTrue(oauth_only["oauth"])
             self.assertFalse(oauth_only["integration"])
+            self.assertFalse(oauth_only["integration_temporal"])
+
+            (empty / "crates/infra-temporal").mkdir(parents=True)
+            with_temporal = DETECT.classify(empty, None)
+            self.assertTrue(with_temporal["integration"])
+            self.assertTrue(with_temporal["integration_temporal"])
 
         lib_res = DETECT.classify(ROOT, ["scripts/lib.py"])
         self.assertTrue(lib_res["rust"])
@@ -159,10 +196,108 @@ class TemplateInitValidationTests(unittest.TestCase):
             template_init.validate_inputs(template_init.InitInputs(**{**base, "jobs": "postgres"}))
         with self.assertRaises(template_init.InitError):
             template_init.validate_inputs(template_init.InitInputs(**{**base, "service_auth": "jwt"}))
+        with self.assertRaises(template_init.InitError):
+            template_init.validate_inputs(template_init.InitInputs(**{**base, "temporal": "invalid"}))
+        self.assertEqual(
+            template_init.validate_inputs(template_init.InitInputs(**{**base, "temporal": "sdk"})).temporal,
+            "sdk",
+        )
         resolved = template_init.validate_inputs(
             template_init.InitInputs(**{**base, "outbound_auth": "oauth2-client-credentials"})
         )
         self.assertEqual(resolved.outbound_http, "bounded")
+
+    def test_temporal_profile_projection_isolation_and_monitoring_rules(self) -> None:
+        promtool = shutil.which("promtool")
+        temporal_removed_paths = (
+            "crates/infra-temporal",
+            "crates/temporal-worker",
+            "crates/config/src/temporal.rs",
+            "crates/config/src/temporal",
+            "crates/config/src/temporal_worker.rs",
+            "crates/config/src/temporal_worker",
+            "crates/infra-http/src/temporal.rs",
+            "crates/service/src/bootstrap/temporal.rs",
+            "test/src/bin/temporal_worker_fixture.rs",
+            "test/tests/temporal.rs",
+            "docs/decisions/temporal-decisions.md",
+        )
+
+        def check_promtool(staged: Path, profile: str) -> None:
+            if promtool is None:
+                return
+            rules = sorted(staged.glob("env/monitoring/*.rules.yml"))
+            tests = sorted(staged.glob("env/monitoring/tests/*-rules.yml"))
+            for cmd in (
+                [promtool, "check", "rules", *(str(p) for p in rules)],
+                [promtool, "test", "rules", *(str(p) for p in tests)],
+            ):
+                res = subprocess.run(cmd, cwd=staged, capture_output=True, text=True, check=False)
+                self.assertEqual(res.returncode, 0, f"{profile}: {cmd}\n{res.stdout}\n{res.stderr}")
+
+        with tempfile.TemporaryDirectory(prefix="proj-minimal-temporal-") as tmp:
+            staged = Path(tmp) / "repo"
+            template_init.project_tree(
+                ROOT, staged, template_check._inputs_for("minimal"), run_cargo=False, from_git_head=False
+            )
+            for rel in (*temporal_removed_paths, "crates/json-payload", "vendor/tonic"):
+                self.assertFalse((staged / rel).exists(), f"minimal retained {rel}")
+            for rel in (
+                "Cargo.toml",
+                "deny.toml",
+                "build/docker/Dockerfile",
+                "build/docker/rust-notices.toml",
+                ".dockerignore",
+                "env/config/local.toml",
+                "env/monitoring/service.rules.yml",
+                "env/monitoring/tests/service-rules.yml",
+                "README.md",
+                "docs/alerting.md",
+                "docs/production-contract.md",
+            ):
+                self.assertNotIn("temporal", (staged / rel).read_text(encoding="utf-8").lower(), f"minimal leaked temporal into {rel}")
+            check_promtool(staged, "minimal")
+
+        with tempfile.TemporaryDirectory(prefix="proj-temporal-only-") as tmp:
+            staged = Path(tmp) / "repo"
+            template_init.project_tree(
+                ROOT, staged, template_check._inputs_for("temporal"), run_cargo=False, from_git_head=False
+            )
+            for rel in (*temporal_removed_paths, "crates/json-payload", "vendor/tonic"):
+                self.assertTrue((staged / rel).exists(), f"temporal missing {rel}")
+            for rel in ("crates/jobs-worker", "crates/infra-jobs", "crates/infra-grpc", "test/src/bin/jobs_worker_fixture.rs"):
+                self.assertFalse((staged / rel).exists(), f"temporal unexpectedly retained {rel}")
+            http_rs = (staged / "crates/config/src/http.rs").read_text(encoding="utf-8")
+            self.assertIn("pub struct WorkerHttpConfig", http_rs)
+            self.assertIn("pub(crate) type TemporalWorkerHttpInput", http_rs)
+            self.assertNotIn("pub(crate) type WorkerHttpInput", http_rs)
+            self.assertIn("pub use http::WorkerHttpConfig;", (staged / "crates/config/src/lib.rs").read_text(encoding="utf-8"))
+            self.assertIn("!vendor/tonic/", (staged / ".dockerignore").read_text(encoding="utf-8"))
+            dockerfile = (staged / "build/docker/Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("COPY --from=planner /src/vendor/tonic /src/vendor/tonic", dockerfile)
+            self.assertIn("temporal-worker-build", dockerfile)
+            self.assertNotIn("jobs-worker-build", dockerfile)
+            deny_text = (staged / "deny.toml").read_text(encoding="utf-8")
+            self.assertIn('"0BSD"', deny_text)
+            self.assertIn('"temporalio-common-wasm"', deny_text)
+            self.assertNotIn("lru@0.18", deny_text)
+            check_promtool(staged, "temporal")
+
+        for profile in ("postgres-full", "grpc-service-auth", "full"):
+            with tempfile.TemporaryDirectory(prefix=f"proj-{profile}-mon-") as tmp:
+                staged = Path(tmp) / "repo"
+                template_init.project_tree(
+                    ROOT, staged, template_check._inputs_for(profile), run_cargo=False, from_git_head=False
+                )
+                rules_text = (staged / "env/monitoring/service.rules.yml").read_text(encoding="utf-8")
+                fixtures_text = (staged / "env/monitoring/tests/service-rules.yml").read_text(encoding="utf-8")
+                if profile == "full":
+                    self.assertIn("service-temporal", rules_text)
+                    self.assertIn("lru@0.18", (staged / "deny.toml").read_text(encoding="utf-8"))
+                else:
+                    self.assertNotIn("temporal", rules_text.lower(), f"{profile} leaked temporal into service.rules.yml")
+                    self.assertNotIn("temporal", fixtures_text.lower(), f"{profile} leaked temporal into service-rules.yml")
+                check_promtool(staged, profile)
 
     def test_prune_mise_lock_keeps_only_retained_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

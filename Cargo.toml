@@ -5,8 +5,10 @@ exclude = [
     "vendor/hotpath",
 # template:begin grpc:workspace-grpc-generator
     "tools/grpc-codegen",
-    "vendor/tonic",
 # template:end grpc:workspace-grpc-generator
+# template:begin tonic:workspace-tonic-vendor-exclude
+    "vendor/tonic",
+# template:end tonic:workspace-tonic-vendor-exclude
 # template:begin postgres:workspace-postgres-vendor-exclude
     "vendor/sqlx-core",
     "vendor/sqlx-postgres",
@@ -34,7 +36,9 @@ publish = false
 hotpath = { version = "=0.28.4", default-features = false }
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
+# template:begin json-payload:workspace-json-payload-crate
 json-payload = { path = "crates/json-payload" }
+# template:end json-payload:workspace-json-payload-crate
 operation-context = { path = "crates/operation-context" }
 shared-rules = { path = "crates/shared-rules" }
 infra-http = { path = "crates/infra-http" }
@@ -88,8 +92,10 @@ infra-object-storage = { path = "crates/infra-object-storage" }
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
+# template:begin temporal:workspace-temporal-crates
 infra-temporal = { path = "crates/infra-temporal" }
 temporal-worker = { path = "crates/temporal-worker" }
+# template:end temporal:workspace-temporal-crates
 
 # template:begin postgres:workspace-postgres-dependencies
 sqlx = { version = "0.9.0", default-features = false }
@@ -134,6 +140,7 @@ aws-smithy-types = { version = "=1.9.3", default-features = false }
 # A request body (axum's `Body`) is not `Sync`; the SDK requires one.
 sync_wrapper = { version = "1.0.2", default-features = false }
 # template:end object-storage:workspace-object-storage-client
+# template:begin temporal:workspace-temporal-client
 temporalio-client = { version = "=1.2.0", default-features = false }
 temporalio-common = { version = "=1.2.0", default-features = false }
 temporalio-sdk = { version = "=1.2.0", default-features = false }
@@ -142,6 +149,7 @@ temporalio-macros = { version = "=1.2.0", default-features = false }
 temporalio-workflow = { version = "=1.2.0", default-features = false }
 erased-serde = { version = "0.4.10", default-features = false }
 futures = { version = "0.3.34", default-features = false }
+# template:end temporal:workspace-temporal-client
 futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 hyper = { version = "1.11.1", default-features = false }
@@ -160,8 +168,10 @@ tower-http = { version = "0.7.1", default-features = false }
 # Pinned with tonic. Outside the gRPC block because the telemetry tests decode
 # OTLP export bodies with it in every profile.
 prost = { version = "=0.14.4", default-features = false }
-# template:begin grpc:workspace-grpc-dependencies
+# template:begin tonic:workspace-tonic-dependency
 tonic = { version = "=0.14.8", default-features = false }
+# template:end tonic:workspace-tonic-dependency
+# template:begin grpc:workspace-grpc-dependencies
 tonic-prost = { version = "=0.14.8", default-features = false }
 tonic-health = { version = "=0.14.8", default-features = false }
 tonic-reflection = { version = "=0.14.8", default-features = false }
@@ -443,7 +453,7 @@ aws-smithy-http-client = { path = "vendor/aws-smithy-http-client" }
 # template:end object-storage:workspace-object-storage-patch
 # Same-family TCP opportunity repair; provenance and retirement: vendor/hyper-util/PATCHES.md.
 hyper-util = { path = "vendor/hyper-util" }
-# template:begin grpc:workspace-tonic-patch
+# template:begin tonic:workspace-tonic-patch
 # The client dispatcher reports decoded RPC outcomes. See vendor/tonic/PATCHES.md.
 tonic = { path = "vendor/tonic" }
-# template:end grpc:workspace-tonic-patch
+# template:end tonic:workspace-tonic-patch

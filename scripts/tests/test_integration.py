@@ -50,10 +50,12 @@ class IntegrationRunnerTests(unittest.TestCase):
                 path = "tests/orders.rs"
                 required-features = ["integration"]
 
+                # template:begin temporal:test-integration-db-args-temporal
                 [[test]]
                 name = "temporal"
                 path = "tests/temporal.rs"
                 required-features = ["integration"]
+                # template:end temporal:test-integration-db-args-temporal
 
                 [[test]]
                 name = "outbound_http"
@@ -115,6 +117,7 @@ class IntegrationRunnerTests(unittest.TestCase):
 
         self.assertEqual(events, ["start:keycloak", "compile", "wait:keycloak", "test", "stack:down"])
 
+    # template:begin temporal:test-integration-temporal
     def test_cmd_temporal_overlaps_startup_with_compilation_and_runs_both_targets(self) -> None:
         if not (lib.ROOT / "crates/infra-temporal").is_dir():
             self.skipTest("temporal profile not present")
@@ -164,6 +167,7 @@ class IntegrationRunnerTests(unittest.TestCase):
             ["cargo", "test", "--locked", "-p", "integration-tests", "--features", "integration", "--test", "temporal", "--no-run"],
             commands,
         )
+    # template:end temporal:test-integration-temporal
 
 
 if __name__ == "__main__":

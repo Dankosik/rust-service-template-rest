@@ -28,6 +28,9 @@ recheck maintenance, licensing, and advisories at adoption time.
 - **JSON depth scanning.** Keep the scalar scanner for mixed message shapes. At 2 KiB on a DigitalOcean c-4, searching for the next quote or escape with `memchr2` made escape-heavy event preparation 60% slower than the baseline. Searching backwards for the last possible opener saved work on plain strings but cost about 10% against the scalar candidate when strings contained many literal openers. Reopen with a representative payload distribution or a change that also helps these cases.
 - **Outbound RFC 3339 validation.** With `time` 0.3.55 in the release build, formatting into a sink took 12.95 ns for a typical UTC timestamp. Replacing the formatter with a UTC year check took 14.11 ns. Recheck this choice if the formatter or toolchain changes.
 <!-- template:end messaging:docs-library-selection-messaging-rejection -->
+<!-- template:begin temporal:docs-library-selection-temporal-rejection -->
+- **Temporal SDK features and helpers:** Adopt `temporalio-client`, `temporalio-common`, `temporalio-sdk`, and `temporalio-sdk-core` with `default-features = false` (`tls-aws-lc` on `temporalio-client` only; `vendored-protox` over host `protoc`; see [Temporal decisions](decisions/temporal-decisions.md)). Reject `temporalio-sdk/{opentelemetry,otel,prometheus,envconfig,testing}`, `temporalio-client/{telemetry,envconfig}`, `tls-ring`, `openssl`, `tls-aws-lc` on `temporalio-common`/`temporalio-sdk-core` (pulls `opentelemetry 0.32`), and `serde_stacker` (`serde_json`'s built-in 128-level recursion limit plus `temporal.max_payload_bytes` suffices).
+<!-- template:end temporal:docs-library-selection-temporal-rejection -->
 
 ## Recorded benchmarks and runtime constraints
 

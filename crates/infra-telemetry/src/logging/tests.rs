@@ -692,6 +692,7 @@ fn sdk_debug_records_stay_out_unless_the_directive_names_them() {
 }
 // template:end object-storage:telemetry-sdk-log-cap-test
 
+// template:begin temporal:telemetry-sdk-log-cap-test
 #[test]
 fn temporal_sdk_debug_and_trace_records_stay_capped_unless_explicitly_named() {
     let emit = |level: &str| {
@@ -755,3 +756,4 @@ fn temporal_sdk_debug_and_trace_records_stay_capped_unless_explicitly_named() {
     assert!(!quiet.contains("core info"), "{quiet}");
     assert!(!quiet.contains("client info"), "{quiet}");
 }
+// template:end temporal:telemetry-sdk-log-cap-test

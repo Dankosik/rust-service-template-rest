@@ -59,8 +59,10 @@ const RETAINED_SECTIONS: &[&str] = &[
     // template:begin webhooks:config-section
     "webhooks",
     // template:end webhooks:config-section
+    // template:begin temporal:config-section
     "temporal",
     "temporal_worker",
+    // template:end temporal:config-section
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -214,6 +216,7 @@ pub(crate) fn load_worker_with_tail_from(
 }
 // template:end worker:load-worker
 
+// template:begin temporal:load-temporal-worker
 pub fn load_temporal_worker(
     options: &LoadOptions,
     build: BuildInfo,
@@ -240,6 +243,7 @@ pub(crate) fn load_temporal_worker_with_tail_from(
     let input: crate::temporal_worker::TemporalWorkerInput = merge(options, environment)?;
     Ok(input.admit(build, shutdown_tail)?)
 }
+// template:end temporal:load-temporal-worker
 
 // template:begin postgres:load-migration
 #[derive(Debug, thiserror::Error)]

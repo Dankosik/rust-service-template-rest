@@ -34,6 +34,7 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
     "grpc-service-auth": {"grpc": "enabled", "authn": "oidc-jwt", "service_auth": "jwt"},
     "messaging-outbox": {"database": "postgres", "jobs": "postgres", "messaging": "nats-jetstream", "outbox": "postgres"},
     "cache-s3": {"cache": "redis", "object_storage": "s3"},
+    "temporal": {"temporal": "sdk"},
     "full": {
         "database": "postgres",
         "authn": "oidc-jwt",
@@ -49,6 +50,7 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
         "cache": "redis",
         "object_storage": "s3",
         "service_auth": "jwt",
+        "temporal": "sdk",
     },
 }
 

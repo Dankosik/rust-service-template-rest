@@ -11,18 +11,34 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# template:begin postgres:test-integration-feature
+# template:begin integration:test-integration-feature-head
 [features]
-# Non-Docker targets run with `just test`. `integration` targets require a live
-# DATABASE_URL and PGBOUNCER_DATABASE_URL in front of the same server, plus
-# NATS_URL when messaging/outbox is retained.
-integration = []
-# template:end postgres:test-integration-feature
+# template:end integration:test-integration-feature-head
+# template:begin postgres:test-default-postgres-feature
+default = ["dep:tokio"]
+# template:end postgres:test-default-postgres-feature
+# template:begin integration:test-integration-feature-body
+# Non-Docker targets run with `just test`. `integration` targets require live
+# Compose services matching the retained profiles.
+integration = [
+# template:end integration:test-integration-feature-body
+# template:begin temporal:test-integration-temporal-features
+    "dep:tokio",
+    "dep:infra-temporal",
+    "dep:temporal-worker",
+    "dep:temporalio-sdk",
+    "dep:temporalio-common",
+    "dep:temporalio-workflow",
+    "dep:temporalio-macros",
+    "dep:futures",
+# template:end temporal:test-integration-temporal-features
+# template:begin integration:test-integration-feature-tail
+]
+# template:end integration:test-integration-feature-tail
 
 # template:begin postgres:test-postgres-dependencies
 [dependencies]
 bytes = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal", "fs"] }
 tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true }
 infra-postgres = { workspace = true, features = ["test-support"] }
@@ -33,6 +49,13 @@ infra-jobs = { workspace = true }
 jobs-worker = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 # template:end jobs:test-jobs-dependencies
+
+# template:begin test-temporal-or-postgres:test-tokio-dependency
+[dependencies.tokio]
+workspace = true
+features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "signal", "fs"]
+optional = true
+# template:end test-temporal-or-postgres:test-tokio-dependency
 
 # template:begin jobs-reference:test-reading-counter-dependencies
 [dependencies.clap]
@@ -58,22 +81,31 @@ workspace = true
 features = ["std"]
 # template:end jobs-reference:test-reading-counter-dependencies
 
+# template:begin temporal:test-temporal-dependencies
 [dependencies.infra-temporal]
 workspace = true
 features = ["worker"]
+optional = true
 [dependencies.temporal-worker]
 workspace = true
+optional = true
 [dependencies.temporalio-sdk]
 workspace = true
+optional = true
 [dependencies.temporalio-common]
 workspace = true
+optional = true
 [dependencies.temporalio-workflow]
 workspace = true
+optional = true
 [dependencies.temporalio-macros]
 workspace = true
+optional = true
 [dependencies.futures]
 workspace = true
 features = ["alloc", "std"]
+optional = true
+# template:end temporal:test-temporal-dependencies
 
 # template:begin webhooks-common:test-webhooks-dependencies
 [dev-dependencies.infra-webhooks]
@@ -150,10 +182,16 @@ serde = { workspace = true, features = ["std", "derive"] }
 # template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 # template:begin jobs:test-jobs-dev-dependencies
 base64 = { workspace = true, features = ["std"] }
-nix = { workspace = true, features = ["signal"] }
 time = { workspace = true, features = ["std", "serde", "serde-well-known", "formatting", "parsing", "macros"] }
 uuid = { workspace = true, features = ["std", "serde", "v4"] }
 # template:end jobs:test-jobs-dev-dependencies
+# template:begin test-signal:test-signal-dev-dependency
+nix = { workspace = true, features = ["signal"] }
+# template:end test-signal:test-signal-dev-dependency
+# template:begin temporal-only:test-temporal-only-dev-dependencies
+tokio-util = { workspace = true, features = ["rt"] }
+url = { workspace = true }
+# template:end temporal-only:test-temporal-only-dev-dependencies
 
 # template:begin jobs:test-jobs-worker-fixture
 [[bin]]
@@ -171,11 +209,13 @@ required-features = ["integration"]
 test = false
 # template:end jobs-reference:test-reading-counter-fixture
 
+# template:begin temporal:test-temporal-worker-fixture
 [[bin]]
 name = "temporal-worker-fixture"
 path = "src/bin/temporal_worker_fixture.rs"
 required-features = ["integration"]
 test = false
+# template:end temporal:test-temporal-worker-fixture
 
 # template:begin postgres:test-postgres-integration-target
 [[test]]
@@ -217,7 +257,9 @@ path = "tests/messaging_recovery.rs"
 required-features = ["integration"]
 # template:end outbox:test-outbox-integration-targets
 
+# template:begin temporal:test-temporal-integration-target
 [[test]]
 name = "temporal"
 path = "tests/temporal.rs"
 required-features = ["integration"]
+# template:end temporal:test-temporal-integration-target

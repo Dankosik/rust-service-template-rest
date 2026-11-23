@@ -43,7 +43,9 @@ _LINT_INTEGRATION_FEATURES: tuple[tuple[str, str], ...] = (
     ("infra-cache", "infra-cache/integration"),
     ("infra-object-storage", "infra-object-storage/integration"),
     ("infra-oauth2-client-credentials", "infra-oauth2-client-credentials/integration"),
+    # template:begin temporal:rust-selection-temporal-feature
     ("infra-temporal", "infra-temporal/integration"),
+    # template:end temporal:rust-selection-temporal-feature
 )
 
 

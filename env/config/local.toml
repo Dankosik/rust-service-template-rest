@@ -135,6 +135,7 @@ session_budgets = "startup"
 # key_id = "example/1"
 # template:end service-auth:local-config
 
+# template:begin temporal:local-config
 [temporal]
 # Temporal is inert until enabled. With local Compose:
 #   docker compose -f env/docker-compose.yml up -d --wait temporal
@@ -158,3 +159,4 @@ enabled = false
 # graceful_shutdown_period = "45s"
 # activity_cancel_cleanup = "10s"
 # finalize_budget = "5s"
+# template:end temporal:local-config

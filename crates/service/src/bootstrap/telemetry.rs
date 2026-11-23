@@ -29,7 +29,9 @@ fn histogram_specs() -> Vec<(&'static str, &'static [f64])> {
         // template:begin object-storage:service-bootstrap-object-storage-histogram
         infra_object_storage::HISTOGRAMS,
         // template:end object-storage:service-bootstrap-object-storage-histogram
+        // template:begin temporal:service-bootstrap-temporal-histogram
         infra_temporal::HISTOGRAMS,
+        // template:end temporal:service-bootstrap-temporal-histogram
     ]
     .concat()
 }
@@ -74,7 +76,9 @@ pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         // template:begin service-auth:bootstrap-startup-log-service-auth
         service_auth.mode = config.service_auth().mode(),
         // template:end service-auth:bootstrap-startup-log-service-auth
+        // template:begin temporal:bootstrap-startup-log-temporal
         temporal.enabled = config.temporal().is_some(),
+        // template:end temporal:bootstrap-startup-log-temporal
         tracing.exporter = exporter.as_str(),
         "service_starting"
     );
@@ -104,6 +108,7 @@ mod tests {
         );
     }
 
+    // template:begin temporal:bootstrap-temporal-histograms-test
     #[test]
     fn install_metrics_registers_every_temporal_histogram_bucket_set() {
         let specs = histogram_specs();
@@ -114,4 +119,5 @@ mod tests {
             );
         }
     }
+    // template:end temporal:bootstrap-temporal-histograms-test
 }

@@ -657,6 +657,7 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
 }
 // template:end object-storage:service-object-storage-lifecycle-admission
 
+// template:begin temporal:service-temporal-lifecycle-tests
 #[test]
 #[expect(
     clippy::disallowed_methods,
@@ -775,6 +776,7 @@ fn production_plaintext_temporal_endpoint_exits_one_before_logging_and_redacts_a
         "Temporal api_key must not leak in diagnostics"
     );
 }
+// template:end temporal:service-temporal-lifecycle-tests
 
 // template:begin inbound-webhooks:service-webhooks-lifecycle-tests
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

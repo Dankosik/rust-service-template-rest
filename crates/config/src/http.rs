@@ -208,11 +208,13 @@ fn validate_grace_and_drain(
 impl<Propagation: Mode, const DEFAULT_GRACE_SECS: u64, const DEFAULT_DRAIN_SECS: u64>
     HttpFields<Propagation, DEFAULT_GRACE_SECS, DEFAULT_DRAIN_SECS>
 {
+    // template:begin temporal:http-valid-drain-timeout
     pub(crate) fn valid_drain_timeout(&self) -> Option<Duration> {
         GRACE_AND_DRAIN_RANGE
             .contains(&self.drain_timeout)
             .then_some(self.drain_timeout)
     }
+    // template:end temporal:http-valid-drain-timeout
 
     fn admit_listener(
         &self,
@@ -296,9 +298,11 @@ impl HttpInput {
     }
 }
 
-// template:begin worker:worker-http-config
+// template:begin worker:worker-http-input
 pub(crate) type WorkerHttpInput = HttpFields<crate::de::Skip>;
+// template:end worker:worker-http-input
 
+// template:begin worker-http:worker-http-config
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerHttpConfig {
     listener: HttpListenerConfig,
@@ -330,9 +334,11 @@ impl<const DEFAULT_GRACE_SECS: u64, const DEFAULT_DRAIN_SECS: u64>
         })
     }
 }
-// template:end worker:worker-http-config
+// template:end worker-http:worker-http-config
 
+// template:begin temporal:temporal-worker-http-input
 pub(crate) type TemporalWorkerHttpInput = HttpFields<crate::de::Skip, 90, 60>;
+// template:end temporal:temporal-worker-http-input
 
 #[cfg(test)]
 mod tests {
@@ -507,17 +513,22 @@ mod tests {
     }
     // template:end worker:worker-http-config-tests
 
+    // template:begin temporal:temporal-worker-http-config-test-head
     #[test]
     fn temporal_worker_http_defaults_to_90s_and_60s_without_changing_service_or_worker_defaults() {
         let service = admit(HttpInput::default()).unwrap();
         assert_eq!(service.grace_period, Duration::from_secs(45));
         assert_eq!(service.drain_timeout, Duration::from_secs(25));
+        // template:end temporal:temporal-worker-http-config-test-head
 
+        // template:begin worker-temporal:temporal-worker-http-config-test-worker
         let jobs_worker =
             admit_with(|v| WorkerHttpInput::default().admit(super::NO_SHUTDOWN_TAIL, v)).unwrap();
         assert_eq!(jobs_worker.grace_period, Duration::from_secs(45));
         assert_eq!(jobs_worker.drain_timeout, Duration::from_secs(25));
+        // template:end worker-temporal:temporal-worker-http-config-test-worker
 
+        // template:begin temporal:temporal-worker-http-config-test-tail
         let temporal_input: TemporalWorkerHttpInput =
             toml::from_str("readiness_propagation_delay = { bad = 1 }\n").unwrap();
         let temporal = admit_with(|v| temporal_input.admit(super::NO_SHUTDOWN_TAIL, v)).unwrap();
@@ -525,4 +536,5 @@ mod tests {
         assert_eq!(temporal.drain_timeout, Duration::from_secs(60));
         assert!(toml::from_str::<TemporalWorkerHttpInput>("bogus = 1\n").is_err());
     }
+    // template:end temporal:temporal-worker-http-config-test-tail
 }

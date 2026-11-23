@@ -104,6 +104,7 @@ services:
     ports:
       - "${KEYCLOAK_PORT:-127.0.0.1:8080}:8080"
   # template:end outbound-auth:compose-keycloak-service
+  # template:begin temporal:compose-temporal-service
   temporal:
     image: temporalio/temporal:1.10.1@sha256:b228dadf9cdb6c7c02a1394b89dd76f827aac9760e458fce42f0899a10141225
     command: ["server", "start-dev", "--ip", "0.0.0.0"]
@@ -114,3 +115,4 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+  # template:end temporal:compose-temporal-service

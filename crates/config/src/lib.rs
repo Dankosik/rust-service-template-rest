@@ -41,8 +41,10 @@ mod webhooks;
 // template:begin worker:worker-config
 mod worker;
 // template:end worker:worker-config
+// template:begin temporal:config-temporal-modules
 mod temporal;
 mod temporal_worker;
+// template:end temporal:config-temporal-modules
 
 mod cli;
 mod de;
@@ -63,8 +65,10 @@ pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
 pub use health::HealthConfig;
 pub use http::{HttpConfig, HttpListenerConfig, ShutdownTail};
-// template:begin worker:config-worker-export
+// template:begin worker-http:config-worker-http-export
 pub use http::WorkerHttpConfig;
+// template:end worker-http:config-worker-http-export
+// template:begin worker:config-worker-export
 pub use load::load_worker;
 pub use worker::WorkerConfig;
 // template:end worker:config-worker-export
@@ -124,12 +128,14 @@ pub use postgres::OperatorPostgresConfig;
 // template:begin webhooks:config-webhooks-export
 pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
 // template:end webhooks:config-webhooks-export
+// template:begin temporal:config-temporal-exports
 pub use load::load_temporal_worker;
 pub use temporal::{TemporalClientConfig, TemporalTlsRotation};
 pub use temporal_worker::{
     TemporalDeploymentConfig, TemporalQueueConfig, TemporalTunerConfig, TemporalVersioningBehavior,
     TemporalWorkerConfig, TemporalWorkerRuntimeConfig,
 };
+// template:end temporal:config-temporal-exports
 pub use validate::{ValidationError, ValidationErrors};
 
 #[derive(Default, Deserialize)]
@@ -168,7 +174,9 @@ pub(crate) struct ConfigInput {
     // template:begin http-idempotency:config-http-idempotency-input-field
     http_idempotency: HttpIdempotencyConfig,
     // template:end http-idempotency:config-http-idempotency-input-field
+    // template:begin temporal:config-input-field
     temporal: temporal::TemporalInput,
+    // template:end temporal:config-input-field
 }
 
 impl ConfigInput {
@@ -228,12 +236,14 @@ impl ConfigInput {
             // template:begin http-idempotency:config-http-idempotency-validate
             self.http_idempotency.validate(v);
             // template:end http-idempotency:config-http-idempotency-validate
+            // template:begin temporal:config-admit
             let temporal = self.temporal.admit(
                 app.is_local_development(),
                 &observability.otel.service_name,
                 &app.version,
                 v,
             );
+            // template:end temporal:config-admit
             Ok(Config {
                 app,
                 http: http?,
@@ -268,7 +278,9 @@ impl ConfigInput {
                 // template:begin http-idempotency:config-http-idempotency-admitted-field
                 http_idempotency: self.http_idempotency,
                 // template:end http-idempotency:config-http-idempotency-admitted-field
+                // template:begin temporal:config-admitted-field
                 temporal: temporal?,
+                // template:end temporal:config-admitted-field
             })
         })
     }
@@ -309,7 +321,9 @@ pub struct Config {
     // template:begin http-idempotency:config-http-idempotency-field
     http_idempotency: HttpIdempotencyConfig,
     // template:end http-idempotency:config-http-idempotency-field
+    // template:begin temporal:config-field
     temporal: Option<TemporalClientConfig>,
+    // template:end temporal:config-field
 }
 
 impl Config {
@@ -408,10 +422,12 @@ impl Config {
     }
     // template:end http-idempotency:config-http-idempotency-accessor
 
+    // template:begin temporal:config-accessor
     #[must_use]
     pub const fn temporal(&self) -> Option<&TemporalClientConfig> {
         self.temporal.as_ref()
     }
+    // template:end temporal:config-accessor
 
     #[must_use]
     pub fn finite_listener_connection_caps(&self) -> u64 {

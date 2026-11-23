@@ -15,7 +15,9 @@ use infra_postgres::{CloseOutcome, PoolStartup};
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
+// template:begin temporal:service-shutdown-temporal-imports
 use infra_temporal::TemporalStartup;
+// template:end temporal:service-shutdown-temporal-imports
 use service_config::{HttpConfig, ShutdownTail};
 use tokio::time::Instant;
 
@@ -107,7 +109,9 @@ pub(crate) struct Dependencies {
     // template:begin object-storage:service-shutdown-dependencies-object-storage-field
     pub(crate) object_storage: Option<ObjectStorage>,
     // template:end object-storage:service-shutdown-dependencies-object-storage-field
+    // template:begin temporal:service-shutdown-dependencies-temporal-field
     pub(crate) temporal: Option<TemporalStartup>,
+    // template:end temporal:service-shutdown-dependencies-temporal-field
 }
 
 impl Dependencies {
@@ -126,7 +130,9 @@ impl Dependencies {
             // template:begin object-storage:service-shutdown-dependencies-object-storage-destructure
             object_storage,
             // template:end object-storage:service-shutdown-dependencies-object-storage-destructure
+            // template:begin temporal:service-shutdown-dependencies-temporal-destructure
             temporal,
+            // template:end temporal:service-shutdown-dependencies-temporal-destructure
         } = self;
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
@@ -172,6 +178,7 @@ impl Dependencies {
             Outcome::Graceful
         };
         let temporal_close = async {
+            // template:begin temporal:service-shutdown-dependencies-temporal-close
             if let Some(temporal) = temporal {
                 return match temporal.close(deadline).await {
                     infra_temporal::CloseOutcome::Complete => {
@@ -184,6 +191,7 @@ impl Dependencies {
                     }
                 };
             }
+            // template:end temporal:service-shutdown-dependencies-temporal-close
             Outcome::Graceful
         };
         let (cache_outcome, postgres_outcome, temporal_outcome) =

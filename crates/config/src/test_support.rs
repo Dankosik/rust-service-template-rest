@@ -35,6 +35,7 @@ pub fn worker(
 }
 // template:end worker:config-worker-fixture
 
+// template:begin temporal:config-temporal-worker-fixture
 #[cfg(feature = "test-support")]
 pub fn temporal_worker(
     environment: &[(&str, &str)],
@@ -50,6 +51,7 @@ pub fn temporal_worker(
             .map(|&(key, value)| (key.into(), value.into())),
     )
 }
+// template:end temporal:config-temporal-worker-fixture
 
 #[cfg(test)]
 pub(crate) use unit::*;
@@ -98,10 +100,12 @@ mod unit {
     }
     // template:end worker:test-support-worker
 
+    // template:begin temporal:test-support-temporal-worker
     #[track_caller]
     pub(crate) fn load_temporal_worker_env(pairs: &[(&str, &str)]) -> crate::TemporalWorkerConfig {
         crate::load::load_temporal_worker_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
     }
+    // template:end temporal:test-support-temporal-worker
 
     #[track_caller]
     #[allow(
@@ -127,7 +131,7 @@ mod unit {
         );
     }
 
-    // template:begin cache:test-support-unknown-env-key
+    // template:begin config-unknown-env-key:test-support-unknown-env-key
     #[track_caller]
     pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
         assert_matches!(
@@ -135,5 +139,5 @@ mod unit {
             Err(crate::load::Error(ErrorKind::Deserialize(_)))
         );
     }
-    // template:end cache:test-support-unknown-env-key
+    // template:end config-unknown-env-key:test-support-unknown-env-key
 }

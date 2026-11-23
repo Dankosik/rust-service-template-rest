@@ -29,7 +29,9 @@ const SECRET_KEY_PATTERNS: &[&str] = &[
     "webhooks.endpoints.*.secret",
     "webhooks.endpoints.*.previous_secret",
     // template:end webhooks:secret-policy-webhooks
+    // template:begin temporal:secret-policy-temporal
     "temporal.api_key",
+    // template:end temporal:secret-policy-temporal
 ];
 
 #[must_use]
@@ -124,7 +126,9 @@ mod tests {
             "webhooks.endpoints.partner.secret",
             "webhooks.endpoints.partner.previous_secret",
             // template:end webhooks:secret-key-webhooks-vector
+            // template:begin temporal:secret-key-temporal-vector
             "temporal.api_key",
+            // template:end temporal:secret-key-temporal-vector
         ] {
             assert!(is_secret_key(key), "{key} should be secret");
         }
@@ -136,8 +140,10 @@ mod tests {
             "object_storage.credentials",
             "postgres.password_file",
             "messaging.credentials_file",
+            // template:begin temporal:secret-key-temporal-nonsecret-vector
             "temporal.api_key_file",
             "temporal.client_key_path",
+            // template:end temporal:secret-key-temporal-nonsecret-vector
             "service_auth.key_id",
             "service_auth.jwt_type",
             "service_auth.trust",

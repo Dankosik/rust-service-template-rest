@@ -69,7 +69,9 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
         // template:begin object-storage:telemetry-sdk-log-cap-apply
         .with(aws_sdk_log_cap(options.level))
         // template:end object-storage:telemetry-sdk-log-cap-apply
+        // template:begin temporal:telemetry-sdk-log-cap-apply
         .with(temporal_sdk_log_cap(options.level))
+        // template:end temporal:telemetry-sdk-log-cap-apply
         .with(otel)
         .with(format_layer);
     let max_level = subscriber.max_level_hint().unwrap_or(LevelFilter::TRACE);
@@ -266,6 +268,7 @@ fn aws_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S> {
 }
 // template:end object-storage:telemetry-sdk-log-cap
 
+// template:begin temporal:telemetry-sdk-log-cap
 fn is_temporal_sdk_target(target: &str) -> bool {
     target.starts_with("temporalio_") || is_within_target(target, "temporal_client")
 }
@@ -287,6 +290,7 @@ fn temporal_sdk_log_cap<S: Subscriber>(directive: &str) -> impl Layer<S> + use<S
                 .any(|name| is_within_target(target, name))
     })
 }
+// template:end temporal:telemetry-sdk-log-cap
 
 #[cfg(test)]
 #[expect(
