@@ -47,8 +47,10 @@ async fn url_database_and_limits_admission_boundaries() {
     }
 
     let limit_failures: Vec<fn(&mut ClickHouseOptions)> = vec![
-        |o| o.max_concurrency = 0,
-        |o| o.max_concurrency = 1025,
+        |o| o.max_read_concurrency = 0,
+        |o| o.max_read_concurrency = 1025,
+        |o| o.max_write_concurrency = 0,
+        |o| o.max_write_concurrency = 1025,
         |o| o.query_timeout = Duration::from_millis(9),
         |o| o.query_timeout = Duration::from_mins(5) + Duration::from_millis(1),
         |o| o.insert_timeout = Duration::from_millis(9),
@@ -77,7 +79,8 @@ async fn url_database_and_limits_admission_boundaries() {
     min_boundary.allow_plaintext = false;
     min_boundary.query_timeout = Duration::from_millis(10);
     min_boundary.insert_timeout = Duration::from_mins(5);
-    min_boundary.max_concurrency = 1;
+    min_boundary.max_read_concurrency = 1;
+    min_boundary.max_write_concurrency = 1;
     min_boundary.max_result_rows = 1;
     min_boundary.max_result_bytes = 64 * 1024;
     min_boundary.http_response_buffer_size = 64 * 1024;

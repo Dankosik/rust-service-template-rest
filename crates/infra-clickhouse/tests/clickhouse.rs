@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_clickhouse::{
-    AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions,
-    CloseOutcome, HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row,
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions, CloseOutcome, Decimal32,
+    Decimal64, Decimal128, HISTOGRAMS, InsertError, InsertFailure, Param, QueryError,
+    QuerySettings, Row,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use operation_context::{OperationContext, Stopped};
@@ -45,7 +46,8 @@ fn options_for(
         query_settings,
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
-        max_concurrency: 16,
+        max_read_concurrency: 16,
+        max_write_concurrency: 16,
         max_result_rows: 100_000,
         max_result_bytes: 16 * 1024 * 1024,
         http_response_buffer_size: 2 * 1024 * 1024,
@@ -193,8 +195,7 @@ async fn assert_rw_batch_async_dedup_and_empty(
     assert_eq!(report.rows, 1);
 
     let async_rows = [make_event(2, "async", uid, day, ts)];
-    let async_opts =
-        AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("smoke-token-1"));
+    let async_opts = AsyncInsertOptions::with_token("smoke-token-1");
     assert_eq!(
         rw.insert_async(ctx, "smoke_async", table, &async_rows, async_opts)
             .await
@@ -211,7 +212,7 @@ async fn assert_rw_batch_async_dedup_and_empty(
     );
 
     let hash_rows = [make_event(3, "async_hash", uid, day, ts)];
-    let hash_opts = AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash);
+    let hash_opts = AsyncInsertOptions::with_payload_hash();
     rw.insert_async(ctx, "smoke_hash_1", table, &hash_rows, hash_opts)
         .await
         .expect("insert_async hash 1");
@@ -226,7 +227,7 @@ async fn assert_rw_batch_async_dedup_and_empty(
             summary,
             table,
             &disabled_rows,
-            AsyncInsertOptions::new(),
+            AsyncInsertOptions::without_deduplication(),
         )
         .await
         .expect(summary);
@@ -252,12 +253,49 @@ async fn assert_rw_batch_async_dedup_and_empty(
     );
 }
 
+async fn assert_server_side_http_post_cancellation(rw: &ClickHouse, ctx: &OperationContext) {
+    let marker = format!("cancel_marker_{}", uuid::Uuid::new_v4().simple());
+    let short_ctx = OperationContext::with_timeout(Duration::from_millis(250));
+    let started = std::time::Instant::now();
+    let cancel_err = rw
+        .query(
+            "slow_cancel",
+            &format!("SELECT sum(sipHash64(number)) AS id FROM numbers(1500000000) /* {marker} */"),
+        )
+        .fetch_one::<SimpleRow>(&short_ctx)
+        .await
+        .expect_err("deadline stop");
+    assert_eq!(cancel_err, QueryError::Stopped(Stopped::Deadline));
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let mut cancelled_on_server = false;
+    for _ in 0..40 {
+        let running: u64 = rw
+            .query(
+                "check_processes",
+                "SELECT count() FROM system.processes WHERE position(query, {marker:String}) > 0 AND position(query, 'system.processes') = 0",
+            )
+            .param("marker", marker.as_str())
+            .fetch_one(ctx)
+            .await
+            .expect("query system.processes");
+        if running == 0 {
+            cancelled_on_server = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        cancelled_on_server,
+        "cancelled HTTP POST query remained active in system.processes"
+    );
+}
+
 async fn assert_read_bounds_cardinality_and_cancellation(
     rw: &ClickHouse,
     ctx: &OperationContext,
     table: &str,
 ) {
-    // Cardinality checks.
     assert_eq!(
         rw.query("one_0", &format!("SELECT id FROM {table} WHERE id = 99999"),)
             .fetch_one::<SimpleRow>(ctx)
@@ -283,7 +321,6 @@ async fn assert_read_bounds_cardinality_and_cancellation(
         Err(QueryError::TooManyRows)
     );
 
-    // Exact == vs +1 row limit.
     let exact_two = rw
         .query("exact_two", "SELECT number AS id FROM numbers(2)")
         .max_result_rows(NonZeroU64::new(2).expect("nz"))
@@ -300,7 +337,6 @@ async fn assert_read_bounds_cardinality_and_cancellation(
         .expect_err("3 rows with cap 2 must return TooLarge");
     assert_eq!(overflow_three, QueryError::TooLarge);
 
-    // Byte limit overflow.
     let overflow_bytes = rw
         .query(
             "over_bytes",
@@ -338,16 +374,24 @@ async fn assert_read_bounds_cardinality_and_cancellation(
     assert_eq!(unknown_db, QueryError::Rejected);
     assert!(!unknown_db.is_retryable());
 
-    // OperationContext cancellation mid-query finishes promptly without waiting 2s.
-    let short_ctx = OperationContext::with_timeout(Duration::from_millis(150));
-    let started = std::time::Instant::now();
-    let cancel_err = rw
-        .query("slow_cancel", "SELECT sleep(2) AS id")
-        .fetch_one::<SimpleRow>(&short_ctx)
-        .await
-        .expect_err("deadline stop");
-    assert_eq!(cancel_err, QueryError::Stopped(Stopped::Deadline));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        rw.query("one_server_cap", "SELECT number AS id FROM numbers(10000)")
+            .fetch_one::<SimpleRow>(ctx)
+            .await,
+        Err(QueryError::TooManyRows)
+    );
+    assert_eq!(
+        rw.query(
+            "one_big_byte_cap",
+            "SELECT repeat('x', 100000) AS k FROM numbers(1)"
+        )
+        .max_result_bytes(NonZeroUsize::new(64 * 1024).expect("nz"))
+        .fetch_one::<String>(ctx)
+        .await,
+        Err(QueryError::TooLarge)
+    );
+
+    assert_server_side_http_post_cancellation(rw, ctx).await;
 }
 
 async fn assert_readonly_behavior(
@@ -395,8 +439,8 @@ async fn assert_readonly_behavior(
     );
 
     let ro_client_settings = ClickHouse::start(options_for(
-        url,
-        db,
+        url.clone(),
+        db.clone(),
         ro_user,
         ro_password,
         QuerySettings::Client,
@@ -410,8 +454,34 @@ async fn assert_readonly_behavior(
         )
         .fetch_all::<EventRow>(ctx)
         .await
-        .expect_err("readonly with client settings must fail");
+        .expect_err("readonly=1 with client settings must fail");
     assert_eq!(ro_client_err, QueryError::Rejected);
+
+    let ro2_client = ClickHouse::start(options_for(
+        url,
+        db,
+        "app_ro2".to_owned(),
+        "app_ro2".to_owned(),
+        QuerySettings::Client,
+    ))
+    .await
+    .expect("start ro2 client");
+    let mutable_ro_row = ro2_client
+        .query(
+            "ro2_read",
+            &format!("SELECT id, kind, trace_id, day, ts FROM {table} WHERE id = {{id:UInt64}}"),
+        )
+        .param("id", 1_u64)
+        .fetch_optional::<EventRow>(ctx)
+        .await
+        .expect("readonly=2 supports client settings");
+    assert_eq!(mutable_ro_row.as_ref().map(|r| r.id), Some(1));
+    assert_eq!(
+        ro2_client
+            .insert_batch(ctx, "ro2_write", table, &dummy, BatchInsertOptions::new())
+            .await,
+        Err(InsertError::NotApplied(InsertFailure::Rejected))
+    );
 
     assert_eq!(
         ro_server.close(Duration::from_secs(2)).await,
@@ -421,35 +491,96 @@ async fn assert_readonly_behavior(
         ro_client_settings.close(Duration::from_secs(2)).await,
         CloseOutcome::Complete
     );
+    assert_eq!(
+        ro2_client.close(Duration::from_secs(2)).await,
+        CloseOutcome::Complete
+    );
+}
+
+struct LiveCredentials<'a> {
+    url: &'a str,
+    db: &'a str,
+    user: &'a str,
+    password: &'a str,
+}
+
+async fn assert_cold_nullable_column_omission(
+    creds: &LiveCredentials<'_>,
+    table_b: &str,
+    ddl: &clickhouse::Client,
+    ctx: &OperationContext,
+) {
+    ddl.query(&format!(
+        "ALTER TABLE {table_b} ADD COLUMN opt Nullable(String)"
+    ))
+    .execute()
+    .await
+    .expect("add bare nullable column");
+    let cold_old = ClickHouse::start(options_for(
+        creds.url.to_owned(),
+        creds.db.to_owned(),
+        creds.user.to_owned(),
+        creds.password.to_owned(),
+        QuerySettings::Client,
+    ))
+    .await
+    .expect("start cold old writer");
+    assert_eq!(
+        cold_old
+            .insert_batch(
+                ctx,
+                "cold_nullable_old",
+                table_b,
+                &[SimpleRow { id: 40 }],
+                BatchInsertOptions::new(),
+            )
+            .await
+            .expect("cold writer omitting bare Nullable column succeeds")
+            .rows,
+        1
+    );
+    let opt_val: Option<String> = cold_old
+        .query(
+            "read_nullable_opt",
+            &format!("SELECT opt FROM {table_b} WHERE id = 40"),
+        )
+        .fetch_one(ctx)
+        .await
+        .expect("read nullable opt");
+    assert_eq!(opt_val, None);
+    assert_eq!(
+        cold_old.close(Duration::from_secs(2)).await,
+        CloseOutcome::Complete
+    );
 }
 
 async fn assert_rolling_schema_evolution(
-    opts: ClickHouseOptions,
+    creds: &LiveCredentials<'_>,
     table_a: &str,
     table_b: &str,
     ddl: &clickhouse::Client,
     ctx: &OperationContext,
 ) {
+    let opts = options_for(
+        creds.url.to_owned(),
+        creds.db.to_owned(),
+        creds.user.to_owned(),
+        creds.password.to_owned(),
+        QuerySettings::Client,
+    );
     let ch = Arc::new(ClickHouse::start(opts).await.expect("start ch"));
 
-    ch.insert_batch(
-        ctx,
-        "prime_a",
-        table_a,
-        &[SimpleRow { id: 1 }],
-        BatchInsertOptions::new(),
-    )
-    .await
-    .expect("prime A");
-    ch.insert_batch(
-        ctx,
-        "prime_b",
-        table_b,
-        &[SimpleRow { id: 1 }],
-        BatchInsertOptions::new(),
-    )
-    .await
-    .expect("prime B");
+    for (summary, tbl) in [("prime_a", table_a), ("prime_b", table_b)] {
+        ch.insert_batch(
+            ctx,
+            summary,
+            tbl,
+            &[SimpleRow { id: 1 }],
+            BatchInsertOptions::new(),
+        )
+        .await
+        .expect(summary);
+    }
 
     ddl.query(&format!(
         "ALTER TABLE {table_a} ADD COLUMN extra UInt8 DEFAULT 0"
@@ -458,7 +589,7 @@ async fn assert_rolling_schema_evolution(
     .await
     .expect("alter table A");
 
-    let drift_err = ch
+    let evolved_first = ch
         .insert_batch(
             ctx,
             "evolved_first",
@@ -467,8 +598,8 @@ async fn assert_rolling_schema_evolution(
             BatchInsertOptions::new(),
         )
         .await
-        .expect_err("stale slot detects schema mismatch");
-    assert_eq!(drift_err, InsertError::NotApplied(InsertFailure::Encode));
+        .expect("stale warm slot transparently re-primes once before dispatch");
+    assert_eq!(evolved_first.rows, 1);
 
     let mut handles = Vec::new();
     for i in 10..15_u64 {
@@ -520,8 +651,9 @@ async fn assert_rolling_schema_evolution(
         .fetch_all::<EvolvedRow>(ctx)
         .await
         .expect("read A");
-    assert_eq!(read_a.len(), 7);
+    assert_eq!(read_a.len(), 8);
     assert_eq!(read_a[0], EvolvedRow { id: 1, extra: 0 });
+    assert_eq!(read_a[1], EvolvedRow { id: 2, extra: 7 });
     assert_eq!(read_a.last(), Some(&EvolvedRow { id: 20, extra: 0 }));
 
     assert_eq!(
@@ -554,7 +686,8 @@ async fn assert_live_busy_shedding(
     ctx: &OperationContext,
 ) {
     let mut busy_opts = options_for(url, db, user, password, QuerySettings::Client);
-    busy_opts.max_concurrency = 1;
+    busy_opts.max_read_concurrency = 1;
+    busy_opts.max_write_concurrency = 1;
     let ch_busy = Arc::new(ClickHouse::start(busy_opts).await.expect("start busy"));
     let entered = Arc::new(Notify::new());
     let registered = entered.notified();
@@ -588,13 +721,15 @@ async fn assert_live_busy_shedding(
         ch_busy
             .insert_batch(
                 ctx,
-                "shed_write",
+                "isolated_write",
                 table_b,
                 &[SimpleRow { id: 99 }],
                 BatchInsertOptions::new()
             )
-            .await,
-        Err(InsertError::NotApplied(InsertFailure::Busy))
+            .await
+            .expect("read saturation must not shed writes")
+            .rows,
+        1
     );
     let _ = holder.await;
     assert_eq!(
@@ -622,20 +757,14 @@ async fn assert_rolling_schema_evolution_and_busy_shedding(
         .expect("create evolve table");
     }
 
-    assert_rolling_schema_evolution(
-        options_for(
-            url.clone(),
-            db.clone(),
-            user.clone(),
-            password.clone(),
-            QuerySettings::Client,
-        ),
-        &table_a,
-        &table_b,
-        ddl,
-        ctx,
-    )
-    .await;
+    let creds = LiveCredentials {
+        url: &url,
+        db: &db,
+        user: &user,
+        password: &password,
+    };
+    assert_rolling_schema_evolution(&creds, &table_a, &table_b, ddl, ctx).await;
+    assert_cold_nullable_column_omission(&creds, &table_b, ddl, ctx).await;
     assert_live_busy_shedding(url, db, user, password, &table_b, ctx).await;
 
     for tbl in [&table_a, &table_b] {
@@ -701,7 +830,7 @@ async fn assert_dedup_override_under_disabled_profile(
     }
 
     let hash_rows = [make_event(12, "nodedup_hash", uid, day, ts)];
-    let hash_opts = AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash);
+    let hash_opts = AsyncInsertOptions::with_payload_hash();
     for summary in ["nodedup_hash_1", "nodedup_hash_2"] {
         nodedup
             .insert_async(ctx, summary, table, &hash_rows, hash_opts)
@@ -710,8 +839,7 @@ async fn assert_dedup_override_under_disabled_profile(
     }
 
     let async_tok_rows = [make_event(13, "nodedup_tok", uid, day, ts)];
-    let async_tok_opts =
-        AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("nodedup-async-tok-1"));
+    let async_tok_opts = AsyncInsertOptions::with_token("nodedup-async-tok-1");
     for summary in ["nodedup_async_tok_1", "nodedup_async_tok_2"] {
         nodedup
             .insert_async(ctx, summary, table, &async_tok_rows, async_tok_opts)
@@ -741,6 +869,163 @@ async fn assert_dedup_override_under_disabled_profile(
         nodedup.close(Duration::from_secs(2)).await,
         CloseOutcome::Complete
     );
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
+#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+struct LedgerRow {
+    id: u64,
+    d32: Decimal32<2>,
+    d64: Decimal64<4>,
+    d128: Decimal128<6>,
+    opt_d64: Option<Decimal64<2>>,
+    #[serde(with = "infra_clickhouse::serde::time::datetime64::millis")]
+    ts: time::OffsetDateTime,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
+#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+struct WrongScaleRead {
+    d64: Decimal64<2>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
+#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+struct WrongPrecisionRead {
+    #[serde(with = "infra_clickhouse::serde::time::datetime64::micros")]
+    ts: time::OffsetDateTime,
+}
+
+async fn assert_live_decimal_scale_change_rejection(
+    rw: &ClickHouse,
+    ddl: &clickhouse::Client,
+    tbl: &str,
+    ts: time::OffsetDateTime,
+    ctx: &OperationContext,
+) {
+    ddl.query(&format!("ALTER TABLE {tbl} MODIFY COLUMN d64 Decimal64(6)"))
+        .execute()
+        .await
+        .expect("modify decimal scale");
+    let stale_row = |id| LedgerRow {
+        id,
+        d32: Decimal32::new(100),
+        d64: Decimal64::new(100),
+        d128: Decimal128::new(100),
+        opt_d64: None,
+        ts,
+    };
+    let modify_err = rw
+        .insert_batch(
+            ctx,
+            "modify_scale_reject",
+            tbl,
+            &[stale_row(2)],
+            BatchInsertOptions::new(),
+        )
+        .await
+        .expect_err("scale change must fail validation rather than corrupting data 100x");
+    assert_eq!(modify_err, InsertError::NotApplied(InsertFailure::Rejected));
+
+    let reprimes_to_encode = rw
+        .insert_batch(
+            ctx,
+            "modify_scale_reprimed",
+            tbl,
+            &[stale_row(3)],
+            BatchInsertOptions::new(),
+        )
+        .await
+        .expect_err("re-primed slot must reject scale mismatch locally");
+    assert_eq!(
+        reprimes_to_encode,
+        InsertError::NotApplied(InsertFailure::Encode)
+    );
+}
+
+async fn assert_decimal_datetime64_and_timezone_params_live(
+    rw: &ClickHouse,
+    ddl: &clickhouse::Client,
+    ctx: &OperationContext,
+) {
+    let tbl = format!("t3_typed_{}", uuid::Uuid::new_v4().simple());
+    ddl.query(&format!(
+        "CREATE TABLE {tbl} (
+            id UInt64,
+            d32 Decimal32(2),
+            d64 Decimal64(4),
+            d128 Decimal128(6),
+            opt_d64 Nullable(Decimal64(2)),
+            ts DateTime64(3, 'UTC')
+        ) ENGINE = MergeTree ORDER BY id"
+    ))
+    .execute()
+    .await
+    .expect("create typed table");
+
+    let ts =
+        time::OffsetDateTime::from_unix_timestamp_nanos(1_763_820_000_123_000_000).expect("ts");
+    let row = LedgerRow {
+        id: 1,
+        d32: Decimal32::new(-1234),
+        d64: Decimal64::new(567_890),
+        d128: Decimal128::new(-9_999_999),
+        opt_d64: Some(Decimal64::new(-5)),
+        ts,
+    };
+    rw.insert_batch(ctx, "typed_ins", &tbl, &[row], BatchInsertOptions::new())
+        .await
+        .expect("typed insert ok");
+
+    let tz_nanos: i64 = rw
+        .query(
+            "tz_param_moscow",
+            "SELECT toUnixTimestamp64Nano({dt:DateTime64(3, 'Europe/Moscow')})",
+        )
+        .param("dt", ts)
+        .fetch_one(ctx)
+        .await
+        .expect("tz param ok");
+    assert_eq!(tz_nanos, 1_763_820_000_123_000_000);
+
+    let dt32_secs: u32 = rw
+        .query("dt32_param", "SELECT toUnixTimestamp({dt:DateTime})")
+        .param("dt", Param::datetime_secs(ts))
+        .fetch_one(ctx)
+        .await
+        .expect("dt32 param with subsec truncated ok");
+    assert_eq!(dt32_secs, 1_763_820_000);
+
+    let matched: u64 = rw
+        .query(
+            "decimal_param_filter",
+            &format!("SELECT id FROM {tbl} WHERE d64 = {{amount:Decimal64(4)}}"),
+        )
+        .param("amount", Decimal64::<4>::new(567_890))
+        .fetch_one(ctx)
+        .await
+        .expect("decimal param filter ok");
+    assert_eq!(matched, 1);
+
+    assert_eq!(
+        rw.query("wrong_scale", &format!("SELECT d64 FROM {tbl}"))
+            .fetch_one::<WrongScaleRead>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        rw.query("wrong_prec", &format!("SELECT ts FROM {tbl}"))
+            .fetch_one::<WrongPrecisionRead>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+
+    assert_live_decimal_scale_change_rejection(rw, ddl, &tbl, ts, ctx).await;
+
+    ddl.query(&format!("DROP TABLE IF EXISTS {tbl}"))
+        .execute()
+        .await
+        .expect("drop typed table");
 }
 
 #[tokio::test]
@@ -800,6 +1085,7 @@ async fn live_clickhouse_26_8_full_hardened_runtime_suite() {
 
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
     assert_param_select(&rw, &ctx).await;
+    assert_decimal_datetime64_and_timezone_params_live(&rw, &ddl, &ctx).await;
     assert_rw_batch_async_dedup_and_empty(&rw, &ctx, &table).await;
     assert_dedup_override_under_disabled_profile(url.clone(), db.clone(), &table, &ctx).await;
     assert_read_bounds_cardinality_and_cancellation(&rw, &ctx, &table).await;

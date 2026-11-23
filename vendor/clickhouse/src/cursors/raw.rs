@@ -12,7 +12,10 @@ use std::{
 
 /// A cursor over raw bytes of a query response.
 /// All other cursors are built on top of this one.
-pub(crate) struct RawCursor(RawCursorState);
+pub(crate) struct RawCursor {
+    state: RawCursorState,
+    max_decoded_bytes: Option<u64>,
+}
 
 enum RawCursorState {
     Waiting(ResponseFuture),
@@ -28,7 +31,14 @@ struct RawCursorLoading {
 
 impl RawCursor {
     pub(crate) fn new(response: Response) -> Self {
-        Self(RawCursorState::Waiting(response.into_future()))
+        Self {
+            state: RawCursorState::Waiting(response.into_future()),
+            max_decoded_bytes: None,
+        }
+    }
+
+    pub(crate) fn set_max_decoded_bytes(&mut self, limit: u64) {
+        self.max_decoded_bytes = Some(limit);
     }
 
     pub(crate) async fn next(&mut self) -> Result<Option<Bytes>> {
@@ -36,13 +46,19 @@ impl RawCursor {
     }
 
     pub(crate) fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>>> {
-        if let RawCursorState::Loading(state) = &mut self.0 {
+        if let RawCursorState::Loading(state) = &mut self.state {
             let chunks = pin!(&mut state.chunks);
 
             Poll::Ready(match ready!(chunks.poll_next(cx)?) {
                 Some(chunk) => {
-                    state.net_size += chunk.net_size as u64;
-                    state.data_size += chunk.data.len() as u64;
+                    state.net_size = state.net_size.saturating_add(chunk.net_size as u64);
+                    state.data_size = state.data_size.saturating_add(chunk.data.len() as u64);
+                    if self
+                        .max_decoded_bytes
+                        .is_some_and(|limit| state.data_size > limit)
+                    {
+                        return Poll::Ready(Err(crate::error::Error::ResultBytesLimitExceeded));
+                    }
                     Ok(Some(chunk.data))
                 }
                 None => Ok(None),
@@ -56,7 +72,7 @@ impl RawCursor {
     #[cold]
     #[inline(never)]
     fn poll_resolve(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let RawCursorState::Waiting(future) = &mut self.0 else {
+        let RawCursorState::Waiting(future) = &mut self.state else {
             panic!("poll_resolve called in invalid state");
         };
 
@@ -73,7 +89,7 @@ impl RawCursor {
             })
             .inspect_err(|e| e.record_in_current_span("response error"));
 
-        self.0 = RawCursorState::Loading(RawCursorLoading {
+        self.state = RawCursorState::Loading(RawCursorLoading {
             chunks,
             summary,
             net_size: 0,
@@ -84,21 +100,21 @@ impl RawCursor {
     }
 
     pub(crate) fn received_bytes(&self) -> u64 {
-        match &self.0 {
+        match &self.state {
             RawCursorState::Loading(state) => state.net_size,
             RawCursorState::Waiting(_) => 0,
         }
     }
 
     pub(crate) fn decoded_bytes(&self) -> u64 {
-        match &self.0 {
+        match &self.state {
             RawCursorState::Loading(state) => state.data_size,
             RawCursorState::Waiting(_) => 0,
         }
     }
 
     pub(crate) fn summary(&self) -> Option<&QuerySummary> {
-        match &self.0 {
+        match &self.state {
             RawCursorState::Loading(state) => state.summary.as_deref(),
             RawCursorState::Waiting(_) => None,
         }
@@ -106,7 +122,7 @@ impl RawCursor {
 
     #[cfg(feature = "futures03")]
     pub(crate) fn is_terminated(&self) -> bool {
-        match &self.0 {
+        match &self.state {
             RawCursorState::Loading(state) => state.chunks.is_terminated(),
             RawCursorState::Waiting(_) => false,
         }

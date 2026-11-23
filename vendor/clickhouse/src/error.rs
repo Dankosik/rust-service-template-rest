@@ -48,6 +48,8 @@ pub enum Error {
     InvalidColumnsHeader(#[source] BoxedError),
     #[error("schema mismatch: {0}")]
     SchemaMismatch(String),
+    #[error("decoded response exceeded the configured byte limit")]
+    ResultBytesLimitExceeded,
     #[error("unsupported: {0}")]
     Unsupported(String),
     #[error("{0}")]

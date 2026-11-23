@@ -248,19 +248,21 @@ async fn single_flight_metadata_isolation_and_schema_drift_recovery() {
     assert_eq!(state.describe_a.load(Ordering::SeqCst), 1);
 
     state.a_evolved.store(1, Ordering::SeqCst);
-    let err = ch
+    let report = ch
         .insert_batch(
             &ctx,
-            "drift_a",
+            "drift_a_auto_reprime",
             "table_a",
             &[EvolvedRow { id: 5, extra: 9 }],
             BatchInsertOptions::new(),
         )
         .await
-        .expect_err("stale metadata triggers SchemaMismatch");
-    assert_eq!(err, InsertError::NotApplied(InsertFailure::Encode));
+        .expect("stale warm slot transparently re-primes once before dispatch");
+    assert_eq!(report.rows, 1);
+    assert_eq!(state.describe_a.load(Ordering::SeqCst), 2);
+    assert_eq!(state.describe_b.load(Ordering::SeqCst), 1);
 
-    let report = ch
+    let report2 = ch
         .insert_batch(
             &ctx,
             "recovered_a",
@@ -269,8 +271,8 @@ async fn single_flight_metadata_isolation_and_schema_drift_recovery() {
             BatchInsertOptions::new(),
         )
         .await
-        .expect("re-primed write succeeds");
-    assert_eq!(report.rows, 1);
+        .expect("re-primed write succeeds from warm cache");
+    assert_eq!(report2.rows, 1);
     assert_eq!(state.describe_a.load(Ordering::SeqCst), 2);
     assert_eq!(state.describe_b.load(Ordering::SeqCst), 1);
 

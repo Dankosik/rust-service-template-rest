@@ -41,7 +41,8 @@ pub(crate) struct Admitted {
     pub(crate) query_settings: QuerySettings,
     pub(crate) query_timeout: Duration,
     pub(crate) insert_timeout: Duration,
-    pub(crate) max_concurrency: usize,
+    pub(crate) max_read_concurrency: usize,
+    pub(crate) max_write_concurrency: usize,
     pub(crate) max_result_rows: u64,
     pub(crate) max_result_bytes: usize,
     pub(crate) http_response_buffer_size: usize,
@@ -118,7 +119,8 @@ pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorK
         query_settings: options.query_settings,
         query_timeout: options.query_timeout,
         insert_timeout: options.insert_timeout,
-        max_concurrency: options.max_concurrency,
+        max_read_concurrency: options.max_read_concurrency,
+        max_write_concurrency: options.max_write_concurrency,
         max_result_rows: options.max_result_rows,
         max_result_bytes: options.max_result_bytes,
         http_response_buffer_size: options.http_response_buffer_size,
@@ -131,7 +133,9 @@ fn validate_limits(options: &ClickHouseOptions) -> Result<(), StartErrorKind> {
     const {
         assert!(MAX_CONCURRENCY_CEILING < tokio::sync::Semaphore::MAX_PERMITS);
     }
-    if !(1..=MAX_CONCURRENCY_CEILING).contains(&options.max_concurrency) {
+    if !(1..=MAX_CONCURRENCY_CEILING).contains(&options.max_read_concurrency)
+        || !(1..=MAX_CONCURRENCY_CEILING).contains(&options.max_write_concurrency)
+    {
         return Err(StartErrorKind::InvalidConcurrency);
     }
     if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&options.query_timeout)

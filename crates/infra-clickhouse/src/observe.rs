@@ -417,7 +417,9 @@ const fn query_error_outcome(error: QueryError) -> Outcome {
         QueryError::TooLarge => Outcome::TooLarge,
         QueryError::Rejected => Outcome::Rejected,
         QueryError::Decode => Outcome::Decode,
-        QueryError::Busy | QueryError::Unavailable => Outcome::Unavailable,
+        QueryError::Busy | QueryError::Unavailable | QueryError::ResourceLimit => {
+            Outcome::Unavailable
+        }
         QueryError::Stopped(Stopped::Deadline) => Outcome::Timeout,
         QueryError::Stopped(Stopped::Cancelled) => Outcome::Cancelled,
     }
@@ -452,7 +454,7 @@ pub(crate) fn describe() {
     metrics::describe_counter!(
         ADMISSION_REFUSED_METRIC,
         Unit::Count,
-        "ClickHouse operations shed immediately because max_concurrency permits are exhausted"
+        "ClickHouse operations shed immediately because read or write concurrency permits are exhausted"
     );
     metrics::describe_counter!(
         INSERT_ROWS_METRIC,

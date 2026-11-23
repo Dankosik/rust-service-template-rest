@@ -80,6 +80,11 @@ impl InsertState {
         matches!(self, Self::NotStarted { .. })
     }
 
+    #[inline(always)]
+    fn is_terminated(&self) -> bool {
+        matches!(self, Self::Terminated { .. })
+    }
+
     fn sender(&mut self) -> Option<&mut ChunkSender> {
         match self {
             InsertState::Active { sender, .. } => Some(sender),
@@ -386,7 +391,7 @@ impl InsertFormatted {
         }
 
         let Some(sender) = self.state.sender() else {
-            return Poll::Ready(Err(Error::Network("channel closed".into())));
+            return self.poll_wait_handle_or_closed(cx);
         };
 
         match sender.poll_ready(cx) {
@@ -394,7 +399,10 @@ impl InsertFormatted {
                 Timeout::reset_opt(self.send_timeout.as_mut());
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(false) => Poll::Ready(Err(Error::Network("channel closed".into()))),
+            Poll::Ready(false) => {
+                self.state.terminated(&self.span);
+                self.poll_wait_handle_or_closed(cx)
+            }
             Poll::Pending => {
                 ready!(Timeout::poll_opt(
                     self.send_timeout.as_mut(),
@@ -404,6 +412,13 @@ impl InsertFormatted {
                 self.abort();
                 Poll::Ready(Err(Error::TimedOut))
             }
+        }
+    }
+
+    fn poll_wait_handle_or_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        match ready!(self.poll_wait_handle(cx)) {
+            Ok(()) => Poll::Ready(Err(Error::Network("channel closed".into()))),
+            Err(err) => Poll::Ready(Err(err)),
         }
     }
 
@@ -699,6 +714,10 @@ impl BufInsertFormatted {
 
     #[inline(always)]
     fn poll_flush_inner(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.insert.state.is_terminated() {
+            return self.insert.poll_wait_handle_or_closed(cx);
+        }
+
         if self.buffer.is_empty() {
             return Poll::Ready(Ok(()));
         }
@@ -720,7 +739,13 @@ impl BufInsertFormatted {
             unreachable!("BUG: we just checked that `ChunkSender` was ready")
         };
 
-        Poll::Ready(res)
+        match res {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(_) => {
+                self.insert.state.terminated(&self.insert.span);
+                self.insert.poll_wait_handle_or_closed(cx)
+            }
+        }
     }
 
     /// Flushes the buffer, then calls [`InsertFormatted::end()`].

@@ -89,7 +89,8 @@ fn omitted_or_blank_url_is_inert_while_active_config_applies_defaults() {
     assert_eq!(ch.query_settings, ClickHouseQuerySettings::Client);
     assert_eq!(ch.query_timeout, Duration::from_secs(5));
     assert_eq!(ch.insert_timeout, Duration::from_secs(5));
-    assert_eq!(ch.max_concurrency.get(), 32);
+    assert_eq!(ch.max_read_concurrency.get(), 32);
+    assert_eq!(ch.max_write_concurrency.get(), 32);
     assert_eq!(ch.max_result_rows.get(), 100_000);
     assert_eq!(ch.max_result_bytes.get(), 16 * 1024 * 1024);
     assert_eq!(ch.http_response_buffer_size.get(), 2 * 1024 * 1024);
@@ -155,7 +156,8 @@ fn independent_ranges_pairs_and_dev_flags_validate_even_when_inert() {
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
         query_timeout: Duration::from_millis(9),
         insert_timeout: Duration::from_mins(6),
-        max_concurrency: 0,
+        max_read_concurrency: 0,
+        max_write_concurrency: 0,
         max_result_rows: 10_000_001,
         max_result_bytes: ByteSize::kib(63),
         http_response_buffer_size: Some(ByteSize::kib(32)),
@@ -169,7 +171,8 @@ fn independent_ranges_pairs_and_dev_flags_validate_even_when_inert() {
             "clickhouse.allow_unauthenticated",
             "clickhouse.query_timeout",
             "clickhouse.insert_timeout",
-            "clickhouse.max_concurrency",
+            "clickhouse.max_read_concurrency",
+            "clickhouse.max_write_concurrency",
             "clickhouse.max_result_rows",
             "clickhouse.max_result_bytes",
             "clickhouse.http_response_buffer_size",
@@ -177,7 +180,10 @@ fn independent_ranges_pairs_and_dev_flags_validate_even_when_inert() {
             "clickhouse.client_key_path",
         ]
     );
+    assert_single_limit_bounds();
+}
 
+fn assert_single_limit_bounds() {
     for (mutate, key) in [
         (
             (|input: &mut ClickHouseInput| input.query_timeout = Duration::from_millis(300_001))
@@ -189,8 +195,12 @@ fn independent_ranges_pairs_and_dev_flags_validate_even_when_inert() {
             "clickhouse.insert_timeout",
         ),
         (
-            |input| input.max_concurrency = 1025,
-            "clickhouse.max_concurrency",
+            |input| input.max_read_concurrency = 1025,
+            "clickhouse.max_read_concurrency",
+        ),
+        (
+            |input| input.max_write_concurrency = 1025,
+            "clickhouse.max_write_concurrency",
         ),
         (
             |input| input.max_result_rows = 0,

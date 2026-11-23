@@ -78,7 +78,8 @@ async fn read_pre_dispatch_limits_and_cardinality() {
     .await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.max_concurrency = 1;
+    opts.max_read_concurrency = 1;
+    opts.max_write_concurrency = 1;
     opts.max_result_rows = 2;
     opts.query_timeout = Duration::from_millis(80);
     let ch = ClickHouse::start(opts).await.expect("start");
@@ -189,6 +190,8 @@ async fn assert_server_settings_and_closed_read(
         "max_result_rows",
         "max_result_bytes",
         "max_memory_usage",
+        "readonly=",
+        "session_timezone=",
         "cancel_http_readonly",
     ] {
         assert!(!ro_uri.contains(forbidden), "{ro_uri}");
@@ -225,7 +228,8 @@ async fn read_precedence_bytes_cap_busy_and_server_settings() {
     .await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.max_concurrency = 1;
+    opts.max_read_concurrency = 1;
+    opts.max_write_concurrency = 1;
     opts.query_timeout = Duration::from_secs(2);
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
@@ -234,8 +238,9 @@ async fn read_precedence_bytes_cap_busy_and_server_settings() {
         ch.query("http400_159", "SELECT http400_code159")
             .fetch_one::<SampleRow>(&ctx)
             .await,
-        Err(QueryError::Unavailable)
+        Err(QueryError::ResourceLimit)
     );
+    assert!(!QueryError::ResourceLimit.is_retryable());
     assert_eq!(
         ch.query("http500_47", "SELECT http500_code47")
             .fetch_one::<SampleRow>(&ctx)
@@ -443,7 +448,7 @@ async fn write_pre_dispatch_validation_and_empty_noop() {
                 "bad_tok",
                 "events",
                 &[SampleRow { id: 1 }],
-                AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken(token))
+                AsyncInsertOptions::with_token(token)
             )
             .await,
             Err(InsertError::NotApplied(InsertFailure::InvalidInput))
@@ -518,7 +523,7 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         "async_disabled",
         "events",
         &[SampleRow { id: 2 }],
-        AsyncInsertOptions::new(),
+        AsyncInsertOptions::without_deduplication(),
     )
     .await
     .expect("async disabled ok");
@@ -527,7 +532,7 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         "async_hash",
         "events",
         &[SampleRow { id: 3 }],
-        AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash),
+        AsyncInsertOptions::with_payload_hash(),
     )
     .await
     .expect("async hash ok");
@@ -536,43 +541,12 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         "async_tok",
         "events",
         &[SampleRow { id: 4 }],
-        AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("tok-a")),
+        AsyncInsertOptions::new(AsyncDeduplication::ByToken("tok-a")),
     )
     .await
     .expect("async tok ok");
 
-    {
-        let uris = captured_uris.lock().await;
-        assert!(
-            uris[0].contains("async_insert=0")
-                && uris[0].contains("deduplicate_insert=enable")
-                && uris[0].contains("insert_deduplication_token=tok-b"),
-            "{}",
-            uris[0]
-        );
-        assert!(
-            uris[1].contains("async_insert=1")
-                && uris[1].contains("wait_for_async_insert=1")
-                && uris[1].contains("deduplicate_insert=disable"),
-            "{}",
-            uris[1]
-        );
-        assert!(
-            uris[2].contains("async_insert=1")
-                && uris[2].contains("wait_for_async_insert=1")
-                && uris[2].contains("deduplicate_insert=enable"),
-            "{}",
-            uris[2]
-        );
-        assert!(
-            uris[3].contains("async_insert=1")
-                && uris[3].contains("wait_for_async_insert=1")
-                && uris[3].contains("deduplicate_insert=enable")
-                && uris[3].contains("insert_deduplication_token=tok-a"),
-            "{}",
-            uris[3]
-        );
-    }
+    assert_captured_write_uris(&captured_uris.lock().await);
 
     assert_eq!(
         ch.insert_batch(
@@ -588,6 +562,46 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
 
     assert_write_code_precedence_and_close(ch, &ctx).await;
     srv.abort();
+}
+
+fn assert_captured_write_uris(uris: &[String]) {
+    assert!(
+        uris[0].contains("async_insert=0")
+            && uris[0].contains("max_execution_time=")
+            && uris[0].contains("timeout_overflow_mode=throw")
+            && uris[0].contains("max_memory_usage=536870912")
+            && uris[0].contains("deduplicate_insert=enable")
+            && uris[0].contains("insert_deduplication_token=tok-b"),
+        "{}",
+        uris[0]
+    );
+    assert!(
+        uris[1].contains("async_insert=1")
+            && uris[1].contains("wait_for_async_insert=1")
+            && uris[1].contains("wait_for_async_insert_timeout=")
+            && uris[1].contains("max_execution_time=")
+            && uris[1].contains("max_memory_usage=536870912")
+            && uris[1].contains("deduplicate_insert=disable"),
+        "{}",
+        uris[1]
+    );
+    assert!(
+        uris[2].contains("async_insert=1")
+            && uris[2].contains("wait_for_async_insert=1")
+            && uris[2].contains("wait_for_async_insert_timeout=")
+            && uris[2].contains("deduplicate_insert=enable"),
+        "{}",
+        uris[2]
+    );
+    assert!(
+        uris[3].contains("async_insert=1")
+            && uris[3].contains("wait_for_async_insert=1")
+            && uris[3].contains("wait_for_async_insert_timeout=")
+            && uris[3].contains("deduplicate_insert=enable")
+            && uris[3].contains("insert_deduplication_token=tok-a"),
+        "{}",
+        uris[3]
+    );
 }
 
 struct MtlsMaterials {

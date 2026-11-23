@@ -1,5 +1,6 @@
 mod a7_stress;
 mod admission;
+mod audit_remediations;
 mod faults;
 mod metadata;
 mod rotation;
@@ -47,7 +48,8 @@ pub(super) fn base_options(url: String) -> ClickHouseOptions {
         query_settings: QuerySettings::Client,
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
-        max_concurrency: 32,
+        max_read_concurrency: 32,
+        max_write_concurrency: 32,
         max_result_rows: 100_000,
         max_result_bytes: 16 * 1024 * 1024,
         http_response_buffer_size: 2 * 1024 * 1024,
@@ -244,7 +246,7 @@ async fn a4_1_and_a4_3_compile_and_send_futures() {
         "async_smoke",
         "events",
         &rows,
-        AsyncInsertOptions::new(),
+        AsyncInsertOptions::with_payload_hash(),
     );
     assert_send(&async_fut);
     let read_fut = client
@@ -645,7 +647,7 @@ async fn a4_7_bad_response_loopback_probes() {
     assert!(
         matches!(&err_158, clickhouse::error::Error::BadResponse(s) if s.starts_with("Code: 158"))
     );
-    let classified_158 = error::classify_query_error(&err_158);
+    let classified_158 = error::classify_query_error(&err_158, false);
     assert_eq!(classified_158.error, QueryError::TooLarge);
     assert_eq!(
         (
@@ -672,9 +674,9 @@ async fn a4_7_bad_response_loopback_probes() {
         );
         assert_eq!(
             (
-                error::classify_query_error(&err).error,
+                error::classify_query_error(&err, false).error,
                 error::classify_metadata_error(&err).error,
-                error::classify_post_dispatch_insert_error(&err).error,
+                error::classify_post_dispatch_insert_error(&err, true).error,
             ),
             (
                 expected_query,
@@ -692,9 +694,54 @@ async fn a4_7_bad_response_loopback_probes() {
 fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
     for (code, message, expected_reason) in [
         (
+            16_u32,
+            "Code: 16. DB::Exception: No such column in table",
+            error::FailureReason::Schema,
+        ),
+        (
+            36_u32,
+            "Code: 36. DB::Exception: Bad arguments",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            43_u32,
+            "Code: 43. DB::Exception: Illegal type of argument",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            46_u32,
+            "Code: 46. DB::Exception: Unknown function",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            70_u32,
+            "Code: 70. DB::Exception: Cannot convert type",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
             81_u32,
             "Code: 81. DB::Exception: Database missing does not exist",
             error::FailureReason::Schema,
+        ),
+        (
+            117_u32,
+            "Code: 117. DB::Exception: Incorrect data",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            153_u32,
+            "Code: 153. DB::Exception: Illegal division",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            215_u32,
+            "Code: 215. DB::Exception: Not an aggregate",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            386_u32,
+            "Code: 386. DB::Exception: No common type",
+            error::FailureReason::QueryInvalid,
         ),
         (
             456_u32,
@@ -708,7 +755,7 @@ fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
         ),
     ] {
         let ch_err = clickhouse::error::Error::BadResponse(message.to_owned());
-        let q = error::classify_query_error(&ch_err);
+        let q = error::classify_query_error(&ch_err, false);
         assert_eq!(q.error, QueryError::Rejected, "{code}");
         assert!(!q.error.is_retryable(), "{code}");
         assert_eq!(q.detail.reason, expected_reason, "{code}");
@@ -726,7 +773,7 @@ fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
         InsertError::NotApplied(InsertFailure::Rejected)
     );
     assert_eq!(
-        error::classify_post_dispatch_insert_error(&db_err).error,
+        error::classify_post_dispatch_insert_error(&db_err, true).error,
         InsertError::NotApplied(InsertFailure::Rejected)
     );
 }
@@ -773,7 +820,7 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{reason}"
         );
         let ch_err = clickhouse::error::Error::BadResponse(reason.to_owned());
-        let q = error::classify_query_error(&ch_err);
+        let q = error::classify_query_error(&ch_err, false);
         assert_eq!(q.error, expected_query, "{reason}");
         assert_eq!(
             q.detail.status_code,
@@ -786,7 +833,7 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{reason}"
         );
         assert_eq!(
-            error::classify_post_dispatch_insert_error(&ch_err).error,
+            error::classify_post_dispatch_insert_error(&ch_err, true).error,
             expected_insert,
             "{reason}"
         );
@@ -811,7 +858,7 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
         );
         let ch_err = clickhouse::error::Error::BadResponse(prose.to_owned());
         assert_eq!(
-            error::classify_query_error(&ch_err).error,
+            error::classify_query_error(&ch_err, false).error,
             QueryError::Unavailable,
             "{prose}"
         );
@@ -821,7 +868,7 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{prose}"
         );
         assert_eq!(
-            error::classify_post_dispatch_insert_error(&ch_err).error,
+            error::classify_post_dispatch_insert_error(&ch_err, true).error,
             InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
             "{prose}"
         );

@@ -761,7 +761,14 @@ impl Client {
     fn insert_metadata_query(&self, raw_table_name: &str) -> query::Query {
         let mut query = self
             .query(&_priv::row_insert_metadata_query(raw_table_name))
-            .with_setting("describe_include_subcolumns", "0");
+            .with_setting("describe_include_subcolumns", "0")
+            .with_setting("wait_end_of_query", "1");
+
+        if self.get_setting("max_execution_time").is_some() {
+            query = query
+                .with_setting("readonly", "2")
+                .with_setting("cancel_http_readonly_queries_on_client_close", "1");
+        }
 
         // Link the schema lookup to the INSERT without reusing its query id.
         // An empty id still asks the server to generate an id for each query.

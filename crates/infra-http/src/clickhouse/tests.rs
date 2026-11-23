@@ -84,7 +84,8 @@ async fn clickhouse_route(
         query_settings: QuerySettings::Client,
         query_timeout: Duration::from_mins(2),
         insert_timeout: Duration::from_mins(2),
-        max_concurrency: 4,
+        max_read_concurrency: 4,
+        max_write_concurrency: 4,
         max_result_rows: 1_000,
         max_result_bytes: 1024 * 1024,
         http_response_buffer_size: 256 * 1024,
@@ -126,6 +127,7 @@ async fn clickhouse_problems_preserve_route_policy_and_unconfirmed_inserts() {
         (read(Q::NotFound), 403, "forbidden"),
         (read(Q::Busy), 503, "service_unavailable"),
         (read(Q::Unavailable), 503, "service_unavailable"),
+        (read(Q::ResourceLimit), 503, "service_unavailable"),
         (read(Q::Stopped(Stopped::Deadline)), 504, "gateway_timeout"),
         (read(Q::TooManyRows), 500, "internal_error"),
         (read(Q::TooLarge), 500, "internal_error"),
@@ -222,7 +224,13 @@ async fn request_budget_timeout_distinguishes_pre_dispatch_describe_from_dispatc
         let rows = [EventRow { id: 1 }];
         let result = if mode == "async" {
             context
-                .clickhouse_insert_async(&client, "ingest", table, &rows, AsyncInsertOptions::new())
+                .clickhouse_insert_async(
+                    &client,
+                    "ingest",
+                    table,
+                    &rows,
+                    AsyncInsertOptions::with_payload_hash(),
+                )
                 .await
         } else {
             context
@@ -292,7 +300,7 @@ async fn run_insert_scenario(
                     "ingest",
                     "events_ok",
                     &rows,
-                    AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("tok")),
+                    AsyncInsertOptions::new(AsyncDeduplication::ByToken("tok")),
                 )
                 .await
                 .unwrap();
@@ -330,7 +338,7 @@ async fn run_insert_scenario(
                     "ingest",
                     "unconfirmed",
                     &rows,
-                    AsyncInsertOptions::new(),
+                    AsyncInsertOptions::with_payload_hash(),
                 )
                 .await
                 .unwrap_err();

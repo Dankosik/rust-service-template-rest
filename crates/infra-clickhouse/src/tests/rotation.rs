@@ -13,7 +13,7 @@ use super::{
     SampleRow, base_options, prometheus_recorder, rbwnat_describe_id_column, rbwnat_u64_rows,
     spawn_http_server,
 };
-use crate::{BatchInsertOptions, ClickHouse, CloseOutcome};
+use crate::{BatchInsertOptions, ClickHouse, CloseOutcome, QueryError};
 
 fn metric_counter(scrape: &str, name: &str, outcome: &str) -> u64 {
     let label = format!("outcome=\"{outcome}\"");
@@ -335,6 +335,66 @@ async fn in_flight_call_keeps_starting_credential_and_drop_cancels_refresh() {
             .num_alive_tasks()
             < tasks_with_client,
         "refresh task did not exit after dropping ClickHouse without close()"
+    );
+    srv.abort();
+}
+
+#[tokio::test]
+async fn password_file_reloads_reactively_on_code_516_without_waiting_poll_interval() {
+    let recorder = prometheus_recorder();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pw_path = dir.path().join("password");
+    let staging = dir.path().join("password.tmp");
+    tokio::fs::write(&pw_path, "pw-old\n")
+        .await
+        .expect("write initial");
+
+    let expected_pw = Arc::new(Mutex::new("pw-old".to_owned()));
+    let (addr, srv) = spawn_auth_server(Arc::clone(&expected_pw)).await;
+
+    let mut opts = base_options(format!("http://{addr}"));
+    opts.password = None;
+    opts.password_file = Some(pw_path.clone());
+    let ch = ClickHouse::start(opts).await.expect("start");
+    let ctx = OperationContext::with_timeout(Duration::from_secs(5));
+
+    assert_eq!(
+        ch.query("initial", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await
+            .expect("initial ok")
+            .id,
+        1
+    );
+
+    write_password_atomic(&staging, &pw_path, "pw-new\n").await;
+    *expected_pw.lock().await = "pw-new".to_owned();
+
+    assert_eq!(
+        ch.query("stale_516", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await,
+        Err(QueryError::Rejected)
+    );
+    let _ = wait_for_scrape(&recorder, |s| {
+        metric_counter(s, "clickhouse_password_file_refreshes_total", "updated") == 1
+    })
+    .await;
+
+    assert_eq!(
+        ch.query("recovered", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await
+            .expect("reactive reload recovered without waiting 5s")
+            .id,
+        1
+    );
+
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
     );
     srv.abort();
 }
