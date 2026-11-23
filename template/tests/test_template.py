@@ -90,6 +90,40 @@ class DetectChangesTests(unittest.TestCase):
         self.assertFalse(pg_only["integration_cache"])
         self.assertFalse(pg_only["integration_object_storage"])
         self.assertFalse(pg_only["integration_messaging"])
+        self.assertFalse(pg_only["integration_clickhouse"])
+
+        ch_only = DETECT.classify(ROOT, ["crates/infra-clickhouse/src/query.rs"])
+        self.assertTrue(ch_only["integration"])
+        self.assertTrue(ch_only["integration_clickhouse"])
+        self.assertFalse(ch_only["integration_db"])
+        self.assertFalse(ch_only["sqlx_check"])
+        self.assertFalse(ch_only["integration_cache"])
+        self.assertFalse(ch_only["integration_object_storage"])
+        self.assertFalse(ch_only["integration_messaging"])
+
+        ch_env = DETECT.classify(ROOT, ["env/clickhouse/users.d/ci-users.xml"])
+        self.assertTrue(ch_env["integration"])
+        self.assertTrue(ch_env["integration_clickhouse"])
+        self.assertFalse(ch_env["integration_db"])
+        self.assertFalse(ch_env["integration_cache"])
+        self.assertFalse(ch_env["integration_object_storage"])
+        self.assertFalse(ch_env["integration_messaging"])
+
+        ch_vendor = DETECT.classify(ROOT, ["vendor/clickhouse/src/response.rs"])
+        self.assertTrue(ch_vendor["rust"])
+        self.assertTrue(ch_vendor["deps"])
+        self.assertTrue(ch_vendor["vendor_transport"])
+        self.assertTrue(ch_vendor["codeql_rust"])
+        self.assertTrue(ch_vendor["integration"])
+        self.assertTrue(ch_vendor["integration_clickhouse"])
+        self.assertFalse(ch_vendor["integration_db"])
+        self.assertFalse(ch_vendor["integration_cache"])
+        self.assertFalse(ch_vendor["integration_object_storage"])
+        self.assertFalse(ch_vendor["integration_messaging"])
+
+        ch_direct_dep = DETECT.classify(ROOT, ["crates/shared-rules/src/secret_file.rs"])
+        self.assertTrue(ch_direct_dep["integration"])
+        self.assertTrue(ch_direct_dep["integration_clickhouse"])
 
         util_test = DETECT.classify(ROOT, ["crates/utility-recipes/tests/utility_values.rs"])
         self.assertTrue(util_test["rust"])
@@ -102,7 +136,14 @@ class DetectChangesTests(unittest.TestCase):
             self.assertFalse(all_empty["grpc"])
             self.assertFalse(all_empty["migrations"])
             self.assertFalse(all_empty["template"])
+            self.assertFalse(all_empty["integration_clickhouse"])
             self.assertTrue(all_empty["rust"])
+            self.assertFalse(
+                DETECT.classify(empty, ["crates/infra-clickhouse/src/query.rs"])["integration_clickhouse"]
+            )
+            self.assertFalse(
+                DETECT.classify(empty, ["crates/shared-rules/src/secret_file.rs"])["integration_clickhouse"]
+            )
 
             (empty / "env").mkdir()
             (empty / "env/docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
@@ -286,6 +327,8 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
             profiles.extend(match.group(1).split())
         self.assertEqual(len(profiles), len(set(profiles)), f"duplicate profiles in template-matrix shards: {profiles}")
         self.assertEqual(set(profiles), set(template_check.CANONICAL_PROFILES))
+        self.assertEqual(template_check.CANONICAL_PROFILES["clickhouse"], {"clickhouse": "http"})
+        self.assertEqual(template_check.CANONICAL_PROFILES["full"]["clickhouse"], "http")
 
     def test_live_workspace_rust_selection_backtest(self) -> None:
         from scripts.checks import rust_selection
@@ -294,6 +337,15 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
         self.assertEqual(cache_plan.mode, "selected")
         self.assertEqual(cache_plan.packages, ("infra-cache", "service"))
         self.assertEqual(cache_plan.lint_features, ("infra-cache/integration",))
+
+        clickhouse_plan = rust_selection.plan_selection(ROOT, ["crates/infra-clickhouse/src/query.rs"])
+        self.assertEqual(clickhouse_plan.mode, "selected")
+        self.assertEqual(clickhouse_plan.packages, ("infra-clickhouse", "service"))
+        self.assertEqual(clickhouse_plan.lint_features, ("infra-clickhouse/integration",))
+
+        vendor_ch_plan = rust_selection.plan_selection(ROOT, ["vendor/clickhouse/src/response.rs"])
+        self.assertEqual(vendor_ch_plan.mode, "full")
+        self.assertIn("infra-clickhouse/integration", vendor_ch_plan.lint_features)
 
         openapi_plan = rust_selection.plan_selection(ROOT, ["api/openapi/service.yaml"])
         self.assertEqual(openapi_plan.mode, "selected")
@@ -304,6 +356,7 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
         self.assertIn("infra-telemetry", obs_plan.packages)
         self.assertIn("service", obs_plan.packages)
         self.assertNotIn("infra-cache", obs_plan.packages)
+        self.assertNotIn("infra-clickhouse", obs_plan.packages)
 
 
 if __name__ == "__main__":

@@ -321,6 +321,10 @@ impl Access {
         if !declares_bearer_scheme(document) {
             return Err(PolicyFault::MissingBearerScheme);
         }
+        #[allow(
+            unused_variables,
+            reason = "only the authn profile retains validated bearer requirements"
+        )]
         let requirements = bearer_requirements(requirements)?;
         Ok(Self::Protected(
             // template:begin authn:http-contract-protected-value

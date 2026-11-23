@@ -9,6 +9,9 @@ use infra_cache::Cache;
 // template:begin object-storage:service-shutdown-object-storage-imports
 use infra_object_storage::ObjectStorage;
 // template:end object-storage:service-shutdown-object-storage-imports
+// template:begin clickhouse:service-shutdown-clickhouse-imports
+use infra_clickhouse::ClickHouse;
+// template:end clickhouse:service-shutdown-clickhouse-imports
 // template:begin postgres:shutdown-imports
 use infra_postgres::{CloseOutcome, PoolStartup};
 // template:end postgres:shutdown-imports
@@ -106,6 +109,9 @@ pub(crate) struct Dependencies {
     // template:begin object-storage:service-shutdown-dependencies-object-storage-field
     pub(crate) object_storage: Option<ObjectStorage>,
     // template:end object-storage:service-shutdown-dependencies-object-storage-field
+    // template:begin clickhouse:service-shutdown-dependencies-clickhouse-field
+    pub(crate) clickhouse: Option<ClickHouse>,
+    // template:end clickhouse:service-shutdown-dependencies-clickhouse-field
 }
 
 impl Dependencies {
@@ -124,6 +130,9 @@ impl Dependencies {
             // template:begin object-storage:service-shutdown-dependencies-object-storage-destructure
             object_storage,
             // template:end object-storage:service-shutdown-dependencies-object-storage-destructure
+            // template:begin clickhouse:service-shutdown-dependencies-clickhouse-destructure
+            clickhouse,
+            // template:end clickhouse:service-shutdown-dependencies-clickhouse-destructure
         } = self;
         // template:begin object-storage:service-shutdown-dependencies-object-storage-close
         drop(object_storage);
@@ -168,8 +177,29 @@ impl Dependencies {
             // template:end postgres:shutdown-dependencies-postgres-close
             Outcome::Graceful
         };
-        let (cache_outcome, postgres_outcome) = tokio::join!(cache_close, postgres_close);
-        cache_outcome.max(postgres_outcome)
+        let clickhouse_close = async {
+            // template:begin clickhouse:service-shutdown-dependencies-clickhouse-close
+            if let Some(client) = clickhouse {
+                return match client
+                    .close(deadline.saturating_duration_since(Instant::now()))
+                    .await
+                {
+                    infra_clickhouse::CloseOutcome::Complete => {
+                        tracing::info!("clickhouse_closed");
+                        Outcome::Graceful
+                    }
+                    infra_clickhouse::CloseOutcome::TimedOut => {
+                        tracing::warn!("clickhouse outlived its close budget");
+                        Outcome::Degraded
+                    }
+                };
+            }
+            // template:end clickhouse:service-shutdown-dependencies-clickhouse-close
+            Outcome::Graceful
+        };
+        let (cache_outcome, postgres_outcome, clickhouse_outcome) =
+            tokio::join!(cache_close, postgres_close, clickhouse_close);
+        cache_outcome.max(postgres_outcome).max(clickhouse_outcome)
     }
 }
 

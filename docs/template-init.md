@@ -20,7 +20,7 @@ matching uppercase env vars also work):
 `--grpc enabled`, `--http-idempotency postgres`, `--jobs postgres`,
 `--messaging nats-jetstream`, `--outbox postgres`, `--webhooks durable`,
 `--inbound-webhooks standard-webhooks`, `--cache redis`,
-`--object-storage s3`, `--service-auth jwt`, and
+`--object-storage s3`, `--clickhouse http`, `--service-auth jwt`, and
 `--agent-harness core|codex|claude|qwen|cursor|grok|opencode|antigravity|all`.
 
 `template/init.py` validates inputs against `template/profiles.json`, strips

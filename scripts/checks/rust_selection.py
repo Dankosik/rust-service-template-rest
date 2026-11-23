@@ -43,6 +43,7 @@ _LINT_INTEGRATION_FEATURES: tuple[tuple[str, str], ...] = (
     ("infra-cache", "infra-cache/integration"),
     ("infra-object-storage", "infra-object-storage/integration"),
     ("infra-oauth2-client-credentials", "infra-oauth2-client-credentials/integration"),
+    ("infra-clickhouse", "infra-clickhouse/integration"),
 )
 
 

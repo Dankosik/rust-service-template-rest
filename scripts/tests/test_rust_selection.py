@@ -164,6 +164,34 @@ class RustSelectionTests(unittest.TestCase):
             self.assertIn("infra-cache", ran[0])
             self.assertIn("--no-fail-fast", ran[0])
 
+    def test_clickhouse_adapter_selects_clickhouse_integration_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta = _synthetic_workspace(root)
+            meta["workspace_members"].append("infra-clickhouse")
+            meta["packages"].append(
+                {
+                    "id": "infra-clickhouse",
+                    "name": "infra-clickhouse",
+                    "manifest_path": str(root / "crates/infra-clickhouse/Cargo.toml"),
+                    "features": {"integration": []},
+                    "dependencies": [{"name": "health"}],
+                }
+            )
+            svc = next(pkg for pkg in meta["packages"] if pkg["name"] == "service-app")
+            svc["dependencies"].append({"name": "infra-clickhouse"})
+
+            plan = rust_selection.plan_selection(root, ["crates/infra-clickhouse/src/query.rs"], metadata=meta)
+            self.assertEqual(plan.mode, "selected")
+            self.assertEqual(plan.packages, ("infra-clickhouse", "service-app"))
+            self.assertEqual(plan.lint_features, ("infra-clickhouse/integration",))
+            self.assertEqual(plan.provenance["infra-clickhouse"], ("owner:crates/infra-clickhouse/src/query.rs",))
+            self.assertEqual(plan.provenance["service-app"], ("reverse-dep:infra-clickhouse",))
+
+            vendor_plan = rust_selection.plan_selection(root, ["vendor/clickhouse/src/response.rs"], metadata=meta)
+            self.assertEqual(vendor_plan.mode, "full")
+            self.assertIn("infra-clickhouse/integration", vendor_plan.lint_features)
+
 
 if __name__ == "__main__":
     unittest.main()

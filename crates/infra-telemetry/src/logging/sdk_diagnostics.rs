@@ -126,6 +126,9 @@ pub(super) fn is_dependency_target(target: &str) -> bool {
         "rustls",
         "rustls_platform_verifier",
         "rustls-platform-verifier",
+        // template:begin clickhouse:telemetry-denied-clickhouse
+        "clickhouse",
+        // template:end clickhouse:telemetry-denied-clickhouse
     ]
     .iter()
     .any(|family| super::is_within_target(target, family))

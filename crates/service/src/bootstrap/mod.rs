@@ -12,6 +12,9 @@ mod authn;
 // template:begin cache:service-bootstrap-cache-module
 mod cache;
 // template:end cache:service-bootstrap-cache-module
+// template:begin clickhouse:service-bootstrap-clickhouse-module
+mod clickhouse;
+// template:end clickhouse:service-bootstrap-clickhouse-module
 // template:begin http-idempotency:bootstrap-http-idempotency-module
 mod idempotency;
 // template:end http-idempotency:bootstrap-http-idempotency-module
@@ -89,6 +92,10 @@ pub(crate) enum BootstrapError {
     #[error("object storage configuration: {0}")]
     ObjectStorage(#[from] infra_object_storage::ConfigError),
     // template:end object-storage:service-bootstrap-object-storage-errors
+    // template:begin clickhouse:service-bootstrap-clickhouse-errors
+    #[error("clickhouse startup: {0}")]
+    ClickHouse(#[from] infra_clickhouse::StartError),
+    // template:end clickhouse:service-bootstrap-clickhouse-errors
     #[error("startup admission: {0}")]
     Admission(#[from] health::NotReady),
     #[error("configuration is invalid: {0}")]
@@ -477,6 +484,11 @@ async fn start(
         .map(object_storage::open)
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
+    // template:begin clickhouse:service-bootstrap-clickhouse-startup
+    if let Some(settings) = config.clickhouse() {
+        dependencies.clickhouse = Some(clickhouse::open(settings).await?);
+    }
+    // template:end clickhouse:service-bootstrap-clickhouse-startup
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
     let webhook_state = inbound_webhooks::prepare(config, postgres_pool.as_ref())?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare

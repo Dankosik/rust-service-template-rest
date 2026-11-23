@@ -544,6 +544,21 @@ fn emit_denied_diagnostics() {
     assert!(
         tracing::info_span!(target: "tracing_opentelemetry", "SDK_SECRET_SENTINEL").is_disabled()
     );
+    // template:begin clickhouse:telemetry-denied-clickhouse-test
+    tracing::debug!(target: "clickhouse", error = ?NeverFormat, "SDK_SECRET_SENTINEL");
+    tracing::warn!(target: "clickhouse::insert", "SDK_SECRET_SENTINEL");
+    assert!(tracing::info_span!(target: "clickhouse", "SDK_SECRET_SENTINEL").is_disabled());
+    assert!(tracing::info_span!(target: "clickhouse::query", "SDK_SECRET_SENTINEL").is_disabled());
+    assert!(!tracing::info_span!(target: "infra_clickhouse", "clickhouse_query").is_disabled());
+    tracing_log::format_trace(
+        &tracing_log::log::Record::builder()
+            .target("clickhouse::client")
+            .level(tracing_log::log::Level::Error)
+            .args(format_args!("SDK_SECRET_SENTINEL"))
+            .build(),
+    )
+    .expect("bridge diagnostic");
+    // template:end clickhouse:telemetry-denied-clickhouse-test
     for target in [
         "rustls::client",
         "hyper_util::client",

@@ -134,3 +134,24 @@ session_budgets = "startup"
 # trust = '{"example-caller": {"keys": [{"kty": "EC", "crv": "P-256", "kid": "example-caller/1", "x": "...", "y": "..."}]}}'
 # key_id = "example/1"
 # template:end service-auth:local-config
+
+# template:begin clickhouse:local-config
+# ClickHouse is inert until a URL is selected. With `docker compose -f env/docker-compose.yml up -d --wait clickhouse`:
+#   APP__CLICKHOUSE__URL=http://127.0.0.1:8123 \
+#   APP__CLICKHOUSE__PASSWORD=app just run
+[clickhouse]
+url = ""
+database = "app"
+username = "app"
+password = ""
+allow_plaintext = true
+query_settings = "client"
+query_timeout = "5s"
+insert_timeout = "5s"
+max_concurrency = 32
+max_result_rows = 100000
+max_result_bytes = "16 MiB"
+max_memory_usage = "512 MiB"
+propagate_trace_context = true
+# password_file = "/run/secrets/clickhouse-password"
+# template:end clickhouse:local-config

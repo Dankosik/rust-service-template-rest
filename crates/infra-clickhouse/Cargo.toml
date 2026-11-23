@@ -1,0 +1,67 @@
+[package]
+name = "infra-clickhouse"
+description = "Optional hardened ClickHouse HTTP/HTTPS client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+integration = []
+
+[[test]]
+name = "clickhouse"
+path = "tests/clickhouse.rs"
+required-features = ["integration"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arc-swap = { workspace = true }
+clickhouse = { workspace = true, features = ["lz4", "time", "uuid"] }
+derive_more = { workspace = true, features = ["debug"] }
+enum-map = { workspace = true, features = ["derive"] }
+http = { workspace = true }
+hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+metrics = { workspace = true }
+operation-context = { workspace = true }
+parking_lot = { workspace = true }
+rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+shared-rules = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true, features = ["std"] }
+tracing-opentelemetry-instrumentation-sdk = { workspace = true, features = ["http"] }
+url = { workspace = true, features = ["std"] }
+uuid = { workspace = true, features = ["v4"] }
+zeroize = { workspace = true, features = ["alloc"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+metrics-exporter-prometheus = { workspace = true }
+observe-test-support = { workspace = true }
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+serde = { workspace = true, features = ["derive"] }
+tempfile = { workspace = true, features = ["getrandom"] }
+tls-test-support = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "rt-multi-thread", "test-util"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["registry"] }

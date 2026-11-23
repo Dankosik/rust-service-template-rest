@@ -34,6 +34,7 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
     "grpc-service-auth": {"grpc": "enabled", "authn": "oidc-jwt", "service_auth": "jwt"},
     "messaging-outbox": {"database": "postgres", "jobs": "postgres", "messaging": "nats-jetstream", "outbox": "postgres"},
     "cache-s3": {"cache": "redis", "object_storage": "s3"},
+    "clickhouse": {"clickhouse": "http"},
     "full": {
         "database": "postgres",
         "authn": "oidc-jwt",
@@ -48,6 +49,7 @@ CANONICAL_PROFILES: dict[str, dict[str, str]] = {
         "inbound_webhooks": "standard-webhooks",
         "cache": "redis",
         "object_storage": "s3",
+        "clickhouse": "http",
         "service_auth": "jwt",
     },
 }

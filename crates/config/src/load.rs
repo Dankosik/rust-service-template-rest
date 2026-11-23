@@ -41,6 +41,9 @@ const RETAINED_SECTIONS: &[&str] = &[
     // template:begin object-storage:config-section
     "object_storage",
     // template:end object-storage:config-section
+    // template:begin clickhouse:config-section
+    "clickhouse",
+    // template:end clickhouse:config-section
     // template:begin authn:config-section
     "authn",
     // template:end authn:config-section

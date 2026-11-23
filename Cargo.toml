@@ -19,6 +19,9 @@ exclude = [
     "vendor/aws-smithy-http-client",
 # template:end object-storage:workspace-object-storage-vendor-exclude
     "vendor/hyper-util",
+# template:begin clickhouse:workspace-clickhouse-vendor-exclude
+    "vendor/clickhouse",
+# template:end clickhouse:workspace-clickhouse-vendor-exclude
 ]
 
 [workspace.package]
@@ -85,6 +88,9 @@ infra-cache = { path = "crates/infra-cache" }
 # template:begin object-storage:workspace-object-storage-crate
 infra-object-storage = { path = "crates/infra-object-storage" }
 # template:end object-storage:workspace-object-storage-crate
+# template:begin clickhouse:workspace-clickhouse-crate
+infra-clickhouse = { path = "crates/infra-clickhouse" }
+# template:end clickhouse:workspace-clickhouse-crate
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
@@ -112,6 +118,9 @@ simdutf8 = { version = "0.1.5", default-features = false }
 pem = { version = "=4.0.0", default-features = false }
 redis = { version = "1.7.1", default-features = false }
 # template:end cache:workspace-cache-client
+# template:begin clickhouse:workspace-clickhouse-client
+clickhouse = { version = "0.15.3", default-features = false }
+# template:end clickhouse:workspace-clickhouse-client
 # template:begin object-storage:workspace-object-storage-client
 # The AWS SDK family releases weekly and yanked one release on 2026-09-14:
 # move these pins together in one reviewed change
@@ -251,9 +260,9 @@ backon = { version = "1.6.0", default-features = false }
 moka = { version = "0.12.16", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
-# template:begin outbound-http:workspace-outbound-http-transport
+# template:begin hyper-rustls:workspace-hyper-rustls
 hyper-rustls = { version = "0.27.9", default-features = false }
-# template:end outbound-http:workspace-outbound-http-transport
+# template:end hyper-rustls:workspace-hyper-rustls
 # template:begin jsonwebtoken:workspace-jsonwebtoken
 jsonwebtoken = { version = "=11.1.0", default-features = false }
 # template:end jsonwebtoken:workspace-jsonwebtoken
@@ -437,3 +446,7 @@ hyper-util = { path = "vendor/hyper-util" }
 # The client dispatcher reports decoded RPC outcomes. See vendor/tonic/PATCHES.md.
 tonic = { path = "vendor/tonic" }
 # template:end grpc:workspace-tonic-patch
+# template:begin clickhouse:workspace-clickhouse-patch
+# Abort detached InsertFormatted tasks and cap error bodies; see vendor/clickhouse/PATCHES.md.
+clickhouse = { path = "vendor/clickhouse" }
+# template:end clickhouse:workspace-clickhouse-patch

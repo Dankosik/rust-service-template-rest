@@ -57,6 +57,9 @@ infra-cache = { workspace = true }
 # template:begin object-storage:service-object-storage-dependency
 infra-object-storage = { workspace = true }
 # template:end object-storage:service-object-storage-dependency
+# template:begin clickhouse:service-clickhouse-dependency
+infra-clickhouse = { workspace = true }
+# template:end clickhouse:service-clickhouse-dependency
 # template:begin outbound-http:service-outbound-http-dependency
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:service-outbound-http-dependency
@@ -120,11 +123,13 @@ tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
 # template:begin runtime-progress:service-runtime-progress-dependencies
 # The non-shipped quota example calls the adopted serializer with a finite
 # primitive event. These are existing workspace versions, not runtime providers.
-serde = { workspace = true, features = ["derive"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
 time = { workspace = true, features = ["std"] }
 # template:end runtime-progress:service-runtime-progress-dependencies
+# template:begin clickhouse:service-clickhouse-test-serde
+serde = { workspace = true, features = ["derive"] }
+# template:end clickhouse:service-clickhouse-test-serde
 # template:begin grpc-jwt:service-grpc-jwt-test-dependencies
 # The process test (tests/grpc_process.rs). The runtime-progress proof implies
 # this profile and also uses infra-bearerauthn test-support and tokio-rustls.

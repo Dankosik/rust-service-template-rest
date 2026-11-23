@@ -131,6 +131,9 @@ COPY --from=planner /src/vendor/hyper-util /src/vendor/hyper-util
 # template:begin grpc:docker-tonic-vendor
 COPY --from=planner /src/vendor/tonic /src/vendor/tonic
 # template:end grpc:docker-tonic-vendor
+# template:begin clickhouse:docker-clickhouse-vendor
+COPY --from=planner /src/vendor/clickhouse /src/vendor/clickhouse
+# template:end clickhouse:docker-clickhouse-vendor
 ARG SERVICE_PACKAGE
 RUN cargo chef cook --release --locked --recipe-path recipe.json -p "${SERVICE_PACKAGE}"
 # template:begin postgres:docker-migrator-build

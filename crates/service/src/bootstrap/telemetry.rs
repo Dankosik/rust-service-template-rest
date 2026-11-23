@@ -26,6 +26,9 @@ pub(super) fn install_metrics() -> Result<Metrics, BootstrapError> {
             // template:begin object-storage:service-bootstrap-object-storage-histogram
             infra_object_storage::HISTOGRAMS,
             // template:end object-storage:service-bootstrap-object-storage-histogram
+            // template:begin clickhouse:service-bootstrap-clickhouse-histogram
+            infra_clickhouse::HISTOGRAMS,
+            // template:end clickhouse:service-bootstrap-clickhouse-histogram
         ]
         .concat(),
     )?)
@@ -68,6 +71,9 @@ pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         // template:begin postgres:bootstrap-startup-log-postgres
         postgres.enabled = config.postgres().is_some(),
         // template:end postgres:bootstrap-startup-log-postgres
+        // template:begin clickhouse:bootstrap-startup-log-clickhouse
+        clickhouse.enabled = config.clickhouse().is_some(),
+        // template:end clickhouse:bootstrap-startup-log-clickhouse
         // template:begin service-auth:bootstrap-startup-log-service-auth
         service_auth.mode = config.service_auth().mode(),
         // template:end service-auth:bootstrap-startup-log-service-auth

@@ -96,9 +96,11 @@ pub(super) fn needs_extension_dispatch(item: &PathItem) -> bool {
             .any(|method| method != axum::http::Method::CONNECT.as_str())
 }
 
+// template:begin http-idempotency:http-document-bare-reference
 pub(super) fn is_bare_reference(reference: &Ref) -> bool {
     *reference == Ref::new(&reference.ref_location)
 }
+// template:end http-idempotency:http-document-bare-reference
 
 pub(super) fn documented_methods(item: &PathItem) -> impl Iterator<Item = &str> {
     standard_operations(item)
