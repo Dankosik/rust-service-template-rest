@@ -1,14 +1,14 @@
+use std::borrow::Cow;
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use operation_context::{BoundedStop, OperationContext};
+use clickhouse::types::{MAX_DECIMAL_SCALE, serialize_decimal_param};
+use operation_context::OperationContext;
 use serde::Serialize;
 use smallvec::SmallVec;
 
 use crate::error::{
-    FailureReason, ObservedFailure, QueryError, bounded_stop_reason, classify_query_error,
-    is_auth_failure,
+    FailureReason, ObservedFailure, QueryError, classify_query_error, is_auth_failure,
 };
 use crate::observe::{Operation, OperationGuard};
 use crate::{
@@ -16,21 +16,11 @@ use crate::{
     within_bounded,
 };
 
-use clickhouse::types::{MAX_DECIMAL_SCALE, serialize_decimal_param};
-
 const NANOS_PER_SEC: u128 = 1_000_000_000;
 
-mod sealed {
-    pub trait ReadRowSealed {}
-    impl<R> ReadRowSealed for R where R: clickhouse::RowOwned + clickhouse::RowRead + Send + 'static {}
-}
+pub trait ReadRow: clickhouse::RowOwned + clickhouse::RowRead + Send {}
 
-pub trait ReadRow:
-    sealed::ReadRowSealed + clickhouse::RowOwned + clickhouse::RowRead + Send + 'static
-{
-}
-
-impl<R> ReadRow for R where R: clickhouse::RowOwned + clickhouse::RowRead + Send + 'static {}
+impl<R: clickhouse::RowOwned + clickhouse::RowRead + Send> ReadRow for R {}
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Param(..)")]
@@ -72,13 +62,7 @@ enum ParamValue {
     DateTimeSecs(time::OffsetDateTime),
     Decimal(i128, u8),
     None,
-    Array(Vec<Param>),
-}
-
-impl Serialize for Param {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
-    }
+    Array(Vec<Self>),
 }
 
 impl Serialize for ParamValue {
@@ -100,14 +84,18 @@ impl Serialize for ParamValue {
             Self::F32(v) => v.serialize(serializer),
             Self::F64(v) => v.serialize(serializer),
             Self::Str(v) => v.serialize(serializer),
-            Self::Uuid(v) => v.to_string().serialize(serializer),
-            Self::Date(v) => {
-                let formatted =
-                    format!("{:04}-{:02}-{:02}", v.year(), u8::from(v.month()), v.day());
-                formatted.serialize(serializer)
+            Self::Uuid(v) => {
+                let mut buf = uuid::Uuid::encode_buffer();
+                serializer.serialize_str(v.as_hyphenated().encode_lower(&mut buf))
             }
-            Self::DateTime(v) => format_datetime_param(*v, true).serialize(serializer),
-            Self::DateTimeSecs(v) => format_datetime_param(*v, false).serialize(serializer),
+            Self::Date(v) => serializer.collect_str(&format_args!(
+                "{:04}-{:02}-{:02}",
+                v.year(),
+                u8::from(v.month()),
+                v.day()
+            )),
+            Self::DateTime(v) => serialize_datetime_param(*v, true, serializer),
+            Self::DateTimeSecs(v) => serialize_datetime_param(*v, false, serializer),
             Self::Decimal(unscaled, scale) => {
                 serialize_decimal_param(*unscaled, *scale, serializer)
             }
@@ -117,27 +105,31 @@ impl Serialize for ParamValue {
     }
 }
 
-fn format_datetime_param(v: time::OffsetDateTime, include_subsec: bool) -> String {
+fn serialize_datetime_param<S: serde::Serializer>(
+    v: time::OffsetDateTime,
+    include_subsec: bool,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     if !include_subsec {
         let secs = v.unix_timestamp();
         return if secs < 0 {
-            format!("-{:010}", secs.unsigned_abs())
+            serializer.collect_str(&format_args!("-{:010}", secs.unsigned_abs()))
         } else {
-            format!("{secs:010}")
+            serializer.collect_str(&format_args!("{secs:010}"))
         };
     }
     let total_ns = v.unix_timestamp_nanos();
     if (-999_999_999..0).contains(&total_ns) {
-        return format!("1969-12-31 23:59:59.{:09}", v.nanosecond());
+        return serializer.collect_str(&format_args!("1969-12-31 23:59:59.{:09}", v.nanosecond()));
     }
     let sign = if total_ns < 0 { "-" } else { "" };
     let abs = total_ns.unsigned_abs();
     let whole = abs / NANOS_PER_SEC;
     let frac = abs % NANOS_PER_SEC;
     if frac == 0 {
-        format!("{sign}{whole:010}")
+        serializer.collect_str(&format_args!("{sign}{whole:010}"))
     } else {
-        format!("{sign}{whole:010}.{frac:09}")
+        serializer.collect_str(&format_args!("{sign}{whole:010}.{frac:09}"))
     }
 }
 
@@ -199,6 +191,24 @@ impl From<&str> for Param {
     }
 }
 
+impl From<&String> for Param {
+    fn from(value: &String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
+impl From<Cow<'_, str>> for Param {
+    fn from(value: Cow<'_, str>) -> Self {
+        Self(ParamValue::Str(value.into_owned()))
+    }
+}
+
+impl From<time::UtcDateTime> for Param {
+    fn from(value: time::UtcDateTime) -> Self {
+        time::OffsetDateTime::from(value).into()
+    }
+}
+
 impl<T: Into<Self>> From<Option<T>> for Param {
     fn from(value: Option<T>) -> Self {
         match value {
@@ -211,7 +221,7 @@ impl<T: Into<Self>> From<Option<T>> for Param {
 impl<T: Into<Self>> From<Vec<T>> for Param {
     fn from(values: Vec<T>) -> Self {
         Self(ParamValue::Array(
-            values.into_iter().map(Into::into).collect(),
+            values.into_iter().map(|value| value.into().0).collect(),
         ))
     }
 }
@@ -219,8 +229,28 @@ impl<T: Into<Self>> From<Vec<T>> for Param {
 impl<T: Clone + Into<Self>> From<&[T]> for Param {
     fn from(values: &[T]) -> Self {
         Self(ParamValue::Array(
-            values.iter().cloned().map(Into::into).collect(),
+            values.iter().cloned().map(|value| value.into().0).collect(),
         ))
+    }
+}
+
+impl<T: Into<Self>, const N: usize> From<[T; N]> for Param {
+    fn from(values: [T; N]) -> Self {
+        Self(ParamValue::Array(
+            values.into_iter().map(|value| value.into().0).collect(),
+        ))
+    }
+}
+
+impl<T: Clone + Into<Self>, const N: usize> From<&[T; N]> for Param {
+    fn from(values: &[T; N]) -> Self {
+        Self::from(values.as_slice())
+    }
+}
+
+impl<T: Clone + Into<Self>> From<&Vec<T>> for Param {
+    fn from(values: &Vec<T>) -> Self {
+        Self::from(values.as_slice())
     }
 }
 
@@ -230,7 +260,7 @@ pub struct Query<'a> {
     client: &'a ClickHouse,
     summary: &'static str,
     sql: &'a str,
-    params: SmallVec<[(&'a str, Param); 4]>,
+    params: SmallVec<[(Cow<'a, str>, Param); 4]>,
     timeout: Option<Duration>,
     max_result_rows: Option<NonZeroU64>,
     max_result_bytes: Option<NonZeroUsize>,
@@ -249,8 +279,8 @@ impl<'a> Query<'a> {
         }
     }
 
-    pub fn param(mut self, name: &'a str, value: impl Into<Param>) -> Self {
-        self.params.push((name, value.into()));
+    pub fn param(mut self, name: impl Into<Cow<'a, str>>, value: impl Into<Param>) -> Self {
+        self.params.push((name.into(), value.into()));
         self
     }
 
@@ -319,46 +349,47 @@ impl<'a> Query<'a> {
         finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
     ) -> Result<T, QueryError> {
         let shared = &self.client.inner.shared;
-        if shared.closing.load(Ordering::Acquire) {
+        if shared.is_closing() {
             return Err(QueryError::Unavailable);
         }
         ctx.check().map_err(QueryError::Stopped)?;
         validate_query_inputs(self.sql, &self.params, self.timeout)?;
 
-        let Ok(_permit) = shared.read_permits.clone().try_acquire_owned() else {
+        let Ok(_permit) = shared.read_permits.try_acquire() else {
             shared.metrics.record_admission_refused(operation);
             return Err(QueryError::Busy);
         };
         let _task_token = shared.tasks.token();
-        if shared.closing.load(Ordering::Acquire) || shared.tasks.is_closed() {
+        if shared.is_closing() {
             return Err(QueryError::Unavailable);
         }
 
         let mut guard =
             OperationGuard::start(&shared.metrics, operation, self.summary, &shared.endpoint);
         let result = async {
-            let effective_timeout = shared
+            let policy = &shared.policy;
+            let effective_timeout = policy
                 .query_timeout
-                .min(self.timeout.unwrap_or(shared.query_timeout));
-            let effective_max_rows = shared.max_result_rows.min(
-                self.max_result_rows
-                    .map_or(shared.max_result_rows, NonZeroU64::get),
-            );
+                .min(self.timeout.unwrap_or(policy.query_timeout));
+            let effective_max_rows = policy
+                .max_result_rows
+                .min(self.max_result_rows.unwrap_or(policy.max_result_rows))
+                .get();
             let server_max_rows = cardinality_cap.map_or(effective_max_rows, |cap| {
                 effective_max_rows.min(u64::try_from(cap).unwrap_or(u64::MAX))
             });
-            let effective_max_bytes = shared.max_result_bytes.min(
-                self.max_result_bytes
-                    .map_or(shared.max_result_bytes, NonZeroUsize::get),
-            );
+            let effective_max_bytes = policy
+                .max_result_bytes
+                .min(self.max_result_bytes.unwrap_or(policy.max_result_bytes))
+                .get();
             let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
 
             let bounded = ctx.bounded(effective_timeout);
-            bounded.check().map_err(stop_to_query_error)?;
+            bounded.check().map_err(ObservedFailure::from_stop)?;
 
             let creds = shared.credentials.load();
             let mut client = creds.read_client.clone();
-            if shared.propagate_trace_context {
+            if policy.propagate_trace_context {
                 client = guard.inject_trace_context(client);
             }
             let (ch_query, query_id) = build_clickhouse_query(
@@ -371,9 +402,9 @@ impl<'a> Query<'a> {
                 effective_max_bytes,
             );
             guard.record_query_id(query_id);
-            bounded.check().map_err(stop_to_query_error)?;
+            bounded.check().map_err(ObservedFailure::from_stop)?;
             let server_cardinality_capped =
-                shared.query_settings == QuerySettings::Client && cardinality_cap.is_some();
+                policy.query_settings == QuerySettings::Client && cardinality_cap.is_some();
             let cursor = ch_query
                 .fetch::<R>()
                 .map_err(|err| classify_query_error(&err, server_cardinality_capped))?
@@ -403,39 +434,48 @@ fn build_clickhouse_query(
     client: &clickhouse::Client,
     shared: &crate::Shared,
     sql: &str,
-    params: SmallVec<[(&str, Param); 4]>,
+    params: SmallVec<[(Cow<'_, str>, Param); 4]>,
     remaining: Duration,
     effective_max_rows: u64,
     effective_max_bytes: usize,
 ) -> (clickhouse::query::Query, String) {
-    let buffer_size = shared.http_response_buffer_size.min(effective_max_bytes);
+    let buffer_size = shared
+        .policy
+        .http_response_buffer_size
+        .get()
+        .min(effective_max_bytes);
     let query_id = uuid::Uuid::new_v4().to_string();
+    let mut buffer_buf = std::fmt::NumBuffer::new();
     let mut ch_query = client
         .query_raw(sql)
         .with_setting("wait_end_of_query", "1")
-        .with_setting("buffer_size", buffer_size.to_string())
+        .with_setting("buffer_size", buffer_size.format_into(&mut buffer_buf))
         .with_setting("query_id", &query_id);
 
-    if shared.query_settings == QuerySettings::Client {
-        ch_query = ch_query
-            .with_setting(
-                "max_execution_time",
-                format_execution_timeout_secs(remaining),
-            )
-            .with_setting("timeout_overflow_mode", "throw")
+    if shared.policy.query_settings == QuerySettings::Client {
+        let timeout_secs = format_execution_timeout_secs(remaining);
+        let mut rows_buf = std::fmt::NumBuffer::new();
+        let mut bytes_buf = std::fmt::NumBuffer::new();
+        ch_query = shared
+            .apply_client_budget(ch_query, &timeout_secs, |query, key, value| {
+                query.with_setting(key, value)
+            })
             .with_setting("result_overflow_mode", "throw")
-            .with_setting("max_result_rows", effective_max_rows.to_string())
-            .with_setting("max_result_bytes", effective_max_bytes.to_string())
+            .with_setting(
+                "max_result_rows",
+                effective_max_rows.format_into(&mut rows_buf),
+            )
+            .with_setting(
+                "max_result_bytes",
+                effective_max_bytes.format_into(&mut bytes_buf),
+            )
             .with_setting("readonly", "2")
             .with_setting("cancel_http_readonly_queries_on_client_close", "1")
             .with_setting("session_timezone", "UTC");
-        if let Some(mem) = shared.max_memory_usage {
-            ch_query = ch_query.with_setting("max_memory_usage", mem.to_string());
-        }
     }
 
     for (name, value) in params {
-        ch_query = ch_query.param(name, value);
+        ch_query = ch_query.param(name.as_ref(), &value.0);
     }
     (ch_query, query_id)
 }
@@ -452,7 +492,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
     loop {
         let next = within_bounded(bounded, cursor.next())
             .await
-            .map_err(stop_to_query_error)?;
+            .map_err(ObservedFailure::from_stop)?;
         match next {
             Ok(Some(row)) => {
                 if cursor.returned_rows() > effective_max_rows {
@@ -477,7 +517,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
             }
             Err(err) => {
                 if let Some(stop) = bounded.stopped() {
-                    return Err(stop_to_query_error(stop));
+                    return Err(ObservedFailure::from_stop(stop));
                 }
                 return Err(classify_query_error(&err, server_cardinality_capped));
             }
@@ -487,7 +527,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
 
 fn validate_query_inputs(
     sql: &str,
-    params: &[(&str, Param)],
+    params: &[(Cow<'_, str>, Param)],
     timeout: Option<Duration>,
 ) -> Result<(), QueryError> {
     if sql.trim().is_empty() || timeout.is_some_and(|limit| limit.is_zero()) {
@@ -507,7 +547,7 @@ fn validate_query_inputs(
 fn is_valid_param_value(value: &ParamValue) -> bool {
     match value {
         ParamValue::Decimal(_, scale) => *scale <= MAX_DECIMAL_SCALE,
-        ParamValue::Array(items) => items.iter().all(|item| is_valid_param_value(&item.0)),
+        ParamValue::Array(items) => items.iter().all(is_valid_param_value),
         _ => true,
     }
 }
@@ -519,12 +559,4 @@ fn is_valid_param_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
-
-const fn stop_to_query_error(stop: BoundedStop) -> ObservedFailure<QueryError> {
-    let error = match stop {
-        BoundedStop::Parent(stopped) => QueryError::Stopped(stopped),
-        BoundedStop::Timeout => QueryError::Unavailable,
-    };
-    ObservedFailure::with_reason(error, bounded_stop_reason(stop))
 }

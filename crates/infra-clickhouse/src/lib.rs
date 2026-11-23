@@ -9,10 +9,10 @@ mod query;
 #[cfg(test)]
 mod tests;
 
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -20,15 +20,19 @@ use arc_swap::ArcSwap;
 use operation_context::{BoundedContext, BoundedStop};
 use secrecy::SecretString;
 use tokio::sync::{Notify, Semaphore};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard as CancelDropGuard};
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
-#[doc(hidden)]
-pub use clickhouse as __clickhouse;
 pub use clickhouse::Row;
 pub use clickhouse::types::{Decimal32, Decimal64, Decimal128};
+
+#[doc(hidden)]
+pub mod _priv {
+    pub use clickhouse::_priv::RowKind;
+}
+
 pub mod serde {
-    pub use clickhouse::serde::{time, uuid};
+    pub use clickhouse::serde::{ipv4, time, uuid, uuid_vec};
 }
 
 use self::admission::Admitted;
@@ -58,27 +62,55 @@ pub struct ClientCertificate {
     pub key_path: PathBuf,
 }
 
-#[derive(derive_more::Debug)]
+#[derive(Clone, derive_more::Debug)]
+pub enum ClickHouseAuth {
+    Password {
+        username: String,
+        #[debug(skip)]
+        password: SecretString,
+    },
+    PasswordFile {
+        username: String,
+        path: PathBuf,
+    },
+    Unauthenticated {
+        username: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum TransportSecurity {
+    Tls {
+        root_ca_path: Option<PathBuf>,
+        client_certificate: Option<ClientCertificate>,
+    },
+    Plaintext,
+}
+
+impl Default for TransportSecurity {
+    fn default() -> Self {
+        Self::Tls {
+            root_ca_path: None,
+            client_certificate: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ClickHouseOptions {
     pub url: String,
     pub database: String,
-    pub username: Option<String>,
-    #[debug(skip)]
-    pub password: Option<SecretString>,
-    pub password_file: Option<PathBuf>,
-    pub root_ca_path: Option<PathBuf>,
-    pub client_certificate: Option<ClientCertificate>,
-    pub allow_plaintext: bool,
-    pub allow_unauthenticated: bool,
+    pub auth: ClickHouseAuth,
+    pub transport: TransportSecurity,
     pub query_settings: QuerySettings,
     pub query_timeout: Duration,
     pub insert_timeout: Duration,
-    pub max_read_concurrency: usize,
-    pub max_write_concurrency: usize,
-    pub max_result_rows: u64,
-    pub max_result_bytes: usize,
-    pub http_response_buffer_size: usize,
-    pub max_memory_usage: Option<u64>,
+    pub max_read_concurrency: NonZeroUsize,
+    pub max_write_concurrency: NonZeroUsize,
+    pub max_result_rows: NonZeroU64,
+    pub max_result_bytes: NonZeroUsize,
+    pub http_response_buffer_size: NonZeroUsize,
+    pub max_memory_usage: Option<NonZeroU64>,
     pub propagate_trace_context: bool,
 }
 
@@ -97,13 +129,18 @@ pub struct ClickHouse {
 
 struct ClientHandle {
     shared: Arc<Shared>,
+    _shutdown_guard: CancelDropGuard,
 }
 
-impl Drop for ClientHandle {
-    fn drop(&mut self) {
-        self.shared.closing.store(true, Ordering::Release);
-        self.shared.shutdown.cancel();
-    }
+pub(crate) struct RuntimePolicy {
+    pub(crate) query_settings: QuerySettings,
+    pub(crate) query_timeout: Duration,
+    pub(crate) insert_timeout: Duration,
+    pub(crate) max_result_rows: NonZeroU64,
+    pub(crate) max_result_bytes: NonZeroUsize,
+    pub(crate) http_response_buffer_size: NonZeroUsize,
+    pub(crate) max_memory_usage: Option<NonZeroU64>,
+    pub(crate) propagate_trace_context: bool,
 }
 
 pub(crate) struct Shared {
@@ -112,26 +149,40 @@ pub(crate) struct Shared {
     table_slots: TableSlotRegistry,
     endpoint: EndpointMetadata,
     metrics: ClientMetrics,
-    query_settings: QuerySettings,
-    query_timeout: Duration,
-    insert_timeout: Duration,
-    max_result_rows: u64,
-    max_result_bytes: usize,
-    http_response_buffer_size: usize,
-    max_memory_usage: Option<u64>,
-    propagate_trace_context: bool,
-    read_permits: Arc<Semaphore>,
-    write_permits: Arc<Semaphore>,
-    closing: AtomicBool,
+    policy: RuntimePolicy,
+    read_permits: Semaphore,
+    write_permits: Semaphore,
     shutdown: CancellationToken,
     tasks: TaskTracker,
 }
 
 impl Shared {
+    pub(crate) fn is_closing(&self) -> bool {
+        self.shutdown.is_cancelled() || self.tasks.is_closed()
+    }
+
     pub(crate) fn notify_auth_failure(&self) {
         if let Some(trigger) = &self.password_refresh_trigger {
             trigger.notify_one();
         }
+    }
+
+    pub(crate) fn apply_client_budget<T>(
+        &self,
+        mut target: T,
+        timeout_secs: &str,
+        mut with_setting: impl FnMut(T, &'static str, &str) -> T,
+    ) -> T {
+        if self.policy.query_settings != QuerySettings::Client {
+            return target;
+        }
+        target = with_setting(target, "max_execution_time", timeout_secs);
+        target = with_setting(target, "timeout_overflow_mode", "throw");
+        if let Some(mem) = self.policy.max_memory_usage {
+            let mut buf = std::fmt::NumBuffer::new();
+            target = with_setting(target, "max_memory_usage", mem.get().format_into(&mut buf));
+        }
+        target
     }
 }
 
@@ -143,7 +194,7 @@ pub(crate) fn format_execution_timeout_secs(remaining: Duration) -> String {
 impl ClickHouse {
     pub async fn start(options: ClickHouseOptions) -> Result<Self, StartError> {
         let admission = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
-            admission::admit(&options)
+            admission::admit(options)
         }));
         let admitted = tokio::time::timeout(ADMISSION_TIMEOUT, admission)
             .await
@@ -160,6 +211,8 @@ impl ClickHouse {
             .password_file
             .as_ref()
             .map(|_| Arc::new(Notify::new()));
+        let shutdown = CancellationToken::new();
+        let shutdown_guard = shutdown.clone().drop_guard();
         let shared = Arc::new(Shared {
             credentials: ArcSwap::from_pointee(ActiveCredentials {
                 cred_epoch: 1,
@@ -170,18 +223,10 @@ impl ClickHouse {
             table_slots: TableSlotRegistry::new(),
             endpoint: admitted.endpoint,
             metrics,
-            query_settings: admitted.query_settings,
-            query_timeout: admitted.query_timeout,
-            insert_timeout: admitted.insert_timeout,
-            max_result_rows: admitted.max_result_rows,
-            max_result_bytes: admitted.max_result_bytes,
-            http_response_buffer_size: admitted.http_response_buffer_size,
-            max_memory_usage: admitted.max_memory_usage,
-            propagate_trace_context: admitted.propagate_trace_context,
-            read_permits: Arc::new(Semaphore::new(admitted.max_read_concurrency)),
-            write_permits: Arc::new(Semaphore::new(admitted.max_write_concurrency)),
-            closing: AtomicBool::new(false),
-            shutdown: CancellationToken::new(),
+            policy: admitted.policy,
+            read_permits: Semaphore::new(admitted.max_read_concurrency.get()),
+            write_permits: Semaphore::new(admitted.max_write_concurrency.get()),
+            shutdown,
             tasks: TaskTracker::new(),
         });
         if let (Some(password_file), Some(trigger)) =
@@ -194,7 +239,10 @@ impl ClickHouse {
             ));
         }
         Self {
-            inner: Arc::new(ClientHandle { shared }),
+            inner: Arc::new(ClientHandle {
+                shared,
+                _shutdown_guard: shutdown_guard,
+            }),
         }
     }
 
@@ -204,7 +252,6 @@ impl ClickHouse {
 
     pub async fn close(&self, budget: Duration) -> CloseOutcome {
         let shared = &self.inner.shared;
-        shared.closing.store(true, Ordering::Release);
         shared.shutdown.cancel();
         shared.tasks.close();
         if tokio::time::timeout(budget, shared.tasks.wait())

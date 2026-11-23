@@ -30,30 +30,29 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions, CloseOutcome,
-    HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row, UnknownOutcome, error,
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseAuth, ClickHouseOptions,
+    CloseOutcome, HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row,
+    TransportSecurity, UnknownOutcome, error,
 };
 
 pub(super) fn base_options(url: String) -> ClickHouseOptions {
     ClickHouseOptions {
         url,
         database: "app".to_owned(),
-        username: Some("app".to_owned()),
-        password: Some(SecretString::from("app")),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: false,
+        auth: ClickHouseAuth::Password {
+            username: "app".to_owned(),
+            password: SecretString::from("app"),
+        },
+        transport: TransportSecurity::Plaintext,
         query_settings: QuerySettings::Client,
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
-        max_read_concurrency: 32,
-        max_write_concurrency: 32,
-        max_result_rows: 100_000,
-        max_result_bytes: 16 * 1024 * 1024,
-        http_response_buffer_size: 2 * 1024 * 1024,
-        max_memory_usage: Some(512 * 1024 * 1024),
+        max_read_concurrency: NonZeroUsize::new(32).expect("nz"),
+        max_write_concurrency: NonZeroUsize::new(32).expect("nz"),
+        max_result_rows: NonZeroU64::new(100_000).expect("nz"),
+        max_result_bytes: NonZeroUsize::new(16 * 1024 * 1024).expect("nz"),
+        http_response_buffer_size: NonZeroUsize::new(2 * 1024 * 1024).expect("nz"),
+        max_memory_usage: Some(NonZeroU64::new(512 * 1024 * 1024).expect("nz")),
         propagate_trace_context: true,
     }
 }
@@ -132,7 +131,7 @@ pub(super) struct CapturedRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 pub(super) struct SampleRow {
     pub(super) id: u64,
 }
@@ -274,7 +273,6 @@ async fn a4_4_and_a4_6_cursor_metrics_bounds_and_multipart_params() {
     let uid = uuid::Uuid::new_v4();
     let date = time::Date::from_calendar_date(2026, time::Month::March, 15).expect("date");
     let dt = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("dt");
-    let slice_items: &[&str] = &["alpha", "beta"];
 
     let row = ch
         .query("param_probe", "SELECT id FROM t WHERE s = {s:String}")
@@ -286,7 +284,7 @@ async fn a4_4_and_a4_6_cursor_metrics_bounds_and_multipart_params() {
         .param("d", date)
         .param("dt", dt)
         .param("opt", Option::<u32>::None)
-        .param("arr", slice_items)
+        .param("arr", ["alpha", "beta"])
         .param("vec", vec![1_i32, 2_i32])
         .fetch_one::<SampleRow>(&ctx)
         .await
@@ -938,7 +936,7 @@ async fn handle_raw_insert_capture_conn(mut stream: TcpStream, state: Arc<Captur
 #[tokio::test]
 async fn a4_8_idx_zero_serialization_error_wire_capture() {
     #[derive(Row)]
-    #[clickhouse(crate = "crate::__clickhouse")]
+    #[clickhouse(crate = "crate")]
     struct FailRow {
         id: u64,
     }
@@ -1030,4 +1028,82 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
         );
     }
     srv.abort();
+}
+
+#[test]
+fn row_derive_uses_crate_root_and_reexported_ipv4_and_uuid_vec_serde() {
+    #[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Row)]
+    #[clickhouse(crate = "crate")]
+    struct NetworkAuditRow {
+        #[serde(with = "crate::serde::ipv4")]
+        client_ip: std::net::Ipv4Addr,
+        #[serde(with = "crate::serde::uuid_vec")]
+        correlation_ids: Vec<uuid::Uuid>,
+    }
+
+    fn assert_row<R: crate::ReadRow + crate::WriteRow>() {}
+
+    assert_row::<NetworkAuditRow>();
+    let row = NetworkAuditRow {
+        client_ip: std::net::Ipv4Addr::LOCALHOST,
+        correlation_ids: vec![uuid::Uuid::nil()],
+    };
+    assert_eq!(row.client_ip, std::net::Ipv4Addr::LOCALHOST);
+    assert_eq!(row.correlation_ids.len(), 1);
+}
+
+#[tokio::test]
+async fn param_conversions_and_owned_param_names_serialize_without_manual_casts() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, server) = spawn_http_capture_server(Arc::clone(&captured)).await;
+
+    let ch = ClickHouse::start(base_options(format!("http://{addr}")))
+        .await
+        .expect("start");
+    let ctx = OperationContext::with_timeout(Duration::from_secs(2));
+
+    let owned_str = "owned-string-param".to_owned();
+    let cow_str = std::borrow::Cow::Borrowed("cow-param");
+    let utc_dt = time::UtcDateTime::from_unix_timestamp(1_700_000_123).expect("utc dt");
+    let arr_ref = ["gamma".to_owned(), "delta".to_owned()];
+    let vec_nums = vec![1_i32, 2_i32];
+
+    let mut query = ch
+        .query("param_ergonomics", "SELECT id FROM t")
+        .param("s_ref", &owned_str)
+        .param("s_cow", cow_str)
+        .param("utc_dt", utc_dt)
+        .param("arr_ref", &arr_ref)
+        .param("vec_ref", &vec_nums);
+    for idx in 0..2 {
+        query = query.param(format!("dyn_{idx}"), idx);
+    }
+    let row = query.fetch_one::<SampleRow>(&ctx).await.expect("fetch_one");
+    assert_eq!(row.id, 42);
+    assert_eq!(arr_ref.len(), 2);
+    assert_eq!(vec_nums.len(), 2);
+
+    let reqs = captured.lock().await;
+    let body_text = String::from_utf8_lossy(&reqs[0].body);
+    for expected in [
+        "name=\"param_s_ref\"\r\n\r\nowned-string-param\r\n",
+        "name=\"param_s_cow\"\r\n\r\ncow-param\r\n",
+        "name=\"param_utc_dt\"\r\n\r\n1700000123\r\n",
+        "name=\"param_arr_ref\"\r\n\r\n['gamma','delta']\r\n",
+        "name=\"param_vec_ref\"\r\n\r\n[1,2]\r\n",
+        "name=\"param_dyn_0\"\r\n\r\n0\r\n",
+        "name=\"param_dyn_1\"\r\n\r\n1\r\n",
+    ] {
+        assert!(
+            body_text.contains(expected),
+            "missing {expected:?} in {body_text}"
+        );
+    }
+    drop(reqs);
+
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    server.abort();
 }

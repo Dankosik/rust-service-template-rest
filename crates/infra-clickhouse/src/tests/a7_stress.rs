@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,8 +90,8 @@ async fn a7_cancelled_insert_does_not_leak_detached_tasks_or_connections() {
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.insert_timeout = Duration::from_millis(50);
-    opts.max_read_concurrency = 4;
-    opts.max_write_concurrency = 4;
+    opts.max_read_concurrency = NonZeroUsize::new(4).expect("nz");
+    opts.max_write_concurrency = NonZeroUsize::new(4).expect("nz");
     let ch = ClickHouse::start(opts).await.expect("start");
 
     let baseline_tasks = tokio::runtime::Handle::current()
@@ -155,8 +156,8 @@ async fn a7_local_timeout_insert_does_not_leak_detached_tasks_or_connections() {
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.insert_timeout = Duration::from_millis(40);
-    opts.max_read_concurrency = 4;
-    opts.max_write_concurrency = 4;
+    opts.max_read_concurrency = NonZeroUsize::new(4).expect("nz");
+    opts.max_write_concurrency = NonZeroUsize::new(4).expect("nz");
     let ch = ClickHouse::start(opts).await.expect("start");
 
     let baseline_tasks = tokio::runtime::Handle::current()

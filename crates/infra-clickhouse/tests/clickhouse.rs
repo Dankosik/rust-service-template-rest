@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_clickhouse::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseOptions, CloseOutcome, Decimal32,
-    Decimal64, Decimal128, HISTOGRAMS, InsertError, InsertFailure, Param, QueryError,
-    QuerySettings, Row,
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseAuth, ClickHouseOptions,
+    CloseOutcome, Decimal32, Decimal64, Decimal128, HISTOGRAMS, InsertError, InsertFailure, Param,
+    QueryError, QuerySettings, Row, TransportSecurity,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use operation_context::{Deadline, OperationContext, Stopped};
@@ -34,31 +34,34 @@ fn options_for(
     password: String,
     query_settings: QuerySettings,
 ) -> ClickHouseOptions {
+    let transport = if url.starts_with("http://") {
+        TransportSecurity::Plaintext
+    } else {
+        TransportSecurity::default()
+    };
     ClickHouseOptions {
         url,
         database,
-        username: Some(user),
-        password: Some(SecretString::from(password)),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: false,
+        auth: ClickHouseAuth::Password {
+            username: user,
+            password: SecretString::from(password),
+        },
+        transport,
         query_settings,
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
-        max_read_concurrency: 16,
-        max_write_concurrency: 16,
-        max_result_rows: 100_000,
-        max_result_bytes: 16 * 1024 * 1024,
-        http_response_buffer_size: 2 * 1024 * 1024,
-        max_memory_usage: Some(512 * 1024 * 1024),
+        max_read_concurrency: NonZeroUsize::new(16).expect("nz"),
+        max_write_concurrency: NonZeroUsize::new(16).expect("nz"),
+        max_result_rows: NonZeroU64::new(100_000).expect("nz"),
+        max_result_bytes: NonZeroUsize::new(16 * 1024 * 1024).expect("nz"),
+        http_response_buffer_size: NonZeroUsize::new(2 * 1024 * 1024).expect("nz"),
+        max_memory_usage: Some(NonZeroU64::new(512 * 1024 * 1024).expect("nz")),
         propagate_trace_context: true,
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct EventRow {
     id: u64,
     kind: String,
@@ -71,7 +74,7 @@ struct EventRow {
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct ParamProbeRow {
     flag: bool,
     num: i64,
@@ -87,13 +90,13 @@ struct ParamProbeRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct SimpleRow {
     id: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct EvolvedRow {
     id: u64,
     extra: u8,
@@ -719,8 +722,8 @@ async fn assert_live_busy_shedding(
     ctx: &OperationContext,
 ) {
     let mut busy_opts = options_for(url, db, user, password, QuerySettings::Client);
-    busy_opts.max_read_concurrency = 1;
-    busy_opts.max_write_concurrency = 1;
+    busy_opts.max_read_concurrency = NonZeroUsize::MIN;
+    busy_opts.max_write_concurrency = NonZeroUsize::MIN;
     let ch_busy = Arc::new(ClickHouse::start(busy_opts).await.expect("start busy"));
     let entered = Arc::new(Notify::new());
     let registered = entered.notified();
@@ -905,7 +908,7 @@ async fn assert_dedup_override_under_disabled_profile(
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct LedgerRow {
     id: u64,
     d32: Decimal32<2>,
@@ -917,13 +920,13 @@ struct LedgerRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct WrongScaleRead {
     d64: Decimal64<2>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct WrongPrecisionRead {
     #[serde(with = "infra_clickhouse::serde::time::datetime64::micros")]
     ts: time::OffsetDateTime,

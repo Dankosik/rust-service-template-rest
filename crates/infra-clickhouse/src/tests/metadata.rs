@@ -124,7 +124,7 @@ fn rbwnat_describe_id_and_extra_default() -> Bytes {
 }
 
 #[derive(Debug, Serialize, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct EvolvedRow {
     id: u64,
     extra: u8,

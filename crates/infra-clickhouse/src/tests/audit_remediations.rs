@@ -26,7 +26,7 @@ use crate::{
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct WideStringRow {
     payload: String,
 }
@@ -460,8 +460,8 @@ async fn streaming_max_result_bytes_aborts_oversized_single_row_and_header_early
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.query_settings = QuerySettings::Server;
-    opts.max_result_bytes = 64 * 1024;
-    opts.http_response_buffer_size = 64 * 1024;
+    opts.max_result_bytes = NonZeroUsize::new(64 * 1024).expect("nz");
+    opts.http_response_buffer_size = NonZeroUsize::new(64 * 1024).expect("nz");
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
 
@@ -709,8 +709,8 @@ async fn separate_read_and_write_concurrency_permits_do_not_starve_each_other() 
     let (addr, srv) = spawn_gated_rw_server(&gates).await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.max_read_concurrency = 1;
-    opts.max_write_concurrency = 1;
+    opts.max_read_concurrency = NonZeroUsize::MIN;
+    opts.max_write_concurrency = NonZeroUsize::MIN;
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
 
@@ -789,7 +789,7 @@ async fn separate_read_and_write_concurrency_permits_do_not_starve_each_other() 
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct ValidTypedRow {
     d32: Decimal32<2>,
     d64: Decimal64<4>,
@@ -800,38 +800,38 @@ struct ValidTypedRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct WrongScale32Row {
     d32: Decimal32<4>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct WrongScaleRow {
     d64: Decimal64<2>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct WrongScale128Row {
     d128: Decimal128<2>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct RawIntDecimalRow {
     d64: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct WrongPrecisionTsRow {
     #[serde(with = "crate::serde::time::datetime64::micros")]
     ts: time::OffsetDateTime,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
-#[clickhouse(crate = "crate::__clickhouse")]
+#[clickhouse(crate = "crate")]
 struct RawIntTsRow {
     ts: i64,
 }
