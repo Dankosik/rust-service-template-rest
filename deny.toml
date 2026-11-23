@@ -65,17 +65,15 @@ deny = [
     { crate = "chrono", wrappers = ["expect-json", "rmcp", "schemars"], reason = "unmaintained (RUSTSEC-2026-0543); only axum-test assertions and the hotpath MCP schema may bring it" },
 ]
 skip = [
-    { crate = "base64@0.22", reason = "async-nats, headers, jsonwebtoken, and metrics-exporter-prometheus have not moved to 0.23" },
+    { crate = "base64@0.22", reason = "async-nats, headers, and metrics-exporter-prometheus have not moved to 0.23" },
     { crate = "block-buffer@0.10", reason = "digest 0.10 transitive chain alongside digest 0.11" },
-    { crate = "const-oid@0.9", reason = "jsonwebtoken 11 transitive chain alongside rcgen on 0.10" },
+    { crate = "const-oid@0.9", reason = "nkeys uses signatory on pkcs8 0.10 and der 0.7, which require const-oid 0.9" },
     { crate = "cpufeatures@0.2", reason = "sha2 0.10 and sha1 0.10 transitive chain alongside sha2 0.11" },
     { crate = "crypto-common@0.1", reason = "digest 0.10 transitive chain alongside digest 0.11" },
     { crate = "digest@0.10", reason = "sqlx-core, ed25519-dalek, and crc-fast alongside digest 0.11" },
     { crate = "getrandom@0.2", reason = "rand 0.8 via nkeys has not moved to getrandom 0.4" },
     { crate = "getrandom@0.3", reason = "rand 0.9 and aws-sdk-s3 have not moved to getrandom 0.4" },
     { crate = "hashbrown@0.16", reason = "moka and metrics-exporter-prometheus transitive chain alongside indexmap on 0.17" },
-    { crate = "itertools@0.13", reason = "prost-derive 0.14 has not moved to itertools 0.15" },
-    { crate = "pem@3", reason = "jsonwebtoken 11 has not moved to pem 4, which rcgen uses in tls-test-support" },
     { crate = "rand@0.8", reason = "nkeys 0.4 via async-nats has not moved to rand 0.10" },
     { crate = "rand@0.9", reason = "metrics-util 0.20 and opentelemetry_sdk 0.33 have not moved to rand 0.10" },
     { crate = "rand_chacha@0.3", reason = "rand 0.8 via nkeys alongside rand 0.9 on rand_chacha 0.9" },
@@ -85,6 +83,7 @@ skip = [
     { crate = "serde_derive_internals@0.29", reason = "clickhouse-macros 0.3 has not moved to 0.30" },
     # template:end clickhouse:deny-clickhouse-skip
     { crate = "sha2@0.10", reason = "sqlx-core 0.9 and ed25519-dalek alongside sha2 0.11 in sqlx-postgres and aws-sdk-s3" },
+    { crate = "signature@2.2.0", reason = "nkeys 0.4 requires signature 2 via ed25519 and signatory; remove when nkeys supports signature 3 used by jsonwebtoken" },
     { crate = "syn@2", reason = "proc-macro crates split across syn 2 and syn 3" },
     { crate = "tower-http@0.6", reason = "reqwest 0.13 has not moved to tower-http 0.7" },
     { crate = "untrusted@0.7", reason = "aws-lc-rs 1.19 uses untrusted 0.7 alongside rustls-webpki on 0.9" },

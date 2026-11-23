@@ -391,7 +391,9 @@ impl JwtVerifier {
             .map_err(|_| malformed())?;
         let header: Header = serde_json::from_slice(&decoded[..length]).map_err(|_| malformed())?;
         // RFC 7515 §4.1.11
-        if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
+        if header.crit.is_some()
+            || header.extras.get::<bool>("b64").map_err(|_| malformed())? == Some(false)
+        {
             return Err(malformed());
         }
         let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
@@ -1304,6 +1306,17 @@ mod tests {
         let body = base.to_string();
         let mut exact = claim_cases(&base, now);
         exact.extend(payload_and_compact_cases(&body));
+        for b64 in [
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            let header = serde_json::json!({"alg": "RS256", "kid": "fixture", "b64": b64});
+            exact.push((
+                format!("b64={b64}"),
+                sign_raw(&header.to_string(), body.as_bytes()),
+            ));
+        }
         let mut differences = Vec::new();
         for (name, token) in &exact {
             let (here, there) = (deciders.here(token).await, deciders.library(token));
