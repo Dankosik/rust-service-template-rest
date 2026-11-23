@@ -77,7 +77,6 @@ pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorK
     let connect_timeout =
         (options.query_timeout.min(options.insert_timeout) / 2).min(CONNECT_TIMEOUT_CAP);
     let mut http = HttpConnector::new();
-    http.enforce_http(false);
     http.set_connect_timeout(Some(connect_timeout));
     http.set_nodelay(true);
     http.set_keepalive(Some(KEEPALIVE_TIME));
@@ -86,28 +85,20 @@ pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorK
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     http.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT));
 
-    let connector = if let Some(tls_config) = tls {
-        let builder = hyper_rustls::HttpsConnectorBuilder::new()
+    let mut client = if let Some(tls_config) = tls {
+        http.enforce_http(false);
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(tls_config)
-            .https_only();
-        builder.enable_http1().wrap_connector(http)
+            .https_only()
+            .enable_http1()
+            .wrap_connector(http);
+        build_clickhouse_client(connector)
     } else {
-        let tls_config = platform_tls_config()?;
-        let builder = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_or_http();
-        builder.enable_http1().wrap_connector(http)
-    };
-
-    let hyper_client = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-        .pool_timer(TokioTimer::new())
-        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-        .http1_max_headers(HTTP1_MAX_HEADERS)
-        .build(connector);
-
-    let mut client = clickhouse::Client::with_http_client(hyper_client)
-        .with_url(url.normalized)
-        .with_database(&options.database);
+        http.enforce_http(true);
+        build_clickhouse_client(http)
+    }
+    .with_url(url.normalized)
+    .with_database(&options.database);
     if let Some(user) = creds.username {
         client = client.with_user(user);
     }
@@ -137,9 +128,10 @@ pub(crate) fn admit(options: &ClickHouseOptions) -> Result<Admitted, StartErrorK
 }
 
 fn validate_limits(options: &ClickHouseOptions) -> Result<(), StartErrorKind> {
-    if !(1..=MAX_CONCURRENCY_CEILING).contains(&options.max_concurrency)
-        || options.max_concurrency >= tokio::sync::Semaphore::MAX_PERMITS
-    {
+    const {
+        assert!(MAX_CONCURRENCY_CEILING < tokio::sync::Semaphore::MAX_PERMITS);
+    }
+    if !(1..=MAX_CONCURRENCY_CEILING).contains(&options.max_concurrency) {
         return Err(StartErrorKind::InvalidConcurrency);
     }
     if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&options.query_timeout)
@@ -288,16 +280,16 @@ fn admit_tls(
     Ok(Some(config))
 }
 
-fn platform_tls_config() -> Result<rustls::ClientConfig, StartErrorKind> {
-    use rustls_platform_verifier::BuilderVerifierExt as _;
-
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let builder = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|_| StartErrorKind::ClientBuild)?
-        .with_platform_verifier()
-        .map_err(|_| StartErrorKind::ClientBuild)?;
-    Ok(builder.with_no_client_auth())
+fn build_clickhouse_client<C>(connector: C) -> clickhouse::Client
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + 'static,
+{
+    let hyper_client = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+        .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .http1_max_headers(HTTP1_MAX_HEADERS)
+        .build(connector);
+    clickhouse::Client::with_http_client(hyper_client)
 }
 
 fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, StartErrorKind> {

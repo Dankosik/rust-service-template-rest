@@ -33,6 +33,9 @@ infra-bearerauthn = { workspace = true }
 # template:begin object-storage:http-object-storage-dependencies
 infra-object-storage = { workspace = true }
 # template:end object-storage:http-object-storage-dependencies
+# template:begin clickhouse:http-clickhouse-dependencies
+infra-clickhouse = { workspace = true }
+# template:end clickhouse:http-clickhouse-dependencies
 # template:begin http-idempotency:http-idempotency-dependencies
 const_format = { workspace = true }
 const-hex = { workspace = true }

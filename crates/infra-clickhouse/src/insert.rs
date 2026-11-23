@@ -1,12 +1,12 @@
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use operation_context::{BoundedStop, OperationContext};
-use tracing::Instrument as _;
 
 use crate::error::{
-    InsertError, InsertFailure, UnknownOutcome, classify_post_dispatch_insert_error,
-    is_local_serialization_error,
+    FailureReason, InsertError, InsertFailure, ObservedFailure, UnknownOutcome,
+    bounded_stop_reason, classify_post_dispatch_insert_error, is_local_serialization_error,
 };
 use crate::metadata::{self, is_schema_drift_error};
 use crate::observe::{InsertModeLabel, Operation, OperationGuard};
@@ -14,6 +14,29 @@ use crate::{ClickHouse, within_bounded};
 
 const MAX_TABLE_BYTES: usize = 128;
 const MAX_DEDUP_TOKEN_BYTES: usize = 256;
+
+#[derive(Clone, Debug, Default)]
+pub struct InsertOutcomes(Arc<AtomicUsize>);
+
+impl InsertOutcomes {
+    #[must_use]
+    pub fn has_unconfirmed_write(&self) -> bool {
+        self.0.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn begin_dispatch(&self) -> DispatchedInsert<'_> {
+        self.0.fetch_add(1, Ordering::Release);
+        DispatchedInsert(self)
+    }
+}
+
+pub(crate) struct DispatchedInsert<'a>(&'a InsertOutcomes);
+
+impl DispatchedInsert<'_> {
+    pub(crate) fn settle(self) {
+        self.0.0.fetch_sub(1, Ordering::Release);
+    }
+}
 
 mod sealed {
     pub trait WriteRowSealed {}
@@ -32,6 +55,7 @@ impl<R> WriteRow for R where R: clickhouse::RowOwned + clickhouse::RowWrite + Se
 pub struct BatchInsertOptions<'a> {
     timeout: Option<Duration>,
     deduplication_token: Option<&'a str>,
+    outcomes: Option<&'a InsertOutcomes>,
 }
 
 impl<'a> BatchInsertOptions<'a> {
@@ -39,6 +63,7 @@ impl<'a> BatchInsertOptions<'a> {
         Self {
             timeout: None,
             deduplication_token: None,
+            outcomes: None,
         }
     }
 
@@ -49,6 +74,11 @@ impl<'a> BatchInsertOptions<'a> {
 
     pub const fn deduplication_token(mut self, token: &'a str) -> Self {
         self.deduplication_token = Some(token);
+        self
+    }
+
+    pub const fn observe_outcomes(mut self, outcomes: &'a InsertOutcomes) -> Self {
+        self.outcomes = Some(outcomes);
         self
     }
 }
@@ -66,6 +96,7 @@ pub enum AsyncDeduplication<'a> {
 pub struct AsyncInsertOptions<'a> {
     timeout: Option<Duration>,
     deduplication: AsyncDeduplication<'a>,
+    outcomes: Option<&'a InsertOutcomes>,
 }
 
 impl<'a> AsyncInsertOptions<'a> {
@@ -73,6 +104,7 @@ impl<'a> AsyncInsertOptions<'a> {
         Self {
             timeout: None,
             deduplication: AsyncDeduplication::Disabled,
+            outcomes: None,
         }
     }
 
@@ -83,6 +115,11 @@ impl<'a> AsyncInsertOptions<'a> {
 
     pub const fn deduplication(mut self, mode: AsyncDeduplication<'a>) -> Self {
         self.deduplication = mode;
+        self
+    }
+
+    pub const fn observe_outcomes(mut self, outcomes: &'a InsertOutcomes) -> Self {
+        self.outcomes = Some(outcomes);
         self
     }
 }
@@ -113,6 +150,7 @@ impl ClickHouse {
             table,
             rows,
             options.timeout,
+            options.outcomes,
             InsertMode::Batch {
                 dedup_token: options.deduplication_token,
             },
@@ -134,6 +172,7 @@ impl ClickHouse {
             table,
             rows,
             options.timeout,
+            options.outcomes,
             InsertMode::Async {
                 dedup: options.deduplication,
             },
@@ -141,6 +180,10 @@ impl ClickHouse {
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "internal helper carries validated insert dispatch options without adding a wrapper struct"
+    )]
     async fn execute_insert<R: WriteRow>(
         &self,
         ctx: &OperationContext,
@@ -148,6 +191,7 @@ impl ClickHouse {
         table: &str,
         rows: &[R],
         timeout: Option<Duration>,
+        outcomes: Option<&InsertOutcomes>,
         mode: InsertMode<'_>,
     ) -> Result<InsertReport, InsertError> {
         let shared = &self.inner.shared;
@@ -176,7 +220,6 @@ impl ClickHouse {
 
         let mut guard =
             OperationGuard::start(&shared.metrics, operation, summary, &shared.endpoint);
-        let span = guard.span();
         let result = async {
             let effective_timeout = shared
                 .insert_timeout
@@ -200,9 +243,11 @@ impl ClickHouse {
             .await?;
 
             bounded.check().map_err(pre_dispatch_stop)?;
-            let insert = configure_insert(insert, bounded.remaining(), mode);
+            let (insert, query_id) = configure_insert(insert, mode);
+            guard.record_query_id(query_id);
             guard.mark_dispatched();
-            write_and_end_insert(
+            let dispatched = outcomes.map(InsertOutcomes::begin_dispatch);
+            let outcome = write_and_end_insert(
                 insert,
                 rows,
                 &bounded,
@@ -210,9 +255,20 @@ impl ClickHouse {
                 observed_gen,
                 &shared.credentials,
             )
-            .await
+            .await;
+            if let Some(inflight) = dispatched
+                && !matches!(
+                    outcome,
+                    Err(ObservedFailure {
+                        error: InsertError::OutcomeUnknown(_),
+                        ..
+                    })
+                )
+            {
+                inflight.settle();
+            }
+            outcome
         }
-        .instrument(span)
         .await;
         guard.finish_insert(mode_label, result)
     }
@@ -220,17 +276,18 @@ impl ClickHouse {
 
 fn configure_insert<R: WriteRow>(
     insert: clickhouse::insert::Insert<R>,
-    remaining: Duration,
     mode: InsertMode<'_>,
-) -> clickhouse::insert::Insert<R> {
-    let mut insert = insert
-        .with_timeouts(Some(remaining), Some(remaining))
-        .with_setting("query_id", uuid::Uuid::new_v4().to_string());
+) -> (clickhouse::insert::Insert<R>, String) {
+    let query_id = uuid::Uuid::new_v4().to_string();
+    let mut insert = insert.with_setting("query_id", &query_id);
+    // ClickHouse 26.2+ deduplicate_insert setting
     match mode {
         InsertMode::Batch { dedup_token } => {
             insert = insert.with_setting("async_insert", "0");
             if let Some(token) = dedup_token {
-                insert = insert.with_setting("insert_deduplication_token", token);
+                insert = insert
+                    .with_setting("deduplicate_insert", "enable")
+                    .with_setting("insert_deduplication_token", token);
             }
         }
         InsertMode::Async { dedup } => {
@@ -238,19 +295,21 @@ fn configure_insert<R: WriteRow>(
                 .with_setting("async_insert", "1")
                 .with_setting("wait_for_async_insert", "1");
             match dedup {
-                AsyncDeduplication::Disabled => {}
+                AsyncDeduplication::Disabled => {
+                    insert = insert.with_setting("deduplicate_insert", "disable");
+                }
                 AsyncDeduplication::ByPayloadHash => {
-                    insert = insert.with_setting("async_insert_deduplicate", "1");
+                    insert = insert.with_setting("deduplicate_insert", "enable");
                 }
                 AsyncDeduplication::ByToken(token) => {
                     insert = insert
-                        .with_setting("async_insert_deduplicate", "1")
+                        .with_setting("deduplicate_insert", "enable")
                         .with_setting("insert_deduplication_token", token);
                 }
             }
         }
     }
-    insert
+    (insert, query_id)
 }
 
 async fn write_and_end_insert<R: WriteRow>(
@@ -260,7 +319,7 @@ async fn write_and_end_insert<R: WriteRow>(
     slot: &metadata::TableSlot,
     observed_gen: u64,
     credentials: &arc_swap::ArcSwap<crate::credentials::ActiveCredentials>,
-) -> Result<InsertReport, InsertError> {
+) -> Result<InsertReport, ObservedFailure<InsertError>> {
     for (idx, row) in rows.iter().enumerate() {
         match within_bounded(bounded, insert.write(row)).await {
             Ok(Ok(())) => {}
@@ -268,8 +327,13 @@ async fn write_and_end_insert<R: WriteRow>(
                 if is_schema_drift_error(&err) {
                     slot.invalidate_if_gen(observed_gen, &credentials.load());
                 }
-                if idx == 0 && is_local_serialization_error(&err) {
-                    return Err(InsertError::NotApplied(InsertFailure::Encode));
+                if is_local_serialization_error(&err) {
+                    let error = if idx == 0 {
+                        InsertError::NotApplied(InsertFailure::Encode)
+                    } else {
+                        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable)
+                    };
+                    return Err(ObservedFailure::with_reason(error, FailureReason::Encode));
                 }
                 if let Some(stop) = bounded.stopped() {
                     return Err(post_dispatch_stop(stop));
@@ -331,18 +395,20 @@ fn is_valid_table_name(table: &str) -> bool {
             .any(|b| b.is_ascii_whitespace() || matches!(b, b'.' | b'`' | b'\'' | b'"' | b';'))
 }
 
-pub(crate) const fn pre_dispatch_stop(stop: BoundedStop) -> InsertError {
-    match stop {
+pub(crate) const fn pre_dispatch_stop(stop: BoundedStop) -> ObservedFailure<InsertError> {
+    let error = match stop {
         BoundedStop::Parent(stopped) => InsertError::NotApplied(InsertFailure::Stopped(stopped)),
         BoundedStop::Timeout => InsertError::NotApplied(InsertFailure::Unavailable),
-    }
+    };
+    ObservedFailure::with_reason(error, bounded_stop_reason(stop))
 }
 
-const fn post_dispatch_stop(stop: BoundedStop) -> InsertError {
-    match stop {
+const fn post_dispatch_stop(stop: BoundedStop) -> ObservedFailure<InsertError> {
+    let error = match stop {
         BoundedStop::Parent(stopped) => {
             InsertError::OutcomeUnknown(UnknownOutcome::Stopped(stopped))
         }
         BoundedStop::Timeout => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-    }
+    };
+    ObservedFailure::with_reason(error, bounded_stop_reason(stop))
 }

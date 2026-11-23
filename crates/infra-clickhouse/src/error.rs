@@ -1,4 +1,6 @@
-use operation_context::Stopped;
+use std::fmt;
+
+use operation_context::{BoundedStop, Stopped};
 use shared_rules::error_chain;
 
 const MAX_BAD_RESPONSE_SCAN_BYTES: usize = 256;
@@ -114,6 +116,153 @@ pub enum InsertError {
     OutcomeUnknown(#[source] UnknownOutcome),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResponseStatusCode {
+    ClickHouse(u32),
+    Http(u16),
+}
+
+impl fmt::Display for ResponseStatusCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ClickHouse(code) => write!(f, "{code}"),
+            Self::Http(status) => write!(f, "{status}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FailureReason {
+    NotFound,
+    TooManyRows,
+    ResultLimit,
+    TooManyParts,
+    Auth,
+    Access,
+    Readonly,
+    Schema,
+    QueryInvalid,
+    ServerTimeout,
+    MemoryLimit,
+    ServerUnknownStatus,
+    ServerError,
+    ClientTimeout,
+    ParentDeadline,
+    ParentCancelled,
+    FutureDropped,
+    Connect,
+    Transport,
+    Decode,
+    Encode,
+}
+
+impl FailureReason {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::TooManyRows => "too_many_rows",
+            Self::ResultLimit => "result_limit",
+            Self::TooManyParts => "too_many_parts",
+            Self::Auth => "auth",
+            Self::Access => "access",
+            Self::Readonly => "readonly",
+            Self::Schema => "schema",
+            Self::QueryInvalid => "query_invalid",
+            Self::ServerTimeout => "server_timeout",
+            Self::MemoryLimit => "memory_limit",
+            Self::ServerUnknownStatus => "server_unknown_status",
+            Self::ServerError => "server_error",
+            Self::ClientTimeout => "client_timeout",
+            Self::ParentDeadline => "parent_deadline",
+            Self::ParentCancelled => "parent_cancelled",
+            Self::FutureDropped => "future_dropped",
+            Self::Connect => "connect",
+            Self::Transport => "transport",
+            Self::Decode => "decode",
+            Self::Encode => "encode",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FailureDetail {
+    pub(crate) reason: FailureReason,
+    pub(crate) status_code: Option<ResponseStatusCode>,
+}
+
+impl FailureDetail {
+    pub(crate) const fn reason(reason: FailureReason) -> Self {
+        Self {
+            reason,
+            status_code: None,
+        }
+    }
+
+    pub(crate) const fn with_clickhouse_code(reason: FailureReason, code: u32) -> Self {
+        Self {
+            reason,
+            status_code: Some(ResponseStatusCode::ClickHouse(code)),
+        }
+    }
+
+    pub(crate) const fn with_http_status(reason: FailureReason, status: u16) -> Self {
+        Self {
+            reason,
+            status_code: Some(ResponseStatusCode::Http(status)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObservedFailure<E> {
+    pub(crate) error: E,
+    pub(crate) detail: FailureDetail,
+}
+
+impl<E> ObservedFailure<E> {
+    pub(crate) const fn new(error: E, detail: FailureDetail) -> Self {
+        Self { error, detail }
+    }
+
+    pub(crate) const fn with_reason(error: E, reason: FailureReason) -> Self {
+        Self::new(error, FailureDetail::reason(reason))
+    }
+}
+
+pub(crate) const fn bounded_stop_reason(stop: BoundedStop) -> FailureReason {
+    match stop {
+        BoundedStop::Parent(Stopped::Deadline) => FailureReason::ParentDeadline,
+        BoundedStop::Parent(Stopped::Cancelled) => FailureReason::ParentCancelled,
+        BoundedStop::Timeout => FailureReason::ClientTimeout,
+    }
+}
+
+const fn clickhouse_code_reason(code: u32) -> FailureReason {
+    match code {
+        516 => FailureReason::Auth,
+        497 => FailureReason::Access,
+        164 => FailureReason::Readonly,
+        16 | 47 | 53 | 60 | 81 => FailureReason::Schema,
+        62 | 456 | 457 => FailureReason::QueryInvalid,
+        158 | 307 | 396 => FailureReason::ResultLimit,
+        159 => FailureReason::ServerTimeout,
+        241 => FailureReason::MemoryLimit,
+        252 => FailureReason::TooManyParts,
+        319 => FailureReason::ServerUnknownStatus,
+        _ => FailureReason::ServerError,
+    }
+}
+
+const fn http_status_reason(status: u16) -> FailureReason {
+    match status {
+        400 => FailureReason::QueryInvalid,
+        401 => FailureReason::Auth,
+        403 => FailureReason::Access,
+        413 => FailureReason::ResultLimit,
+        _ => FailureReason::ServerError,
+    }
+}
+
 pub(crate) fn extract_exception_code(message: &str) -> Option<u32> {
     let bytes = message.as_bytes();
     let end = bytes.len().min(MAX_BAD_RESPONSE_SCAN_BYTES);
@@ -145,10 +294,16 @@ pub(crate) fn is_hyper_connect_error(error: &clickhouse::error::Error) -> bool {
     })
 }
 
-pub(crate) fn classify_query_error(error: &clickhouse::error::Error) -> QueryError {
+pub(crate) fn classify_query_error(
+    error: &clickhouse::error::Error,
+) -> ObservedFailure<QueryError> {
     match error {
-        clickhouse::error::Error::RowNotFound => QueryError::NotFound,
-        clickhouse::error::Error::InvalidParams(_) => QueryError::Rejected,
+        clickhouse::error::Error::RowNotFound => {
+            ObservedFailure::with_reason(QueryError::NotFound, FailureReason::NotFound)
+        }
+        clickhouse::error::Error::InvalidParams(_) => {
+            ObservedFailure::with_reason(QueryError::Rejected, FailureReason::QueryInvalid)
+        }
         clickhouse::error::Error::NotEnoughData
         | clickhouse::error::Error::InvalidUtf8Encoding(_)
         | clickhouse::error::Error::InvalidTagEncoding(_)
@@ -158,70 +313,139 @@ pub(crate) fn classify_query_error(error: &clickhouse::error::Error) -> QueryErr
         | clickhouse::error::Error::SchemaMismatch(_)
         | clickhouse::error::Error::DataFormat(_)
         | clickhouse::error::Error::Decompression(_)
-        | clickhouse::error::Error::Custom(_) => QueryError::Decode,
+        | clickhouse::error::Error::Custom(_) => {
+            ObservedFailure::with_reason(QueryError::Decode, FailureReason::Decode)
+        }
         clickhouse::error::Error::BadResponse(message) => {
             if let Some(code) = extract_exception_code(message) {
-                match code {
+                let error = match code {
                     158 | 307 | 396 => QueryError::TooLarge,
-                    47 | 53 | 60 | 62 | 164 | 497 | 516 => QueryError::Rejected,
+                    47 | 53 | 60 | 62 | 81 | 164 | 456 | 457 | 497 | 516 => QueryError::Rejected,
                     _ => QueryError::Unavailable,
-                }
+                };
+                ObservedFailure::new(
+                    error,
+                    FailureDetail::with_clickhouse_code(clickhouse_code_reason(code), code),
+                )
+            } else if let Some(status) = extract_http_status_from_bad_response(message) {
+                let error = match status {
+                    400 | 401 | 403 => QueryError::Rejected,
+                    _ => QueryError::Unavailable,
+                };
+                ObservedFailure::new(
+                    error,
+                    FailureDetail::with_http_status(http_status_reason(status), status),
+                )
             } else {
-                match extract_http_status_from_bad_response(message) {
-                    Some(400 | 401 | 403) => QueryError::Rejected,
-                    _ => QueryError::Unavailable,
-                }
+                ObservedFailure::with_reason(QueryError::Unavailable, FailureReason::ServerError)
             }
         }
-        _ => QueryError::Unavailable,
+        _ => {
+            let reason = if is_hyper_connect_error(error) {
+                FailureReason::Connect
+            } else {
+                FailureReason::Transport
+            };
+            ObservedFailure::with_reason(QueryError::Unavailable, reason)
+        }
     }
 }
 
-pub(crate) fn classify_metadata_error(error: &clickhouse::error::Error) -> InsertFailure {
+pub(crate) fn classify_metadata_error(
+    error: &clickhouse::error::Error,
+) -> ObservedFailure<InsertError> {
     match error {
         clickhouse::error::Error::SchemaMismatch(_)
         | clickhouse::error::Error::InvalidColumnsHeader(_)
         | clickhouse::error::Error::DataFormat(_)
-        | clickhouse::error::Error::NotEnoughData => InsertFailure::Encode,
+        | clickhouse::error::Error::NotEnoughData => ObservedFailure::with_reason(
+            InsertError::NotApplied(InsertFailure::Encode),
+            FailureReason::Encode,
+        ),
         clickhouse::error::Error::BadResponse(message) => {
             if let Some(code) = extract_exception_code(message) {
-                match code {
-                    47 | 60 | 164 | 497 | 516 => InsertFailure::Rejected,
+                let failure = match code {
+                    47 | 60 | 81 | 164 | 497 | 516 => InsertFailure::Rejected,
                     _ => InsertFailure::Unavailable,
-                }
+                };
+                ObservedFailure::new(
+                    InsertError::NotApplied(failure),
+                    FailureDetail::with_clickhouse_code(clickhouse_code_reason(code), code),
+                )
+            } else if let Some(status) = extract_http_status_from_bad_response(message) {
+                let failure = match status {
+                    400 | 401 | 403 => InsertFailure::Rejected,
+                    _ => InsertFailure::Unavailable,
+                };
+                ObservedFailure::new(
+                    InsertError::NotApplied(failure),
+                    FailureDetail::with_http_status(http_status_reason(status), status),
+                )
             } else {
-                match extract_http_status_from_bad_response(message) {
-                    Some(400 | 401 | 403) => InsertFailure::Rejected,
-                    _ => InsertFailure::Unavailable,
-                }
+                ObservedFailure::with_reason(
+                    InsertError::NotApplied(InsertFailure::Unavailable),
+                    FailureReason::ServerError,
+                )
             }
         }
-        _ => InsertFailure::Unavailable,
+        _ => {
+            let reason = if is_hyper_connect_error(error) {
+                FailureReason::Connect
+            } else {
+                FailureReason::Transport
+            };
+            ObservedFailure::with_reason(
+                InsertError::NotApplied(InsertFailure::Unavailable),
+                reason,
+            )
+        }
     }
 }
 
-pub(crate) fn classify_post_dispatch_insert_error(error: &clickhouse::error::Error) -> InsertError {
+pub(crate) fn classify_post_dispatch_insert_error(
+    error: &clickhouse::error::Error,
+) -> ObservedFailure<InsertError> {
     if is_hyper_connect_error(error) {
-        return InsertError::NotApplied(InsertFailure::Unavailable);
+        return ObservedFailure::with_reason(
+            InsertError::NotApplied(InsertFailure::Unavailable),
+            FailureReason::Connect,
+        );
     }
     if let clickhouse::error::Error::BadResponse(message) = error {
         if let Some(code) = extract_exception_code(message) {
-            return match code {
+            let mapped = match code {
                 252 => InsertError::NotApplied(InsertFailure::TooManyParts),
                 307 => InsertError::NotApplied(InsertFailure::TooLarge),
-                16 | 47 | 53 | 60 | 164 | 497 | 516 => {
+                16 | 47 | 53 | 60 | 81 | 164 | 497 | 516 => {
                     InsertError::NotApplied(InsertFailure::Rejected)
                 }
                 _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
             };
+            return ObservedFailure::new(
+                mapped,
+                FailureDetail::with_clickhouse_code(clickhouse_code_reason(code), code),
+            );
         }
-        return match extract_http_status_from_bad_response(message) {
-            Some(413) => InsertError::NotApplied(InsertFailure::TooLarge),
-            Some(400 | 401 | 403) => InsertError::NotApplied(InsertFailure::Rejected),
-            _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-        };
+        if let Some(status) = extract_http_status_from_bad_response(message) {
+            let mapped = match status {
+                413 => InsertError::NotApplied(InsertFailure::TooLarge),
+                400 | 401 | 403 => InsertError::NotApplied(InsertFailure::Rejected),
+                _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+            };
+            return ObservedFailure::new(
+                mapped,
+                FailureDetail::with_http_status(http_status_reason(status), status),
+            );
+        }
+        return ObservedFailure::with_reason(
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+            FailureReason::ServerError,
+        );
     }
-    InsertError::OutcomeUnknown(UnknownOutcome::Unavailable)
+    ObservedFailure::with_reason(
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+        FailureReason::Transport,
+    )
 }
 
 pub(crate) fn is_local_serialization_error(error: &clickhouse::error::Error) -> bool {

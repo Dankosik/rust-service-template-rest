@@ -5,9 +5,10 @@ use std::time::Duration;
 use operation_context::{BoundedStop, OperationContext};
 use serde::Serialize;
 use smallvec::SmallVec;
-use tracing::Instrument as _;
 
-use crate::error::{QueryError, classify_query_error};
+use crate::error::{
+    FailureReason, ObservedFailure, QueryError, bounded_stop_reason, classify_query_error,
+};
 use crate::observe::{Operation, OperationGuard};
 use crate::{ClickHouse, QuerySettings, within_bounded};
 
@@ -229,9 +230,15 @@ impl<'a> Query<'a> {
     pub async fn fetch_one<R: ReadRow>(self, ctx: &OperationContext) -> Result<R, QueryError> {
         self.execute_bounded::<R, _>(ctx, Operation::FetchOne, Some(2), |mut rows| {
             match rows.len() {
-                0 => Err(QueryError::NotFound),
+                0 => Err(ObservedFailure::with_reason(
+                    QueryError::NotFound,
+                    FailureReason::NotFound,
+                )),
                 1 => Ok(rows.remove(0)),
-                _ => Err(QueryError::TooManyRows),
+                _ => Err(ObservedFailure::with_reason(
+                    QueryError::TooManyRows,
+                    FailureReason::TooManyRows,
+                )),
             }
         })
         .await
@@ -248,7 +255,10 @@ impl<'a> Query<'a> {
             |mut rows| match rows.len() {
                 0 => Ok(None),
                 1 => Ok(Some(rows.remove(0))),
-                _ => Err(QueryError::TooManyRows),
+                _ => Err(ObservedFailure::with_reason(
+                    QueryError::TooManyRows,
+                    FailureReason::TooManyRows,
+                )),
             },
         )
         .await
@@ -264,7 +274,7 @@ impl<'a> Query<'a> {
         ctx: &OperationContext,
         operation: Operation,
         cardinality_cap: Option<usize>,
-        finish_rows: impl FnOnce(Vec<R>) -> Result<T, QueryError>,
+        finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
     ) -> Result<T, QueryError> {
         let shared = &self.client.inner.shared;
         if shared.closing.load(Ordering::Acquire) {
@@ -282,9 +292,8 @@ impl<'a> Query<'a> {
             return Err(QueryError::Unavailable);
         }
 
-        let guard =
+        let mut guard =
             OperationGuard::start(&shared.metrics, operation, self.summary, &shared.endpoint);
-        let span = guard.span();
         let result = async {
             let effective_timeout = shared
                 .query_timeout
@@ -306,7 +315,7 @@ impl<'a> Query<'a> {
             if shared.propagate_trace_context {
                 client = guard.inject_trace_context(client);
             }
-            let ch_query = build_clickhouse_query(
+            let (ch_query, query_id) = build_clickhouse_query(
                 &client,
                 shared,
                 self.sql,
@@ -315,6 +324,7 @@ impl<'a> Query<'a> {
                 effective_max_rows,
                 effective_max_bytes,
             );
+            guard.record_query_id(query_id);
             bounded.check().map_err(stop_to_query_error)?;
             let cursor = ch_query
                 .fetch::<R>()
@@ -330,7 +340,6 @@ impl<'a> Query<'a> {
             )
             .await
         }
-        .instrument(span)
         .await;
         guard.finish_query(result)
     }
@@ -344,14 +353,14 @@ fn build_clickhouse_query(
     remaining: Duration,
     effective_max_rows: u64,
     effective_max_bytes: usize,
-) -> clickhouse::query::Query {
+) -> (clickhouse::query::Query, String) {
     let buffer_size = shared.http_response_buffer_size.min(effective_max_bytes);
     let query_id = uuid::Uuid::new_v4().to_string();
     let mut ch_query = client
         .query_raw(sql)
         .with_setting("wait_end_of_query", "1")
         .with_setting("buffer_size", buffer_size.to_string())
-        .with_setting("query_id", query_id);
+        .with_setting("query_id", &query_id);
 
     if shared.query_settings == QuerySettings::Client {
         let max_exec_secs = remaining
@@ -373,7 +382,7 @@ fn build_clickhouse_query(
     for (name, value) in params {
         ch_query = ch_query.param(name, value);
     }
-    ch_query
+    (ch_query, query_id)
 }
 
 async fn consume_bounded_rows<R: ReadRow, T>(
@@ -382,8 +391,8 @@ async fn consume_bounded_rows<R: ReadRow, T>(
     effective_max_rows: u64,
     effective_max_bytes: usize,
     cardinality_cap: Option<usize>,
-    finish_rows: impl FnOnce(Vec<R>) -> Result<T, QueryError>,
-) -> Result<(T, u64, u64), QueryError> {
+    finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
+) -> Result<(T, u64, u64), ObservedFailure<QueryError>> {
     let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
     let mut rows = Vec::new();
     loop {
@@ -395,7 +404,10 @@ async fn consume_bounded_rows<R: ReadRow, T>(
                 if cursor.decoded_bytes() > max_bytes_u64
                     || cursor.returned_rows() > effective_max_rows
                 {
-                    return Err(QueryError::TooLarge);
+                    return Err(ObservedFailure::with_reason(
+                        QueryError::TooLarge,
+                        FailureReason::ResultLimit,
+                    ));
                 }
                 rows.push(row);
                 if let Some(cap) = cardinality_cap
@@ -408,7 +420,10 @@ async fn consume_bounded_rows<R: ReadRow, T>(
             }
             Ok(None) => {
                 if cursor.decoded_bytes() > max_bytes_u64 {
-                    return Err(QueryError::TooLarge);
+                    return Err(ObservedFailure::with_reason(
+                        QueryError::TooLarge,
+                        FailureReason::ResultLimit,
+                    ));
                 }
                 let returned_rows = cursor.returned_rows();
                 let decoded_bytes = cursor.decoded_bytes();
@@ -452,9 +467,10 @@ fn is_valid_param_name(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-const fn stop_to_query_error(stop: BoundedStop) -> QueryError {
-    match stop {
+const fn stop_to_query_error(stop: BoundedStop) -> ObservedFailure<QueryError> {
+    let error = match stop {
         BoundedStop::Parent(stopped) => QueryError::Stopped(stopped),
         BoundedStop::Timeout => QueryError::Unavailable,
-    }
+    };
+    ObservedFailure::with_reason(error, bounded_stop_reason(stop))
 }

@@ -42,10 +42,12 @@ mod tests {
     use std::time::Duration;
 
     use axum::extract::State;
+    use axum::http::StatusCode;
     use infra_clickhouse::{
         AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, ClickHouse, CloseOutcome,
     };
-    use infra_http::RequestContext;
+    use infra_http::clickhouse::{insert_problem, query_problem};
+    use infra_http::{Code, Problem, RequestContext};
 
     #[derive(Clone, serde::Deserialize, serde::Serialize, infra_clickhouse::Row)]
     #[clickhouse(crate = "infra_clickhouse::__clickhouse")]
@@ -59,41 +61,47 @@ mod tests {
         let dependencies = super::super::shutdown::Dependencies::default();
         let clickhouse = dependencies.clickhouse;
         assert!(clickhouse.is_none());
-        let _: axum::routing::MethodRouter = axum::routing::get(
-            async |State(client): State<Option<ClickHouse>>, request: RequestContext| {
+        let _: axum::routing::MethodRouter = axum::routing::post(
+            async |State(client): State<Option<ClickHouse>>,
+                   request: RequestContext|
+                   -> Result<StatusCode, Problem> {
                 if let Some(client) = client {
-                    let _read = client
+                    let _row = client
                         .query(
                             "event_by_id",
                             "SELECT id, label FROM events WHERE id = {id:UInt64}",
                         )
                         .param("id", 1_u64)
-                        .fetch_optional::<EventRow>(request.operation())
-                        .await;
+                        .fetch_one::<EventRow>(request.operation())
+                        .await
+                        .map_err(|error| query_problem(error, || Problem::new(Code::NotFound)))?;
                     let rows = [EventRow {
                         id: 1,
                         label: "created".to_owned(),
                     }];
-                    let _batch = client
-                        .insert_batch(
-                            request.operation(),
+                    let _batch = request
+                        .clickhouse_insert_batch(
+                            &client,
                             "events_batch",
                             "events",
                             &rows,
                             BatchInsertOptions::new(),
                         )
-                        .await;
-                    let _async_insert = client
-                        .insert_async(
-                            request.operation(),
+                        .await
+                        .map_err(insert_problem)?;
+                    let _async_insert = request
+                        .clickhouse_insert_async(
+                            &client,
                             "events_async",
                             "events",
                             &rows,
                             AsyncInsertOptions::new()
                                 .deduplication(AsyncDeduplication::ByToken("tok")),
                         )
-                        .await;
+                        .await
+                        .map_err(insert_problem)?;
                 }
+                Ok(StatusCode::NO_CONTENT)
             },
         )
         .with_state(clickhouse);

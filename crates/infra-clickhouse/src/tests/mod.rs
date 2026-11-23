@@ -573,6 +573,65 @@ async fn a4_7_error_network_is_connect_and_bad_response_probes() {
     tls_srv.abort();
 }
 
+const A4_7_LOOPBACK_CASES: &[(&str, &str, QueryError, InsertFailure, InsertError)] = &[
+    (
+        "SELECT empty_400",
+        "400 Bad Request",
+        QueryError::Rejected,
+        InsertFailure::Rejected,
+        InsertError::NotApplied(InsertFailure::Rejected),
+    ),
+    (
+        "SELECT empty_401",
+        "401 Unauthorized",
+        QueryError::Rejected,
+        InsertFailure::Rejected,
+        InsertError::NotApplied(InsertFailure::Rejected),
+    ),
+    (
+        "SELECT empty_403",
+        "403 Forbidden",
+        QueryError::Rejected,
+        InsertFailure::Rejected,
+        InsertError::NotApplied(InsertFailure::Rejected),
+    ),
+    (
+        "SELECT empty_413",
+        "413 Payload Too Large",
+        QueryError::Unavailable,
+        InsertFailure::Unavailable,
+        InsertError::NotApplied(InsertFailure::TooLarge),
+    ),
+    (
+        "SELECT prose_400",
+        "400 rows written",
+        QueryError::Unavailable,
+        InsertFailure::Unavailable,
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+    ),
+    (
+        "SELECT prose_401",
+        "401 custom text",
+        QueryError::Unavailable,
+        InsertFailure::Unavailable,
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+    ),
+    (
+        "SELECT body_401",
+        "unauthorized",
+        QueryError::Unavailable,
+        InsertFailure::Unavailable,
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+    ),
+    (
+        "SELECT body_413",
+        "request entity too large",
+        QueryError::Unavailable,
+        InsertFailure::Unavailable,
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+    ),
+];
+
 #[tokio::test]
 async fn a4_7_bad_response_loopback_probes() {
     let (bad_addr, bad_srv) = spawn_bad_response_server().await;
@@ -586,68 +645,21 @@ async fn a4_7_bad_response_loopback_probes() {
     assert!(
         matches!(&err_158, clickhouse::error::Error::BadResponse(s) if s.starts_with("Code: 158"))
     );
-    assert_eq!(error::classify_query_error(&err_158), QueryError::TooLarge);
+    let classified_158 = error::classify_query_error(&err_158);
+    assert_eq!(classified_158.error, QueryError::TooLarge);
+    assert_eq!(
+        (
+            classified_158.detail.reason,
+            classified_158.detail.status_code
+        ),
+        (
+            error::FailureReason::ResultLimit,
+            Some(error::ResponseStatusCode::ClickHouse(158)),
+        )
+    );
 
-    let loopback_cases = [
-        (
-            "SELECT empty_400",
-            "400 Bad Request",
-            QueryError::Rejected,
-            InsertFailure::Rejected,
-            InsertError::NotApplied(InsertFailure::Rejected),
-        ),
-        (
-            "SELECT empty_401",
-            "401 Unauthorized",
-            QueryError::Rejected,
-            InsertFailure::Rejected,
-            InsertError::NotApplied(InsertFailure::Rejected),
-        ),
-        (
-            "SELECT empty_403",
-            "403 Forbidden",
-            QueryError::Rejected,
-            InsertFailure::Rejected,
-            InsertError::NotApplied(InsertFailure::Rejected),
-        ),
-        (
-            "SELECT empty_413",
-            "413 Payload Too Large",
-            QueryError::Unavailable,
-            InsertFailure::Unavailable,
-            InsertError::NotApplied(InsertFailure::TooLarge),
-        ),
-        (
-            "SELECT prose_400",
-            "400 rows written",
-            QueryError::Unavailable,
-            InsertFailure::Unavailable,
-            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-        ),
-        (
-            "SELECT prose_401",
-            "401 custom text",
-            QueryError::Unavailable,
-            InsertFailure::Unavailable,
-            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-        ),
-        (
-            "SELECT body_401",
-            "unauthorized",
-            QueryError::Unavailable,
-            InsertFailure::Unavailable,
-            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-        ),
-        (
-            "SELECT body_413",
-            "request entity too large",
-            QueryError::Unavailable,
-            InsertFailure::Unavailable,
-            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-        ),
-    ];
-
-    for (sql, expected_reason, expected_query, expected_metadata, expected_insert) in loopback_cases
+    for &(sql, expected_reason, expected_query, expected_metadata, expected_insert) in
+        A4_7_LOOPBACK_CASES
     {
         let err = bad_client
             .query(sql)
@@ -658,20 +670,65 @@ async fn a4_7_bad_response_loopback_probes() {
             matches!(&err, clickhouse::error::Error::BadResponse(s) if s == expected_reason),
             "sql={sql}: expected BadResponse({expected_reason:?}), got {err:?}"
         );
-        assert_eq!(error::classify_query_error(&err), expected_query, "{sql}");
         assert_eq!(
-            error::classify_metadata_error(&err),
-            expected_metadata,
-            "{sql}"
-        );
-        assert_eq!(
-            error::classify_post_dispatch_insert_error(&err),
-            expected_insert,
+            (
+                error::classify_query_error(&err).error,
+                error::classify_metadata_error(&err).error,
+                error::classify_post_dispatch_insert_error(&err).error,
+            ),
+            (
+                expected_query,
+                InsertError::NotApplied(expected_metadata),
+                expected_insert,
+            ),
             "{sql}"
         );
     }
 
     bad_srv.abort();
+}
+
+#[test]
+fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
+    for (code, message, expected_reason) in [
+        (
+            81_u32,
+            "Code: 81. DB::Exception: Database missing does not exist",
+            error::FailureReason::Schema,
+        ),
+        (
+            456_u32,
+            "Code: 456. DB::Exception: Query parameter `id` was not set",
+            error::FailureReason::QueryInvalid,
+        ),
+        (
+            457_u32,
+            "Code: 457. DB::Exception: Value for query parameter `id` is invalid",
+            error::FailureReason::QueryInvalid,
+        ),
+    ] {
+        let ch_err = clickhouse::error::Error::BadResponse(message.to_owned());
+        let q = error::classify_query_error(&ch_err);
+        assert_eq!(q.error, QueryError::Rejected, "{code}");
+        assert!(!q.error.is_retryable(), "{code}");
+        assert_eq!(q.detail.reason, expected_reason, "{code}");
+        assert_eq!(
+            q.detail.status_code,
+            Some(error::ResponseStatusCode::ClickHouse(code)),
+            "{code}"
+        );
+    }
+    let db_err = clickhouse::error::Error::BadResponse(
+        "Code: 81. DB::Exception: Database missing does not exist".to_owned(),
+    );
+    assert_eq!(
+        error::classify_metadata_error(&db_err).error,
+        InsertError::NotApplied(InsertFailure::Rejected)
+    );
+    assert_eq!(
+        error::classify_post_dispatch_insert_error(&db_err).error,
+        InsertError::NotApplied(InsertFailure::Rejected)
+    );
 }
 
 #[test]
@@ -716,18 +773,20 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{reason}"
         );
         let ch_err = clickhouse::error::Error::BadResponse(reason.to_owned());
+        let q = error::classify_query_error(&ch_err);
+        assert_eq!(q.error, expected_query, "{reason}");
         assert_eq!(
-            error::classify_query_error(&ch_err),
-            expected_query,
+            q.detail.status_code,
+            expected_status.map(error::ResponseStatusCode::Http),
             "{reason}"
         );
         assert_eq!(
-            error::classify_metadata_error(&ch_err),
-            expected_metadata,
+            error::classify_metadata_error(&ch_err).error,
+            InsertError::NotApplied(expected_metadata),
             "{reason}"
         );
         assert_eq!(
-            error::classify_post_dispatch_insert_error(&ch_err),
+            error::classify_post_dispatch_insert_error(&ch_err).error,
             expected_insert,
             "{reason}"
         );
@@ -752,17 +811,17 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
         );
         let ch_err = clickhouse::error::Error::BadResponse(prose.to_owned());
         assert_eq!(
-            error::classify_query_error(&ch_err),
+            error::classify_query_error(&ch_err).error,
             QueryError::Unavailable,
             "{prose}"
         );
         assert_eq!(
-            error::classify_metadata_error(&ch_err),
-            InsertFailure::Unavailable,
+            error::classify_metadata_error(&ch_err).error,
+            InsertError::NotApplied(InsertFailure::Unavailable),
             "{prose}"
         );
         assert_eq!(
-            error::classify_post_dispatch_insert_error(&ch_err),
+            error::classify_post_dispatch_insert_error(&ch_err).error,
             InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
             "{prose}"
         );

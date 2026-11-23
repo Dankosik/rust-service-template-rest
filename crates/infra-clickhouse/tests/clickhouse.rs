@@ -54,7 +54,7 @@ fn options_for(
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
 #[clickhouse(crate = "infra_clickhouse::__clickhouse")]
 struct EventRow {
     id: u64,
@@ -141,6 +141,22 @@ async fn assert_param_select(rw: &ClickHouse, ctx: &OperationContext) {
     );
 }
 
+fn make_event(
+    id: u64,
+    kind: &str,
+    trace_id: uuid::Uuid,
+    day: time::Date,
+    ts: time::OffsetDateTime,
+) -> EventRow {
+    EventRow {
+        id,
+        kind: kind.to_owned(),
+        trace_id,
+        day,
+        ts,
+    }
+}
+
 async fn assert_rw_batch_async_dedup_and_empty(
     rw: &ClickHouse,
     ctx: &OperationContext,
@@ -163,13 +179,7 @@ async fn assert_rw_batch_async_dedup_and_empty(
     let ts =
         time::OffsetDateTime::from_unix_timestamp_nanos(1_763_820_000_123_000_000).expect("ts");
 
-    let batch_rows = [EventRow {
-        id: 1,
-        kind: "batch".to_owned(),
-        trace_id: uid,
-        day,
-        ts,
-    }];
+    let batch_rows = [make_event(1, "batch", uid, day, ts)];
     let report = rw
         .insert_batch(
             ctx,
@@ -182,27 +192,45 @@ async fn assert_rw_batch_async_dedup_and_empty(
         .expect("insert_batch");
     assert_eq!(report.rows, 1);
 
-    let async_rows = [EventRow {
-        id: 2,
-        kind: "async".to_owned(),
-        trace_id: uid,
-        day,
-        ts,
-    }];
+    let async_rows = [make_event(2, "async", uid, day, ts)];
     let async_opts =
         AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("smoke-token-1"));
-    let async_report = rw
-        .insert_async(ctx, "smoke_async", table, &async_rows, async_opts)
-        .await
-        .expect("insert_async 1");
-    assert_eq!(async_report.rows, 1);
+    assert_eq!(
+        rw.insert_async(ctx, "smoke_async", table, &async_rows, async_opts)
+            .await
+            .expect("insert_async 1")
+            .rows,
+        1
+    );
+    assert_eq!(
+        rw.insert_async(ctx, "smoke_async_dup", table, &async_rows, async_opts)
+            .await
+            .expect("insert_async 2")
+            .rows,
+        1
+    );
 
-    // Duplicate token insert should deduplicate in ClickHouse.
-    let dup_report = rw
-        .insert_async(ctx, "smoke_async_dup", table, &async_rows, async_opts)
+    let hash_rows = [make_event(3, "async_hash", uid, day, ts)];
+    let hash_opts = AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash);
+    rw.insert_async(ctx, "smoke_hash_1", table, &hash_rows, hash_opts)
         .await
-        .expect("insert_async 2");
-    assert_eq!(dup_report.rows, 1);
+        .expect("insert_async hash 1");
+    rw.insert_async(ctx, "smoke_hash_2", table, &hash_rows, hash_opts)
+        .await
+        .expect("insert_async hash 2");
+
+    let disabled_rows = [make_event(4, "async_disabled", uid, day, ts)];
+    for summary in ["smoke_disabled_1", "smoke_disabled_2"] {
+        rw.insert_async(
+            ctx,
+            summary,
+            table,
+            &disabled_rows,
+            AsyncInsertOptions::new(),
+        )
+        .await
+        .expect(summary);
+    }
 
     let fetched = rw
         .query(
@@ -212,9 +240,16 @@ async fn assert_rw_batch_async_dedup_and_empty(
         .fetch_all::<EventRow>(ctx)
         .await
         .expect("read back rows");
-    assert_eq!(fetched.len(), 2);
-    assert_eq!(fetched[0], batch_rows[0]);
-    assert_eq!(fetched[1], async_rows[0]);
+    assert_eq!(
+        fetched,
+        vec![
+            batch_rows[0].clone(),
+            async_rows[0].clone(),
+            hash_rows[0].clone(),
+            disabled_rows[0].clone(),
+            disabled_rows[0].clone(),
+        ]
+    );
 }
 
 async fn assert_read_bounds_cardinality_and_cancellation(
@@ -277,13 +312,31 @@ async fn assert_read_bounds_cardinality_and_cancellation(
         .expect_err("byte overflow must return TooLarge");
     assert_eq!(overflow_bytes, QueryError::TooLarge);
 
-    // Unknown column -> Rejected (Code: 47).
     let unknown_col = rw
         .query("bad_col", &format!("SELECT nonexistent FROM {table}"))
         .fetch_all::<SimpleRow>(ctx)
         .await
         .expect_err("unknown column rejected");
     assert_eq!(unknown_col, QueryError::Rejected);
+
+    let missing_param = rw
+        .query("missing_param", "SELECT {missing:UInt64} AS id")
+        .fetch_one::<SimpleRow>(ctx)
+        .await
+        .expect_err("missing query parameter rejected");
+    assert_eq!(missing_param, QueryError::Rejected);
+    assert!(!missing_param.is_retryable());
+
+    let unknown_db = rw
+        .query(
+            "missing_db",
+            "SELECT id FROM no_such_db_clickhouse_test.events",
+        )
+        .fetch_one::<SimpleRow>(ctx)
+        .await
+        .expect_err("unknown database rejected");
+    assert_eq!(unknown_db, QueryError::Rejected);
+    assert!(!unknown_db.is_retryable());
 
     // OperationContext cancellation mid-query finishes promptly without waiting 2s.
     let short_ctx = OperationContext::with_timeout(Duration::from_millis(150));
@@ -593,6 +646,103 @@ async fn assert_rolling_schema_evolution_and_busy_shedding(
     }
 }
 
+async fn assert_dedup_override_under_disabled_profile(
+    url: String,
+    db: String,
+    table: &str,
+    ctx: &OperationContext,
+) {
+    let nodedup = ClickHouse::start(options_for(
+        url,
+        db,
+        "app_nodedup".to_owned(),
+        "app_nodedup".to_owned(),
+        QuerySettings::Client,
+    ))
+    .await
+    .expect("start app_nodedup");
+
+    let profile_setting: String = nodedup
+        .query(
+            "check_nodedup_profile",
+            "SELECT getSetting('deduplicate_insert')",
+        )
+        .fetch_one(ctx)
+        .await
+        .expect("read deduplicate_insert setting");
+    assert_eq!(profile_setting, "disable");
+
+    let uid = uuid::Uuid::new_v4();
+    let day = time::Date::from_calendar_date(2026, time::Month::November, 22).expect("date");
+    let ts =
+        time::OffsetDateTime::from_unix_timestamp_nanos(1_763_820_000_123_000_000).expect("ts");
+
+    let plain_batch_rows = [make_event(10, "batch_plain", uid, day, ts)];
+    for summary in ["nodedup_plain_1", "nodedup_plain_2"] {
+        nodedup
+            .insert_batch(
+                ctx,
+                summary,
+                table,
+                &plain_batch_rows,
+                BatchInsertOptions::new(),
+            )
+            .await
+            .expect(summary);
+    }
+
+    let batch_tok_rows = [make_event(11, "batch_tok", uid, day, ts)];
+    let batch_tok_opts = BatchInsertOptions::new().deduplication_token("nodedup-batch-tok-1");
+    for summary in ["nodedup_batch_1", "nodedup_batch_2"] {
+        nodedup
+            .insert_batch(ctx, summary, table, &batch_tok_rows, batch_tok_opts)
+            .await
+            .expect(summary);
+    }
+
+    let hash_rows = [make_event(12, "nodedup_hash", uid, day, ts)];
+    let hash_opts = AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash);
+    for summary in ["nodedup_hash_1", "nodedup_hash_2"] {
+        nodedup
+            .insert_async(ctx, summary, table, &hash_rows, hash_opts)
+            .await
+            .expect(summary);
+    }
+
+    let async_tok_rows = [make_event(13, "nodedup_tok", uid, day, ts)];
+    let async_tok_opts =
+        AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("nodedup-async-tok-1"));
+    for summary in ["nodedup_async_tok_1", "nodedup_async_tok_2"] {
+        nodedup
+            .insert_async(ctx, summary, table, &async_tok_rows, async_tok_opts)
+            .await
+            .expect(summary);
+    }
+
+    let fetched = nodedup
+        .query(
+            "read_back_nodedup",
+            &format!("SELECT id, kind, trace_id, day, ts FROM {table} WHERE id >= 10 ORDER BY id"),
+        )
+        .fetch_all::<EventRow>(ctx)
+        .await
+        .expect("read back nodedup rows");
+    assert_eq!(
+        fetched,
+        vec![
+            plain_batch_rows[0].clone(),
+            plain_batch_rows[0].clone(),
+            batch_tok_rows[0].clone(),
+            hash_rows[0].clone(),
+            async_tok_rows[0].clone(),
+        ]
+    );
+    assert_eq!(
+        nodedup.close(Duration::from_secs(2)).await,
+        CloseOutcome::Complete
+    );
+}
+
 #[tokio::test]
 async fn live_clickhouse_26_8_full_hardened_runtime_suite() {
     let mut builder = PrometheusBuilder::new();
@@ -651,6 +801,7 @@ async fn live_clickhouse_26_8_full_hardened_runtime_suite() {
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
     assert_param_select(&rw, &ctx).await;
     assert_rw_batch_async_dedup_and_empty(&rw, &ctx, &table).await;
+    assert_dedup_override_under_disabled_profile(url.clone(), db.clone(), &table, &ctx).await;
     assert_read_bounds_cardinality_and_cancellation(&rw, &ctx, &table).await;
     assert_readonly_behavior(url.clone(), db.clone(), ro_user, ro_password, &table, &ctx).await;
 

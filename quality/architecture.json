@@ -136,6 +136,10 @@
           "reason": "File routes bind streaming storage operations to the HTTP request and response lifetimes and render pre-header failures.",
           "authority": "docs/repo-architecture.md#global-invariants"
         },
+        "crates/infra-clickhouse/Cargo.toml": {
+          "reason": "Analytical HTTP routes bind ClickHouse insert outcome tracking to request budgets and project query/insert failures to Problem responses.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
         "crates/service-failure/Cargo.toml": {
           "reason": "HTTP projects shared failure codes into Problem responses.",
           "authority": "docs/repo-architecture.md#global-invariants"
