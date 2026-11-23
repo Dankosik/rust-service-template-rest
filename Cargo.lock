@@ -6401,6 +6401,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "temporal-worker"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "clap",
+ "futures",
+ "futures-util",
+ "health",
+ "http-body",
+ "infra-http",
+ "infra-http-transport",
+ "infra-telemetry",
+ "infra-temporal",
+ "operation-context",
+ "prost",
+ "rlimit",
+ "secrecy",
+ "serde_json",
+ "service-config",
+ "temporalio-common",
+ "temporalio-macros",
+ "temporalio-sdk",
+ "temporalio-workflow",
+ "thiserror",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "temporalio-client"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

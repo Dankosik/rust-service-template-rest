@@ -60,6 +60,7 @@
     "crates/migrate/Cargo.toml": {"role": "migrator"},
     "crates/service/Cargo.toml": {"role": "root"},
     "crates/service-failure/Cargo.toml": {"role": "contract"},
+    "crates/temporal-worker/Cargo.toml": {"role": "root"},
     "crates/nats-test-support/Cargo.toml": {"role": "test-support"},
     "crates/observe-test-support/Cargo.toml": {"role": "test-support"},
     "crates/tls-test-support/Cargo.toml": {"role": "test-support"},

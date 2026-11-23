@@ -1,0 +1,54 @@
+[package]
+name = "temporal-worker"
+description = "The Temporal worker process: runs registered workflows and activities under the service's configuration, telemetry, health, and lifecycle rules."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "temporal_worker"
+
+[[bin]]
+name = "temporal-worker"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
+futures-util = { workspace = true, features = ["std", "async-await"] }
+health = { workspace = true }
+infra-http = { workspace = true }
+infra-http-transport = { workspace = true }
+infra-telemetry = { workspace = true }
+infra-temporal = { workspace = true, features = ["worker"] }
+operation-context = { workspace = true }
+rlimit = { workspace = true }
+secrecy = { workspace = true }
+service-config = { workspace = true }
+thiserror = { workspace = true }
+tikv-jemallocator = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true, features = ["std"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["background_threads"] }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["http2", "tokio"] }
+bytes = { workspace = true, features = ["std"] }
+futures = { workspace = true, features = ["alloc", "std"] }
+http-body = { workspace = true }
+prost = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+service-config = { workspace = true, features = ["test-support"] }
+temporalio-common = { workspace = true, features = ["vendored-protox"] }
+temporalio-macros = { workspace = true }
+temporalio-sdk = { workspace = true, features = ["dynamic-tls"] }
+temporalio-workflow = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "test-util"] }
