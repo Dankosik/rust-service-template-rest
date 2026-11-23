@@ -673,8 +673,10 @@ tests:
         values: "0+2x30"
       - series: 'temporal_request_failure{job="service",instance="a",namespace="default",operation="StartWorkflowExecution",status_code="UNAVAILABLE"}'
         values: "0+3x30"
-      - series: 'temporal_request_failure{job="temporal-worker",instance="tw",namespace="default",operation="PollWorkflowTaskQueue",status_code="TRANSPORT_ERROR"}'
+      - series: 'temporal_long_request_failure{job="temporal-worker",instance="tw",namespace="default",task_queue="orders",operation="PollWorkflowTaskQueue",status_code="TRANSPORT_ERROR"}'
         values: "0+2x30"
+      - series: 'temporal_long_request_failure{job="temporal-worker",instance="tw",namespace="default",task_queue="orders",operation="PollWorkflowTaskQueue",status_code="CANCELLED"}'
+        values: "0+50x30"
       - series: 'temporal_request_failure{job="service",instance="a",namespace="default",operation="StartWorkflowExecution",status_code="ALREADY_EXISTS"}'
         values: "0+50x30"
       - series: 'temporal_request_failure{job="service",instance="a",namespace="default",operation="DescribeWorkflowExecution",status_code="NOT_FOUND"}'

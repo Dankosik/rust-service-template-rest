@@ -666,7 +666,7 @@ groups:
       - alert: TemporalClientRpcErrors
         expr: |
           sum by(job,namespace,operation,status_code) (
-            rate(temporal_request_failure{job=~"service|temporal-worker",status_code=~"UNKNOWN|DEADLINE_EXCEEDED|RESOURCE_EXHAUSTED|INTERNAL|UNAVAILABLE|DATA_LOSS|UNAUTHENTICATED|PERMISSION_DENIED|TRANSPORT_ERROR"}[5m])
+            rate({__name__=~"temporal_request_failure|temporal_long_request_failure",job=~"service|temporal-worker",status_code=~"UNKNOWN|DEADLINE_EXCEEDED|RESOURCE_EXHAUSTED|INTERNAL|UNAVAILABLE|DATA_LOSS|UNAUTHENTICATED|PERMISSION_DENIED|TRANSPORT_ERROR"}[5m])
           ) > 0
         for: 5m
         labels: {severity: ticket}

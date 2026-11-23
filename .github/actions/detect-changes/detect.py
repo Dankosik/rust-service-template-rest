@@ -102,6 +102,7 @@ SURFACES: dict[str, tuple[str, ...]] = {
     "integration_temporal": (
         "crates/infra-temporal/**", "crates/temporal-worker/**",
         "crates/health/**", "crates/operation-context/**", "crates/shared-rules/**",
+        "crates/service-failure/**",
         "crates/json-payload/**", "crates/infra-http/**", "crates/infra-http-transport/**",
         "crates/infra-telemetry/**", "crates/observe-test-support/**", "crates/tls-test-support/**",
         "test/Cargo.toml", "test/src/bin/temporal_worker_fixture.rs", "test/tests/temporal.rs",

@@ -5,10 +5,10 @@
     reason = "integration test helpers panic directly on broken fixtures"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use health::Probe as _;
@@ -52,6 +52,7 @@ struct TelemetryHarness {
     events: EventCapture,
     exporter: InMemorySpanExporter,
     provider: SdkTracerProvider,
+    task_queues: Mutex<BTreeSet<String>>,
 }
 
 static TELEMETRY: OnceLock<TelemetryHarness> = OnceLock::new();
@@ -83,8 +84,15 @@ fn telemetry() -> &'static TelemetryHarness {
             events,
             exporter,
             provider,
+            task_queues: Mutex::new(BTreeSet::new()),
         }
     })
+}
+
+fn unique_task_queue(harness: &TelemetryHarness, prefix: &str) -> String {
+    let queue = unique_name(prefix);
+    harness.task_queues.lock().unwrap().insert(queue.clone());
+    queue
 }
 
 fn temporal_endpoint() -> Url {
@@ -360,26 +368,52 @@ impl PreemptRetryActivities {
     }
 }
 
-fn assert_lifecycle_metrics(scrape: &str, task_queue: &str) {
+fn prometheus_label_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let (_, rest) = line.split_once('{')?;
+    let (mut rest, _) = rest.rsplit_once('}')?;
+    while !rest.is_empty() {
+        let (name, after_eq) = rest.split_once('=')?;
+        let after_quote = after_eq.strip_prefix('"')?;
+        let (value, tail) = after_quote.split_once('"')?;
+        if name == key {
+            return Some(value);
+        }
+        rest = tail.strip_prefix(',').unwrap_or(tail);
+    }
+    None
+}
+
+fn assert_lifecycle_metrics(harness: &TelemetryHarness, task_queue: &str) {
+    let scrape = harness.prometheus.render();
+    let known_queues = harness.task_queues.lock().unwrap().clone();
     assert!(
         scrape.contains("temporal_request{") && scrape.contains("temporal_request_failure{"),
         "{scrape}"
     );
     assert!(
-        scrape.contains("temporal_workflow_task_schedule_to_start_latency_bucket{")
-            && scrape.contains("le=\"1\"")
-            && scrape.contains(&format!("task_queue=\"{task_queue}\"")),
-        "{scrape}"
+        scrape.lines().any(|line| {
+            line.starts_with("temporal_workflow_task_schedule_to_start_latency_bucket{")
+                && prometheus_label_value(line, "le") == Some("1")
+                && prometheus_label_value(line, "task_queue") == Some(task_queue)
+        }),
+        "missing le=\"1\" bucket on temporal_workflow_task_schedule_to_start_latency_bucket for {task_queue}:\n{scrape}"
     );
-    for line in scrape
-        .lines()
-        .filter(|line| line.contains(&format!("task_queue=\"{task_queue}")))
-    {
-        assert!(
-            line.contains(&format!("task_queue=\"{task_queue}\"")),
-            "sticky queue suffix leaked into task_queue label: {line}"
-        );
+    let mut saw_task_queue = false;
+    for line in scrape.lines().filter(|line| line.starts_with("temporal_")) {
+        if let Some(observed_queue) = prometheus_label_value(line, "task_queue") {
+            assert!(
+                known_queues.contains(observed_queue),
+                "unexpected or sticky task_queue label {observed_queue:?} in line: {line}"
+            );
+            if observed_queue == task_queue {
+                saw_task_queue = true;
+            }
+        }
     }
+    assert!(
+        saw_task_queue,
+        "no temporal_* metric carried task_queue={task_queue:?}:\n{scrape}"
+    );
 }
 
 async fn exercise_update_with_start(
@@ -453,7 +487,7 @@ async fn await_lifecycle_status(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_workflow_start_query_update_signal_duplicate_and_metrics() {
     let harness = telemetry();
-    let task_queue = unique_name("it-lifecycle-q");
+    let task_queue = unique_task_queue(harness, "it-lifecycle-q");
     let (startup, conn) = admit_client(TemporalAuth::None, Duration::from_secs(30)).await;
     let client = conn.client();
 
@@ -549,7 +583,7 @@ async fn live_workflow_start_query_update_signal_duplicate_and_metrics() {
     assert_eq!(description.status(), WorkflowExecutionStatus::Completed);
 
     exercise_update_with_start(&client, &op, queue_name).await;
-    assert_lifecycle_metrics(&harness.prometheus.render(), &task_queue);
+    assert_lifecycle_metrics(harness, &task_queue);
 
     worker.initiate_shutdown();
     assert_eq!(
@@ -562,6 +596,12 @@ async fn live_workflow_start_query_update_signal_duplicate_and_metrics() {
         startup.close(Instant::now() + Duration::from_secs(5)).await,
         CloseOutcome::Complete
     );
+}
+
+fn has_span_attr(span: &opentelemetry_sdk::trace::SpanData, key: &str, expected: &str) -> bool {
+    span.attributes
+        .iter()
+        .any(|kv| kv.key.as_str() == key && kv.value.as_str() == expected)
 }
 
 fn assert_replay_trace_spans(
@@ -584,9 +624,7 @@ fn assert_replay_trace_spans(
         .iter()
         .filter(|span| {
             span.name == "temporal_run_workflow"
-                && span.attributes.iter().any(|kv| {
-                    kv.key.as_str() == "temporal.task_queue" && kv.value.as_str() == task_queue
-                })
+                && has_span_attr(span, "temporal.task_queue", task_queue)
         })
         .collect();
     assert_eq!(
@@ -603,25 +641,43 @@ fn assert_replay_trace_spans(
         run_wf_spans[0]
     );
     let wf_trace_id = run_wf_spans[0].span_context.trace_id();
+    assert_ne!(
+        wf_trace_id, root_trace_id,
+        "temporal_run_workflow must start a linked workflow trace rather than reusing caller trace_id"
+    );
 
-    let schedule_act_count = spans
+    let activity_type = ReplayTraceActivities::work.name();
+    let schedule_act_spans: Vec<_> = spans
         .iter()
         .filter(|span| {
-            span.name == "temporal_schedule_activity" && span.span_context.trace_id() == wf_trace_id
+            span.name == "temporal_schedule_activity"
+                && has_span_attr(span, "temporal.activity_type", activity_type)
         })
-        .count();
+        .collect();
     assert_eq!(
-        schedule_act_count, 1,
-        "replay must not duplicate temporal_schedule_activity: {spans:?}"
+        schedule_act_spans.len(),
+        1,
+        "replay must not duplicate temporal_schedule_activity across any trace: {schedule_act_spans:?}"
+    );
+    assert_eq!(
+        schedule_act_spans[0].span_context.trace_id(),
+        wf_trace_id,
+        "temporal_schedule_activity must stay on workflow trace: {:?}",
+        schedule_act_spans[0]
+    );
+    assert!(
+        !spans.iter().any(|span| {
+            span.name == "temporal_schedule_activity"
+                && span.span_context.trace_id() == root_trace_id
+        }),
+        "replay must not emit temporal_schedule_activity under workflow_parent root_trace_id: {spans:?}"
     );
 
     let run_act_spans: Vec<_> = spans
         .iter()
         .filter(|span| {
             span.name == "temporal_run_activity"
-                && span.attributes.iter().any(|kv| {
-                    kv.key.as_str() == "temporal.task_queue" && kv.value.as_str() == task_queue
-                })
+                && has_span_attr(span, "temporal.task_queue", task_queue)
         })
         .collect();
     assert_eq!(run_act_spans.len(), 1, "{run_act_spans:?}");
@@ -630,12 +686,17 @@ fn assert_replay_trace_spans(
         wf_trace_id,
         "activity span must propagate workflow trace context through _tracer-data"
     );
+    assert_eq!(
+        run_act_spans[0].parent_span_id,
+        schedule_act_spans[0].span_context.span_id(),
+        "activity span must parent to temporal_schedule_activity via _tracer-data"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_otel_tracer_data_propagates_and_deduplicates_on_replay() {
     let harness = telemetry();
-    let task_queue = unique_name("it-trace-q");
+    let task_queue = unique_task_queue(harness, "it-trace-q");
     let (startup, conn) = admit_client(TemporalAuth::None, Duration::from_secs(30)).await;
     let client = conn.client();
     let op = OperationContext::with_timeout(OP_TIMEOUT);
@@ -829,7 +890,7 @@ async fn live_api_key_file_rotation_and_corrupt_file_preservation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_force_cancel_preempts_via_will_complete_async_and_server_retries_to_completion() {
     let harness = telemetry();
-    let task_queue = unique_name("it-preempt-q");
+    let task_queue = unique_task_queue(harness, "it-preempt-q");
     let (startup, conn) = admit_client(TemporalAuth::None, Duration::from_secs(30)).await;
     let client = conn.client();
     let op = OperationContext::with_timeout(OP_TIMEOUT);
