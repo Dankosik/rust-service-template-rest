@@ -544,7 +544,6 @@ struct WorkerShared {
 
 impl WorkerShared {
     fn record_failure(&self, error: WorkerFatalError) {
-        self.failed.store(true, Ordering::Release);
         self.first_error.send_if_modified(|slot| {
             if slot.is_some() {
                 return false;
@@ -552,6 +551,7 @@ impl WorkerShared {
             *slot = Some(error);
             true
         });
+        self.failed.store(true, Ordering::Release);
         self.graceful_stop.cancel();
     }
 
@@ -751,6 +751,13 @@ fn build_deployment_options(
     {
         return Err(WorkerPrepareError::InvalidConfiguration(
             "use_worker_versioning requires pinned or auto_upgrade default_versioning_behavior",
+        ));
+    }
+    if !build.use_worker_versioning
+        && build.default_versioning_behavior != VersioningBehaviorMode::Unspecified
+    {
+        return Err(WorkerPrepareError::InvalidConfiguration(
+            "default_versioning_behavior must be unspecified when use_worker_versioning is false",
         ));
     }
     let default_versioning_behavior = match build.default_versioning_behavior {

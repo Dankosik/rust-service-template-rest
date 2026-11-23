@@ -9,8 +9,7 @@ use futures_util::FutureExt;
 use health::{BoxedProbe, PreparedReadiness, Readiness};
 use infra_telemetry::install_panic_hook;
 use infra_temporal::worker::{
-    PreparedTemporalWorker, TemporalWorkerHandle, WorkerFatalError, WorkerPrepareError,
-    WorkerStartError,
+    PreparedTemporalWorker, WorkerFatalError, WorkerPrepareError, WorkerStartError,
 };
 use service_config::TemporalWorkerConfig;
 use tokio::sync::watch;
@@ -116,7 +115,7 @@ pub(crate) async fn serve(
     }
     let report = shutdown::run(shutdown::Plan {
         http: config.http(),
-        finalize_budget: config.temporal_worker().finalize_budget(),
+        drain: shutdown::DrainBudgets::from_worker(config.temporal_worker()),
         resources,
         background,
         signals,
@@ -263,13 +262,13 @@ fn pending_failure(
             return Some(WorkerError::ListenerStopped(name));
         }
     }
-    if resources
+    if let Some(fatal) = resources
         .work
         .temporal
         .as_ref()
-        .is_some_and(TemporalWorkerHandle::has_failed)
+        .and_then(|worker| worker.wait_failed().now_or_never())
     {
-        return Some(WorkerError::TemporalWorkerFailed(WorkerFatalError::Fatal));
+        return Some(WorkerError::TemporalWorkerFailed(fatal));
     }
     None
 }

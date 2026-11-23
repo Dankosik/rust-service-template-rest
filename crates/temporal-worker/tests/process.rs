@@ -141,6 +141,23 @@ impl StubbornBlockingActivities {
     }
 }
 
+struct CooperativeShutdownActivities;
+
+#[activities]
+impl CooperativeShutdownActivities {
+    #[activity]
+    async fn work(ctx: ActivityContext, _input: String) -> Result<String, ActivityError> {
+        let op = infra_temporal::worker::activity_operation_context(&ctx);
+        tracing::info!("cooperative_activity_started");
+        let stopped = op.wait_stopped().await;
+        if stopped == operation_context::Stopped::Cancelled {
+            tracing::info!("cooperative_activity_cancelled");
+            return Err(ActivityError::cancelled());
+        }
+        Ok("unexpected".to_owned())
+    }
+}
+
 struct LeakingActivities {
     leaked: Arc<Mutex<Option<ActivityContext>>>,
 }
@@ -176,6 +193,7 @@ impl health::Probe for ReadyCustomProbe {
 enum MockMode {
     Idle,
     BlockingActivity,
+    CooperativeActivity,
     LeakingActivity,
     CpuSpinWorkflow { spin_ms: u64 },
 }
@@ -184,6 +202,7 @@ struct LoopbackTemporalState {
     mode: MockMode,
     delivered: AtomicBool,
     cancel_rpcs: AtomicUsize,
+    fail_rpcs: AtomicUsize,
     complete_wf_rpcs: AtomicUsize,
     poll_release: CancellationToken,
     shutdown_release: CancellationToken,
@@ -212,6 +231,7 @@ impl LoopbackTemporalServer {
             mode,
             delivered: AtomicBool::new(false),
             cancel_rpcs: AtomicUsize::new(0),
+            fail_rpcs: AtomicUsize::new(0),
             complete_wf_rpcs: AtomicUsize::new(0),
             poll_release: stop.child_token(),
             shutdown_release: stop.child_token(),
@@ -253,6 +273,10 @@ impl LoopbackTemporalServer {
         self.state.cancel_rpcs.load(Ordering::Acquire)
     }
 
+    fn fail_rpcs(&self) -> usize {
+        self.state.fail_rpcs.load(Ordering::Acquire)
+    }
+
     async fn stop(self) {
         self.stop.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(3), self.task).await;
@@ -267,6 +291,7 @@ fn build_temporal_router(state: &Arc<LoopbackTemporalState>) -> axum::Router {
     let s_poll_wf = Arc::clone(state);
     let s_poll_act = Arc::clone(state);
     let s_cancel = Arc::clone(state);
+    let s_fail = Arc::clone(state);
     let s_wf_complete = Arc::clone(state);
     let s_shutdown = Arc::clone(state);
 
@@ -313,6 +338,16 @@ fn build_temporal_router(state: &Arc<LoopbackTemporalState>) -> axum::Router {
                 let state = Arc::clone(&s_cancel);
                 async move {
                     state.cancel_rpcs.fetch_add(1, Ordering::AcqRel);
+                    grpc_ok(&[])
+                }
+            }),
+        )
+        .route(
+            "/temporal.api.workflowservice.v1.WorkflowService/RespondActivityTaskFailed",
+            axum::routing::post(move || {
+                let state = Arc::clone(&s_fail);
+                async move {
+                    state.fail_rpcs.fetch_add(1, Ordering::AcqRel);
                     grpc_ok(&[])
                 }
             }),
@@ -438,6 +473,7 @@ async fn handle_poll_workflow(state: &LoopbackTemporalState) -> Response<Body> {
 async fn handle_poll_activity(state: &LoopbackTemporalState) -> Response<Body> {
     let activity_name = match state.mode {
         MockMode::BlockingActivity => Some(StubbornBlockingActivities::block.name()),
+        MockMode::CooperativeActivity => Some(CooperativeShutdownActivities::work.name()),
         MockMode::LeakingActivity => Some(LeakingActivities::leak.name()),
         MockMode::Idle | MockMode::CpuSpinWorkflow { .. } => None,
     };
@@ -1016,6 +1052,155 @@ fn child_cpu_spin_workflow() {
             .temporal
             .default_queue()?
             .register_workflow::<CpuSpinWorkflow>()?;
+        registration.register_close_hook(Box::new(|_deadline| {
+            Box::pin(async {
+                tracing::info!("close_hook_invoked");
+                CloseOutcome::Complete
+            })
+        }));
+        Ok(())
+    });
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drain_budget_expiry_preempts_stuck_activity_preserves_tail_and_exits_three() {
+    let server =
+        LoopbackTemporalServer::start_with_shutdown_gate(MockMode::BlockingActivity, true).await;
+    let endpoint = server.endpoint();
+    let mut env = base_local_temporal_env(&endpoint);
+    env.push(("APP__OBSERVABILITY__METRICS__ADDR", "127.0.0.1:0"));
+    env.push(("APP__TEMPORAL_WORKER__TASK_QUEUE", "budget-queue"));
+    env.push(("APP__TEMPORAL_WORKER__GRACEFUL_SHUTDOWN_PERIOD", "200ms"));
+    env.push(("APP__TEMPORAL_WORKER__ACTIVITY_CANCEL_CLEANUP", "200ms"));
+    env.push(("APP__TEMPORAL_WORKER__FINALIZE_BUDGET", "1500ms"));
+    env.push(("APP__HTTP__DRAIN_TIMEOUT", "1900ms"));
+    env.push(("APP__HTTP__GRACE_PERIOD", "18.4s"));
+
+    let child = ManagedChild::spawn("child_blocking_activity", &env);
+    let metrics_line = child.wait_for_line("diagnostics listener bound", Duration::from_secs(10));
+    let metrics_addr = extract_bound_addr(&metrics_line);
+    let _ = child.wait_for_line("temporal_worker_ready", Duration::from_secs(10));
+    let _ = child.wait_for_line("stubborn_activity_started", Duration::from_secs(10));
+
+    let first_stop = Instant::now();
+    send_sigterm(child.pid());
+    server.release_polls();
+
+    let forced_line = child.wait_for_line("temporal_drain_forced", Duration::from_secs(5));
+    let forced_elapsed = first_stop.elapsed();
+    assert!(
+        forced_line.contains("\"reason\":\"budget\""),
+        "drain timeout must force preemption with reason=budget:\n{forced_line}"
+    );
+    assert!(
+        forced_elapsed < Duration::from_millis(1200),
+        "preemption must fire at graceful_shutdown_period + activity_cancel_cleanup (400ms), not drain_timeout (1900ms); took {forced_elapsed:?}"
+    );
+
+    let (metrics_status, metrics_body) = http_get(metrics_addr, "/metrics").await;
+    assert!(
+        metrics_status.starts_with("HTTP/1.1 200 "),
+        "{metrics_status}"
+    );
+    assert!(
+        metrics_body.contains("temporal_drain_forced_total 1"),
+        "temporal_drain_forced_total must increment on budget expiry:\n{metrics_body}"
+    );
+
+    let _ = child.wait_for_line("temporal_forced_finish_timed_out", Duration::from_secs(5));
+    let finish_timeout_elapsed = first_stop.elapsed();
+    assert!(
+        finish_timeout_elapsed < Duration::from_millis(2700),
+        "forced finalize must stay within drain_deadline (1900ms) rather than adding finalize_budget on top (3400ms); took {finish_timeout_elapsed:?}"
+    );
+
+    server.release_shutdown();
+    let (code, stdout, stderr) = child.wait_exit(Duration::from_secs(10));
+    let cancel_rpcs = server.cancel_rpcs();
+    server.stop().await;
+
+    assert_eq!(code, Some(3), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        cancel_rpcs, 0,
+        "budget-expired forced preemption must never send RespondActivityTaskCanceled"
+    );
+    assert!(
+        stdout.contains("close_hook_invoked"),
+        "registered close hook must still run inside preserved TEMPORAL_SHUTDOWN_TAIL:\n{stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cooperative_activity_finishes_within_cancel_cleanup_and_exits_zero() {
+    let server =
+        LoopbackTemporalServer::start_with_shutdown_gate(MockMode::CooperativeActivity, true).await;
+    let endpoint = server.endpoint();
+    let mut env = base_local_temporal_env(&endpoint);
+    env.push(("APP__OBSERVABILITY__METRICS__ADDR", "127.0.0.1:0"));
+    env.push(("APP__TEMPORAL_WORKER__TASK_QUEUE", "coop-queue"));
+    env.push(("APP__TEMPORAL_WORKER__GRACEFUL_SHUTDOWN_PERIOD", "250ms"));
+    env.push(("APP__TEMPORAL_WORKER__ACTIVITY_CANCEL_CLEANUP", "1500ms"));
+    env.push(("APP__TEMPORAL_WORKER__FINALIZE_BUDGET", "500ms"));
+    env.push(("APP__HTTP__DRAIN_TIMEOUT", "2250ms"));
+    env.push(("APP__HTTP__GRACE_PERIOD", "18.75s"));
+
+    let child = ManagedChild::spawn("child_cooperative_activity", &env);
+    let metrics_line = child.wait_for_line("diagnostics listener bound", Duration::from_secs(10));
+    let metrics_addr = extract_bound_addr(&metrics_line);
+    let _ = child.wait_for_line("temporal_worker_ready", Duration::from_secs(10));
+    let _ = child.wait_for_line("cooperative_activity_started", Duration::from_secs(10));
+
+    send_sigterm(child.pid());
+    server.release_polls();
+
+    let _ = child.wait_for_line("cooperative_activity_cancelled", Duration::from_secs(5));
+    let (metrics_status, metrics_body) = http_get(metrics_addr, "/metrics").await;
+    assert!(
+        metrics_status.starts_with("HTTP/1.1 200 "),
+        "{metrics_status}"
+    );
+    assert!(
+        !metrics_body.lines().any(|line| {
+            line.starts_with("temporal_drain_forced_total ")
+                && line != "temporal_drain_forced_total 0"
+        }),
+        "cooperative drain must not increment temporal_drain_forced_total:\n{metrics_body}"
+    );
+    server.release_shutdown();
+
+    let (code, stdout, stderr) = child.wait_exit(Duration::from_secs(10));
+    let cancel_rpcs = server.cancel_rpcs();
+    let fail_rpcs = server.fail_rpcs();
+    server.stop().await;
+
+    assert_eq!(code, Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("cooperative_activity_cancelled"),
+        "activity must observe WorkerShutdown cancellation:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("temporal_drain_completed"),
+        "cooperative drain must complete gracefully:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("temporal_drain_forced"),
+        "cooperative activity finishing within cancel cleanup must not force drain:\n{stdout}"
+    );
+    assert_eq!(cancel_rpcs, 0);
+    assert_eq!(fail_rpcs, 1);
+    assert!(stdout.contains("close_hook_invoked"), "{stdout}");
+}
+
+#[test]
+#[ignore = "child-only fixture invoked by cooperative_activity_finishes_within_cancel_cleanup_and_exits_zero"]
+fn child_cooperative_activity() {
+    run_child(|registration| {
+        registration
+            .temporal
+            .default_queue()?
+            .register_activities(CooperativeShutdownActivities);
         registration.register_close_hook(Box::new(|_deadline| {
             Box::pin(async {
                 tracing::info!("close_hook_invoked");

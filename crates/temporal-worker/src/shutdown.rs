@@ -10,7 +10,7 @@ use infra_telemetry::{
 };
 use infra_temporal::worker::WorkerFatalError;
 use infra_temporal::{CloseOutcome, TemporalStartup};
-use service_config::{ShutdownTail, WorkerHttpConfig};
+use service_config::{ShutdownTail, TemporalWorkerRuntimeConfig, WorkerHttpConfig};
 use tokio::time::Instant;
 
 use crate::background::Background;
@@ -64,18 +64,77 @@ impl Budget {
         }
     }
 
+    fn clamp_at(&self, now: Instant, want: Duration) -> Duration {
+        want.min(self.deadline.saturating_duration_since(now))
+    }
+
     fn clamp(&self, want: Duration) -> Duration {
-        want.min(self.deadline.saturating_duration_since(Instant::now()))
+        self.clamp_at(Instant::now(), want)
     }
 
     fn stage_deadline(&self, want: Duration) -> Instant {
-        Instant::now() + self.clamp(want)
+        let now = Instant::now();
+        now + self.clamp_at(now, want)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DrainBudgets {
+    pub(crate) graceful_shutdown_period: Duration,
+    pub(crate) activity_cancel_cleanup: Duration,
+    pub(crate) finalize_budget: Duration,
+}
+
+impl DrainBudgets {
+    pub(crate) const fn from_worker(worker: &TemporalWorkerRuntimeConfig) -> Self {
+        Self {
+            graceful_shutdown_period: worker.graceful_shutdown_period(),
+            activity_cancel_cleanup: worker.activity_cancel_cleanup(),
+            finalize_budget: worker.finalize_budget(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DrainDeadlines {
+    drain_budget: Duration,
+    drain_deadline: Instant,
+    preempt_deadline: Instant,
+}
+
+fn drain_deadlines(
+    drain_start: Instant,
+    drain_timeout: Duration,
+    drain: DrainBudgets,
+    budget: &Budget,
+) -> DrainDeadlines {
+    let drain_budget = budget.clamp_at(drain_start, drain_timeout);
+    let drain_deadline = drain_start + drain_budget;
+    let cooperative_window = drain
+        .graceful_shutdown_period
+        .saturating_add(drain.activity_cancel_cleanup);
+    let preempt_deadline = drain_start
+        .checked_add(cooperative_window)
+        .map_or(drain_deadline, |deadline| deadline.min(drain_deadline));
+    DrainDeadlines {
+        drain_budget,
+        drain_deadline,
+        preempt_deadline,
+    }
+}
+
+fn forced_finalize_deadline(
+    now: Instant,
+    finalize_budget: Duration,
+    drain_deadline: Instant,
+) -> Instant {
+    now.checked_add(finalize_budget)
+        .map_or(drain_deadline, |deadline| deadline.min(drain_deadline))
 }
 
 pub(crate) struct Plan<'a> {
     pub(crate) http: &'a WorkerHttpConfig,
-    pub(crate) finalize_budget: Duration,
+    pub(crate) drain: DrainBudgets,
     pub(crate) resources: Resources,
     pub(crate) background: Background,
     pub(crate) signals: &'a mut Signals,
@@ -85,7 +144,7 @@ pub(crate) struct Plan<'a> {
 pub(crate) async fn run(plan: Plan<'_>) -> ShutdownReport {
     let Plan {
         http,
-        finalize_budget,
+        drain,
         resources,
         background,
         signals,
@@ -104,14 +163,8 @@ pub(crate) async fn run(plan: Plan<'_>) -> ShutdownReport {
         Outcome::Graceful
     })
     .await;
-    let (drain_outcome, worker_fatal) = drain_work(
-        &mut work,
-        http.drain_timeout,
-        finalize_budget,
-        &budget,
-        signals,
-    )
-    .await;
+    let (drain_outcome, worker_fatal) =
+        drain_work(&mut work, http.drain_timeout, drain, &budget, signals).await;
     outcome = outcome.max(drain_outcome);
     let listeners_outcome = close_listeners(listeners, budget.clamp(LISTENER_CLOSE_BUDGET)).await;
     outcome = outcome.max(listeners_outcome);
@@ -150,13 +203,13 @@ enum DrainRace {
 async fn drain_work(
     work: &mut Work,
     drain_timeout: Duration,
-    finalize_budget: Duration,
+    drain: DrainBudgets,
     budget: &Budget,
     signals: &mut Signals,
 ) -> (Outcome, Option<WorkerFatalError>) {
     isolate_stage_or(
         "drain",
-        drain_temporal(work, drain_timeout, finalize_budget, budget, signals),
+        drain_temporal(work, drain_timeout, drain, budget, signals),
         (Outcome::Degraded, None),
     )
     .await
@@ -165,48 +218,54 @@ async fn drain_work(
 async fn drain_temporal(
     work: &mut Work,
     drain_timeout: Duration,
-    finalize_budget: Duration,
+    drain: DrainBudgets,
     budget: &Budget,
     signals: &mut Signals,
 ) -> (Outcome, Option<WorkerFatalError>) {
     let Some(mut handle) = work.temporal.take() else {
         return (Outcome::Graceful, None);
     };
-    let drain_budget = budget.clamp(drain_timeout);
-    tracing::info!(budget = ?drain_budget, "temporal_drain_started");
-    let drain_deadline = Instant::now() + drain_budget;
+    let drain_start = Instant::now();
+    let DrainDeadlines {
+        drain_budget,
+        drain_deadline,
+        preempt_deadline,
+    } = drain_deadlines(drain_start, drain_timeout, drain, budget);
+    tracing::info!(
+        budget = ?drain_budget,
+        preempt_budget = ?preempt_deadline.saturating_duration_since(drain_start),
+        "temporal_drain_started"
+    );
     let race = tokio::select! {
         biased;
         () = handle.drained() => DrainRace::Drained,
-        () = tokio::time::sleep_until(drain_deadline) => DrainRace::Forced("budget", None),
+        () = tokio::time::sleep_until(preempt_deadline) => DrainRace::Forced("budget", None),
         result = signals.wait() => match result {
             Ok(()) => DrainRace::Forced("second_signal", None),
             Err(error) => DrainRace::Forced("signal_receiver_failed", Some(error.to_string())),
         },
     };
     match race {
-        DrainRace::Drained => {
-            let finish_deadline = drain_deadline.max(budget.stage_deadline(finalize_budget));
-            match handle.finish(finish_deadline).await {
-                Ok(CloseOutcome::Complete) => {
-                    tracing::info!("temporal_drain_completed");
-                    (Outcome::Graceful, None)
-                }
-                Ok(CloseOutcome::TimedOut) => {
-                    tracing::warn!("temporal_drain_finish_timed_out");
-                    (Outcome::Degraded, None)
-                }
-                Err(fatal) => {
-                    tracing::error!(error = %fatal, "temporal_worker_finish_failed");
-                    (Outcome::Degraded, Some(fatal))
-                }
+        DrainRace::Drained => match handle.finish(drain_deadline).await {
+            Ok(CloseOutcome::Complete) => {
+                tracing::info!("temporal_drain_completed");
+                (Outcome::Graceful, None)
             }
-        }
+            Ok(CloseOutcome::TimedOut) => {
+                tracing::warn!("temporal_drain_finish_timed_out");
+                (Outcome::Degraded, None)
+            }
+            Err(fatal) => {
+                tracing::error!(error = %fatal, "temporal_worker_finish_failed");
+                (Outcome::Degraded, Some(fatal))
+            }
+        },
         DrainRace::Forced(reason, error) => {
             handle.force_cancel();
             tracing::warn!(reason, error, "temporal_drain_forced");
-            let cleanup_deadline = budget.stage_deadline(finalize_budget);
-            match handle.finish(cleanup_deadline).await {
+            let finalize_deadline =
+                forced_finalize_deadline(Instant::now(), drain.finalize_budget, drain_deadline);
+            match handle.finish(finalize_deadline).await {
                 Ok(CloseOutcome::Complete) => (Outcome::Degraded, None),
                 Ok(CloseOutcome::TimedOut) => {
                     tracing::warn!("temporal_forced_finish_timed_out");
@@ -547,7 +606,7 @@ mod tests {
             Duration::from_secs(9),
             run(Plan {
                 http,
-                finalize_budget: config.temporal_worker().finalize_budget(),
+                drain: DrainBudgets::from_worker(config.temporal_worker()),
                 resources: Resources::default(),
                 background,
                 signals: &mut signals,
@@ -564,5 +623,70 @@ mod tests {
         );
         assert!(tracker.is_empty());
         std::assert_matches!(observed_end.now_or_never(), Some(Err(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nested_drain_deadlines_never_starve_shutdown_tail_under_tight_admitted_configs() {
+        let cases = [
+            (
+                &[("APP__HTTP__GRACE_PERIOD", "76.5s")][..],
+                Duration::from_secs(55),
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+            ),
+            (
+                &[
+                    ("APP__TEMPORAL_WORKER__GRACEFUL_SHUTDOWN_PERIOD", "5s"),
+                    ("APP__TEMPORAL_WORKER__ACTIVITY_CANCEL_CLEANUP", "5s"),
+                    ("APP__TEMPORAL_WORKER__FINALIZE_BUDGET", "20s"),
+                    ("APP__HTTP__DRAIN_TIMEOUT", "30s"),
+                    ("APP__HTTP__GRACE_PERIOD", "46.5s"),
+                ][..],
+                Duration::from_secs(10),
+                Duration::from_secs(30),
+                Duration::from_secs(20),
+            ),
+        ];
+
+        for (env, expected_preempt, expected_drain, expected_finalize) in cases {
+            let config = worker_config(env).unwrap();
+            let http = config.http();
+            let drain = DrainBudgets::from_worker(config.temporal_worker());
+            let start = Instant::now();
+            let budget = Budget::for_process_deadline(start + http.grace_period);
+            let deadlines = drain_deadlines(start, http.drain_timeout, drain, &budget);
+
+            assert_eq!(deadlines.drain_budget, expected_drain);
+            assert_eq!(deadlines.drain_deadline, start + expected_drain);
+            assert_eq!(deadlines.preempt_deadline, start + expected_preempt);
+
+            let budget_forced_finalize = forced_finalize_deadline(
+                deadlines.preempt_deadline,
+                drain.finalize_budget,
+                deadlines.drain_deadline,
+            );
+            assert_eq!(
+                budget_forced_finalize,
+                deadlines.preempt_deadline + expected_finalize
+            );
+            assert!(budget_forced_finalize <= deadlines.drain_deadline);
+
+            let early_signal_at = start + Duration::from_secs(1);
+            let early_forced_finalize = forced_finalize_deadline(
+                early_signal_at,
+                drain.finalize_budget,
+                deadlines.drain_deadline,
+            );
+            assert_eq!(early_forced_finalize, early_signal_at + expected_finalize);
+            assert!(early_forced_finalize <= deadlines.drain_deadline);
+
+            let remaining_for_tail = budget
+                .deadline
+                .saturating_duration_since(deadlines.drain_deadline);
+            assert_eq!(
+                remaining_for_tail + RUNTIME_SHUTDOWN_TIMEOUT,
+                TEMPORAL_SHUTDOWN_TAIL
+            );
+        }
     }
 }

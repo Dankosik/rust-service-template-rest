@@ -10,7 +10,7 @@ use metrics_util::MetricKind;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use opentelemetry::global;
 use opentelemetry::propagation::TextMapCompositePropagator;
-use opentelemetry::trace::{SpanId, TraceId, TracerProvider as _};
+use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId, TracerProvider as _};
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use operation_context::{OperationContext, Stopped};
@@ -28,7 +28,8 @@ use temporalio_common::protos::temporal::api::common::v1::{
 };
 use temporalio_common::protos::temporal::api::enums::v1::{EventType, TaskQueueKind};
 use temporalio_common::protos::temporal::api::history::v1::{
-    History, HistoryEvent, WorkflowExecutionStartedEventAttributes,
+    History, HistoryEvent, TimerFiredEventAttributes, TimerStartedEventAttributes,
+    WorkflowExecutionStartedEventAttributes, WorkflowTaskCompletedEventAttributes,
     WorkflowTaskScheduledEventAttributes, WorkflowTaskStartedEventAttributes, history_event,
 };
 use temporalio_common::protos::temporal::api::taskqueue::v1::TaskQueue;
@@ -41,7 +42,7 @@ use temporalio_common::protos::temporal::api::workflowservice::v1::{
 use temporalio_common::protos::{ENCODING_PAYLOAD_KEY, JSON_ENCODING_VAL};
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
-use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowResult};
+use temporalio_sdk::{ActivityOptions, ContinueAsNewOptions, WorkflowContext, WorkflowResult};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -49,7 +50,9 @@ use tonic::Status;
 use tracing_subscriber::layer::SubscriberExt as _;
 use url::Url;
 
-use super::interceptors::deadline_from_system_time;
+use super::interceptors::{
+    active_scope_bridge_spawns, deadline_from_system_time, has_active_activity_scope,
+};
 use super::{
     Preempted, PreparedTemporalWorker, RegistryError, TaskQueueOverrides, TemporalWorkerOptions,
     VersioningBehaviorMode, WorkerDeploymentMetadata, WorkerFatalError, WorkerPrepareError,
@@ -57,7 +60,7 @@ use super::{
     run_with_preemption,
 };
 use crate::payload::build_data_converter;
-use crate::trace::TRACER_DATA_HEADER;
+use crate::trace::{TRACER_DATA_HEADER, extract_context_from_headers};
 use crate::{CloseOutcome, TemporalAuth, TemporalConnection, TemporalOptions, TemporalStartup};
 
 #[workflow]
@@ -363,6 +366,24 @@ fn assert_invalid_worker_configurations(
         Err(WorkerPrepareError::InvalidConfiguration(_))
     );
 
+    for disallowed_behavior in [
+        VersioningBehaviorMode::Pinned,
+        VersioningBehaviorMode::AutoUpgrade,
+    ] {
+        let mut unversioned_with_behavior = deploy.clone();
+        unversioned_with_behavior.use_worker_versioning = false;
+        unversioned_with_behavior.default_versioning_behavior = disallowed_behavior;
+        std::assert_matches!(
+            PreparedTemporalWorker::prepare(
+                conn,
+                opts,
+                unversioned_with_behavior,
+                single_echo_workflow_registry()
+            ),
+            Err(WorkerPrepareError::InvalidConfiguration(_))
+        );
+    }
+
     let mut bad_sticky = opts.clone();
     bad_sticky.max_cached_workflows = 10;
     bad_sticky.tuner = WorkerTunerOptions::FixedSize {
@@ -588,6 +609,10 @@ async fn worker_fatal_validation_failure_marks_probe_unhealthy_and_wakes_wait_fa
         .expect("fatal error wakes wait_failed");
     assert_eq!(fatal, WorkerFatalError::Fatal);
     assert!(handle.has_failed());
+    assert_eq!(
+        handle.wait_failed().now_or_never(),
+        Some(WorkerFatalError::Fatal)
+    );
 
     let calls_before_probe = describe_calls.load(Ordering::Acquire);
     assert!(probe.check().await.is_err());
@@ -1114,4 +1139,804 @@ fn deadline_from_system_time_maps_future_and_past_deadlines() {
         let past = deadline_from_system_time(SystemTime::now() - Duration::from_secs(1));
         assert!(past.expired());
     });
+}
+
+struct CooperativeSubtaskActivities {
+    ready: Arc<Notify>,
+    main_cancelled: Arc<AtomicBool>,
+    subtask_cancelled: Arc<AtomicBool>,
+}
+
+#[activities]
+impl CooperativeSubtaskActivities {
+    #[activity]
+    async fn wait_cancel(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        _input: String,
+    ) -> Result<String, ActivityError> {
+        let op = activity_operation_context(&ctx);
+        let subtask_ready = Arc::new(Notify::new());
+        let subtask_ready_tx = Arc::clone(&subtask_ready);
+        let subtask_cancelled = Arc::clone(&self.subtask_cancelled);
+        let sub_ctx = ctx.clone();
+        let subtask = tokio::spawn(async move {
+            let sub_op = activity_operation_context(&sub_ctx);
+            subtask_ready_tx.notify_one();
+            let stopped = sub_op.wait_stopped().await;
+            if stopped == Stopped::Cancelled {
+                subtask_cancelled.store(true, Ordering::Release);
+            }
+            stopped
+        });
+        subtask_ready.notified().await;
+        self.ready.notify_one();
+        let main_stopped = op.wait_stopped().await;
+        if main_stopped == Stopped::Cancelled {
+            self.main_cancelled.store(true, Ordering::Release);
+        }
+        let sub_stopped = subtask.await.unwrap();
+        assert_eq!(main_stopped, Stopped::Cancelled);
+        assert_eq!(sub_stopped, Stopped::Cancelled);
+        Err(ActivityError::cancelled())
+    }
+}
+
+struct LoopAndSubtaskActivities {
+    observed_bridge_spawns: Arc<AtomicUsize>,
+    observed_info: Arc<Mutex<Option<temporalio_sdk::activities::ActivityInfo>>>,
+}
+
+#[activities]
+impl LoopAndSubtaskActivities {
+    #[activity]
+    async fn loop_and_subtask(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        _input: String,
+    ) -> Result<String, ActivityError> {
+        let sub_ctx = ctx.clone();
+        let subtask = tokio::spawn(async move {
+            let sub_op = activity_operation_context(&sub_ctx);
+            assert!(sub_op.check().is_ok());
+        });
+        subtask.await.unwrap();
+        for _ in 0..50 {
+            let op = activity_operation_context(&ctx);
+            assert!(op.check().is_ok());
+        }
+        let spawns = active_scope_bridge_spawns(&ctx).expect("active activity scope exists");
+        self.observed_bridge_spawns.store(spawns, Ordering::Release);
+        *self.observed_info.lock().unwrap() = Some(ctx.info().clone());
+        Ok("done".to_owned())
+    }
+}
+
+struct SingleActivityRpcMock {
+    activity_name: &'static str,
+    task_token: &'static [u8],
+    delivered: AtomicBool,
+    cancel_rpcs: AtomicUsize,
+    complete_rpcs: AtomicUsize,
+    fail_rpcs: AtomicUsize,
+    completed: Notify,
+    failed: Notify,
+    poll_release: CancellationToken,
+}
+
+impl SingleActivityRpcMock {
+    fn new(
+        activity_name: &'static str,
+        task_token: &'static [u8],
+        poll_release: CancellationToken,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            activity_name,
+            task_token,
+            delivered: AtomicBool::new(false),
+            cancel_rpcs: AtomicUsize::new(0),
+            complete_rpcs: AtomicUsize::new(0),
+            fail_rpcs: AtomicUsize::new(0),
+            completed: Notify::new(),
+            failed: Notify::new(),
+            poll_release,
+        })
+    }
+
+    async fn handle(&self, mut req: GrpcRequest) -> Result<GrpcSuccessResponse, Status> {
+        req.headers.clear();
+        let proto = match req.rpc.as_str() {
+            "GetSystemInfo" | "DescribeNamespace" => {
+                DescribeNamespaceResponse::default().encode_to_vec()
+            }
+            "PollActivityTaskQueue" => self.poll_activity().await,
+            "RespondActivityTaskCanceled" => {
+                self.cancel_rpcs.fetch_add(1, Ordering::AcqRel);
+                Vec::new()
+            }
+            "RespondActivityTaskCompleted" => {
+                self.complete_rpcs.fetch_add(1, Ordering::AcqRel);
+                self.completed.notify_one();
+                RespondActivityTaskCompletedResponse::default().encode_to_vec()
+            }
+            "RespondActivityTaskFailed" => {
+                self.fail_rpcs.fetch_add(1, Ordering::AcqRel);
+                self.failed.notify_one();
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        Ok(GrpcSuccessResponse {
+            headers: req.headers,
+            proto,
+        })
+    }
+
+    async fn poll_activity(&self) -> Vec<u8> {
+        if self.delivered.swap(true, Ordering::AcqRel) {
+            self.poll_release.cancelled().await;
+            return Vec::new();
+        }
+        let now = SystemTime::now().into();
+        PollActivityTaskQueueResponse {
+            task_token: self.task_token.to_vec(),
+            workflow_execution: Some(WorkflowExecution {
+                workflow_id: "wf-op-ctx-1".to_owned(),
+                run_id: "run-op-ctx-1".to_owned(),
+            }),
+            activity_id: "1".to_owned(),
+            activity_type: Some(ActivityType {
+                name: self.activity_name.to_owned(),
+            }),
+            input: Some(Payloads {
+                payloads: vec![json_string_payload("job")],
+            }),
+            scheduled_time: Some(now),
+            started_time: Some(now),
+            start_to_close_timeout: Duration::from_secs(60).try_into().ok(),
+            schedule_to_close_timeout: Duration::from_secs(120).try_into().ok(),
+            attempt: 1,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn service(self: &Arc<Self>) -> CallbackBasedGrpcService {
+        let mock = Arc::clone(self);
+        CallbackBasedGrpcService {
+            callback: Arc::new(move |req: GrpcRequest| {
+                let mock = Arc::clone(&mock);
+                async move { mock.handle(req).await }.boxed()
+            }),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_operation_context_cancels_in_activity_and_subtask_on_worker_shutdown() {
+    let ready = Arc::new(Notify::new());
+    let main_cancelled = Arc::new(AtomicBool::new(false));
+    let subtask_cancelled = Arc::new(AtomicBool::new(false));
+    let poll_release = CancellationToken::new();
+    let rpc = SingleActivityRpcMock::new(
+        CooperativeSubtaskActivities::wait_cancel.name(),
+        b"act-coop-cancel-1",
+        poll_release.clone(),
+    );
+
+    let (startup, conn) = admit_connection(rpc.service()).await;
+    let mut opts = base_worker_options();
+    opts.graceful_shutdown_period = Duration::from_millis(100);
+
+    let mut registry = WorkerRegistry::new();
+    registry
+        .default_queue()
+        .unwrap()
+        .register_activities(CooperativeSubtaskActivities {
+            ready: Arc::clone(&ready),
+            main_cancelled: Arc::clone(&main_cancelled),
+            subtask_cancelled: Arc::clone(&subtask_cancelled),
+        });
+
+    let prepared =
+        PreparedTemporalWorker::prepare(&conn, &opts, base_deployment(), registry).unwrap();
+    let mut handle = prepared.start(tokio::runtime::Handle::current()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), ready.notified())
+        .await
+        .expect("activity and subtask registered operation contexts");
+
+    handle.initiate_shutdown();
+    poll_release.cancel();
+
+    tokio::time::timeout(Duration::from_secs(5), rpc.failed.notified())
+        .await
+        .expect("WorkerShutdown cancel reported as retryable failure");
+    assert_eq!(
+        handle.finish(Instant::now() + Duration::from_secs(5)).await,
+        Ok(CloseOutcome::Complete)
+    );
+    assert!(main_cancelled.load(Ordering::Acquire));
+    assert!(subtask_cancelled.load(Ordering::Acquire));
+    assert_eq!(rpc.fail_rpcs.load(Ordering::Acquire), 1);
+    assert_eq!(rpc.cancel_rpcs.load(Ordering::Acquire), 0);
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_operation_context_repeated_and_subtask_calls_do_not_leak_core_worker() {
+    let observed_bridge_spawns = Arc::new(AtomicUsize::new(0));
+    let observed_info = Arc::new(Mutex::new(None));
+    let poll_release = CancellationToken::new();
+    let rpc = SingleActivityRpcMock::new(
+        LoopAndSubtaskActivities::loop_and_subtask.name(),
+        b"act-loop-subtask-1",
+        poll_release.clone(),
+    );
+
+    let (startup, conn) = admit_connection(rpc.service()).await;
+    let mut registry = WorkerRegistry::new();
+    registry
+        .default_queue()
+        .unwrap()
+        .register_activities(LoopAndSubtaskActivities {
+            observed_bridge_spawns: Arc::clone(&observed_bridge_spawns),
+            observed_info: Arc::clone(&observed_info),
+        });
+
+    let prepared =
+        PreparedTemporalWorker::prepare(&conn, &base_worker_options(), base_deployment(), registry)
+            .unwrap();
+    let mut handle = prepared.start(tokio::runtime::Handle::current()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), rpc.completed.notified())
+        .await
+        .expect("activity completed normally");
+
+    handle.initiate_shutdown();
+    poll_release.cancel();
+
+    assert_eq!(
+        handle.finish(Instant::now() + Duration::from_secs(5)).await,
+        Ok(CloseOutcome::Complete),
+        "normal completion after repeated and spawned-subtask activity_operation_context calls must not leak Arc<CoreWorker>"
+    );
+    assert_eq!(
+        observed_bridge_spawns.load(Ordering::Acquire),
+        1,
+        "repeated loop and spawned-subtask calls must share a single cancellation bridge task"
+    );
+    let info = observed_info
+        .lock()
+        .unwrap()
+        .take()
+        .expect("activity recorded its info");
+    assert!(
+        !has_active_activity_scope(&info),
+        "active activity scope map must remove attempt entry on exit"
+    );
+    assert_eq!(rpc.complete_rpcs.load(Ordering::Acquire), 1);
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_driver_panic_publishes_thread_panicked_to_wait_failed_and_finish() {
+    let callback = CallbackBasedGrpcService {
+        callback: Arc::new(move |mut req: GrpcRequest| {
+            async move {
+                req.headers.clear();
+                assert_ne!(req.rpc, "DescribeNamespace", "injected worker driver panic");
+                Ok(GrpcSuccessResponse {
+                    headers: req.headers,
+                    proto: Vec::new(),
+                })
+            }
+            .boxed()
+        }),
+    };
+
+    let (startup, conn) = admit_connection(callback).await;
+    let prepared = PreparedTemporalWorker::prepare(
+        &conn,
+        &base_worker_options(),
+        base_deployment(),
+        single_echo_workflow_registry(),
+    )
+    .unwrap();
+    let mut handle = prepared.start(tokio::runtime::Handle::current()).unwrap();
+
+    let fatal = tokio::time::timeout(Duration::from_secs(5), handle.wait_failed())
+        .await
+        .expect("driver thread panic wakes wait_failed");
+    assert_eq!(fatal, WorkerFatalError::ThreadPanicked);
+    assert!(handle.has_failed());
+    assert_eq!(
+        handle.wait_failed().now_or_never(),
+        Some(WorkerFatalError::ThreadPanicked)
+    );
+    assert_eq!(
+        handle.finish(Instant::now() + Duration::from_secs(5)).await,
+        Err(WorkerFatalError::ThreadPanicked)
+    );
+    assert_eq!(
+        startup.close(Instant::now() + Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+}
+
+#[workflow]
+#[derive(Default)]
+struct ReplayThenLiveWorkflow;
+
+#[workflow_methods]
+impl ReplayThenLiveWorkflow {
+    #[run]
+    async fn run(ctx: &mut WorkflowContext<Self>, input: String) -> WorkflowResult<String> {
+        ctx.timer(Duration::from_secs(1)).await;
+        if input == "continue" {
+            let Err(termination) =
+                ctx.continue_as_new("next".to_owned(), ContinueAsNewOptions::default());
+            return Err(termination);
+        }
+        let result = ctx
+            .execute_activity(
+                EchoActivities::echo,
+                input,
+                ActivityOptions::start_to_close_timeout(Duration::from_secs(10)),
+            )
+            .await?;
+        Ok(result)
+    }
+}
+
+struct ReplayToLiveTraceRpcMock {
+    input_mode: String,
+    start_tracer_payload: Payload,
+    wf_delivered: AtomicBool,
+    act_delivered: AtomicBool,
+    act_ready: Notify,
+    wf_completed: Notify,
+    act_completed: Notify,
+    captured_activity_header: Mutex<Option<Header>>,
+    captured_continue_header: Mutex<Option<Header>>,
+    poll_release: CancellationToken,
+}
+
+impl ReplayToLiveTraceRpcMock {
+    fn new(
+        input_mode: &str,
+        start_tracer_payload: Payload,
+        poll_release: CancellationToken,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            input_mode: input_mode.to_owned(),
+            start_tracer_payload,
+            wf_delivered: AtomicBool::new(false),
+            act_delivered: AtomicBool::new(false),
+            act_ready: Notify::new(),
+            wf_completed: Notify::new(),
+            act_completed: Notify::new(),
+            captured_activity_header: Mutex::new(None),
+            captured_continue_header: Mutex::new(None),
+            poll_release,
+        })
+    }
+
+    async fn handle(&self, mut req: GrpcRequest) -> Result<GrpcSuccessResponse, Status> {
+        req.headers.clear();
+        let proto = match req.rpc.as_str() {
+            "GetSystemInfo" | "DescribeNamespace" => {
+                DescribeNamespaceResponse::default().encode_to_vec()
+            }
+            "PollWorkflowTaskQueue" => self.poll_workflow().await,
+            "RespondWorkflowTaskCompleted" => self.complete_workflow(&req.proto),
+            "PollActivityTaskQueue" => self.poll_activity().await,
+            "RespondActivityTaskCompleted" => {
+                self.act_completed.notify_one();
+                RespondActivityTaskCompletedResponse::default().encode_to_vec()
+            }
+            _ => Vec::new(),
+        };
+        Ok(GrpcSuccessResponse {
+            headers: req.headers,
+            proto,
+        })
+    }
+
+    async fn poll_workflow(&self) -> Vec<u8> {
+        if self.wf_delivered.swap(true, Ordering::AcqRel) {
+            self.poll_release.cancelled().await;
+            return Vec::new();
+        }
+        replay_to_live_workflow_poll_response(&self.input_mode, self.start_tracer_payload.clone())
+            .encode_to_vec()
+    }
+
+    fn complete_workflow(&self, raw: &[u8]) -> Vec<u8> {
+        let completed = RespondWorkflowTaskCompletedRequest::decode(raw).unwrap();
+        for cmd in completed.commands {
+            match cmd.attributes {
+                Some(CommandAttributes::ScheduleActivityTaskCommandAttributes(attrs)) => {
+                    *self.captured_activity_header.lock().unwrap() = attrs.header;
+                    self.act_ready.notify_one();
+                }
+                Some(CommandAttributes::ContinueAsNewWorkflowExecutionCommandAttributes(attrs)) => {
+                    *self.captured_continue_header.lock().unwrap() = attrs.header;
+                }
+                _ => {}
+            }
+        }
+        self.wf_completed.notify_one();
+        RespondWorkflowTaskCompletedResponse::default().encode_to_vec()
+    }
+
+    async fn poll_activity(&self) -> Vec<u8> {
+        if self.input_mode == "continue" || self.act_delivered.swap(true, Ordering::AcqRel) {
+            self.poll_release.cancelled().await;
+            return Vec::new();
+        }
+        tokio::select! {
+            () = self.act_ready.notified() => {}
+            () = self.poll_release.cancelled() => return Vec::new(),
+        }
+        let header = self.captured_activity_header.lock().unwrap().clone();
+        PollActivityTaskQueueResponse {
+            task_token: b"act-replay-live-1".to_vec(),
+            workflow_execution: Some(WorkflowExecution {
+                workflow_id: "wf-replay-live-1".to_owned(),
+                run_id: "run-replay-live-1".to_owned(),
+            }),
+            activity_id: "1".to_owned(),
+            activity_type: Some(ActivityType {
+                name: EchoActivities::echo.name().to_owned(),
+            }),
+            input: Some(Payloads {
+                payloads: vec![json_string_payload(&self.input_mode)],
+            }),
+            header,
+            attempt: 1,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn service(self: &Arc<Self>) -> CallbackBasedGrpcService {
+        let mock = Arc::clone(self);
+        CallbackBasedGrpcService {
+            callback: Arc::new(move |req: GrpcRequest| {
+                let mock = Arc::clone(&mock);
+                async move { mock.handle(req).await }.boxed()
+            }),
+        }
+    }
+}
+
+fn replay_history_event(
+    event_id: i64,
+    event_type: EventType,
+    attributes: history_event::Attributes,
+) -> HistoryEvent {
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let offset = u64::try_from(event_id).unwrap_or(0);
+    HistoryEvent {
+        event_id,
+        event_time: Some((base + Duration::from_secs(offset)).into()),
+        event_type: event_type as i32,
+        attributes: Some(attributes),
+        ..Default::default()
+    }
+}
+
+fn replay_to_live_history_events(
+    input_mode: &str,
+    start_tracer_payload: Payload,
+    task_queue: TaskQueue,
+) -> Vec<HistoryEvent> {
+    vec![
+        replay_history_event(
+            1,
+            EventType::WorkflowExecutionStarted,
+            history_event::Attributes::WorkflowExecutionStartedEventAttributes(
+                WorkflowExecutionStartedEventAttributes {
+                    workflow_type: Some(WorkflowType {
+                        name: "ReplayThenLiveWorkflow".to_owned(),
+                    }),
+                    task_queue: Some(task_queue),
+                    original_execution_run_id: "run-replay-live-1".to_owned(),
+                    input: Some(Payloads {
+                        payloads: vec![json_string_payload(input_mode)],
+                    }),
+                    header: Some(Header {
+                        fields: HashMap::from([(
+                            TRACER_DATA_HEADER.to_owned(),
+                            start_tracer_payload,
+                        )]),
+                    }),
+                    workflow_id: "wf-replay-live-1".to_owned(),
+                    ..Default::default()
+                },
+            ),
+        ),
+        replay_history_event(
+            2,
+            EventType::WorkflowTaskScheduled,
+            history_event::Attributes::WorkflowTaskScheduledEventAttributes(
+                WorkflowTaskScheduledEventAttributes::default(),
+            ),
+        ),
+        replay_history_event(
+            3,
+            EventType::WorkflowTaskStarted,
+            history_event::Attributes::WorkflowTaskStartedEventAttributes(
+                WorkflowTaskStartedEventAttributes {
+                    scheduled_event_id: 2,
+                    ..Default::default()
+                },
+            ),
+        ),
+        replay_history_event(
+            4,
+            EventType::WorkflowTaskCompleted,
+            history_event::Attributes::WorkflowTaskCompletedEventAttributes(
+                WorkflowTaskCompletedEventAttributes {
+                    scheduled_event_id: 2,
+                    started_event_id: 3,
+                    ..Default::default()
+                },
+            ),
+        ),
+        replay_history_event(
+            5,
+            EventType::TimerStarted,
+            history_event::Attributes::TimerStartedEventAttributes(TimerStartedEventAttributes {
+                timer_id: "1".to_owned(),
+                workflow_task_completed_event_id: 4,
+                ..Default::default()
+            }),
+        ),
+        replay_history_event(
+            6,
+            EventType::TimerFired,
+            history_event::Attributes::TimerFiredEventAttributes(TimerFiredEventAttributes {
+                timer_id: "1".to_owned(),
+                started_event_id: 5,
+            }),
+        ),
+        replay_history_event(
+            7,
+            EventType::WorkflowTaskScheduled,
+            history_event::Attributes::WorkflowTaskScheduledEventAttributes(
+                WorkflowTaskScheduledEventAttributes::default(),
+            ),
+        ),
+        replay_history_event(
+            8,
+            EventType::WorkflowTaskStarted,
+            history_event::Attributes::WorkflowTaskStartedEventAttributes(
+                WorkflowTaskStartedEventAttributes {
+                    scheduled_event_id: 7,
+                    ..Default::default()
+                },
+            ),
+        ),
+    ]
+}
+
+fn replay_to_live_workflow_poll_response(
+    input_mode: &str,
+    start_tracer_payload: Payload,
+) -> PollWorkflowTaskQueueResponse {
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let task_queue = TaskQueue {
+        name: "orders".to_owned(),
+        kind: TaskQueueKind::Normal as i32,
+        normal_name: String::new(),
+    };
+    let events =
+        replay_to_live_history_events(input_mode, start_tracer_payload, task_queue.clone());
+    PollWorkflowTaskQueueResponse {
+        task_token: b"wf-replay-live-token-2".to_vec(),
+        workflow_execution: Some(WorkflowExecution {
+            workflow_id: "wf-replay-live-1".to_owned(),
+            run_id: "run-replay-live-1".to_owned(),
+        }),
+        workflow_type: Some(WorkflowType {
+            name: "ReplayThenLiveWorkflow".to_owned(),
+        }),
+        workflow_execution_task_queue: Some(task_queue),
+        previous_started_event_id: 3,
+        started_event_id: 8,
+        started_time: Some((base + Duration::from_secs(8)).into()),
+        attempt: 1,
+        history: Some(History { events }),
+        ..Default::default()
+    }
+}
+
+fn run_replay_to_live_trace_case(
+    input_mode: &str,
+    client_trace_id: TraceId,
+    client_span_id: SpanId,
+) -> (
+    Arc<ReplayToLiveTraceRpcMock>,
+    Vec<opentelemetry_sdk::trace::SpanData>,
+) {
+    thread_local! {
+        static REPLAY_DISPATCH_GUARD: std::cell::RefCell<Option<tracing::dispatcher::DefaultGuard>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
+        Box::new(TraceContextPropagator::new()),
+        Box::new(BaggagePropagator::new()),
+    ]));
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("replay-to-live-test")));
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let worker_dispatch = dispatch.clone();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start(move || {
+            let guard = tracing::dispatcher::set_default(&worker_dispatch);
+            REPLAY_DISPATCH_GUARD.with(|cell| *cell.borrow_mut() = Some(guard));
+        })
+        .on_thread_stop(|| {
+            REPLAY_DISPATCH_GUARD.with(|cell| *cell.borrow_mut() = None);
+        })
+        .build()
+        .unwrap();
+
+    let traceparent = format!("00-{client_trace_id}-{client_span_id}-01");
+    let dc = build_data_converter(64 * 1024, None);
+    let pc = dc.payload_converter();
+    let ctx_data = SerializationContextData::Workflow(WorkflowSerializationContext::new());
+    let start_tracer_payload = pc
+        .to_payload(
+            &SerializationContext::new(&ctx_data, pc),
+            &HashMap::from([("traceparent".to_owned(), traceparent)]),
+        )
+        .unwrap();
+
+    let poll_release = CancellationToken::new();
+    let rpc = ReplayToLiveTraceRpcMock::new(input_mode, start_tracer_payload, poll_release.clone());
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        runtime.block_on(async {
+            let (startup, conn) = admit_connection(rpc.service()).await;
+            let mut registry = WorkerRegistry::new();
+            registry
+                .default_queue()
+                .unwrap()
+                .register_workflow::<ReplayThenLiveWorkflow>()
+                .unwrap()
+                .register_activities(EchoActivities);
+
+            let prepared = PreparedTemporalWorker::prepare(
+                &conn,
+                &base_worker_options(),
+                base_deployment(),
+                registry,
+            )
+            .unwrap();
+            let mut handle = prepared.start(tokio::runtime::Handle::current()).unwrap();
+
+            tokio::time::timeout(Duration::from_secs(5), rpc.wf_completed.notified())
+                .await
+                .expect("live activation 2 workflow task completed");
+            if input_mode != "continue" {
+                tokio::time::timeout(Duration::from_secs(5), rpc.act_completed.notified())
+                    .await
+                    .expect("activity task completed");
+            }
+
+            handle.initiate_shutdown();
+            poll_release.cancel();
+            assert_eq!(
+                handle.finish(Instant::now() + Duration::from_secs(5)).await,
+                Ok(CloseOutcome::Complete)
+            );
+            assert_eq!(
+                startup.close(Instant::now() + Duration::from_secs(1)).await,
+                CloseOutcome::Complete
+            );
+        });
+    });
+
+    let _ = provider.force_flush();
+    let spans = exporter.get_finished_spans().unwrap();
+    (rpc, spans)
+}
+
+#[test]
+fn trace_interceptors_preserve_workflow_parent_across_replay_to_live_activity_and_continue_as_new()
+{
+    let client_trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
+    let client_span_id = SpanId::from_hex("00f067aa0ba902b7").unwrap();
+    let dc = build_data_converter(64 * 1024, None);
+    let pc = dc.payload_converter();
+
+    let (act_rpc, act_spans) =
+        run_replay_to_live_trace_case("activity", client_trace_id, client_span_id);
+    let act_header = act_rpc
+        .captured_activity_header
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("live schedule_activity carries header");
+    let extracted_act = extract_context_from_headers(&act_header.fields, pc);
+    assert_eq!(
+        extracted_act.span().span_context().trace_id(),
+        client_trace_id,
+        "outbound schedule_activity _tracer-data must preserve original workflow_parent trace_id across replay-to-live boundary"
+    );
+
+    assert!(
+        !act_spans
+            .iter()
+            .any(|span| span.name == "temporal_run_workflow"),
+        "replayed activation 1 must suppress temporal_run_workflow span: {act_spans:?}"
+    );
+    let ambient_run_wf = act_spans
+        .iter()
+        .find(|span| span.name.starts_with("RunWorkflow"))
+        .expect("temporalio-sdk ambient RunWorkflow span was entered");
+    assert_ne!(
+        ambient_run_wf.span_context.trace_id(),
+        client_trace_id,
+        "ambient RunWorkflow span carries an unlinked trace_id"
+    );
+    let sched_span = act_spans
+        .iter()
+        .find(|span| span.name == "temporal_schedule_activity")
+        .expect("live activation 2 exports temporal_schedule_activity");
+    assert_eq!(sched_span.span_context.trace_id(), client_trace_id);
+    assert_eq!(sched_span.parent_span_id, client_span_id);
+    let run_act_span = act_spans
+        .iter()
+        .find(|span| span.name == "temporal_run_activity")
+        .expect("activity exports temporal_run_activity");
+    assert_eq!(run_act_span.span_context.trace_id(), client_trace_id);
+    assert_eq!(
+        run_act_span.parent_span_id,
+        sched_span.span_context.span_id()
+    );
+
+    let (can_rpc, can_spans) =
+        run_replay_to_live_trace_case("continue", client_trace_id, client_span_id);
+    let can_header = can_rpc
+        .captured_continue_header
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("live continue_as_new carries header");
+    let extracted_can = extract_context_from_headers(&can_header.fields, pc);
+    assert_eq!(
+        extracted_can.span().span_context().trace_id(),
+        client_trace_id,
+        "outbound continue_as_new _tracer-data must preserve original workflow_parent trace_id across replay-to-live boundary"
+    );
+    assert!(
+        !can_spans
+            .iter()
+            .any(|span| span.name == "temporal_run_workflow"),
+        "replayed activation 1 must suppress temporal_run_workflow span: {can_spans:?}"
+    );
+    let can_span = can_spans
+        .iter()
+        .find(|span| span.name == "temporal_continue_as_new")
+        .expect("detached live continue_as_new exports temporal_continue_as_new");
+    assert_eq!(can_span.span_context.trace_id(), client_trace_id);
+    assert_eq!(can_span.parent_span_id, client_span_id);
 }
