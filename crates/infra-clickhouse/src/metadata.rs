@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,10 +8,9 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use crate::credentials::ActiveCredentials;
-use crate::error::{InsertError, ObservedFailure, classify_metadata_error, extract_exception_code};
-use crate::insert::{WriteRow, pre_dispatch_stop};
+use crate::error::{InsertError, ObservedFailure, classify_metadata_error, is_schema_drift_error};
 use crate::observe::OperationGuard;
-use crate::{QuerySettings, Shared, format_execution_timeout_secs, within_bounded};
+use crate::{Shared, format_execution_timeout_secs, within_bounded};
 
 pub(crate) const MAX_TABLE_SLOTS: usize = 256;
 
@@ -129,10 +129,9 @@ struct TableSlotState {
 pub(crate) struct TableSlot {
     state: Mutex<TableSlotState>,
     notify: Notify,
-    database: String,
 }
 
-enum SlotStep {
+enum PrepareStep {
     Ready {
         generation: u64,
         client: clickhouse::Client,
@@ -142,7 +141,6 @@ enum SlotStep {
         leader_id: u64,
         client: clickhouse::Client,
     },
-    WaitPrime,
 }
 
 impl TableSlot {
@@ -154,11 +152,10 @@ impl TableSlot {
                 cred_epoch: creds.cred_epoch,
             }),
             notify: Notify::new(),
-            database: database.to_owned(),
         }
     }
 
-    fn acquire_step(&self, creds: &ActiveCredentials) -> SlotStep {
+    fn acquire_step(&self, creds: &ActiveCredentials) -> Option<PrepareStep> {
         let mut state = self.state.lock();
         if state.cred_epoch < creds.cred_epoch {
             if let Some(password) = creds.password.as_ref() {
@@ -167,19 +164,19 @@ impl TableSlot {
             state.cred_epoch = creds.cred_epoch;
         }
         match state.coordinator.acquire() {
-            AcquireDecision::Ready { generation } => SlotStep::Ready {
+            AcquireDecision::Ready { generation } => Some(PrepareStep::Ready {
                 generation,
                 client: state.client.clone(),
-            },
+            }),
             AcquireDecision::LeadPrime {
                 generation,
                 leader_id,
-            } => SlotStep::LeadPrime {
+            } => Some(PrepareStep::LeadPrime {
                 generation,
                 leader_id,
                 client: state.client.clone(),
-            },
-            AcquireDecision::WaitPrime { .. } => SlotStep::WaitPrime,
+            }),
+            AcquireDecision::WaitPrime { .. } => None,
         }
     }
 
@@ -205,14 +202,19 @@ impl TableSlot {
         }
     }
 
-    pub(crate) fn invalidate_if_gen(&self, observed_gen: u64, creds: &ActiveCredentials) {
+    pub(crate) fn invalidate_if_gen(
+        &self,
+        observed_gen: u64,
+        creds: &ActiveCredentials,
+        database: &str,
+    ) {
         let wake = {
             let mut state = self.state.lock();
             if matches!(
                 state.coordinator.on_schema_mismatch(observed_gen),
                 InvalidateOutcome::Invalidated { .. }
             ) {
-                state.client = creds.read_client.clone().with_database(&self.database);
+                state.client = creds.read_client.clone().with_database(database);
                 state.cred_epoch = creds.cred_epoch;
                 true
             } else {
@@ -252,9 +254,10 @@ impl TableSlotRegistry {
     ) -> Arc<TableSlot> {
         let mut inner = self.inner.lock();
         if let Some(slot) = inner.slots.get(table).cloned() {
-            if let Some(pos) = inner.lru.iter().position(|entry| entry == table) {
-                inner.lru.remove(pos);
-                inner.lru.push_back(table.to_owned());
+            if let Some(pos) = inner.lru.iter().position(|entry| entry == table)
+                && let Some(entry) = inner.lru.remove(pos)
+            {
+                inner.lru.push_back(entry);
             }
             return slot;
         }
@@ -284,37 +287,6 @@ impl TableSlotRegistry {
     }
 }
 
-struct PrimeGuard {
-    slot: Arc<TableSlot>,
-    generation: u64,
-    leader_id: u64,
-    armed: bool,
-}
-
-impl PrimeGuard {
-    const fn new(slot: Arc<TableSlot>, generation: u64, leader_id: u64) -> Self {
-        Self {
-            slot,
-            generation,
-            leader_id,
-            armed: true,
-        }
-    }
-
-    fn mark_populated(mut self) {
-        self.armed = false;
-        self.slot.mark_populated(self.generation, self.leader_id);
-    }
-}
-
-impl Drop for PrimeGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.slot.mark_aborted(self.generation, self.leader_id);
-        }
-    }
-}
-
 fn configure_prepare_client(
     mut client: clickhouse::Client,
     query_id: &str,
@@ -322,25 +294,38 @@ fn configure_prepare_client(
     guard: &OperationGuard<'_>,
     remaining: Duration,
 ) -> clickhouse::Client {
-    if shared.propagate_trace_context {
+    if shared.policy.propagate_trace_context {
         client = guard.inject_trace_context(client);
     }
     client = client.with_setting("query_id", query_id);
-    if shared.query_settings == QuerySettings::Client {
-        client = client
-            .with_setting(
-                "max_execution_time",
-                format_execution_timeout_secs(remaining),
-            )
-            .with_setting("timeout_overflow_mode", "throw");
-        if let Some(mem) = shared.max_memory_usage {
-            client = client.with_setting("max_memory_usage", mem.to_string());
-        }
-    }
-    client
+    let timeout_secs = format_execution_timeout_secs(remaining);
+    shared.apply_client_budget(client, &timeout_secs, |client, key, value| {
+        client.with_setting(key, value)
+    })
 }
 
-pub(crate) async fn prepare_insert<R: WriteRow>(
+async fn acquire_prepare_step(
+    slot: &TableSlot,
+    shared: &Shared,
+    bounded: &BoundedContext,
+) -> Result<PrepareStep, ObservedFailure<InsertError>> {
+    loop {
+        if let Some(step) = slot.acquire_step(&shared.credentials.load()) {
+            return Ok(step);
+        }
+        let notified = slot.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(step) = slot.acquire_step(&shared.credentials.load()) {
+            return Ok(step);
+        }
+        within_bounded(bounded, notified)
+            .await
+            .map_err(ObservedFailure::pre_dispatch_stop)?;
+    }
+}
+
+pub(crate) async fn prepare_insert<R: clickhouse::Row>(
     slot: &Arc<TableSlot>,
     table: &str,
     query_id: &str,
@@ -350,71 +335,53 @@ pub(crate) async fn prepare_insert<R: WriteRow>(
 ) -> Result<(clickhouse::insert::Insert<R>, u64), ObservedFailure<InsertError>> {
     let mut retried_warm_drift = false;
     loop {
-        let notified = slot.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-
-        let creds = shared.credentials.load();
-        match slot.acquire_step(&creds) {
-            SlotStep::Ready { generation, client } => {
-                let call_client =
-                    configure_prepare_client(client, query_id, shared, guard, bounded.remaining());
-                match within_bounded(bounded, call_client.insert::<R>(table)).await {
-                    Ok(Ok(insert)) => return Ok((insert, generation)),
-                    Ok(Err(error)) => {
-                        if is_schema_drift_error(&error) {
-                            slot.invalidate_if_gen(generation, &shared.credentials.load());
-                            if !retried_warm_drift {
-                                retried_warm_drift = true;
-                                continue;
-                            }
-                        }
-                        return Err(classify_metadata_error(&error));
-                    }
-                    Err(stop) => return Err(pre_dispatch_stop(stop)),
+        let (generation, prime_guard, client) =
+            match acquire_prepare_step(slot, shared, bounded).await? {
+                PrepareStep::Ready { generation, client } => (generation, None, client),
+                PrepareStep::LeadPrime {
+                    generation,
+                    leader_id,
+                    client,
+                } => {
+                    let abort_guard = DropGuard::new(
+                        (Arc::clone(slot), generation, leader_id),
+                        |(slot, generation, leader_id)| {
+                            slot.mark_aborted(generation, leader_id);
+                        },
+                    );
+                    (generation, Some(abort_guard), client)
                 }
+            };
+        let call_client =
+            configure_prepare_client(client, query_id, shared, guard, bounded.remaining());
+        match within_bounded(bounded, call_client.insert::<R>(table)).await {
+            Ok(Ok(insert)) => {
+                if let Some(abort_guard) = prime_guard {
+                    let (slot, generation, leader_id) = DropGuard::dismiss(abort_guard);
+                    slot.mark_populated(generation, leader_id);
+                }
+                return Ok((insert, generation));
             }
-            SlotStep::LeadPrime {
-                generation,
-                leader_id,
-                client,
-            } => {
-                let prime_guard = PrimeGuard::new(Arc::clone(slot), generation, leader_id);
-                let call_client =
-                    configure_prepare_client(client, query_id, shared, guard, bounded.remaining());
-                match within_bounded(bounded, call_client.insert::<R>(table)).await {
-                    Ok(Ok(insert)) => {
-                        prime_guard.mark_populated();
-                        return Ok((insert, generation));
-                    }
-                    Ok(Err(error)) => {
-                        drop(prime_guard);
-                        if is_schema_drift_error(&error) {
-                            slot.invalidate_if_gen(generation, &shared.credentials.load());
-                        }
-                        return Err(classify_metadata_error(&error));
-                    }
-                    Err(stop) => {
-                        drop(prime_guard);
-                        return Err(pre_dispatch_stop(stop));
+            Ok(Err(error)) => {
+                let was_warm = prime_guard.is_none();
+                drop(prime_guard);
+                if is_schema_drift_error(&error) {
+                    slot.invalidate_if_gen(
+                        generation,
+                        &shared.credentials.load(),
+                        &shared.endpoint.database,
+                    );
+                    if was_warm && !retried_warm_drift {
+                        retried_warm_drift = true;
+                        continue;
                     }
                 }
+                return Err(classify_metadata_error(&error));
             }
-            SlotStep::WaitPrime => {
-                within_bounded(bounded, notified)
-                    .await
-                    .map_err(pre_dispatch_stop)?;
+            Err(stop) => {
+                drop(prime_guard);
+                return Err(ObservedFailure::pre_dispatch_stop(stop));
             }
         }
     }
-}
-
-pub(crate) fn is_schema_drift_error(error: &clickhouse::error::Error) -> bool {
-    matches!(error, clickhouse::error::Error::SchemaMismatch(_))
-        || matches!(
-            error,
-            clickhouse::error::Error::BadResponse(message)
-                if matches!(extract_exception_code(message), Some(16 | 47 | 53))
-                    || crate::error::is_header_schema_mismatch(message)
-        )
 }

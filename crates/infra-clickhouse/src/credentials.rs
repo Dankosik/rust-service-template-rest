@@ -1,20 +1,22 @@
-use std::path::PathBuf;
+use std::io::{self, ErrorKind, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use shared_rules::rfc9110::has_ascii_control;
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::Shared;
-use crate::admission::read_password_file;
 use crate::error::StartErrorKind;
 use crate::observe::PasswordRefreshOutcome;
 
-pub(crate) const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const REACTIVE_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
 #[derive(derive_more::Debug)]
 #[debug("ActiveCredentials {{ cred_epoch: {}, .. }}", self.cred_epoch)]
@@ -25,8 +27,23 @@ pub(crate) struct ActiveCredentials {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) enum PasswordFileError {
+    Io(ErrorKind),
+    EmptyOrInvalid,
+}
+
+impl From<PasswordFileError> for StartErrorKind {
+    fn from(error: PasswordFileError) -> Self {
+        match error {
+            PasswordFileError::Io(kind) => Self::PasswordFile { kind },
+            PasswordFileError::EmptyOrInvalid => Self::PasswordFileEmpty,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum RefreshReadFailure {
-    Start(StartErrorKind),
+    File(PasswordFileError),
     Busy,
     TimedOut,
     Panicked,
@@ -35,8 +52,8 @@ enum RefreshReadFailure {
 impl RefreshReadFailure {
     const fn reason(self) -> &'static str {
         match self {
-            Self::Start(StartErrorKind::PasswordFile { .. }) => "io_error",
-            Self::Start(_) => "empty_or_invalid",
+            Self::File(PasswordFileError::Io(_)) => "io_error",
+            Self::File(PasswordFileError::EmptyOrInvalid) => "empty_or_invalid",
             Self::Busy => "read_busy",
             Self::TimedOut => "timed_out",
             Self::Panicked => "panicked",
@@ -132,7 +149,7 @@ pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf, tri
 
 async fn read_once(
     reading: &Arc<Semaphore>,
-    path: &std::path::Path,
+    path: &Path,
 ) -> Result<Zeroizing<String>, RefreshReadFailure> {
     let permit = Arc::clone(reading)
         .try_acquire_owned()
@@ -146,5 +163,67 @@ async fn read_once(
         .await
         .map_err(|_| RefreshReadFailure::TimedOut)?
         .map_err(|_| RefreshReadFailure::Panicked)?
-        .map_err(RefreshReadFailure::Start)
+        .map_err(RefreshReadFailure::File)
+}
+
+pub(crate) fn read_password_file(path: &Path) -> Result<Zeroizing<String>, PasswordFileError> {
+    let mut bytes = read_secret_file(path, MAX_PASSWORD_FILE_BYTES)
+        .map_err(|error| PasswordFileError::Io(error.kind()))?;
+    let raw = std::mem::take(&mut *bytes);
+    let mut content = String::from_utf8(raw)
+        .map(Zeroizing::new)
+        .map_err(|error| {
+            error.into_bytes().zeroize();
+            PasswordFileError::Io(ErrorKind::InvalidData)
+        })?;
+    let trimmed = Zeroizing::new(shared_rules::secret_file::value(std::mem::take(
+        &mut *content,
+    )));
+    if trimmed.is_empty() || has_ascii_control(trimmed.as_bytes()) {
+        return Err(PasswordFileError::EmptyOrInvalid);
+    }
+    Ok(trimmed)
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "blocking workers must read from the same descriptor they validated as a regular file"
+)]
+fn read_regular_file_into(path: &Path, max_bytes: usize, bytes: &mut Vec<u8>) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(ErrorKind::InvalidInput.into());
+    }
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or(max_bytes)
+        .min(max_bytes)
+        .saturating_add(1);
+    bytes.reserve_exact(capacity);
+    file.take(max_bytes as u64 + 1).read_to_end(bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    Ok(())
+}
+
+pub(crate) fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    read_regular_file_into(path, max_bytes, &mut bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn read_secret_file(path: &Path, max_bytes: usize) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    read_regular_file_into(path, max_bytes, &mut bytes)?;
+    Ok(bytes)
 }

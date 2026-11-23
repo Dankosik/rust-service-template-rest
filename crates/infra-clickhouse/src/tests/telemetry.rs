@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,8 +20,8 @@ use super::{
     spawn_http_server,
 };
 use crate::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, CloseOutcome, InsertError, InsertFailure,
-    QueryError,
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseAuth, CloseOutcome, InsertError,
+    InsertFailure, QueryError,
 };
 
 fn count_lines_with(scrape: &str, prefix: &str, labels: &[&str]) -> u64 {
@@ -876,11 +876,12 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
 
     let srv = spawn_telemetry_server().await;
     let mut opts = base_options(format!("http://{}", srv.addr));
-    opts.max_read_concurrency = 1;
-    opts.max_write_concurrency = 1;
-    opts.password = Some(secrecy::SecretString::from(
-        "SUPER_SECRET_PASSWORD_SENTINEL",
-    ));
+    opts.max_read_concurrency = NonZeroUsize::MIN;
+    opts.max_write_concurrency = NonZeroUsize::MIN;
+    opts.auth = ClickHouseAuth::Password {
+        username: "app".to_owned(),
+        password: secrecy::SecretString::from("SUPER_SECRET_PASSWORD_SENTINEL"),
+    };
     let ch = ClickHouse::start(opts).await.expect("start");
 
     assert_eq!(

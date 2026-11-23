@@ -18,7 +18,8 @@ use super::{
 };
 use crate::{
     AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClientCertificate, CloseOutcome,
-    InsertError, InsertFailure, InsertReport, QueryError, QuerySettings, Row, UnknownOutcome,
+    InsertError, InsertFailure, InsertReport, QueryError, QuerySettings, Row, TransportSecurity,
+    UnknownOutcome,
 };
 
 async fn spawn_read_fault_server(
@@ -77,9 +78,9 @@ async fn read_pre_dispatch_limits_and_cardinality() {
     .await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.max_read_concurrency = 1;
-    opts.max_write_concurrency = 1;
-    opts.max_result_rows = 2;
+    opts.max_read_concurrency = NonZeroUsize::MIN;
+    opts.max_write_concurrency = NonZeroUsize::MIN;
+    opts.max_result_rows = NonZeroU64::new(2).expect("nz");
     opts.query_timeout = Duration::from_millis(80);
     let ch = ClickHouse::start(opts).await.expect("start");
 
@@ -227,8 +228,8 @@ async fn read_precedence_bytes_cap_busy_and_server_settings() {
     .await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.max_read_concurrency = 1;
-    opts.max_write_concurrency = 1;
+    opts.max_read_concurrency = NonZeroUsize::MIN;
+    opts.max_write_concurrency = NonZeroUsize::MIN;
     opts.query_timeout = Duration::from_secs(2);
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
@@ -486,7 +487,7 @@ async fn write_pre_dispatch_validation_and_empty_noop() {
 #[tokio::test]
 async fn write_settings_idx_nonzero_and_code_precedence() {
     #[derive(Row)]
-    #[clickhouse(crate = "crate::__clickhouse")]
+    #[clickhouse(crate = "crate")]
     struct SecondFailRow {
         id: u64,
     }
@@ -680,8 +681,10 @@ async fn tls_handshake_failure_is_not_applied() {
         .await
         .expect("write ca");
     let mut bad_tls_opts = base_options(format!("https://localhost:{}", untrusted_addr.port()));
-    bad_tls_opts.allow_plaintext = false;
-    bad_tls_opts.root_ca_path = Some(wrong_ca_path);
+    bad_tls_opts.transport = TransportSecurity::Tls {
+        root_ca_path: Some(wrong_ca_path),
+        client_certificate: None,
+    };
     let ch_bad = ClickHouse::start(bad_tls_opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
     assert_eq!(
@@ -770,12 +773,13 @@ async fn response_phase_tls_fault_is_outcome_unknown() {
 
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
     let mut valid_opts = base_options(format!("https://localhost:{}", mtls_addr.port()));
-    valid_opts.allow_plaintext = false;
-    valid_opts.root_ca_path = Some(ca_path);
-    valid_opts.client_certificate = Some(ClientCertificate {
-        cert_path,
-        key_path,
-    });
+    valid_opts.transport = TransportSecurity::Tls {
+        root_ca_path: Some(ca_path),
+        client_certificate: Some(ClientCertificate {
+            cert_path,
+            key_path,
+        }),
+    };
     let ch_mtls = ClickHouse::start(valid_opts).await.expect("start mtls");
     let err = ch_mtls
         .insert_batch(

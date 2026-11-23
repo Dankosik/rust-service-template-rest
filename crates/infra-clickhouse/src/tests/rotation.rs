@@ -13,7 +13,10 @@ use super::{
     SampleRow, base_options, prometheus_recorder, rbwnat_describe_id_column, rbwnat_u64_rows,
     spawn_http_server,
 };
-use crate::{BatchInsertOptions, ClickHouse, CloseOutcome, InsertError, InsertFailure, QueryError};
+use crate::{
+    BatchInsertOptions, ClickHouse, ClickHouseAuth, CloseOutcome, InsertError, InsertFailure,
+    QueryError,
+};
 
 fn metric_counter(scrape: &str, name: &str, outcome: &str) -> u64 {
     let label = format!("outcome=\"{outcome}\"");
@@ -162,8 +165,10 @@ async fn password_file_rotates_every_5s_and_retains_valid_password_on_ctl_error(
     let (addr, srv) = spawn_auth_server(Arc::clone(&expected_pw)).await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.password = None;
-    opts.password_file = Some(pw_path.clone());
+    opts.auth = ClickHouseAuth::PasswordFile {
+        username: "app".to_owned(),
+        path: pw_path.clone(),
+    };
     opts.query_timeout = Duration::from_secs(30);
     opts.insert_timeout = Duration::from_secs(30);
     let ch = ClickHouse::start(opts).await.expect("start");
@@ -277,8 +282,10 @@ async fn in_flight_call_keeps_starting_credential_and_drop_cancels_refresh() {
     .await;
 
     let mut opts = base_options(format!("http://{addr}"));
-    opts.password = None;
-    opts.password_file = Some(pw_path.clone());
+    opts.auth = ClickHouseAuth::PasswordFile {
+        username: "app".to_owned(),
+        path: pw_path.clone(),
+    };
     opts.query_timeout = Duration::from_secs(30);
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(60));
@@ -387,8 +394,10 @@ async fn password_file_reloads_reactively_on_query_and_insert_code_516() {
 
     let make_opts = || {
         let mut opts = base_options(format!("http://{addr}"));
-        opts.password = None;
-        opts.password_file = Some(pw_path.clone());
+        opts.auth = ClickHouseAuth::PasswordFile {
+            username: "app".to_owned(),
+            path: pw_path.clone(),
+        };
         opts
     };
     let ch_read = ClickHouse::start(make_opts()).await.expect("start read");
@@ -490,8 +499,10 @@ async fn reactive_password_refresh_enforces_1s_cooldown_before_second_reload() {
         .expect("write initial");
 
     let mut opts = base_options("http://127.0.0.1:1".to_owned());
-    opts.password = None;
-    opts.password_file = Some(pw_path.clone());
+    opts.auth = ClickHouseAuth::PasswordFile {
+        username: "app".to_owned(),
+        path: pw_path.clone(),
+    };
     let ch = ClickHouse::start(opts).await.expect("start");
 
     write_password_atomic(&staging, &pw_path, "pw-v2\n").await;

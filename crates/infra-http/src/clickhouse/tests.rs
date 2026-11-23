@@ -1,3 +1,4 @@
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::response::IntoResponse as _;
 use axum::routing::post;
 use axum_test::TestServer;
-use infra_clickhouse::{ClickHouseOptions, QuerySettings, Row};
+use infra_clickhouse::{ClickHouseAuth, ClickHouseOptions, QuerySettings, Row, TransportSecurity};
 use operation_context::Stopped;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
@@ -21,7 +22,7 @@ use crate::test_support::body_json;
 const OPENING_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize, Serialize, Row)]
-#[clickhouse(crate = "infra_clickhouse::__clickhouse")]
+#[clickhouse(crate = "infra_clickhouse")]
 struct EventRow {
     id: u64,
 }
@@ -74,21 +75,16 @@ async fn clickhouse_route(
             .origin()
             .ascii_serialization(),
         database: "app".to_owned(),
-        username: None,
-        password: None,
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: true,
+        auth: ClickHouseAuth::Unauthenticated { username: None },
+        transport: TransportSecurity::Plaintext,
         query_settings: QuerySettings::Client,
         query_timeout: Duration::from_mins(2),
         insert_timeout: Duration::from_mins(2),
-        max_read_concurrency: 4,
-        max_write_concurrency: 4,
-        max_result_rows: 1_000,
-        max_result_bytes: 1024 * 1024,
-        http_response_buffer_size: 256 * 1024,
+        max_read_concurrency: NonZeroUsize::new(4).unwrap(),
+        max_write_concurrency: NonZeroUsize::new(4).unwrap(),
+        max_result_rows: NonZeroU64::new(1_000).unwrap(),
+        max_result_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+        http_response_buffer_size: NonZeroUsize::new(256 * 1024).unwrap(),
         max_memory_usage: None,
         propagate_trace_context: false,
     })
