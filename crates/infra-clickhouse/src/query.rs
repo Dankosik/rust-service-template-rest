@@ -16,8 +16,9 @@ use crate::{
     within_bounded,
 };
 
-const UNIX_EPOCH_TEXT_MIN_SECS: i64 = 1_000_000_000;
-const MAX_DECIMAL_PARAM_SCALE: u8 = 38;
+use clickhouse::types::{MAX_DECIMAL_SCALE, serialize_decimal_param};
+
+const NANOS_PER_SEC: u128 = 1_000_000_000;
 
 mod sealed {
     pub trait ReadRowSealed {}
@@ -108,7 +109,7 @@ impl Serialize for ParamValue {
             Self::DateTime(v) => format_datetime_param(*v, true).serialize(serializer),
             Self::DateTimeSecs(v) => format_datetime_param(*v, false).serialize(serializer),
             Self::Decimal(unscaled, scale) => {
-                format_decimal_param(*unscaled, *scale).serialize(serializer)
+                serialize_decimal_param(*unscaled, *scale, serializer)
             }
             Self::None => serializer.serialize_none(),
             Self::Array(items) => items.serialize(serializer),
@@ -117,50 +118,27 @@ impl Serialize for ParamValue {
 }
 
 fn format_datetime_param(v: time::OffsetDateTime, include_subsec: bool) -> String {
-    let secs = v.unix_timestamp();
-    let ns = if include_subsec { v.nanosecond() } else { 0 };
-    if secs >= UNIX_EPOCH_TEXT_MIN_SECS {
-        return if ns == 0 {
-            secs.to_string()
+    if !include_subsec {
+        let secs = v.unix_timestamp();
+        return if secs < 0 {
+            format!("-{:010}", secs.unsigned_abs())
         } else {
-            format!("{secs}.{ns:09}")
+            format!("{secs:010}")
         };
     }
-    let utc = v.to_offset(time::UtcOffset::UTC);
-    if ns == 0 {
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            utc.year(),
-            u8::from(utc.month()),
-            utc.day(),
-            utc.hour(),
-            utc.minute(),
-            utc.second(),
-        )
+    let total_ns = v.unix_timestamp_nanos();
+    if (-999_999_999..0).contains(&total_ns) {
+        return format!("1969-12-31 23:59:59.{:09}", v.nanosecond());
+    }
+    let sign = if total_ns < 0 { "-" } else { "" };
+    let abs = total_ns.unsigned_abs();
+    let whole = abs / NANOS_PER_SEC;
+    let frac = abs % NANOS_PER_SEC;
+    if frac == 0 {
+        format!("{sign}{whole:010}")
     } else {
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-            utc.year(),
-            u8::from(utc.month()),
-            utc.day(),
-            utc.hour(),
-            utc.minute(),
-            utc.second(),
-            ns,
-        )
+        format!("{sign}{whole:010}.{frac:09}")
     }
-}
-
-fn format_decimal_param(unscaled: i128, scale: u8) -> String {
-    if scale == 0 {
-        return unscaled.to_string();
-    }
-    let sign = if unscaled < 0 { "-" } else { "" };
-    let abs = unscaled.unsigned_abs();
-    let divisor = 10_u128.pow(u32::from(scale));
-    let whole = abs / divisor;
-    let frac = abs % divisor;
-    format!("{sign}{whole}.{frac:0width$}", width = usize::from(scale))
 }
 
 macro_rules! impl_param_from {
@@ -394,17 +372,19 @@ impl<'a> Query<'a> {
             );
             guard.record_query_id(query_id);
             bounded.check().map_err(stop_to_query_error)?;
+            let server_cardinality_capped =
+                shared.query_settings == QuerySettings::Client && cardinality_cap.is_some();
             let cursor = ch_query
                 .fetch::<R>()
-                .map_err(|err| classify_query_error(&err, cardinality_cap.is_some()))?
+                .map_err(|err| classify_query_error(&err, server_cardinality_capped))?
                 .with_max_decoded_bytes(max_bytes_u64);
 
             consume_bounded_rows(
                 cursor,
                 &bounded,
                 effective_max_rows,
-                effective_max_bytes,
                 cardinality_cap,
+                server_cardinality_capped,
                 finish_rows,
             )
             .await
@@ -464,11 +444,10 @@ async fn consume_bounded_rows<R: ReadRow, T>(
     mut cursor: clickhouse::query::RowCursor<R>,
     bounded: &operation_context::BoundedContext,
     effective_max_rows: u64,
-    effective_max_bytes: usize,
     cardinality_cap: Option<usize>,
+    server_cardinality_capped: bool,
     finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
 ) -> Result<(T, u64, u64), ObservedFailure<QueryError>> {
-    let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
     let mut rows = Vec::new();
     loop {
         let next = within_bounded(bounded, cursor.next())
@@ -476,9 +455,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
             .map_err(stop_to_query_error)?;
         match next {
             Ok(Some(row)) => {
-                if cursor.decoded_bytes() > max_bytes_u64
-                    || cursor.returned_rows() > effective_max_rows
-                {
+                if cursor.returned_rows() > effective_max_rows {
                     return Err(ObservedFailure::with_reason(
                         QueryError::TooLarge,
                         FailureReason::ResultLimit,
@@ -494,12 +471,6 @@ async fn consume_bounded_rows<R: ReadRow, T>(
                 }
             }
             Ok(None) => {
-                if cursor.decoded_bytes() > max_bytes_u64 {
-                    return Err(ObservedFailure::with_reason(
-                        QueryError::TooLarge,
-                        FailureReason::ResultLimit,
-                    ));
-                }
                 let returned_rows = cursor.returned_rows();
                 let decoded_bytes = cursor.decoded_bytes();
                 return finish_rows(rows).map(|value| (value, returned_rows, decoded_bytes));
@@ -508,7 +479,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
                 if let Some(stop) = bounded.stopped() {
                     return Err(stop_to_query_error(stop));
                 }
-                return Err(classify_query_error(&err, cardinality_cap.is_some()));
+                return Err(classify_query_error(&err, server_cardinality_capped));
             }
         }
     }
@@ -535,7 +506,7 @@ fn validate_query_inputs(
 
 fn is_valid_param_value(value: &ParamValue) -> bool {
     match value {
-        ParamValue::Decimal(_, scale) => *scale <= MAX_DECIMAL_PARAM_SCALE,
+        ParamValue::Decimal(_, scale) => *scale <= MAX_DECIMAL_SCALE,
         ParamValue::Array(items) => items.iter().all(|item| is_valid_param_value(&item.0)),
         _ => true,
     }

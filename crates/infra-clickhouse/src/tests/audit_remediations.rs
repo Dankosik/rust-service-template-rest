@@ -59,20 +59,40 @@ fn rbwnat_describe_columns(cols: &[(&str, &str, &str)]) -> Bytes {
     Bytes::from(out)
 }
 
-#[tokio::test]
-async fn multi_chunk_insert_surfaces_early_server_errors_and_invalidates_schema_cache() {
-    let describe_calls = Arc::new(AtomicUsize::new(0));
-    let insert_calls = Arc::new(AtomicUsize::new(0));
-    let describe_srv = Arc::clone(&describe_calls);
-    let insert_srv = Arc::clone(&insert_calls);
+fn incompressible_payload(seed: u64, len: usize) -> String {
+    let mut state = seed | 1;
+    let mut out = String::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let offset = u8::try_from(state % 26).unwrap_or(0);
+        out.push((b'a' + offset) as char);
+    }
+    out
+}
 
-    let (addr, srv) = spawn_http_server(move |req: Request<Incoming>| {
-        let describes = Arc::clone(&describe_srv);
-        let inserts = Arc::clone(&insert_srv);
+fn long_enum_header_mismatch_error() -> Bytes {
+    let long_enum = (0..18)
+        .map(|i| format!("'variant_long_name_{i:02}' = {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let msg = format!(
+        "Code: 117. DB::Exception: Type of 'payload' must be Enum8({long_enum}), not String: (while reading header). (INCORRECT_DATA)"
+    );
+    assert!(msg.find("while reading header").expect("marker") > 256);
+    Bytes::from(msg)
+}
+
+async fn spawn_early_insert_fault_server(
+    describe_calls: Arc<AtomicUsize>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let insert_calls = Arc::new(AtomicUsize::new(0));
+    spawn_http_server(move |req: Request<Incoming>| {
+        let describes = Arc::clone(&describe_calls);
+        let inserts = Arc::clone(&insert_calls);
         async move {
-            let uri = req.uri().to_string();
-            let is_describe = uri.contains("-describe");
-            if is_describe {
+            if req.uri().to_string().contains("-describe") {
                 let _ = req.into_body().collect().await;
                 describes.fetch_add(1, Ordering::SeqCst);
                 return Response::builder()
@@ -87,67 +107,85 @@ async fn multi_chunk_insert_surfaces_early_server_errors_and_invalidates_schema_
             let (status, body) = match call {
                 0 => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Bytes::from_static(b"Code: 252. DB::Exception: Too many parts"),
+                    Bytes::from_static(b"Code: 53. DB::Exception: Type mismatch"),
                 ),
                 1 => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Bytes::from_static(b"Code: 53. DB::Exception: Type mismatch"),
+                    long_enum_header_mismatch_error(),
                 ),
                 _ => (StatusCode::OK, Bytes::new()),
             };
             Response::builder()
                 .status(status)
+                .header("connection", "close")
                 .body(Full::new(body))
                 .expect("insert resp")
         }
     })
-    .await;
+    .await
+}
+
+#[tokio::test]
+async fn multi_chunk_insert_surfaces_early_errors_invalidates_long_117_and_rejects_early_200() {
+    let describe_calls = Arc::new(AtomicUsize::new(0));
+    let (addr, srv) = spawn_early_insert_fault_server(Arc::clone(&describe_calls)).await;
 
     let ch = ClickHouse::start(base_options(format!("http://{addr}")))
         .await
         .expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
-
-    let single_big = [WideStringRow {
-        payload: "x".repeat(320 * 1024),
-    }];
-    let err_252 = ch
-        .insert_batch(
-            &ctx,
-            "big_252",
-            "events",
-            &single_big,
-            BatchInsertOptions::new(),
-        )
-        .await
-        .expect_err("early 252 on >254 KiB single row");
-    assert_eq!(
-        err_252,
-        InsertError::NotApplied(InsertFailure::TooManyParts)
-    );
-
-    let multi_big: Vec<WideStringRow> = (0..10)
-        .map(|_| WideStringRow {
-            payload: "y".repeat(40 * 1024),
+    let multi_chunk: Vec<WideStringRow> = (0..40)
+        .map(|i| WideStringRow {
+            payload: incompressible_payload(i + 1, 40 * 1024),
         })
         .collect();
+
     let err_53 = ch
         .insert_batch(
             &ctx,
             "big_53",
             "events",
-            &multi_big,
+            &multi_chunk,
             BatchInsertOptions::new(),
         )
         .await
-        .expect_err("early 53 on >254 KiB batch");
+        .expect_err("early 53 on multi-chunk batch");
     assert_eq!(err_53, InsertError::NotApplied(InsertFailure::Rejected));
     assert_eq!(describe_calls.load(Ordering::SeqCst), 1);
 
-    let ok_after_invalidation = ch
+    let err_117 = ch
         .insert_batch(
             &ctx,
-            "after_53",
+            "big_117_long",
+            "events",
+            &multi_chunk,
+            BatchInsertOptions::new(),
+        )
+        .await
+        .expect_err("multi-row long Code 117 header mismatch");
+    assert_eq!(err_117, InsertError::NotApplied(InsertFailure::Rejected));
+    assert_eq!(describe_calls.load(Ordering::SeqCst), 2);
+
+    let err_early_200 = ch
+        .insert_batch(
+            &ctx,
+            "early_200_drop",
+            "events",
+            &multi_chunk,
+            BatchInsertOptions::new(),
+        )
+        .await
+        .expect_err("early HTTP 200 after dropping unsent chunks must not report Ok");
+    assert_eq!(
+        err_early_200,
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable)
+    );
+    assert_eq!(describe_calls.load(Ordering::SeqCst), 3);
+
+    let ok_after = ch
+        .insert_batch(
+            &ctx,
+            "after_reprime",
             "events",
             &[WideStringRow {
                 payload: "z".to_owned(),
@@ -155,9 +193,8 @@ async fn multi_chunk_insert_surfaces_early_server_errors_and_invalidates_schema_
             BatchInsertOptions::new(),
         )
         .await
-        .expect("slot re-primed after Code: 53");
-    assert_eq!(ok_after_invalidation.rows, 1);
-    assert_eq!(describe_calls.load(Ordering::SeqCst), 2);
+        .expect("subsequent small insert succeeds");
+    assert_eq!(ok_after.rows, 1);
 
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,
@@ -171,7 +208,7 @@ async fn handle_close_conn_describe(
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let body = req.into_body().collect().await.expect("body").to_bytes();
     let resp_body = if String::from_utf8_lossy(&body).contains("DESCRIBE") {
-        rbwnat_describe_id_column()
+        rbwnat_describe_columns(&[("payload", "String", "")])
     } else {
         Bytes::new()
     };
@@ -210,7 +247,9 @@ async fn warm_slot_connect_refused_returns_not_applied_instead_of_channel_closed
         &ctx,
         "prime",
         "events",
-        &[SampleRow { id: 1 }],
+        &[WideStringRow {
+            payload: "a".to_owned(),
+        }],
         BatchInsertOptions::new(),
     )
     .await
@@ -219,16 +258,21 @@ async fn warm_slot_connect_refused_returns_not_applied_instead_of_channel_closed
     srv.abort();
     let _ = srv.await;
 
+    let multi_chunk: Vec<WideStringRow> = (0..16)
+        .map(|i| WideStringRow {
+            payload: incompressible_payload(i + 100, 40 * 1024),
+        })
+        .collect();
     let err = ch
         .insert_batch(
             &ctx,
             "after_down",
             "events",
-            &[SampleRow { id: 2 }],
+            &multi_chunk,
             BatchInsertOptions::new(),
         )
         .await
-        .expect_err("ECONNREFUSED on warm slot must fail");
+        .expect_err("ECONNREFUSED on multi-chunk warm slot must fail");
     assert_eq!(err, InsertError::NotApplied(InsertFailure::Unavailable));
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,
@@ -331,13 +375,13 @@ async fn nullable_and_low_cardinality_nullable_without_default_are_omittable() {
     srv.abort();
 }
 
-struct ChunkedBytesBody {
+struct StallingChunkedBody {
     chunks: Vec<Bytes>,
     index: usize,
     sent_chunks: Arc<AtomicUsize>,
 }
 
-impl Body for ChunkedBytesBody {
+impl Body for StallingChunkedBody {
     type Data = Bytes;
     type Error = std::io::Error;
 
@@ -346,7 +390,7 @@ impl Body for ChunkedBytesBody {
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         if self.index >= self.chunks.len() {
-            return Poll::Ready(None);
+            return Poll::Pending;
         }
         let chunk = self.chunks[self.index].clone();
         self.index += 1;
@@ -355,18 +399,17 @@ impl Body for ChunkedBytesBody {
     }
 }
 
-fn build_oversized_rbwnat_payload(body: &str) -> Vec<u8> {
+fn build_oversized_rbwnat_prefix(body: &str) -> Vec<u8> {
     let mut payload = Vec::new();
     encode_varuint(1, &mut payload);
     if body.contains("big_header") {
         encode_varuint(200 * 1024, &mut payload);
-        payload.extend(std::iter::repeat_n(b'a', 200 * 1024));
-        encode_ch_str("String", &mut payload);
+        payload.extend(std::iter::repeat_n(b'a', 80 * 1024));
     } else {
         encode_ch_str("payload", &mut payload);
         encode_ch_str("String", &mut payload);
         encode_varuint(200 * 1024, &mut payload);
-        payload.extend(std::iter::repeat_n(b'b', 200 * 1024));
+        payload.extend(std::iter::repeat_n(b'b', 80 * 1024));
     }
     payload
 }
@@ -374,16 +417,16 @@ fn build_oversized_rbwnat_payload(body: &str) -> Vec<u8> {
 async fn handle_chunked_rbwnat(
     req: Request<Incoming>,
     sent: Arc<AtomicUsize>,
-) -> Result<Response<ChunkedBytesBody>, hyper::Error> {
+) -> Result<Response<StallingChunkedBody>, hyper::Error> {
     let body = req.into_body().collect().await.expect("body").to_bytes();
-    let payload = build_oversized_rbwnat_payload(&String::from_utf8_lossy(&body));
+    let payload = build_oversized_rbwnat_prefix(&String::from_utf8_lossy(&body));
     let chunks = payload
         .chunks(16 * 1024)
         .map(Bytes::copy_from_slice)
         .collect();
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(ChunkedBytesBody {
+        .body(StallingChunkedBody {
             chunks,
             index: 0,
             sent_chunks: sent,
@@ -420,7 +463,7 @@ async fn streaming_max_result_bytes_aborts_oversized_single_row_and_header_early
     opts.max_result_bytes = 64 * 1024;
     opts.http_response_buffer_size = 64 * 1024;
     let ch = ClickHouse::start(opts).await.expect("start");
-    let ctx = OperationContext::with_timeout(Duration::from_secs(5));
+    let ctx = OperationContext::with_timeout(Duration::from_secs(2));
 
     for sql in ["SELECT big_row", "SELECT big_header"] {
         sent_chunks.store(0, Ordering::SeqCst);
@@ -431,6 +474,7 @@ async fn streaming_max_result_bytes_aborts_oversized_single_row_and_header_early
             .await
             .expect_err(sql);
         assert_eq!(err, QueryError::TooLarge, "{sql}");
+        assert!(sent_chunks.load(Ordering::SeqCst) > 0, "{sql}");
     }
 
     assert_eq!(
@@ -450,11 +494,32 @@ fn handle_settings_probe(uri: &str, body_str: &str) -> (StatusCode, Bytes) {
                 b"Code: 396. DB::Exception: Limit for result exceeded, max rows: 2.00, current rows: 10.00. (TOO_MANY_ROWS_OR_BYTES)",
             ),
         )
+    } else if body_str.contains("code_396_transfer") {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(
+                b"Code: 396. DB::Exception: Limit for rows to transfer exceeded, max rows: 10, current rows: 20. (TOO_MANY_ROWS_OR_BYTES)",
+            ),
+        )
     } else if body_str.contains("code_396_bytes") {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Bytes::from_static(
                 b"Code: 396. DB::Exception: Limit for result exceeded, max bytes: 1.00 KiB, current bytes: 4.90 KiB. (TOO_MANY_ROWS_OR_BYTES)",
+            ),
+        )
+    } else if body_str.contains("code_158_read") {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(
+                b"Code: 158. DB::Exception: Limit for rows to read exceeded, max rows: 10, current rows: 1000. (TOO_MANY_ROWS)",
+            ),
+        )
+    } else if body_str.contains("code_130_arr") {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(
+                b"Code: 130. DB::Exception: Cannot read array from text. (CANNOT_READ_ARRAY_FROM_TEXT)",
             ),
         )
     } else if uri.contains("INSERT") {
@@ -464,11 +529,13 @@ fn handle_settings_probe(uri: &str, body_str: &str) -> (StatusCode, Bytes) {
     }
 }
 
-#[tokio::test]
-async fn describe_settings_fetch_one_row_cap_and_fractional_timeouts_are_enforced() {
+async fn spawn_settings_probe_server() -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<String>>>,
+) {
     let captured_uris = Arc::new(Mutex::new(Vec::new()));
     let uris_srv = Arc::clone(&captured_uris);
-
     let (addr, srv) = spawn_http_server(move |req: Request<Incoming>| {
         let uris = Arc::clone(&uris_srv);
         async move {
@@ -485,10 +552,19 @@ async fn describe_settings_fetch_one_row_cap_and_fractional_timeouts_are_enforce
         }
     })
     .await;
+    (addr, srv, captured_uris)
+}
+
+#[tokio::test]
+async fn describe_settings_fetch_one_row_cap_and_fractional_timeouts_are_enforced() {
+    let (addr, srv, captured_uris) = spawn_settings_probe_server().await;
 
     let ch = ClickHouse::start(base_options(format!("http://{addr}")))
         .await
         .expect("start");
+    let mut server_opts = base_options(format!("http://{addr}"));
+    server_opts.query_settings = QuerySettings::Server;
+    let ch_server = ClickHouse::start(server_opts).await.expect("start server");
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
 
     let _ = ch
@@ -498,21 +574,29 @@ async fn describe_settings_fetch_one_row_cap_and_fractional_timeouts_are_enforce
         .await
         .expect("fetch_one ok");
 
+    for (sql, expected) in [
+        ("SELECT code_396_rows", QueryError::TooManyRows),
+        ("SELECT code_396_transfer", QueryError::TooLarge),
+        ("SELECT code_396_bytes", QueryError::TooLarge),
+        ("SELECT code_158_read", QueryError::TooLarge),
+        ("SELECT code_130_arr", QueryError::Rejected),
+    ] {
+        assert_eq!(
+            ch.query("probe", sql).fetch_one::<SampleRow>(&ctx).await,
+            Err(expected),
+            "{sql}"
+        );
+    }
     assert_eq!(
-        ch.query("one_rows_396", "SELECT code_396_rows")
-            .fetch_one::<SampleRow>(&ctx)
-            .await,
-        Err(QueryError::TooManyRows)
-    );
-    assert_eq!(
-        ch.query("one_bytes_396", "SELECT code_396_bytes")
-            .fetch_one::<SampleRow>(&ctx)
+        ch.query("all_rows_396", "SELECT code_396_rows")
+            .fetch_all::<SampleRow>(&ctx)
             .await,
         Err(QueryError::TooLarge)
     );
     assert_eq!(
-        ch.query("all_rows_396", "SELECT code_396_rows")
-            .fetch_all::<SampleRow>(&ctx)
+        ch_server
+            .query("srv_rows_396", "SELECT code_396_rows")
+            .fetch_one::<SampleRow>(&ctx)
             .await,
         Err(QueryError::TooLarge)
     );
@@ -557,6 +641,10 @@ async fn describe_settings_fetch_one_row_cap_and_fractional_timeouts_are_enforce
 
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    assert_eq!(
+        ch_server.close(Duration::from_secs(1)).await,
         CloseOutcome::Complete
     );
     srv.abort();
@@ -713,8 +801,20 @@ struct ValidTypedRow {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
 #[clickhouse(crate = "crate::__clickhouse")]
+struct WrongScale32Row {
+    d32: Decimal32<4>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
+#[clickhouse(crate = "crate::__clickhouse")]
 struct WrongScaleRow {
     d64: Decimal64<2>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
+#[clickhouse(crate = "crate::__clickhouse")]
+struct WrongScale128Row {
+    d128: Decimal128<2>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
@@ -767,12 +867,26 @@ fn build_typed_mock_response(body: &str) -> Bytes {
         out.extend_from_slice(&(-5_i64).to_le_bytes());
         out.extend_from_slice(&1_763_820_000_123_i64.to_le_bytes());
         Bytes::from(out)
+    } else if body.contains("select_decimal32_scale2") {
+        let mut out = Vec::new();
+        encode_varuint(1, &mut out);
+        encode_ch_str("d32", &mut out);
+        encode_ch_str("Decimal(7, 2)", &mut out);
+        out.extend_from_slice(&1234_i32.to_le_bytes());
+        Bytes::from(out)
     } else if body.contains("select_decimal64_scale4") {
         let mut out = Vec::new();
         encode_varuint(1, &mut out);
         encode_ch_str("d64", &mut out);
         encode_ch_str("Decimal(12, 4)", &mut out);
         out.extend_from_slice(&1234_i64.to_le_bytes());
+        Bytes::from(out)
+    } else if body.contains("select_decimal128_scale6") {
+        let mut out = Vec::new();
+        encode_varuint(1, &mut out);
+        encode_ch_str("d128", &mut out);
+        encode_ch_str("Decimal(28, 6)", &mut out);
+        out.extend_from_slice(&1234_i128.to_le_bytes());
         Bytes::from(out)
     } else if body.contains("select_dt64_3") {
         let mut out = Vec::new();
@@ -809,6 +923,99 @@ async fn spawn_typed_mock_server() -> (
     })
     .await;
     (addr, srv, captured_bodies)
+}
+
+async fn assert_typed_mismatches_rejected(
+    ch: &ClickHouse,
+    ctx: &OperationContext,
+    ts: time::OffsetDateTime,
+) {
+    assert_eq!(
+        ch.query("bad_scale32_read", "SELECT select_decimal32_scale2")
+            .fetch_one::<WrongScale32Row>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        ch.query("bad_scale_read", "SELECT select_decimal64_scale4")
+            .fetch_one::<WrongScaleRow>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        ch.query("bad_scale128_read", "SELECT select_decimal128_scale6")
+            .fetch_one::<WrongScale128Row>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        ch.query("raw_dec_read", "SELECT select_decimal64_scale4")
+            .fetch_one::<RawIntDecimalRow>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        ch.query("bad_prec_read", "SELECT select_dt64_3")
+            .fetch_one::<WrongPrecisionTsRow>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        ch.query("raw_ts_read", "SELECT select_dt64_3")
+            .fetch_one::<RawIntTsRow>(ctx)
+            .await,
+        Err(QueryError::Decode)
+    );
+    assert_eq!(
+        ch.insert_batch(
+            ctx,
+            "bad_scale32_write",
+            "typed_events_bad32",
+            &[WrongScale32Row {
+                d32: Decimal32::new(100),
+            }],
+            BatchInsertOptions::new(),
+        )
+        .await,
+        Err(InsertError::NotApplied(InsertFailure::Encode))
+    );
+    assert_eq!(
+        ch.insert_batch(
+            ctx,
+            "bad_scale_write",
+            "typed_events_bad1",
+            &[WrongScaleRow {
+                d64: Decimal64::new(100),
+            }],
+            BatchInsertOptions::new(),
+        )
+        .await,
+        Err(InsertError::NotApplied(InsertFailure::Encode))
+    );
+    assert_eq!(
+        ch.insert_batch(
+            ctx,
+            "bad_scale128_write",
+            "typed_events_bad128",
+            &[WrongScale128Row {
+                d128: Decimal128::new(100),
+            }],
+            BatchInsertOptions::new(),
+        )
+        .await,
+        Err(InsertError::NotApplied(InsertFailure::Encode))
+    );
+    assert_eq!(
+        ch.insert_batch(
+            ctx,
+            "bad_prec_write",
+            "typed_events_bad2",
+            &[WrongPrecisionTsRow { ts }],
+            BatchInsertOptions::new(),
+        )
+        .await,
+        Err(InsertError::NotApplied(InsertFailure::Encode))
+    );
 }
 
 #[tokio::test]
@@ -855,55 +1062,7 @@ async fn decimal_scale_and_datetime64_precision_are_strictly_validated() {
         1
     );
 
-    assert_eq!(
-        ch.query("bad_scale_read", "SELECT select_decimal64_scale4")
-            .fetch_one::<WrongScaleRow>(&ctx)
-            .await,
-        Err(QueryError::Decode)
-    );
-    assert_eq!(
-        ch.query("raw_dec_read", "SELECT select_decimal64_scale4")
-            .fetch_one::<RawIntDecimalRow>(&ctx)
-            .await,
-        Err(QueryError::Decode)
-    );
-    assert_eq!(
-        ch.query("bad_prec_read", "SELECT select_dt64_3")
-            .fetch_one::<WrongPrecisionTsRow>(&ctx)
-            .await,
-        Err(QueryError::Decode)
-    );
-    assert_eq!(
-        ch.query("raw_ts_read", "SELECT select_dt64_3")
-            .fetch_one::<RawIntTsRow>(&ctx)
-            .await,
-        Err(QueryError::Decode)
-    );
-
-    assert_eq!(
-        ch.insert_batch(
-            &ctx,
-            "bad_scale_write",
-            "typed_events_bad1",
-            &[WrongScaleRow {
-                d64: Decimal64::new(100),
-            }],
-            BatchInsertOptions::new(),
-        )
-        .await,
-        Err(InsertError::NotApplied(InsertFailure::Encode))
-    );
-    assert_eq!(
-        ch.insert_batch(
-            &ctx,
-            "bad_prec_write",
-            "typed_events_bad2",
-            &[WrongPrecisionTsRow { ts }],
-            BatchInsertOptions::new(),
-        )
-        .await,
-        Err(InsertError::NotApplied(InsertFailure::Encode))
-    );
+    assert_typed_mismatches_rejected(&ch, &ctx, ts).await;
 
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,
@@ -922,32 +1081,41 @@ async fn datetime_and_decimal_query_param_formatting_and_validation() {
 
     let ts = time::OffsetDateTime::from_unix_timestamp_nanos(1_763_820_000_123_000_000)
         .expect("valid ts");
-    let pre_2001 = time::OffsetDateTime::from_unix_timestamp_nanos(-500_000_000).expect("1969");
+    let y1999 =
+        time::OffsetDateTime::from_unix_timestamp_nanos(946_684_799_500_000_000).expect("1999");
+    let neg_1_5 = time::OffsetDateTime::from_unix_timestamp_nanos(-1_500_000_000).expect("-1.5s");
+    let neg_half = time::OffsetDateTime::from_unix_timestamp_nanos(-500_000_000).expect("-0.5s");
     let _ = ch
         .query("param_fmt", "SELECT param_check")
         .param("dt_modern", ts)
         .param("dt_secs", Param::datetime_secs(ts))
-        .param("dt_old", pre_2001)
+        .param("dt_1999", y1999)
+        .param("dt_epoch", time::OffsetDateTime::UNIX_EPOCH)
+        .param("dt_neg", neg_1_5)
+        .param("dt_neg_half", neg_half)
         .param("dec_neg", Decimal64::<2>::new(-5))
         .param("dec_int", Param::decimal(42, 0))
+        .param(
+            "dec_arr",
+            vec![Decimal64::<2>::new(1234), Decimal64::<2>::new(-500)],
+        )
         .fetch_one::<SampleRow>(&ctx)
         .await
         .expect("params ok");
     let body = captured_bodies.lock().await.last().cloned().expect("body");
-    assert!(body.contains("1763820000.123000000"), "{body}");
-    assert!(
-        body.contains("name=\"param_dt_secs\"\r\n\r\n1763820000\r\n"),
-        "{body}"
-    );
-    assert!(body.contains("1969-12-31 23:59:59.500000000"), "{body}");
-    assert!(
-        body.contains("name=\"param_dec_neg\"\r\n\r\n-0.05\r\n"),
-        "{body}"
-    );
-    assert!(
-        body.contains("name=\"param_dec_int\"\r\n\r\n42\r\n"),
-        "{body}"
-    );
+    for expected in [
+        "name=\"param_dt_modern\"\r\n\r\n1763820000.123000000\r\n",
+        "name=\"param_dt_secs\"\r\n\r\n1763820000\r\n",
+        "name=\"param_dt_1999\"\r\n\r\n0946684799.500000000\r\n",
+        "name=\"param_dt_epoch\"\r\n\r\n0000000000\r\n",
+        "name=\"param_dt_neg\"\r\n\r\n-0000000001.500000000\r\n",
+        "name=\"param_dt_neg_half\"\r\n\r\n1969-12-31 23:59:59.500000000\r\n",
+        "name=\"param_dec_neg\"\r\n\r\n-0.05\r\n",
+        "name=\"param_dec_int\"\r\n\r\n42\r\n",
+        "name=\"param_dec_arr\"\r\n\r\n[12.34,-5.00]\r\n",
+    ] {
+        assert!(body.contains(expected), "missing {expected:?} in {body}");
+    }
 
     assert_eq!(
         ch.query("bad_dec_scale", "SELECT 1")

@@ -9,7 +9,7 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::response::IntoResponse as _;
 use axum::routing::post;
 use axum_test::TestServer;
-use infra_clickhouse::{AsyncDeduplication, ClickHouseOptions, QuerySettings, Row};
+use infra_clickhouse::{ClickHouseOptions, QuerySettings, Row};
 use operation_context::Stopped;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, watch};
@@ -300,7 +300,7 @@ async fn run_insert_scenario(
                     "ingest",
                     "events_ok",
                     &rows,
-                    AsyncInsertOptions::new(AsyncDeduplication::ByToken("tok")),
+                    AsyncInsertOptions::with_token("tok"),
                 )
                 .await
                 .unwrap();

@@ -85,7 +85,7 @@ impl<'a> BatchInsertOptions<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AsyncDeduplication<'a> {
+enum AsyncDeduplication<'a> {
     Disabled,
     ByPayloadHash,
     ByToken(&'a str),
@@ -100,7 +100,7 @@ pub struct AsyncInsertOptions<'a> {
 }
 
 impl<'a> AsyncInsertOptions<'a> {
-    pub const fn new(deduplication: AsyncDeduplication<'a>) -> Self {
+    const fn new(deduplication: AsyncDeduplication<'a>) -> Self {
         Self {
             timeout: None,
             deduplication,
@@ -122,11 +122,6 @@ impl<'a> AsyncInsertOptions<'a> {
 
     pub const fn timeout(mut self, limit: Duration) -> Self {
         self.timeout = Some(limit);
-        self
-    }
-
-    pub const fn deduplication(mut self, mode: AsyncDeduplication<'a>) -> Self {
-        self.deduplication = mode;
         self
     }
 

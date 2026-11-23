@@ -245,7 +245,9 @@ const fn clickhouse_code_reason(code: u32) -> FailureReason {
         497 => FailureReason::Access,
         164 => FailureReason::Readonly,
         16 | 47 | 53 | 60 | 81 => FailureReason::Schema,
-        36 | 43 | 46 | 62 | 70 | 117 | 153 | 215 | 386 | 456 | 457 => FailureReason::QueryInvalid,
+        36 | 43 | 46 | 62 | 70 | 117 | 130 | 153 | 215 | 386 | 456 | 457 => {
+            FailureReason::QueryInvalid
+        }
         158 | 307 | 396 => FailureReason::ResultLimit,
         159 => FailureReason::ServerTimeout,
         241 => FailureReason::MemoryLimit,
@@ -262,25 +264,12 @@ pub(crate) const fn is_auth_failure(detail: FailureDetail) -> bool {
     )
 }
 
-fn is_rows_limit_message(message: &str) -> bool {
-    let bytes = message.as_bytes();
-    let end = bytes.len().min(MAX_BAD_RESPONSE_SCAN_BYTES);
-    bytes
-        .get(..end)
-        .is_some_and(|prefix| prefix.windows(8).any(|window| window == b"max rows"))
+fn is_result_rows_limit_message(message: &str) -> bool {
+    message.contains("Limit for result exceeded") && message.contains("max rows")
 }
 
 pub(crate) fn is_header_schema_mismatch(message: &str) -> bool {
-    if extract_exception_code(message) != Some(117) {
-        return false;
-    }
-    let bytes = message.as_bytes();
-    let end = bytes.len().min(MAX_BAD_RESPONSE_SCAN_BYTES);
-    bytes.get(..end).is_some_and(|prefix| {
-        prefix
-            .windows(20)
-            .any(|window| window == b"while reading header")
-    })
+    extract_exception_code(message) == Some(117) && message.contains("while reading header")
 }
 
 const fn http_status_reason(status: u16) -> FailureReason {
@@ -352,9 +341,7 @@ pub(crate) fn classify_query_error(
         }
         clickhouse::error::Error::BadResponse(message) => {
             if let Some(code) = extract_exception_code(message) {
-                if cardinality_capped
-                    && (code == 158 || (code == 396 && is_rows_limit_message(message)))
-                {
+                if cardinality_capped && code == 396 && is_result_rows_limit_message(message) {
                     return ObservedFailure::new(
                         QueryError::TooManyRows,
                         FailureDetail::with_clickhouse_code(FailureReason::TooManyRows, code),
@@ -363,8 +350,8 @@ pub(crate) fn classify_query_error(
                 let error = match code {
                     158 | 307 | 396 => QueryError::TooLarge,
                     159 | 241 => QueryError::ResourceLimit,
-                    16 | 36 | 43 | 46 | 47 | 53 | 60 | 62 | 70 | 81 | 117 | 153 | 164 | 215
-                    | 386 | 456 | 457 | 497 | 516 => QueryError::Rejected,
+                    16 | 36 | 43 | 46 | 47 | 53 | 60 | 62 | 70 | 81 | 117 | 130 | 153 | 164
+                    | 215 | 386 | 456 | 457 | 497 | 516 => QueryError::Rejected,
                     _ => QueryError::Unavailable,
                 };
                 ObservedFailure::new(

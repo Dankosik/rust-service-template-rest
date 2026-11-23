@@ -14,10 +14,11 @@ use infra_clickhouse::{
     QuerySettings, Row,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-use operation_context::{OperationContext, Stopped};
+use operation_context::{Deadline, OperationContext, Stopped};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -253,41 +254,64 @@ async fn assert_rw_batch_async_dedup_and_empty(
     );
 }
 
+async fn count_running_marker(rw: &ClickHouse, ctx: &OperationContext, marker: &str) -> u64 {
+    rw.query(
+        "check_processes",
+        "SELECT count() FROM system.processes WHERE position(query, {marker:String}) > 0 AND position(query, 'system.processes') = 0",
+    )
+    .param("marker", marker)
+    .fetch_one(ctx)
+    .await
+    .expect("query system.processes")
+}
+
 async fn assert_server_side_http_post_cancellation(rw: &ClickHouse, ctx: &OperationContext) {
     let marker = format!("cancel_marker_{}", uuid::Uuid::new_v4().simple());
-    let short_ctx = OperationContext::with_timeout(Duration::from_millis(250));
-    let started = std::time::Instant::now();
-    let cancel_err = rw
-        .query(
-            "slow_cancel",
-            &format!("SELECT sum(sipHash64(number)) AS id FROM numbers(1500000000) /* {marker} */"),
-        )
-        .fetch_one::<SimpleRow>(&short_ctx)
-        .await
-        .expect_err("deadline stop");
-    assert_eq!(cancel_err, QueryError::Stopped(Stopped::Deadline));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    let token = CancellationToken::new();
+    let cancel_ctx =
+        OperationContext::new(Some(Deadline::after(Duration::from_secs(5))), token.clone());
+    let rw_bg = rw.clone();
+    let sql =
+        format!("SELECT sum(sipHash64(number)) AS id FROM numbers(5000000000) /* {marker} */");
+    let query_task = tokio::spawn(async move {
+        rw_bg
+            .query("slow_cancel", &sql)
+            .fetch_one::<SimpleRow>(&cancel_ctx)
+            .await
+    });
+
+    let mut observed_running = false;
+    for _ in 0..80 {
+        if count_running_marker(rw, ctx, &marker).await >= 1 {
+            observed_running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        observed_running,
+        "slow query never became visible in system.processes before cancellation"
+    );
+
+    let cancelled_at = std::time::Instant::now();
+    token.cancel();
+    assert_eq!(
+        query_task.await.expect("join slow query"),
+        Err(QueryError::Stopped(Stopped::Cancelled))
+    );
 
     let mut cancelled_on_server = false;
-    for _ in 0..40 {
-        let running: u64 = rw
-            .query(
-                "check_processes",
-                "SELECT count() FROM system.processes WHERE position(query, {marker:String}) > 0 AND position(query, 'system.processes') = 0",
-            )
-            .param("marker", marker.as_str())
-            .fetch_one(ctx)
-            .await
-            .expect("query system.processes");
-        if running == 0 {
+    for _ in 0..80 {
+        if count_running_marker(rw, ctx, &marker).await == 0 {
             cancelled_on_server = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(
-        cancelled_on_server,
-        "cancelled HTTP POST query remained active in system.processes"
+        cancelled_on_server && cancelled_at.elapsed() < Duration::from_secs(2),
+        "cancelled HTTP POST query remained active in system.processes (elapsed={:?})",
+        cancelled_at.elapsed()
     );
 }
 
@@ -387,6 +411,15 @@ async fn assert_read_bounds_cardinality_and_cancellation(
         )
         .max_result_bytes(NonZeroUsize::new(64 * 1024).expect("nz"))
         .fetch_one::<String>(ctx)
+        .await,
+        Err(QueryError::TooLarge)
+    );
+    assert_eq!(
+        rw.query(
+            "one_scan_limit_158",
+            "SELECT count() FROM numbers(1000) SETTINGS max_rows_to_read = 10"
+        )
+        .fetch_one::<u64>(ctx)
         .await,
         Err(QueryError::TooLarge)
     );
@@ -920,7 +953,7 @@ async fn assert_live_decimal_scale_change_rejection(
             ctx,
             "modify_scale_reject",
             tbl,
-            &[stale_row(2)],
+            &[stale_row(2), stale_row(3)],
             BatchInsertOptions::new(),
         )
         .await
@@ -932,7 +965,7 @@ async fn assert_live_decimal_scale_change_rejection(
             ctx,
             "modify_scale_reprimed",
             tbl,
-            &[stale_row(3)],
+            &[stale_row(4)],
             BatchInsertOptions::new(),
         )
         .await
@@ -941,6 +974,60 @@ async fn assert_live_decimal_scale_change_rejection(
         reprimes_to_encode,
         InsertError::NotApplied(InsertFailure::Encode)
     );
+}
+
+async fn assert_timezone_and_decimal_array_params_live(
+    rw: &ClickHouse,
+    ctx: &OperationContext,
+    ts: time::OffsetDateTime,
+) {
+    for (label, dt_val, expected_ns) in [
+        ("modern", ts, 1_763_820_000_123_000_000_i64),
+        (
+            "pre_2001",
+            time::OffsetDateTime::from_unix_timestamp_nanos(946_684_799_500_000_000).expect("1999"),
+            946_684_799_500_000_000,
+        ),
+        ("epoch", time::OffsetDateTime::UNIX_EPOCH, 0),
+        (
+            "pre_epoch",
+            time::OffsetDateTime::from_unix_timestamp_nanos(-1_500_000_000).expect("-1.5s"),
+            -1_500_000_000,
+        ),
+    ] {
+        let tz_nanos: i64 = rw
+            .query(
+                "tz_param_moscow",
+                "SELECT toUnixTimestamp64Nano({dt:DateTime64(3, 'Europe/Moscow')})",
+            )
+            .param("dt", dt_val)
+            .fetch_one(ctx)
+            .await
+            .expect(label);
+        assert_eq!(tz_nanos, expected_ns, "{label}");
+    }
+
+    let dt32_secs: u32 = rw
+        .query("dt32_param", "SELECT toUnixTimestamp({dt:DateTime})")
+        .param("dt", Param::datetime_secs(ts))
+        .fetch_one(ctx)
+        .await
+        .expect("dt32 param with subsec truncated ok");
+    assert_eq!(dt32_secs, 1_763_820_000);
+
+    let dec_arr_sum: Decimal128<2> = rw
+        .query(
+            "decimal_array_param",
+            "SELECT arraySum({vals:Array(Decimal64(2))})",
+        )
+        .param(
+            "vals",
+            vec![Decimal64::<2>::new(1234), Decimal64::<2>::new(-500)],
+        )
+        .fetch_one(ctx)
+        .await
+        .expect("Array(Decimal64(2)) param ok");
+    assert_eq!(dec_arr_sum, Decimal128::new(734));
 }
 
 async fn assert_decimal_datetime64_and_timezone_params_live(
@@ -977,24 +1064,7 @@ async fn assert_decimal_datetime64_and_timezone_params_live(
         .await
         .expect("typed insert ok");
 
-    let tz_nanos: i64 = rw
-        .query(
-            "tz_param_moscow",
-            "SELECT toUnixTimestamp64Nano({dt:DateTime64(3, 'Europe/Moscow')})",
-        )
-        .param("dt", ts)
-        .fetch_one(ctx)
-        .await
-        .expect("tz param ok");
-    assert_eq!(tz_nanos, 1_763_820_000_123_000_000);
-
-    let dt32_secs: u32 = rw
-        .query("dt32_param", "SELECT toUnixTimestamp({dt:DateTime})")
-        .param("dt", Param::datetime_secs(ts))
-        .fetch_one(ctx)
-        .await
-        .expect("dt32 param with subsec truncated ok");
-    assert_eq!(dt32_secs, 1_763_820_000);
+    assert_timezone_and_decimal_array_params_live(rw, ctx, ts).await;
 
     let matched: u64 = rw
         .query(

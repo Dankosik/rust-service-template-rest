@@ -36,8 +36,7 @@ use self::credentials::ActiveCredentials;
 use self::error::StartErrorKind;
 pub use self::error::{InsertError, InsertFailure, QueryError, StartError, UnknownOutcome};
 pub use self::insert::{
-    AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, InsertOutcomes, InsertReport,
-    WriteRow,
+    AsyncInsertOptions, BatchInsertOptions, InsertOutcomes, InsertReport, WriteRow,
 };
 use self::metadata::TableSlotRegistry;
 pub use self::observe::HISTOGRAMS;

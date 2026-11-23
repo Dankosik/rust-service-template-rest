@@ -592,7 +592,10 @@ pub mod time {
     /// Contains modules to ser/de `OffsetDateTime` to/from `DateTime64(_)`.
     pub mod datetime64 {
         use super::*;
-        use crate::types::decimal::{DateTime64Wire, deserialize_datetime64_ticks};
+        use crate::types::decimal::{
+            DATETIME64_MICROS_NAME, DATETIME64_MILLIS_NAME, DATETIME64_NANOS_NAME,
+            DATETIME64_SECS_NAME, DateTime64Wire, deserialize_datetime64_ticks,
+        };
 
         /// Ser/de `OffsetDateTime` to/from `DateTime64(0)`.
         pub mod secs {
@@ -607,14 +610,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1_000_000_000, "__clickhouse_datetime64_0", serializer)
+                do_serialize(dt, 1_000_000_000, DATETIME64_SECS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1_000_000_000, "__clickhouse_datetime64_0")
+                do_deserialize(deserializer, 1_000_000_000, DATETIME64_SECS_NAME)
             }
         }
 
@@ -631,14 +634,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1_000_000, "__clickhouse_datetime64_3", serializer)
+                do_serialize(dt, 1_000_000, DATETIME64_MILLIS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1_000_000, "__clickhouse_datetime64_3")
+                do_deserialize(deserializer, 1_000_000, DATETIME64_MILLIS_NAME)
             }
         }
 
@@ -655,14 +658,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1_000, "__clickhouse_datetime64_6", serializer)
+                do_serialize(dt, 1_000, DATETIME64_MICROS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1_000, "__clickhouse_datetime64_6")
+                do_deserialize(deserializer, 1_000, DATETIME64_MICROS_NAME)
             }
         }
 
@@ -679,14 +682,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1, "__clickhouse_datetime64_9", serializer)
+                do_serialize(dt, 1, DATETIME64_NANOS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1, "__clickhouse_datetime64_9")
+                do_deserialize(deserializer, 1, DATETIME64_NANOS_NAME)
             }
         }
 

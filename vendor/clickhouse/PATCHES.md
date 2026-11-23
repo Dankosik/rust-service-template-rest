@@ -20,23 +20,27 @@ dependencies or `unsafe`:
    `MAX_BAD_RESPONSE_BYTES = 64 * 1024` (64 KiB), stopping early once the bound
    is reached while preserving leading bytes (`Code: <u32>`) and existing
    canonical `Error::BadResponse` status-reason fallbacks.
-3. `src/insert_formatted.rs` (`InsertFormatted::poll_ready`,
-   `BufInsertFormatted::poll_flush_inner`): when `ChunkSender` reports closed,
-   transitions to `InsertState::Terminated` and awaits `handle` via
-   `poll_wait_handle_or_closed` instead of returning a generic
-   `Error::Network("channel closed")`, preserving real server `Error::BadResponse`
-   (`Code: 252`, `516`, `53`, `16`, `413`) and `hyper` connect errors across
-   multi-chunk (> 254 KiB) batches and fast warm-slot failures.
+3. `src/insert_formatted.rs` (`InsertState::Terminated { channel_closed }`,
+   `InsertFormatted::poll_ready`, `BufInsertFormatted::poll_flush_inner`): when
+   `ChunkSender` reports closed while sending, transitions to
+   `InsertState::Terminated { channel_closed: true }` and awaits `handle`,
+   preserving real server `Error::BadResponse` (`Code: 252`, `516`, `53`, `16`,
+   `117`, `413`) and `hyper` connect errors across multi-chunk (> 254 KiB)
+   batches and fast warm-slot failures while converting early HTTP `200 OK`
+   after an unsent chunk into `Error::Network("channel closed")` even across
+   `Poll::Pending` re-polls in `poll_end`.
 4. `src/row_metadata.rs` (`InsertMetadata::to_row`): permits omitting
    `Nullable(T)` and `LowCardinality(Nullable(T))` columns even when ClickHouse
    `DESCRIBE TABLE` reports `default_type = ""`, matching ClickHouse SQL's
    implicit `NULL` default for `ALTER TABLE ... ADD COLUMN ... Nullable(T)`.
-5. `src/types/decimal.rs`, `src/serde.rs`, and `src/rowbinary/{validation,ser,de}.rs`:
-   adds scale-validated `Decimal32<SCALE>`, `Decimal64<SCALE>`, and
-   `Decimal128<SCALE>` types, tags `serde::time::datetime64::{secs,millis,micros,nanos}`
-   with exact precision markers, and enforces exact `DateTime64` precision and
-   `Decimal` scale in `DataTypeValidator` (rejecting mismatches and untagged
-   raw `i32`/`i64`/`i128` against `DateTime64`/`Decimal` columns).
+5. `src/types/decimal.rs`, `src/serde.rs`, `src/sql/ser.rs`, and
+   `src/rowbinary/{validation,ser,de}.rs`: adds scale-validated
+   `Decimal32<SCALE>`, `Decimal64<SCALE>`, and `Decimal128<SCALE>` types (with
+   unquoted SQL/parameter and `Array(Decimal)` serialization), tags
+   `serde::time::datetime64::{secs,millis,micros,nanos}` with exact precision
+   markers, and enforces exact `DateTime64` precision and `Decimal` scale in
+   `DataTypeValidator` (rejecting mismatches and untagged raw
+   `i32`/`i64`/`i128` against `DateTime64`/`Decimal` columns).
 6. `src/cursors/{raw,row}.rs` and `src/error.rs`: adds
    `RowCursor::with_max_decoded_bytes` and `Error::ResultBytesLimitExceeded`,
    enforcing the decoded-byte ceiling in `RawCursor::poll_next` before

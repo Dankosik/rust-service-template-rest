@@ -17,9 +17,8 @@ use super::{
     SampleRow, base_options, rbwnat_describe_id_column, rbwnat_u64_rows, spawn_http_server,
 };
 use crate::{
-    AsyncDeduplication, AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClientCertificate,
-    CloseOutcome, InsertError, InsertFailure, InsertReport, QueryError, QuerySettings, Row,
-    UnknownOutcome,
+    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClientCertificate, CloseOutcome,
+    InsertError, InsertFailure, InsertReport, QueryError, QuerySettings, Row, UnknownOutcome,
 };
 
 async fn spawn_read_fault_server(
@@ -541,7 +540,7 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         "async_tok",
         "events",
         &[SampleRow { id: 4 }],
-        AsyncInsertOptions::new(AsyncDeduplication::ByToken("tok-a")),
+        AsyncInsertOptions::with_token("tok-a"),
     )
     .await
     .expect("async tok ok");

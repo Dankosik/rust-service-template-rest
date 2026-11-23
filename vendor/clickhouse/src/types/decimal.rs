@@ -4,10 +4,16 @@ use serde::{
 };
 use std::fmt;
 
+pub const MAX_DECIMAL_SCALE: u8 = 38;
+pub(crate) const DECIMAL_PARAM_SERDE_NAME: &str = "__clickhouse_decimal_param";
 pub(crate) const DECIMAL32_PREFIX: &str = "__clickhouse_decimal32_";
 pub(crate) const DECIMAL64_PREFIX: &str = "__clickhouse_decimal64_";
 pub(crate) const DECIMAL128_PREFIX: &str = "__clickhouse_decimal128_";
 pub(crate) const DATETIME64_PREFIX: &str = "__clickhouse_datetime64_";
+pub(crate) const DATETIME64_SECS_NAME: &str = "__clickhouse_datetime64_0";
+pub(crate) const DATETIME64_MILLIS_NAME: &str = "__clickhouse_datetime64_3";
+pub(crate) const DATETIME64_MICROS_NAME: &str = "__clickhouse_datetime64_6";
+pub(crate) const DATETIME64_NANOS_NAME: &str = "__clickhouse_datetime64_9";
 
 const DECIMAL32_NAMES: [&str; 10] = [
     "__clickhouse_decimal32_0",
@@ -143,7 +149,12 @@ macro_rules! define_scaled_decimal {
 
         impl<const SCALE: u8> Serialize for $name<SCALE> {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.serialize_newtype_struct(Self::serde_name(), &self.0)
+                let () = Self::VALID_SCALE;
+                if serializer.is_human_readable() {
+                    serialize_decimal_param(i128::from(self.0), SCALE, serializer)
+                } else {
+                    serializer.serialize_newtype_struct(Self::serde_name(), &self.0)
+                }
             }
         }
 
@@ -170,6 +181,8 @@ macro_rules! define_scaled_decimal {
                 deserializer.deserialize_newtype_struct(Self::serde_name(), NewtypeVisitor::<SCALE>)
             }
         }
+
+        impl<const SCALE: u8> crate::row::Primitive for $name<SCALE> {}
 
         impl<const SCALE: u8> fmt::Display for $name<SCALE> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -203,6 +216,36 @@ define_scaled_decimal!(
     DECIMAL128_NAMES,
     "Scale-validated ClickHouse `Decimal128(S)` value stored as a scaled `i128`."
 );
+
+struct FormattedDecimal {
+    unscaled: i128,
+    scale: u8,
+}
+
+impl fmt::Display for FormattedDecimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_scaled_i128(f, self.unscaled, self.scale)
+    }
+}
+
+impl Serialize for FormattedDecimal {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+pub fn serialize_decimal_param<S: Serializer>(
+    unscaled: i128,
+    scale: u8,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if scale > MAX_DECIMAL_SCALE {
+        return Err(serde::ser::Error::custom(format!(
+            "decimal scale {scale} exceeds ClickHouse maximum {MAX_DECIMAL_SCALE}"
+        )));
+    }
+    serializer.serialize_newtype_struct(DECIMAL_PARAM_SERDE_NAME, &FormattedDecimal { unscaled, scale })
+}
 
 pub(crate) fn format_scaled_i128(
     f: &mut fmt::Formatter<'_>,
