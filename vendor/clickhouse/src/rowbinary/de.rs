@@ -2,7 +2,9 @@ use crate::Row;
 use crate::error::{Error, Result};
 use crate::row_metadata::RowMetadata;
 use crate::rowbinary::utils::{ensure_size, get_unsigned_leb128};
-use crate::rowbinary::validation::{DataTypeValidator, NullEncoding, SchemaValidator, SerdeType};
+use crate::rowbinary::validation::{
+    DataTypeValidator, NullEncoding, SchemaValidator, SerdeType, parse_scaled_newtype,
+};
 use crate::types::bf16;
 use crate::types::int256;
 use bytes::Buf;
@@ -318,6 +320,12 @@ where
         name: &str,
         visitor: V,
     ) -> Result<V::Value> {
+        if let Some(serde_type) = parse_scaled_newtype(name) {
+            self.validator.validate(serde_type)?;
+            let mut unvalidated = RowBinaryDeserializer::<R, ()>::new(self.input, ());
+            return visitor.visit_newtype_struct(&mut unvalidated);
+        }
+
         const FIXED_BYTES: &[(&str, usize)] = &[
             (int256::MODULE_PATH, int256::BYTE_LEN),
             (bf16::MODULE_PATH, bf16::BYTE_LEN),

@@ -3,6 +3,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::row::RowKind;
 use clickhouse_types::Column;
+use clickhouse_types::data_types::DataTypeNode;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -256,7 +257,15 @@ impl InsertMetadata {
         }
 
         let missing_columns = set_columns.iter().enumerate().filter_map(|(col, &is_set)| {
-            if is_set || self.column_default_kinds[col].has_default() {
+            if is_set
+                || self.column_default_kinds[col].has_default()
+                || matches!(
+                    self.row_metadata.columns[col]
+                        .data_type
+                        .remove_low_cardinality(),
+                    DataTypeNode::Nullable(_)
+                )
+            {
                 return None;
             }
 

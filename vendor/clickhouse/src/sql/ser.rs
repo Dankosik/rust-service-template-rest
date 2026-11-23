@@ -1,7 +1,7 @@
 use std::fmt::{self, Write};
 
 use super::escape;
-use crate::types::{Int256, UInt256};
+use crate::types::{Int256, UInt256, decimal::DECIMAL_PARAM_SERDE_NAME};
 use serde::{
     Serialize,
     ser::{self, SerializeSeq, SerializeTuple, Serializer},
@@ -229,6 +229,11 @@ impl<'a, W: Write> Serializer for SqlSerializer<'a, W> {
 
                 Ok(())
             }
+            DECIMAL_PARAM_SERDE_NAME => value.serialize(SqlSerializer {
+                writer: &mut self.writer,
+                in_param: self.in_param,
+                skip_next_string_escape: true,
+            }),
 
             _ => value.serialize(self),
         }
@@ -446,7 +451,10 @@ impl<'a, W: Write> Serializer for ParamSerializer<'a, W> {
         name: &'static str,
         value: &T,
     ) -> Result {
-        if matches!(name, UInt256::SERDE_NAME | Int256::SERDE_NAME) {
+        if matches!(
+            name,
+            UInt256::SERDE_NAME | Int256::SERDE_NAME | DECIMAL_PARAM_SERDE_NAME
+        ) {
             value.serialize(SqlSerializer {
                 writer: &mut self.writer,
                 in_param: true,

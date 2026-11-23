@@ -13,7 +13,7 @@ use super::{
     SampleRow, base_options, prometheus_recorder, rbwnat_describe_id_column, rbwnat_u64_rows,
     spawn_http_server,
 };
-use crate::{BatchInsertOptions, ClickHouse, CloseOutcome};
+use crate::{BatchInsertOptions, ClickHouse, CloseOutcome, InsertError, InsertFailure, QueryError};
 
 fn metric_counter(scrape: &str, name: &str, outcome: &str) -> u64 {
     let label = format!("outcome=\"{outcome}\"");
@@ -337,4 +337,191 @@ async fn in_flight_call_keeps_starting_credential_and_drop_cancels_refresh() {
         "refresh task did not exit after dropping ClickHouse without close()"
     );
     srv.abort();
+}
+
+async fn wait_for_updated_reaches(
+    recorder: &metrics_exporter_prometheus::PrometheusRecorder,
+    expected: u64,
+    max_wait: Duration,
+    msg: &str,
+) {
+    let deadline = tokio::time::Instant::now() + max_wait;
+    let mut scrape = String::new();
+    while tokio::time::Instant::now() < deadline {
+        scrape = recorder.handle().render();
+        if metric_counter(
+            &scrape,
+            "clickhouse_password_file_refreshes_total",
+            "updated",
+        ) == expected
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        metric_counter(
+            &scrape,
+            "clickhouse_password_file_refreshes_total",
+            "updated",
+        ),
+        expected,
+        "{msg}"
+    );
+}
+
+#[tokio::test]
+async fn password_file_reloads_reactively_on_query_and_insert_code_516() {
+    let recorder = prometheus_recorder();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pw_path = dir.path().join("password");
+    let staging = dir.path().join("password.tmp");
+    tokio::fs::write(&pw_path, "pw-v1\n")
+        .await
+        .expect("write initial");
+
+    let expected_pw = Arc::new(Mutex::new("pw-v1".to_owned()));
+    let (addr, srv) = spawn_auth_server(Arc::clone(&expected_pw)).await;
+
+    let make_opts = || {
+        let mut opts = base_options(format!("http://{addr}"));
+        opts.password = None;
+        opts.password_file = Some(pw_path.clone());
+        opts
+    };
+    let ch_read = ClickHouse::start(make_opts()).await.expect("start read");
+    let ch_write = ClickHouse::start(make_opts()).await.expect("start write");
+    let ctx = OperationContext::with_timeout(Duration::from_secs(5));
+
+    assert_eq!(
+        ch_read
+            .query("initial", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await
+            .expect("initial ok")
+            .id,
+        1
+    );
+
+    write_password_atomic(&staging, &pw_path, "pw-v2\n").await;
+    *expected_pw.lock().await = "pw-v2".to_owned();
+
+    assert_eq!(
+        ch_read
+            .query("stale_query_516", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await,
+        Err(QueryError::Rejected)
+    );
+    wait_for_updated_reaches(
+        &recorder,
+        1,
+        Duration::from_secs(2),
+        "query 516 triggers immediate reload (< 5s poll)",
+    )
+    .await;
+    assert_eq!(
+        ch_read
+            .query("recovered_query", "SELECT 1")
+            .fetch_one::<SampleRow>(&ctx)
+            .await
+            .expect("query recovered")
+            .id,
+        1
+    );
+
+    assert_eq!(
+        ch_write
+            .insert_batch(
+                &ctx,
+                "stale_insert_516",
+                "events",
+                &[SampleRow { id: 2 }],
+                BatchInsertOptions::new(),
+            )
+            .await,
+        Err(InsertError::NotApplied(InsertFailure::Rejected))
+    );
+    wait_for_updated_reaches(
+        &recorder,
+        2,
+        Duration::from_secs(2),
+        "insert 516 triggers immediate reload (< 5s poll)",
+    )
+    .await;
+    assert_eq!(
+        ch_write
+            .insert_batch(
+                &ctx,
+                "recovered_insert",
+                "events",
+                &[SampleRow { id: 3 }],
+                BatchInsertOptions::new(),
+            )
+            .await
+            .expect("insert recovered")
+            .rows,
+        1
+    );
+
+    assert_eq!(
+        ch_read.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    assert_eq!(
+        ch_write.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    srv.abort();
+}
+
+#[tokio::test]
+async fn reactive_password_refresh_enforces_1s_cooldown_before_second_reload() {
+    let recorder = prometheus_recorder();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pw_path = dir.path().join("password");
+    let staging = dir.path().join("password.tmp");
+    tokio::fs::write(&pw_path, "pw-v1\n")
+        .await
+        .expect("write initial");
+
+    let mut opts = base_options("http://127.0.0.1:1".to_owned());
+    opts.password = None;
+    opts.password_file = Some(pw_path.clone());
+    let ch = ClickHouse::start(opts).await.expect("start");
+
+    write_password_atomic(&staging, &pw_path, "pw-v2\n").await;
+    let first_triggered = std::time::Instant::now();
+    ch.inner.shared.notify_auth_failure();
+    wait_for_updated_reaches(
+        &recorder,
+        1,
+        Duration::from_secs(2),
+        "first reactive trigger reloads immediately",
+    )
+    .await;
+
+    write_password_atomic(&staging, &pw_path, "pw-v3\n").await;
+    ch.inner.shared.notify_auth_failure();
+    wait_for_updated_reaches(
+        &recorder,
+        2,
+        Duration::from_millis(3500),
+        "second reactive trigger reloads after 1s cooldown (< 5s poll)",
+    )
+    .await;
+    let elapsed = first_triggered.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(4),
+        "expected second reactive reload after 1s cooldown and before 5s poll, got {elapsed:?}"
+    );
+
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
 }

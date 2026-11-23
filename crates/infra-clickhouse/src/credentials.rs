@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
 use zeroize::Zeroizing;
@@ -13,6 +13,7 @@ use crate::error::StartErrorKind;
 use crate::observe::PasswordRefreshOutcome;
 
 pub(crate) const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const REACTIVE_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(derive_more::Debug)]
@@ -43,18 +44,34 @@ impl RefreshReadFailure {
     }
 }
 
-pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf) {
+pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf, trigger: Arc<Notify>) {
     let reading = Arc::new(Semaphore::new(1));
     let mut warned_read_failure = false;
+    let mut last_reactive_refresh: Option<Instant> = None;
     let mut next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
 
     loop {
-        tokio::select! {
+        let reactive = tokio::select! {
             biased;
             () = shared.shutdown.cancelled() => return,
-            () = tokio::time::sleep_until(next_refresh) => {}
+            () = trigger.notified() => true,
+            () = tokio::time::sleep_until(next_refresh) => false,
+        };
+        if reactive
+            && let Some(prev) = last_reactive_refresh
+            && let Some(wait) = REACTIVE_REFRESH_COOLDOWN.checked_sub(prev.elapsed())
+        {
+            tokio::select! {
+                biased;
+                () = shared.shutdown.cancelled() => return,
+                () = tokio::time::sleep(wait) => {}
+            }
         }
-        next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
+        let now = Instant::now();
+        if reactive {
+            last_reactive_refresh = Some(now);
+        }
+        next_refresh = now + PASSWORD_REFRESH_INTERVAL;
 
         let result = tokio::select! {
             biased;

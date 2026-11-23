@@ -2,7 +2,9 @@ use crate::Row;
 use crate::error::Error::SequenceMustHaveLength;
 use crate::error::{Error, Result};
 use crate::row_metadata::RowMetadata;
-use crate::rowbinary::validation::{DataTypeValidator, SchemaValidator, SerdeType};
+use crate::rowbinary::validation::{
+    DataTypeValidator, SchemaValidator, SerdeType, parse_scaled_newtype,
+};
 use crate::types::bf16;
 use crate::types::int256;
 use bytes::BufMut;
@@ -184,6 +186,12 @@ impl<'ser, B: BufMut, R: Row, V: SchemaValidator<R>> Serializer
         name: &'static str,
         value: &T,
     ) -> Result<()> {
+        if let Some(serde_type) = parse_scaled_newtype(name) {
+            self.validator.validate(serde_type)?;
+            let mut unvalidated = RowBinarySerializer::<&mut B, R, ()>::new(&mut self.buffer, ());
+            return value.serialize(&mut unvalidated);
+        }
+
         const FIXED_BYTES: &[(&str, usize)] = &[
             (int256::MODULE_PATH, int256::BYTE_LEN),
             (bf16::MODULE_PATH, bf16::BYTE_LEN),

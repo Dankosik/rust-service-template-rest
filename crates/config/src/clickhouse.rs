@@ -25,10 +25,13 @@ use crate::validate::{
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClickHouseQuerySettings {
-    /// The client attaches per-query budget and cancellation settings.
+    /// The client attaches per-query budget, `readonly = 2` (on reads), and
+    /// cancellation settings. Recommended for read-write users and for
+    /// read-only profiles configured with `readonly = 2` and `<constraints>`.
     #[default]
     Client,
-    /// The server user profile owns query budgets (for `readonly = 1` users).
+    /// The server user profile owns query budgets and cancellation settings
+    /// (required for rigid `readonly = 1` profiles).
     Server,
 }
 
@@ -85,10 +88,14 @@ pub(crate) struct ClickHouseInput {
     #[serde_as(as = "StrictDuration")]
     #[educe(Default(expression = Duration::from_secs(5)))]
     insert_timeout: Duration,
-    /// Maximum simultaneous in-flight `ClickHouse` operations (`1..=1024`).
+    /// Maximum simultaneous in-flight `ClickHouse` read queries (`1..=1024`).
     #[serde_as(as = "StrictCount")]
     #[educe(Default = 32)]
-    max_concurrency: usize,
+    max_read_concurrency: usize,
+    /// Maximum simultaneous in-flight `ClickHouse` inserts (`1..=1024`).
+    #[serde_as(as = "StrictCount")]
+    #[educe(Default = 32)]
+    max_write_concurrency: usize,
     /// Maximum rows returned by one bounded read (`1..=10_000_000`).
     #[serde_as(as = "StrictCount")]
     #[educe(Default = 100_000)]
@@ -122,7 +129,8 @@ pub struct ClickHouseConfig {
     pub query_settings: ClickHouseQuerySettings,
     pub query_timeout: Duration,
     pub insert_timeout: Duration,
-    pub max_concurrency: NonZeroUsize,
+    pub max_read_concurrency: NonZeroUsize,
+    pub max_write_concurrency: NonZeroUsize,
     pub max_result_rows: NonZeroU64,
     pub max_result_bytes: NonZeroUsize,
     pub http_response_buffer_size: NonZeroUsize,
@@ -137,7 +145,8 @@ enum UrlScheme {
 }
 
 struct AdmittedLimits {
-    max_concurrency: NonZeroUsize,
+    max_read_concurrency: NonZeroUsize,
+    max_write_concurrency: NonZeroUsize,
     max_result_rows: NonZeroU64,
     max_result_bytes: NonZeroUsize,
     http_response_buffer_size: NonZeroUsize,
@@ -247,7 +256,8 @@ impl ClickHouseInput {
             query_settings: self.query_settings,
             query_timeout: self.query_timeout,
             insert_timeout: self.insert_timeout,
-            max_concurrency: limits.max_concurrency,
+            max_read_concurrency: limits.max_read_concurrency,
+            max_write_concurrency: limits.max_write_concurrency,
             max_result_rows: limits.max_result_rows,
             max_result_bytes: limits.max_result_bytes,
             http_response_buffer_size: limits.http_response_buffer_size,
@@ -267,9 +277,14 @@ impl ClickHouseInput {
             self.insert_timeout,
             MIN_TIMEOUT..=MAX_TIMEOUT,
         ));
-        let max_concurrency = v.record(nonzero_usize_range(
-            "clickhouse.max_concurrency",
-            self.max_concurrency,
+        let max_read_concurrency = v.record(nonzero_usize_range(
+            "clickhouse.max_read_concurrency",
+            self.max_read_concurrency,
+            1..=MAX_CONCURRENCY_CEILING,
+        ));
+        let max_write_concurrency = v.record(nonzero_usize_range(
+            "clickhouse.max_write_concurrency",
+            self.max_write_concurrency,
             1..=MAX_CONCURRENCY_CEILING,
         ));
         let max_result_rows = v.record(nonzero_u64_range(
@@ -303,7 +318,8 @@ impl ClickHouseInput {
             .map(Some)
         };
 
-        let max_concurrency = max_concurrency?;
+        let max_read_concurrency = max_read_concurrency?;
+        let max_write_concurrency = max_write_concurrency?;
         let max_result_rows = max_result_rows?;
         let max_result_bytes = max_result_bytes?;
         let http_response_buffer_size = match http_response_buffer_size {
@@ -313,7 +329,8 @@ impl ClickHouseInput {
         let max_memory_usage = max_memory_usage?;
 
         Ok(AdmittedLimits {
-            max_concurrency,
+            max_read_concurrency,
+            max_write_concurrency,
             max_result_rows,
             max_result_bytes,
             http_response_buffer_size,

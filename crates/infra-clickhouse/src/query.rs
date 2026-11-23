@@ -8,9 +8,17 @@ use smallvec::SmallVec;
 
 use crate::error::{
     FailureReason, ObservedFailure, QueryError, bounded_stop_reason, classify_query_error,
+    is_auth_failure,
 };
 use crate::observe::{Operation, OperationGuard};
-use crate::{ClickHouse, QuerySettings, within_bounded};
+use crate::{
+    ClickHouse, Decimal32, Decimal64, Decimal128, QuerySettings, format_execution_timeout_secs,
+    within_bounded,
+};
+
+use clickhouse::types::{MAX_DECIMAL_SCALE, serialize_decimal_param};
+
+const NANOS_PER_SEC: u128 = 1_000_000_000;
 
 mod sealed {
     pub trait ReadRowSealed {}
@@ -27,6 +35,18 @@ impl<R> ReadRow for R where R: clickhouse::RowOwned + clickhouse::RowRead + Send
 #[derive(Clone, derive_more::Debug)]
 #[debug("Param(..)")]
 pub struct Param(ParamValue);
+
+impl Param {
+    #[must_use]
+    pub const fn datetime_secs(value: time::OffsetDateTime) -> Self {
+        Self(ParamValue::DateTimeSecs(value))
+    }
+
+    #[must_use]
+    pub const fn decimal(unscaled: i128, scale: u8) -> Self {
+        Self(ParamValue::Decimal(unscaled, scale))
+    }
+}
 
 #[derive(Clone)]
 enum ParamValue {
@@ -49,6 +69,8 @@ enum ParamValue {
     Uuid(uuid::Uuid),
     Date(time::Date),
     DateTime(time::OffsetDateTime),
+    DateTimeSecs(time::OffsetDateTime),
+    Decimal(i128, u8),
     None,
     Array(Vec<Param>),
 }
@@ -84,36 +106,38 @@ impl Serialize for ParamValue {
                     format!("{:04}-{:02}-{:02}", v.year(), u8::from(v.month()), v.day());
                 formatted.serialize(serializer)
             }
-            Self::DateTime(v) => {
-                let utc = v.to_offset(time::UtcOffset::UTC);
-                let ns = utc.nanosecond();
-                let formatted = if ns == 0 {
-                    format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                        utc.year(),
-                        u8::from(utc.month()),
-                        utc.day(),
-                        utc.hour(),
-                        utc.minute(),
-                        utc.second(),
-                    )
-                } else {
-                    format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-                        utc.year(),
-                        u8::from(utc.month()),
-                        utc.day(),
-                        utc.hour(),
-                        utc.minute(),
-                        utc.second(),
-                        ns,
-                    )
-                };
-                formatted.serialize(serializer)
+            Self::DateTime(v) => format_datetime_param(*v, true).serialize(serializer),
+            Self::DateTimeSecs(v) => format_datetime_param(*v, false).serialize(serializer),
+            Self::Decimal(unscaled, scale) => {
+                serialize_decimal_param(*unscaled, *scale, serializer)
             }
             Self::None => serializer.serialize_none(),
             Self::Array(items) => items.serialize(serializer),
         }
+    }
+}
+
+fn format_datetime_param(v: time::OffsetDateTime, include_subsec: bool) -> String {
+    if !include_subsec {
+        let secs = v.unix_timestamp();
+        return if secs < 0 {
+            format!("-{:010}", secs.unsigned_abs())
+        } else {
+            format!("{secs:010}")
+        };
+    }
+    let total_ns = v.unix_timestamp_nanos();
+    if (-999_999_999..0).contains(&total_ns) {
+        return format!("1969-12-31 23:59:59.{:09}", v.nanosecond());
+    }
+    let sign = if total_ns < 0 { "-" } else { "" };
+    let abs = total_ns.unsigned_abs();
+    let whole = abs / NANOS_PER_SEC;
+    let frac = abs % NANOS_PER_SEC;
+    if frac == 0 {
+        format!("{sign}{whole:010}")
+    } else {
+        format!("{sign}{whole:010}.{frac:09}")
     }
 }
 
@@ -150,6 +174,24 @@ impl_param_from!(
     time::Date => Date,
     time::OffsetDateTime => DateTime,
 );
+
+impl<const SCALE: u8> From<Decimal32<SCALE>> for Param {
+    fn from(value: Decimal32<SCALE>) -> Self {
+        Self::decimal(i128::from(value.unscaled()), value.scale())
+    }
+}
+
+impl<const SCALE: u8> From<Decimal64<SCALE>> for Param {
+    fn from(value: Decimal64<SCALE>) -> Self {
+        Self::decimal(i128::from(value.unscaled()), value.scale())
+    }
+}
+
+impl<const SCALE: u8> From<Decimal128<SCALE>> for Param {
+    fn from(value: Decimal128<SCALE>) -> Self {
+        Self::decimal(value.unscaled(), value.scale())
+    }
+}
 
 impl From<&str> for Param {
     fn from(value: &str) -> Self {
@@ -283,7 +325,7 @@ impl<'a> Query<'a> {
         ctx.check().map_err(QueryError::Stopped)?;
         validate_query_inputs(self.sql, &self.params, self.timeout)?;
 
-        let Ok(_permit) = shared.permits.clone().try_acquire_owned() else {
+        let Ok(_permit) = shared.read_permits.clone().try_acquire_owned() else {
             shared.metrics.record_admission_refused(operation);
             return Err(QueryError::Busy);
         };
@@ -302,10 +344,14 @@ impl<'a> Query<'a> {
                 self.max_result_rows
                     .map_or(shared.max_result_rows, NonZeroU64::get),
             );
+            let server_max_rows = cardinality_cap.map_or(effective_max_rows, |cap| {
+                effective_max_rows.min(u64::try_from(cap).unwrap_or(u64::MAX))
+            });
             let effective_max_bytes = shared.max_result_bytes.min(
                 self.max_result_bytes
                     .map_or(shared.max_result_bytes, NonZeroUsize::get),
             );
+            let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
 
             let bounded = ctx.bounded(effective_timeout);
             bounded.check().map_err(stop_to_query_error)?;
@@ -321,26 +367,34 @@ impl<'a> Query<'a> {
                 self.sql,
                 self.params,
                 bounded.remaining(),
-                effective_max_rows,
+                server_max_rows,
                 effective_max_bytes,
             );
             guard.record_query_id(query_id);
             bounded.check().map_err(stop_to_query_error)?;
+            let server_cardinality_capped =
+                shared.query_settings == QuerySettings::Client && cardinality_cap.is_some();
             let cursor = ch_query
                 .fetch::<R>()
-                .map_err(|err| classify_query_error(&err))?;
+                .map_err(|err| classify_query_error(&err, server_cardinality_capped))?
+                .with_max_decoded_bytes(max_bytes_u64);
 
             consume_bounded_rows(
                 cursor,
                 &bounded,
                 effective_max_rows,
-                effective_max_bytes,
                 cardinality_cap,
+                server_cardinality_capped,
                 finish_rows,
             )
             .await
         }
         .await;
+        if let Err(failure) = &result
+            && is_auth_failure(failure.detail)
+        {
+            shared.notify_auth_failure();
+        }
         guard.finish_query(result)
     }
 }
@@ -363,17 +417,18 @@ fn build_clickhouse_query(
         .with_setting("query_id", &query_id);
 
     if shared.query_settings == QuerySettings::Client {
-        let max_exec_secs = remaining
-            .as_secs()
-            .saturating_add(u64::from(remaining.subsec_nanos() > 0))
-            .max(1);
         ch_query = ch_query
-            .with_setting("max_execution_time", max_exec_secs.to_string())
+            .with_setting(
+                "max_execution_time",
+                format_execution_timeout_secs(remaining),
+            )
             .with_setting("timeout_overflow_mode", "throw")
             .with_setting("result_overflow_mode", "throw")
             .with_setting("max_result_rows", effective_max_rows.to_string())
             .with_setting("max_result_bytes", effective_max_bytes.to_string())
-            .with_setting("cancel_http_readonly_queries_on_client_close", "1");
+            .with_setting("readonly", "2")
+            .with_setting("cancel_http_readonly_queries_on_client_close", "1")
+            .with_setting("session_timezone", "UTC");
         if let Some(mem) = shared.max_memory_usage {
             ch_query = ch_query.with_setting("max_memory_usage", mem.to_string());
         }
@@ -389,11 +444,10 @@ async fn consume_bounded_rows<R: ReadRow, T>(
     mut cursor: clickhouse::query::RowCursor<R>,
     bounded: &operation_context::BoundedContext,
     effective_max_rows: u64,
-    effective_max_bytes: usize,
     cardinality_cap: Option<usize>,
+    server_cardinality_capped: bool,
     finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
 ) -> Result<(T, u64, u64), ObservedFailure<QueryError>> {
-    let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
     let mut rows = Vec::new();
     loop {
         let next = within_bounded(bounded, cursor.next())
@@ -401,9 +455,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
             .map_err(stop_to_query_error)?;
         match next {
             Ok(Some(row)) => {
-                if cursor.decoded_bytes() > max_bytes_u64
-                    || cursor.returned_rows() > effective_max_rows
-                {
+                if cursor.returned_rows() > effective_max_rows {
                     return Err(ObservedFailure::with_reason(
                         QueryError::TooLarge,
                         FailureReason::ResultLimit,
@@ -419,12 +471,6 @@ async fn consume_bounded_rows<R: ReadRow, T>(
                 }
             }
             Ok(None) => {
-                if cursor.decoded_bytes() > max_bytes_u64 {
-                    return Err(ObservedFailure::with_reason(
-                        QueryError::TooLarge,
-                        FailureReason::ResultLimit,
-                    ));
-                }
                 let returned_rows = cursor.returned_rows();
                 let decoded_bytes = cursor.decoded_bytes();
                 return finish_rows(rows).map(|value| (value, returned_rows, decoded_bytes));
@@ -433,7 +479,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
                 if let Some(stop) = bounded.stopped() {
                     return Err(stop_to_query_error(stop));
                 }
-                return Err(classify_query_error(&err));
+                return Err(classify_query_error(&err, server_cardinality_capped));
             }
         }
     }
@@ -447,8 +493,8 @@ fn validate_query_inputs(
     if sql.trim().is_empty() || timeout.is_some_and(|limit| limit.is_zero()) {
         return Err(QueryError::Rejected);
     }
-    for (idx, (name, _)) in params.iter().enumerate() {
-        if !is_valid_param_name(name) {
+    for (idx, (name, value)) in params.iter().enumerate() {
+        if !is_valid_param_name(name) || !is_valid_param_value(&value.0) {
             return Err(QueryError::Rejected);
         }
         if params[..idx].iter().any(|(prev, _)| prev == name) {
@@ -456,6 +502,14 @@ fn validate_query_inputs(
         }
     }
     Ok(())
+}
+
+fn is_valid_param_value(value: &ParamValue) -> bool {
+    match value {
+        ParamValue::Decimal(_, scale) => *scale <= MAX_DECIMAL_SCALE,
+        ParamValue::Array(items) => items.iter().all(|item| is_valid_param_value(&item.0)),
+        _ => true,
+    }
 }
 
 fn is_valid_param_name(name: &str) -> bool {

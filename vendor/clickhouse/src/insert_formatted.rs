@@ -70,6 +70,7 @@ enum InsertState {
     },
     Terminated {
         handle: JoinHandle<Result<()>>,
+        channel_closed: bool,
     },
     Completed,
 }
@@ -78,6 +79,11 @@ impl InsertState {
     #[inline(always)]
     fn is_not_started(&self) -> bool {
         matches!(self, Self::NotStarted { .. })
+    }
+
+    #[inline(always)]
+    fn is_terminated(&self) -> bool {
+        matches!(self, Self::Terminated { .. })
     }
 
     fn sender(&mut self) -> Option<&mut ChunkSender> {
@@ -89,7 +95,9 @@ impl InsertState {
 
     fn handle(&mut self) -> Option<&mut JoinHandle<Result<()>>> {
         match self {
-            InsertState::Active { handle, .. } | InsertState::Terminated { handle } => Some(handle),
+            InsertState::Active { handle, .. } | InsertState::Terminated { handle, .. } => {
+                Some(handle)
+            }
             _ => None,
         }
     }
@@ -118,7 +126,7 @@ impl InsertState {
         client
     }
 
-    fn terminated(&mut self, span: &tracing::Span) {
+    fn terminate(&mut self, span: &tracing::Span, mark_channel_closed: bool) {
         match mem::replace(self, InsertState::Completed) {
             InsertState::NotStarted { .. } | InsertState::Completed => (),
             InsertState::Active {
@@ -127,7 +135,10 @@ impl InsertState {
                 encoded_bytes,
                 ..
             } => {
-                *self = InsertState::Terminated { handle };
+                *self = InsertState::Terminated {
+                    handle,
+                    channel_closed: mark_channel_closed,
+                };
 
                 tracing::record_all!(
                     span,
@@ -135,8 +146,14 @@ impl InsertState {
                     clickhouse.request.encoded_bytes = encoded_bytes,
                 );
             }
-            InsertState::Terminated { handle } => {
-                *self = InsertState::Terminated { handle };
+            InsertState::Terminated {
+                handle,
+                channel_closed,
+            } => {
+                *self = InsertState::Terminated {
+                    handle,
+                    channel_closed: channel_closed || mark_channel_closed,
+                };
             }
         }
     }
@@ -365,7 +382,7 @@ impl InsertFormatted {
                 match self.try_send(mem::take(&mut data), original_size) {
                     ControlFlow::Break(Ok(())) => return Poll::Ready(Ok(())),
                     ControlFlow::Break(Err(_)) => {
-                        // If the channel is closed, we should return the actual error
+                        self.state.terminate(&self.span, true);
                         return self.poll_wait_handle(cx);
                     }
                     ControlFlow::Continue(unsent) => {
@@ -386,7 +403,11 @@ impl InsertFormatted {
         }
 
         let Some(sender) = self.state.sender() else {
-            return Poll::Ready(Err(Error::Network("channel closed".into())));
+            return match self.state {
+                InsertState::Terminated { .. } => self.poll_wait_handle(cx),
+                InsertState::Completed => Poll::Ready(Err(Error::Network("channel closed".into()))),
+                InsertState::NotStarted { .. } | InsertState::Active { .. } => unreachable!(),
+            };
         };
 
         match sender.poll_ready(cx) {
@@ -394,7 +415,10 @@ impl InsertFormatted {
                 Timeout::reset_opt(self.send_timeout.as_mut());
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(false) => Poll::Ready(Err(Error::Network("channel closed".into()))),
+            Poll::Ready(false) => {
+                self.state.terminate(&self.span, true);
+                self.poll_wait_handle(cx)
+            }
             Poll::Pending => {
                 ready!(Timeout::poll_opt(
                     self.send_timeout.as_mut(),
@@ -446,11 +470,18 @@ impl InsertFormatted {
     }
 
     pub(crate) fn poll_end(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.state.terminated(&self.span);
+        self.state.terminate(&self.span, false);
         self.poll_wait_handle(cx)
     }
 
     fn poll_wait_handle(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let channel_closed = matches!(
+            self.state,
+            InsertState::Terminated {
+                channel_closed: true,
+                ..
+            }
+        );
         let Some(handle) = self.state.handle() else {
             return Poll::Ready(Ok(()));
         };
@@ -469,6 +500,7 @@ impl InsertFormatted {
         };
 
         let res = match res {
+            Ok(Ok(())) if channel_closed => Err(Error::Network("channel closed".into())),
             Ok(res) => res,
             Err(err) if err.is_panic() => panic::resume_unwind(err.into_panic()),
             Err(err) => Err(Error::Custom(format!("unexpected error: {err}"))),
@@ -554,13 +586,13 @@ impl InsertFormatted {
                 sender.abort();
                 handle.abort();
             }
-            InsertState::Terminated { handle } => {
+            InsertState::Terminated { handle, .. } => {
                 handle.abort();
             }
             InsertState::NotStarted { .. } | InsertState::Completed => {}
         }
 
-        self.state.terminated(&self.span);
+        self.state.terminate(&self.span, false);
     }
 }
 
@@ -699,6 +731,10 @@ impl BufInsertFormatted {
 
     #[inline(always)]
     fn poll_flush_inner(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.insert.state.is_terminated() {
+            return self.insert.poll_wait_handle(cx);
+        }
+
         if self.buffer.is_empty() {
             return Poll::Ready(Ok(()));
         }
@@ -720,7 +756,13 @@ impl BufInsertFormatted {
             unreachable!("BUG: we just checked that `ChunkSender` was ready")
         };
 
-        Poll::Ready(res)
+        match res {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(_) => {
+                self.insert.state.terminate(&self.insert.span, true);
+                self.insert.poll_wait_handle(cx)
+            }
+        }
     }
 
     /// Flushes the buffer, then calls [`InsertFormatted::end()`].

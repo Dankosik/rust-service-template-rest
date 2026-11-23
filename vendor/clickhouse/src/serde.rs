@@ -592,6 +592,10 @@ pub mod time {
     /// Contains modules to ser/de `OffsetDateTime` to/from `DateTime64(_)`.
     pub mod datetime64 {
         use super::*;
+        use crate::types::decimal::{
+            DATETIME64_MICROS_NAME, DATETIME64_MILLIS_NAME, DATETIME64_NANOS_NAME,
+            DATETIME64_SECS_NAME, DateTime64Wire, deserialize_datetime64_ticks,
+        };
 
         /// Ser/de `OffsetDateTime` to/from `DateTime64(0)`.
         pub mod secs {
@@ -606,14 +610,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1_000_000_000, serializer)
+                do_serialize(dt, 1_000_000_000, DATETIME64_SECS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1_000_000_000)
+                do_deserialize(deserializer, 1_000_000_000, DATETIME64_SECS_NAME)
             }
         }
 
@@ -630,14 +634,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1_000_000, serializer)
+                do_serialize(dt, 1_000_000, DATETIME64_MILLIS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1_000_000)
+                do_deserialize(deserializer, 1_000_000, DATETIME64_MILLIS_NAME)
             }
         }
 
@@ -654,14 +658,14 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1_000, serializer)
+                do_serialize(dt, 1_000, DATETIME64_MICROS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1_000)
+                do_deserialize(deserializer, 1_000, DATETIME64_MICROS_NAME)
             }
         }
 
@@ -678,33 +682,47 @@ pub mod time {
             where
                 S: Serializer,
             {
-                do_serialize(dt, 1, serializer)
+                do_serialize(dt, 1, DATETIME64_NANOS_NAME, serializer)
             }
 
             pub fn deserialize<'de, D>(deserializer: D) -> Result<OffsetDateTime, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                do_deserialize(deserializer, 1)
+                do_deserialize(deserializer, 1, DATETIME64_NANOS_NAME)
             }
         }
 
-        fn do_serialize<S>(dt: &OffsetDateTime, div: i128, serializer: S) -> Result<S::Ok, S::Error>
+        fn do_serialize<S>(
+            dt: &OffsetDateTime,
+            div: i128,
+            wire_name: &'static str,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
             let ts = dt.unix_timestamp_nanos() / div;
 
-            i64::try_from(ts)
-                .map_err(|_| S::Error::custom(format!("{dt} cannot be represented as DateTime64")))?
-                .serialize(serializer)
+            let ticks = i64::try_from(ts).map_err(|_| {
+                S::Error::custom(format!("{dt} cannot be represented as DateTime64"))
+            })?;
+            DateTime64Wire {
+                name: wire_name,
+                ticks,
+            }
+            .serialize(serializer)
         }
 
-        fn do_deserialize<'de, D>(deserializer: D, mul: i128) -> Result<OffsetDateTime, D::Error>
+        fn do_deserialize<'de, D>(
+            deserializer: D,
+            mul: i128,
+            wire_name: &'static str,
+        ) -> Result<OffsetDateTime, D::Error>
         where
             D: Deserializer<'de>,
         {
-            let ts: i64 = Deserialize::deserialize(deserializer)?;
+            let ts = deserialize_datetime64_ticks(deserializer, wire_name)?;
             let ts = i128::from(ts) * mul; // cannot overflow: `mul` fits in `i64`
             OffsetDateTime::from_unix_timestamp_nanos(ts).map_err(D::Error::custom)
         }

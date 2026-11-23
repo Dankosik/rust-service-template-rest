@@ -125,6 +125,9 @@ async fn spawn_telemetry_server() -> TelemetryServer {
             tp.lock().await.push(header);
             let body = req.into_body().collect().await.expect("body").to_bytes();
             let s = String::from_utf8_lossy(&body);
+            if let Some(qid) = wire_qid {
+                qids.lock().await.push(qid);
+            }
             if s.contains("DESCRIBE") || uri.contains("DESCRIBE") {
                 if sd.load(Ordering::SeqCst) == 1 {
                     sn.notify_one();
@@ -134,9 +137,6 @@ async fn spawn_telemetry_server() -> TelemetryServer {
                     .status(StatusCode::OK)
                     .body(Full::new(rbwnat_describe_id_column()))
                     .expect("resp");
-            }
-            if let Some(qid) = wire_qid {
-                qids.lock().await.push(qid);
             }
             if uri.contains("INSERT") || s.contains("INSERT") {
                 if si.load(Ordering::SeqCst) == 1 {
@@ -193,10 +193,6 @@ async fn exercise_drop_and_busy_paths(
                 ch.query("busy_shed", "SELECT 1").fetch_one::<SampleRow>(ctx).await,
                 Err(QueryError::Busy)
             );
-            assert_eq!(
-                ch.insert_batch(ctx, "busy_ins", "events_table", &[SampleRow { id: 1 }], BatchInsertOptions::new()).await,
-                Err(InsertError::NotApplied(InsertFailure::Busy))
-            );
             drop(fut);
         }
     }
@@ -212,7 +208,13 @@ async fn exercise_drop_and_busy_paths(
     ));
     tokio::select! {
         res = &mut pre_fut => panic!("unexpected pre-dispatch completion: {res:?}"),
-        () = srv.stalled_notify.notified() => drop(pre_fut),
+        () = srv.stalled_notify.notified() => {
+            assert_eq!(
+                ch.insert_batch(ctx, "busy_ins", "events_table", &[SampleRow { id: 1 }], BatchInsertOptions::new()).await,
+                Err(InsertError::NotApplied(InsertFailure::Busy))
+            );
+            drop(pre_fut);
+        }
     }
     srv.stall_describe.store(0, Ordering::SeqCst);
     srv.release_stall.notify_waiters();
@@ -264,7 +266,7 @@ async fn assert_pre_admission_silent(
             "zero",
             "events",
             &[] as &[SampleRow],
-            AsyncInsertOptions::new(),
+            AsyncInsertOptions::with_payload_hash(),
         )
         .await;
     assert_eq!(spans.snapshot(), []);
@@ -365,9 +367,9 @@ async fn exercise_read_failure_diagnostics(
         (
             "server_timeout_err",
             "SELECT timeout_159",
-            QueryError::Unavailable,
+            QueryError::ResourceLimit,
         ),
-        ("oom_err", "SELECT oom_241", QueryError::Unavailable),
+        ("oom_err", "SELECT oom_241", QueryError::ResourceLimit),
     ] {
         assert_eq!(
             ch.query(summary, sql).fetch_one::<SampleRow>(ctx).await,
@@ -564,7 +566,7 @@ const EXPECTED_SPANS: &[ExpectedSpan] = &[
         "cancelled",
         "future_dropped",
         None,
-        false,
+        true,
         tracing::Level::DEBUG,
     ),
     ExpectedSpan::err(
@@ -655,7 +657,9 @@ fn assert_single_span_and_event(
         assert_eq!(cap_qid, Some(qid), "{summary}");
         assert!(uuid::Uuid::parse_str(qid).is_ok(), "{summary}: {qid}");
         assert!(
-            wire_query_ids.iter().any(|wire| wire == qid),
+            wire_query_ids
+                .iter()
+                .any(|wire| wire == qid || wire == &format!("{qid}-describe")),
             "{summary}: query_id {qid} missing from wire requests {wire_query_ids:?}"
         );
     } else {
@@ -872,7 +876,8 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
 
     let srv = spawn_telemetry_server().await;
     let mut opts = base_options(format!("http://{}", srv.addr));
-    opts.max_concurrency = 1;
+    opts.max_read_concurrency = 1;
+    opts.max_write_concurrency = 1;
     opts.password = Some(secrecy::SecretString::from(
         "SUPER_SECRET_PASSWORD_SENTINEL",
     ));

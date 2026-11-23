@@ -6,11 +6,12 @@ use operation_context::{BoundedStop, OperationContext};
 
 use crate::error::{
     FailureReason, InsertError, InsertFailure, ObservedFailure, UnknownOutcome,
-    bounded_stop_reason, classify_post_dispatch_insert_error, is_local_serialization_error,
+    bounded_stop_reason, classify_post_dispatch_insert_error, is_auth_failure,
+    is_local_serialization_error,
 };
 use crate::metadata::{self, is_schema_drift_error};
 use crate::observe::{InsertModeLabel, Operation, OperationGuard};
-use crate::{ClickHouse, within_bounded};
+use crate::{ClickHouse, QuerySettings, Shared, format_execution_timeout_secs, within_bounded};
 
 const MAX_TABLE_BYTES: usize = 128;
 const MAX_DEDUP_TOKEN_BYTES: usize = 256;
@@ -83,16 +84,15 @@ impl<'a> BatchInsertOptions<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum AsyncDeduplication<'a> {
-    #[default]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncDeduplication<'a> {
     Disabled,
     ByPayloadHash,
     ByToken(&'a str),
 }
 
 #[must_use]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct AsyncInsertOptions<'a> {
     timeout: Option<Duration>,
     deduplication: AsyncDeduplication<'a>,
@@ -100,21 +100,28 @@ pub struct AsyncInsertOptions<'a> {
 }
 
 impl<'a> AsyncInsertOptions<'a> {
-    pub const fn new() -> Self {
+    const fn new(deduplication: AsyncDeduplication<'a>) -> Self {
         Self {
             timeout: None,
-            deduplication: AsyncDeduplication::Disabled,
+            deduplication,
             outcomes: None,
         }
     }
 
-    pub const fn timeout(mut self, limit: Duration) -> Self {
-        self.timeout = Some(limit);
-        self
+    pub const fn with_token(token: &'a str) -> Self {
+        Self::new(AsyncDeduplication::ByToken(token))
     }
 
-    pub const fn deduplication(mut self, mode: AsyncDeduplication<'a>) -> Self {
-        self.deduplication = mode;
+    pub const fn with_payload_hash() -> Self {
+        Self::new(AsyncDeduplication::ByPayloadHash)
+    }
+
+    pub const fn without_deduplication() -> Self {
+        Self::new(AsyncDeduplication::Disabled)
+    }
+
+    pub const fn timeout(mut self, limit: Duration) -> Self {
+        self.timeout = Some(limit);
         self
     }
 
@@ -209,7 +216,7 @@ impl ClickHouse {
             InsertMode::Batch { .. } => (Operation::InsertBatch, InsertModeLabel::Batch),
             InsertMode::Async { .. } => (Operation::InsertAsync, InsertModeLabel::Async),
         };
-        let Ok(_permit) = shared.permits.clone().try_acquire_owned() else {
+        let Ok(_permit) = shared.write_permits.clone().try_acquire_owned() else {
             shared.metrics.record_admission_refused(operation);
             return Err(InsertError::NotApplied(InsertFailure::Busy));
         };
@@ -227,24 +234,20 @@ impl ClickHouse {
             let bounded = ctx.bounded(effective_timeout);
             bounded.check().map_err(pre_dispatch_stop)?;
 
+            let query_id = uuid::Uuid::new_v4().to_string();
+            guard.record_query_id(query_id.clone());
+
             let creds_snap = shared.credentials.load();
             let slot =
                 shared
                     .table_slots
                     .get_or_create(table, &creds_snap, &shared.endpoint.database);
-            let (insert, observed_gen) = metadata::prepare_insert::<R>(
-                &slot,
-                table,
-                &shared.credentials,
-                &guard,
-                shared.propagate_trace_context,
-                &bounded,
-            )
-            .await?;
+            let (insert, observed_gen) =
+                metadata::prepare_insert::<R>(&slot, table, &query_id, shared, &guard, &bounded)
+                    .await?;
 
             bounded.check().map_err(pre_dispatch_stop)?;
-            let (insert, query_id) = configure_insert(insert, mode);
-            guard.record_query_id(query_id);
+            let insert = configure_insert(insert, shared, mode, bounded.remaining());
             guard.mark_dispatched();
             let dispatched = outcomes.map(InsertOutcomes::begin_dispatch);
             let outcome = write_and_end_insert(
@@ -270,16 +273,30 @@ impl ClickHouse {
             outcome
         }
         .await;
+        if let Err(failure) = &result
+            && is_auth_failure(failure.detail)
+        {
+            shared.notify_auth_failure();
+        }
         guard.finish_insert(mode_label, result)
     }
 }
 
 fn configure_insert<R: WriteRow>(
-    insert: clickhouse::insert::Insert<R>,
+    mut insert: clickhouse::insert::Insert<R>,
+    shared: &Shared,
     mode: InsertMode<'_>,
-) -> (clickhouse::insert::Insert<R>, String) {
-    let query_id = uuid::Uuid::new_v4().to_string();
-    let mut insert = insert.with_setting("query_id", &query_id);
+    remaining: Duration,
+) -> clickhouse::insert::Insert<R> {
+    let timeout_secs = format_execution_timeout_secs(remaining);
+    if shared.query_settings == QuerySettings::Client {
+        insert = insert
+            .with_setting("max_execution_time", &timeout_secs)
+            .with_setting("timeout_overflow_mode", "throw");
+        if let Some(mem) = shared.max_memory_usage {
+            insert = insert.with_setting("max_memory_usage", mem.to_string());
+        }
+    }
     // ClickHouse 26.2+ deduplicate_insert setting
     match mode {
         InsertMode::Batch { dedup_token } => {
@@ -294,6 +311,9 @@ fn configure_insert<R: WriteRow>(
             insert = insert
                 .with_setting("async_insert", "1")
                 .with_setting("wait_for_async_insert", "1");
+            if shared.query_settings == QuerySettings::Client {
+                insert = insert.with_setting("wait_for_async_insert_timeout", &timeout_secs);
+            }
             match dedup {
                 AsyncDeduplication::Disabled => {
                     insert = insert.with_setting("deduplicate_insert", "disable");
@@ -309,7 +329,7 @@ fn configure_insert<R: WriteRow>(
             }
         }
     }
-    (insert, query_id)
+    insert
 }
 
 async fn write_and_end_insert<R: WriteRow>(
@@ -320,6 +340,7 @@ async fn write_and_end_insert<R: WriteRow>(
     observed_gen: u64,
     credentials: &arc_swap::ArcSwap<crate::credentials::ActiveCredentials>,
 ) -> Result<InsertReport, ObservedFailure<InsertError>> {
+    let single_row = rows.len() == 1;
     for (idx, row) in rows.iter().enumerate() {
         match within_bounded(bounded, insert.write(row)).await {
             Ok(Ok(())) => {}
@@ -338,7 +359,7 @@ async fn write_and_end_insert<R: WriteRow>(
                 if let Some(stop) = bounded.stopped() {
                     return Err(post_dispatch_stop(stop));
                 }
-                return Err(classify_post_dispatch_insert_error(&err));
+                return Err(classify_post_dispatch_insert_error(&err, single_row));
             }
             Err(stop) => return Err(post_dispatch_stop(stop)),
         }
@@ -355,7 +376,7 @@ async fn write_and_end_insert<R: WriteRow>(
             if let Some(stop) = bounded.stopped() {
                 return Err(post_dispatch_stop(stop));
             }
-            Err(classify_post_dispatch_insert_error(&err))
+            Err(classify_post_dispatch_insert_error(&err, single_row))
         }
         Err(stop) => Err(post_dispatch_stop(stop)),
     }
