@@ -30,6 +30,9 @@ const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 
 const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
 const DURABLE_CONTRACT: &str = "service.delivery-contract.v1";
+const BROKER_REQUEST_TIMED_OUT: MessagingError = MessagingError::TimedOut {
+    budget: BROKER_OPERATION_BUDGET,
+};
 
 impl Registry {
     #[must_use]
@@ -104,27 +107,27 @@ impl DeadLetterTopology {
         .ok_or_else(|| {
             Refusal::DeadLetterBoundsUnavailable.report("dead_letter_stream", 0, None)
         })?;
-        if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
+        if bounds.header_bytes > wire::NATIVE_HEADER_LIMIT_BYTES {
             return Err(Refusal::DeadLetterHeaderSize.report(
                 "dead_letter_stream",
-                bounds.headers,
+                bounds.header_bytes,
                 i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
             ));
         }
-        if bounds.total > server_max_payload_bytes {
+        if bounds.total_bytes > server_max_payload_bytes {
             return Err(Refusal::ServerMaxPayload.report(
                 "server",
-                bounds.total,
+                bounds.total_bytes,
                 i64::try_from(server_max_payload_bytes).ok(),
             ));
         }
         if let Some(limit) = self
             .dead_letter_max_message_bytes
-            .filter(|limit| limit.get() < bounds.total)
+            .filter(|limit| limit.get() < bounds.total_bytes)
         {
             return Err(Refusal::StreamMessageSize.report(
                 "dead_letter_stream",
-                bounds.total,
+                bounds.total_bytes,
                 i64::try_from(limit.get()).ok(),
             ));
         }
@@ -183,19 +186,21 @@ fn dead_letter_subject_covered(config: &StreamConfig, subject: &str) -> bool {
 async fn admit_consumer_topology(
     consumer: &ConsumerOptions,
     source_stream: &str,
-    raw_source_limit: i32,
+    source_max_message_size: i32,
     envelope_limit_bytes: usize,
     jetstream: &async_nats::jetstream::Context,
     context: &OperationContext,
 ) -> Result<ConsumerAdmission, MessagingError> {
-    let source_max_message_bytes = source_message_limit(raw_source_limit, envelope_limit_bytes)
-        .map_err(|refusal| {
-            refusal.report(
-                "source_stream",
-                envelope_limit_bytes,
-                Some(raw_source_limit.into()),
-            )
-        })?;
+    let source_max_message_bytes =
+        admit_source_max_message_bytes(source_max_message_size, envelope_limit_bytes).map_err(
+            |refusal| {
+                refusal.report(
+                    "source_stream",
+                    envelope_limit_bytes,
+                    Some(source_max_message_size.into()),
+                )
+            },
+        )?;
     let dead_letter_name = match &consumer.dlq_stream {
         Some(name) => name.clone(),
         None => stream_name_for_subject(jetstream, &consumer.dlq_subject, context).await?,
@@ -230,7 +235,7 @@ async fn admit_consumer_topology(
     })
 }
 
-fn source_message_limit(raw: i32, envelope_limit_bytes: usize) -> Result<usize, Refusal> {
+fn admit_source_max_message_bytes(raw: i32, envelope_limit_bytes: usize) -> Result<usize, Refusal> {
     match usize::try_from(raw) {
         Ok(limit) if limit > envelope_limit_bytes => Err(Refusal::StreamMessageSize),
         Ok(limit @ 1..) => Ok(limit),
@@ -463,9 +468,12 @@ async fn stream_name_for_subject(
             .stream_by_subject(subject.to_owned())
             .await
             .map_err(|error| {
+                #[warn(clippy::wildcard_enum_match_arm)]
                 let broker = match error.kind() {
                     GetStreamByNameErrorKind::JetStream(broker) => Some(broker),
-                    _ => None,
+                    GetStreamByNameErrorKind::Request
+                    | GetStreamByNameErrorKind::NotFound
+                    | GetStreamByNameErrorKind::InvalidSubject => None,
                 };
                 report_topology_failure("stream_by_subject", None, &error, broker.as_ref())
             })
@@ -473,6 +481,7 @@ async fn stream_name_for_subject(
     .await
 }
 
+#[warn(clippy::wildcard_enum_match_arm)]
 async fn find_durable(
     jetstream: &Context,
     stream: &str,
@@ -492,10 +501,13 @@ async fn find_durable(
                 &error,
                 Some(&broker),
             )),
-            ConsumerErrorKind::TimedOut => Err(MessagingError::TimedOut {
-                budget: BROKER_OPERATION_BUDGET,
-            }),
-            _ => Err(report_topology_failure("get_consumer", None, &error, None)),
+            ConsumerErrorKind::TimedOut => Err(BROKER_REQUEST_TIMED_OUT),
+            ConsumerErrorKind::Request
+            | ConsumerErrorKind::InvalidConsumerType
+            | ConsumerErrorKind::InvalidName
+            | ConsumerErrorKind::Other => {
+                Err(report_topology_failure("get_consumer", None, &error, None))
+            }
         },
     }
 }
@@ -513,12 +525,15 @@ pub(crate) async fn bind_durable(
     };
     let expected = config.into_consumer_config();
     if let Some(error_type) = durable_contract_error_type(&expected, &pull.cached_info().config) {
-        tracing::warn!(operation = "bind_consumer", error.type = error_type, expected_contract = expected.metadata.get(DURABLE_CONTRACT).map(String::as_str), reason = %MessagingError::Topology, "messaging_admission_failed");
-        return Err(MessagingError::Topology);
+        return Err(report_bind_refusal(
+            error_type,
+            expected.metadata.get(DURABLE_CONTRACT).map(String::as_str),
+        ));
     }
     Ok(pull)
 }
 
+#[warn(clippy::wildcard_enum_match_arm)]
 async fn create_or_find_durable(
     jetstream: &Context,
     stream: &str,
@@ -542,10 +557,11 @@ async fn create_or_find_durable(
             &error,
             Some(&broker),
         )),
-        ConsumerCreateStrictErrorKind::TimedOut => Err(MessagingError::TimedOut {
-            budget: BROKER_OPERATION_BUDGET,
-        }),
-        _ => Err(report_topology_failure(
+        ConsumerCreateStrictErrorKind::TimedOut => Err(BROKER_REQUEST_TIMED_OUT),
+        ConsumerCreateStrictErrorKind::Request
+        | ConsumerCreateStrictErrorKind::InvalidConsumerType
+        | ConsumerCreateStrictErrorKind::InvalidName
+        | ConsumerCreateStrictErrorKind::Other => Err(report_topology_failure(
             "create_consumer",
             None,
             &error,
@@ -607,6 +623,21 @@ fn report_topology_failure(
     failure
 }
 
+pub(crate) fn report_bind_refusal(
+    error_type: &'static str,
+    expected_contract: Option<&str>,
+) -> MessagingError {
+    let failure = MessagingError::Topology;
+    tracing::warn!(
+        operation = "bind_consumer",
+        error.type = error_type,
+        expected_contract,
+        reason = %failure,
+        "messaging_admission_failed"
+    );
+    failure
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Refusal {
     ServerVersion,
@@ -629,13 +660,13 @@ pub(crate) enum Refusal {
 impl Refusal {
     fn report(
         self,
-        operation: &'static str,
+        component: &'static str,
         required_bytes: usize,
         limit_bytes: Option<i64>,
     ) -> MessagingError {
         let failure = self.failure();
         log_admission_refusal(
-            operation,
+            component,
             failure,
             self.error_type(),
             required_bytes,
@@ -686,14 +717,14 @@ impl Refusal {
 }
 
 fn log_admission_refusal(
-    operation: &'static str,
+    component: &'static str,
     failure: MessagingError,
     error_type: &'static str,
     required_bytes: usize,
     limit_bytes: Option<i64>,
 ) {
     tracing::warn!(
-        operation,
+        operation = component,
         reason = %failure,
         error.type = error_type,
         required_bytes,
@@ -733,17 +764,16 @@ pub(crate) fn classify_topology(error: &(dyn std::error::Error + 'static)) -> Me
         .unwrap_or(MessagingError::Topology)
 }
 
+#[warn(clippy::wildcard_enum_match_arm)]
 fn request_failure(error: &async_nats::jetstream::context::RequestError) -> Option<MessagingError> {
     use async_nats::jetstream::context::RequestErrorKind;
 
     match error.kind() {
-        RequestErrorKind::TimedOut => Some(MessagingError::TimedOut {
-            budget: BROKER_OPERATION_BUDGET,
-        }),
+        RequestErrorKind::TimedOut => Some(BROKER_REQUEST_TIMED_OUT),
         RequestErrorKind::InvalidSubject => {
             Some(MessagingError::Configuration("broker subject is invalid"))
         }
-        _ => None,
+        RequestErrorKind::NoResponders | RequestErrorKind::Other => None,
     }
 }
 

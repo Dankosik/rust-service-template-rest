@@ -19,7 +19,7 @@ impl BuildInfo {
     }
 }
 
-fn validate_local_development(env: &str, requested: bool) -> Result<bool, ValidationError> {
+fn insecure_development_allowed(env: &str, requested: bool) -> Result<bool, ValidationError> {
     if requested && !matches!(env, "local" | "development") {
         return Err(ValidationError::new(
             "app.allow_insecure_development",
@@ -33,7 +33,7 @@ fn validate_local_development(env: &str, requested: bool) -> Result<bool, Valida
     dead_code,
     reason = "removing every profile with an escape hatch leaves the rule without a caller"
 )]
-pub(crate) fn local_development_only(
+pub(crate) fn insecure_development_only(
     key: &str,
     enabled: bool,
     local_development: bool,
@@ -85,7 +85,7 @@ pub struct AppConfig {
 
 impl<Meta: Mode, Instance: Mode> AppFields<Meta, Instance> {
     pub(crate) fn admit_insecure_development(&self, v: &mut Violations) -> bool {
-        v.record(validate_local_development(
+        v.record(insecure_development_allowed(
             &self.env,
             self.allow_insecure_development,
         ))

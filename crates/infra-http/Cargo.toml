@@ -33,6 +33,9 @@ infra-bearerauthn = { workspace = true }
 # template:begin object-storage:http-object-storage-dependencies
 infra-object-storage = { workspace = true }
 # template:end object-storage:http-object-storage-dependencies
+# template:begin clickhouse:http-clickhouse-dependencies
+infra-clickhouse = { workspace = true }
+# template:end clickhouse:http-clickhouse-dependencies
 # template:begin temporal:http-temporal-dependencies
 infra-temporal = { workspace = true }
 # template:end temporal:http-temporal-dependencies
@@ -57,7 +60,7 @@ http-body-util = { workspace = true }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
-serde_html_form = { workspace = true }
+serde_html_form = { workspace = true, features = ["de", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }

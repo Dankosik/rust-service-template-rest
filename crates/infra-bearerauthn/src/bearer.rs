@@ -5,20 +5,16 @@ use crate::Failure;
 #[derive(Eq, PartialEq, derive_more::Debug)]
 #[debug("PresentedToken([REDACTED])")]
 pub struct PresentedToken<'a> {
-    bytes: &'a [u8],
+    text: &'a str,
 }
 
 impl<'a> PresentedToken<'a> {
-    #[expect(
-        clippy::expect_used,
-        reason = "parse_bearer only constructs PresentedToken from RFC 6750 ASCII b64token bytes"
-    )]
     pub(crate) fn as_str(&self) -> &'a str {
-        std::str::from_utf8(self.bytes).expect("RFC 6750 b64token bytes are valid ASCII")
+        self.text
     }
 
     pub(crate) fn as_bytes(&self) -> &'a [u8] {
-        self.bytes
+        self.text.as_bytes()
     }
 
     #[must_use]
@@ -40,10 +36,12 @@ impl DelegationCredential {
 
 /// RFC 6750 §2.1
 pub(crate) fn parse_bearer<'a>(
-    headers: impl IntoIterator<Item = &'a [u8]>,
+    authorization: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<PresentedToken<'a>, Failure> {
-    match rfc6750::token_bytes(headers) {
-        Ok(bytes) => Ok(PresentedToken { bytes }),
+    match rfc6750::token_bytes(authorization) {
+        Ok(bytes) => std::str::from_utf8(bytes)
+            .map(|text| PresentedToken { text })
+            .map_err(|_| Failure::Malformed),
         Err(NoBearer::Missing) => Err(Failure::Missing),
         Err(NoBearer::Malformed) => Err(Failure::Malformed),
     }

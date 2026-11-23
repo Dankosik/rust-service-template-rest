@@ -183,7 +183,23 @@ enum Written {
     TerminalRefusal(Record),
 }
 
+impl<T: RefusalMode> From<WriteOutcome<T>> for Written {
+    fn from(outcome: WriteOutcome<T>) -> Self {
+        match outcome {
+            WriteOutcome::Success(record) => Self::Success(record.into_record()),
+            WriteOutcome::TerminalRefusal(refusal) => Self::TerminalRefusal(refusal.into_record()),
+        }
+    }
+}
+
 impl Written {
+    fn into_savepoint_end<A>(self) -> SavepointEnd<Self, A> {
+        match self {
+            Self::Success(_) => SavepointEnd::Keep(self),
+            Self::TerminalRefusal(_) => SavepointEnd::Rollback(self),
+        }
+    }
+
     const fn record(&self) -> &Record {
         match self {
             Self::Success(record) | Self::TerminalRefusal(record) => record,
@@ -250,12 +266,7 @@ impl Store {
         }
         let written = if T::NEEDS_SAVEPOINT {
             tx.with_savepoint(async |tx: &mut Tx<'_, M>| match work(tx).await {
-                Ok(WriteOutcome::Success(record)) => {
-                    SavepointEnd::Keep(Written::Success(record.into_record()))
-                }
-                Ok(WriteOutcome::TerminalRefusal(refusal)) => {
-                    SavepointEnd::Rollback(Written::TerminalRefusal(refusal.into_record()))
-                }
+                Ok(outcome) => Written::from(outcome).into_savepoint_end(),
                 Err(rollback) => SavepointEnd::AbortTransaction(rollback),
             })
             .await
@@ -265,12 +276,7 @@ impl Store {
                 SavepointError::Aborted(rollback) => Stop::RolledBack(rollback),
             })?
         } else {
-            match work(tx).await.map_err(Stop::RolledBack)? {
-                WriteOutcome::Success(record) => Written::Success(record.into_record()),
-                WriteOutcome::TerminalRefusal(refusal) => {
-                    Written::TerminalRefusal(refusal.into_record())
-                }
-            }
+            Written::from(work(tx).await.map_err(Stop::RolledBack)?)
         };
         write(
             tx,

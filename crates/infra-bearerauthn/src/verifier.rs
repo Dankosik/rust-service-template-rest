@@ -24,28 +24,29 @@ pub(crate) fn unix_time(
 fn record_verification(
     counters: &VerificationCounters,
     result: Result<Principal, VerificationError>,
-) -> Result<Principal, Failure> {
-    let error = match result {
+) -> VerificationOutcome {
+    match result {
         Ok(principal) => {
             counters.verified.increment(1);
-            return Ok(principal);
+            VerificationOutcome::Verified(principal)
         }
-        Err(error) => error,
-    };
-    let mode = counters.mode;
-    let reason = error.reason.label();
-    counters.refused[error.reason]
-        .get_or_init(|| {
-            metrics::counter!(
-                TOKEN_VERIFICATIONS_METRIC,
-                "mode" => mode,
-                "outcome" => "failure",
-                "reason" => reason
-            )
-        })
-        .increment(1);
-    tracing::debug!(mode, reason, "authn_verification_failed");
-    Err(error.failure)
+        Err(error) => {
+            let mode = counters.mode;
+            let reason = error.reason.label();
+            counters.refused[error.reason]
+                .get_or_init(|| {
+                    metrics::counter!(
+                        TOKEN_VERIFICATIONS_METRIC,
+                        "mode" => mode,
+                        "outcome" => "failure",
+                        "reason" => reason
+                    )
+                })
+                .increment(1);
+            tracing::debug!(mode, reason, "authn_verification_failed");
+            VerificationOutcome::Failed(error.failure)
+        }
+    }
 }
 
 struct VerificationCounters {
@@ -174,9 +175,6 @@ impl Verifier {
         if let Err(stopped) = context.check() {
             return VerificationOutcome::Stopped(stopped);
         }
-        match record_verification(&self.0.counters, result) {
-            Ok(principal) => VerificationOutcome::Verified(principal),
-            Err(failure) => VerificationOutcome::Failed(failure),
-        }
+        record_verification(&self.0.counters, result)
     }
 }

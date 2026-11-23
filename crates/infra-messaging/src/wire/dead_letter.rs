@@ -63,8 +63,8 @@ impl DeadLetterReason {
 }
 
 pub(crate) struct DeadLetterBounds {
-    pub(crate) total: usize,
-    pub(crate) headers: usize,
+    pub(crate) total_bytes: usize,
+    pub(crate) header_bytes: usize,
 }
 
 fn transfer_headers<T>(
@@ -109,8 +109,8 @@ pub(crate) fn dead_letter_bounds(
     let framing_reserve = HEADER_PREAMBLE_BYTES.max(RETAINED_HEADERS.len() * 2 + 4);
     let framed_source = source_bytes.checked_add(framing_reserve)?;
     Some(DeadLetterBounds {
-        total: framed_source.checked_add(additions)?,
-        headers: framed_source
+        total_bytes: framed_source.checked_add(additions)?,
+        header_bytes: framed_source
             .min(HEADER_LIMIT_BYTES)
             .checked_add(additions)?,
     })
@@ -169,23 +169,27 @@ fn required_header<'a>(
         .ok_or(RestoreError::MissingHeader(header))
 }
 
+fn required_outbound_identity<'a>(
+    headers: &'a HeaderMap,
+    header: &'static str,
+) -> Result<&'a str, RestoreError> {
+    let identity = required_header(headers, header)?;
+    valid_outbound_identity(identity)
+        .then_some(identity)
+        .ok_or(RestoreError::Identity)
+}
+
 pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, RestoreError> {
     let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT);
     if !valid_subject(subject) {
         return Err(RestoreError::Subject);
     }
-    let message_id = required_header(&record.headers, MESSAGE_ID)?;
-    if !valid_outbound_identity(message_id) {
-        return Err(RestoreError::Identity);
-    }
+    let message_id = required_outbound_identity(&record.headers, MESSAGE_ID)?;
     let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
     if has_ambiguous_original_id(&record.headers, message_id, stored_publication_id) {
         return Err(RestoreError::MessageIdMissing);
     }
-    let event_type = required_header(&record.headers, EVENT_TYPE)?;
-    if !valid_outbound_identity(event_type) {
-        return Err(RestoreError::Identity);
-    }
+    let event_type = required_outbound_identity(&record.headers, EVENT_TYPE)?;
     let schema_version = parse_schema(required_header(&record.headers, EVENT_SCHEMA)?)
         .ok_or(RestoreError::Schema)?;
     let occurred_at = parse_timestamp(required_header(&record.headers, CREATED_AT)?)
@@ -292,8 +296,8 @@ mod tests {
             for (reason, ()) in EnumMap::<DeadLetterReason, ()>::default() {
                 let transferred =
                     dead_letter_headers(&original, &subject, "ACTUAL_DLQ", &transfer_id, reason);
-                assert!(encoded_header_bytes(&transferred) <= bounds.headers);
-                assert!(encoded_header_bytes(&transferred) + payload.len() <= bounds.total);
+                assert!(encoded_header_bytes(&transferred) <= bounds.header_bytes);
+                assert!(encoded_header_bytes(&transferred) + payload.len() <= bounds.total_bytes);
                 assert_eq!(
                     transferred.get("Original-Subject").unwrap().as_str(),
                     subject
@@ -306,7 +310,7 @@ mod tests {
             }
         }
         let bounds = dead_letter_bounds(128, 14, 10).unwrap();
-        assert_eq!(bounds.headers, bounds.total);
+        assert_eq!(bounds.header_bytes, bounds.total_bytes);
     }
 
     #[test]
@@ -324,7 +328,7 @@ mod tests {
         let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT);
         let bounds =
             dead_letter_bounds(record.payload.len(), subject.len(), record.stream.len()).unwrap();
-        assert!(encoded_header_bytes(&record.headers) + record.payload.len() <= bounds.total);
+        assert!(encoded_header_bytes(&record.headers) + record.payload.len() <= bounds.total_bytes);
     }
 
     #[test]

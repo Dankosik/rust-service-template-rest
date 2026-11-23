@@ -96,7 +96,6 @@ impl Observer {
         request: &mut Request,
         matched: Option<MatchedPath>,
         request_id: Option<RequestId>,
-        classify_for_admission: bool,
     ) -> (ActiveObservation, bool) {
         let started = Instant::now();
         let connection = request.extensions_mut().remove::<ConnectionInfo>();
@@ -104,11 +103,7 @@ impl Observer {
         let version = request.version();
         let scheme = url_scheme(request.uri(), connection.as_ref());
         let route = matched.as_ref().map(MatchedPath::as_str);
-        let is_probe = match method {
-            HttpMethod::Get => classify_for_admission || !self.log_health_probes,
-            HttpMethod::Head => classify_for_admission,
-            _ => false,
-        } && route.is_some_and(|route| self.probes.contains(method, route));
+        let is_probe = route.is_some_and(|route| self.probes.contains(method, route));
         let log_access = !suppresses_access_log(self.log_health_probes, method, is_probe);
         let span = make_span(
             version,
@@ -162,12 +157,8 @@ impl ActiveObservation {
         self.trace_context.fallback.take()
     }
 
-    pub(crate) fn response_request_id(&mut self) -> Option<RequestId> {
-        if self.observation.log_access {
-            self.observation.request_id.clone()
-        } else {
-            self.observation.request_id.take()
-        }
+    pub(crate) fn request_id(&self) -> Option<RequestId> {
+        self.observation.request_id.clone()
     }
 
     pub(crate) fn finish<G: Send + Unpin + 'static>(
@@ -310,8 +301,10 @@ fn classify_outcome(end: RequestEnd, head: Option<&ResponseHead>) -> RequestOutc
     let error_type =
         interruption.or_else(|| status.filter(StatusCode::is_server_error).map(status_label));
     let access_status = status.map(|value| value.as_u16()).or(fallback_log_status);
-    let termination =
-        interruption.or_else(|| head.filter(|head| head.load_shed).map(|_| "load_shed"));
+    let termination = interruption.or_else(|| {
+        head.is_some_and(|head| head.load_shed)
+            .then_some("load_shed")
+    });
     let problem_code = head.and_then(|head| head.problem_code).map(Code::as_str);
     RequestOutcome {
         status,
@@ -468,6 +461,12 @@ impl DurationSeries {
         route_durations.get(key)
     }
 
+    fn cached_route(&self, route: &str) -> Option<Arc<str>> {
+        self.matched
+            .get_key_value(route)
+            .map(|(cached, _)| Arc::clone(cached))
+    }
+
     fn insert(&mut self, route: Option<Arc<str>>, key: DurationLabels, histogram: Histogram) {
         let route_durations = match route {
             Some(route) => self.matched.entry(route).or_default(),
@@ -481,16 +480,12 @@ impl DurationSeries {
 struct Series {
     active: [[OnceLock<Gauge>; 2]; HttpMethod::COUNT],
     durations: ArcSwap<DurationSeries>,
-    durations_write: Mutex<()>,
+    durations_insert_lock: Mutex<()>,
 }
 
 impl Series {
     fn cached_route(&self, route: &str) -> Option<Arc<str>> {
-        self.durations
-            .load()
-            .matched
-            .get_key_value(route)
-            .map(|(cached, _)| Arc::clone(cached))
+        self.durations.load().cached_route(route)
     }
 
     fn active_gauge(&self, method: HttpMethod, scheme: TransportScheme) -> &Gauge {
@@ -510,26 +505,25 @@ impl Series {
             histogram.record(seconds);
             return;
         }
-        let histogram = {
-            let _write = self.durations_write.lock();
-            let current = self.durations.load_full();
-            if let Some(existing) = current.get(route, &key) {
-                existing.clone()
-            } else {
-                let cached_route = route.map(|route| {
-                    current.matched.get_key_value(route).map_or_else(
-                        || Arc::<str>::from(route),
-                        |(existing, _)| Arc::clone(existing),
-                    )
-                });
-                let histogram = duration_histogram(cached_route.clone(), key);
-                let mut next = (*current).clone();
-                next.insert(cached_route, key, histogram.clone());
-                self.durations.store(Arc::new(next));
-                histogram
-            }
-        };
-        histogram.record(seconds);
+        self.register_duration(route, key).record(seconds);
+    }
+
+    fn register_duration(&self, route: Option<&str>, key: DurationLabels) -> Histogram {
+        let _insert = self.durations_insert_lock.lock();
+        let current = self.durations.load_full();
+        if let Some(existing) = current.get(route, &key) {
+            return existing.clone();
+        }
+        let cached_route = route.map(|route| {
+            current
+                .cached_route(route)
+                .unwrap_or_else(|| Arc::from(route))
+        });
+        let histogram = duration_histogram(cached_route.clone(), key);
+        let mut next = (*current).clone();
+        next.insert(cached_route, key, histogram.clone());
+        self.durations.store(Arc::new(next));
+        histogram
     }
 }
 

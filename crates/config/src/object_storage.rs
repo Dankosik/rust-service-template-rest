@@ -5,7 +5,7 @@ use bytesize::{ByteSize, GIB, MIB};
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::app::local_development_only;
+use crate::app::insecure_development_only;
 use crate::de::{BlankAsNoneVerbatim, StrictBool, StrictCount, StrictDuration};
 use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, non_blank, nonzero_usize_range,
@@ -188,14 +188,23 @@ impl CredentialFields {
                     "object_storage.credentials",
                     "workload_identity is accepted only by amazon_s3",
                 ));
-                refuse_access_key(
-                    self.access_key_id.is_some(),
-                    self.secret_access_key.is_some(),
-                    v,
-                );
+                self.refuse_access_key(v);
                 Err(rejected)
             }
         }
+    }
+
+    fn refuse_access_key(&self, v: &mut Violations) {
+        v.reject_present(
+            &[
+                ("object_storage.access_key_id", self.access_key_id.is_some()),
+                (
+                    "object_storage.secret_access_key",
+                    self.secret_access_key.is_some(),
+                ),
+            ],
+            "is not accepted with workload_identity",
+        );
     }
 
     fn admit_amazon(self, v: &mut Violations) -> Result<ObjectStorageAmazonCredentials, Rejected> {
@@ -204,11 +213,7 @@ impl CredentialFields {
                 .admit_access_key(v)
                 .map(ObjectStorageAmazonCredentials::AccessKey),
             CredentialsKind::WorkloadIdentity => {
-                refuse_access_key(
-                    self.access_key_id.is_some(),
-                    self.secret_access_key.is_some(),
-                    v,
-                );
+                self.refuse_access_key(v);
                 Ok(ObjectStorageAmazonCredentials::WorkloadIdentity)
             }
         }
@@ -345,16 +350,6 @@ fn refuse_path_style(path_style: bool, v: &mut Violations) {
     );
 }
 
-fn refuse_access_key(has_id: bool, has_secret: bool, v: &mut Violations) {
-    v.reject_present(
-        &[
-            ("object_storage.access_key_id", has_id),
-            ("object_storage.secret_access_key", has_secret),
-        ],
-        "is not accepted with workload_identity",
-    );
-}
-
 impl ObjectStorageInput {
     pub(crate) fn admit(
         self,
@@ -368,7 +363,7 @@ impl ObjectStorageInput {
             endpoint,
             expected_bucket_owner,
             path_style,
-            credentials,
+            credentials: credentials_kind,
             access_key_id,
             secret_access_key,
             max_object_bytes,
@@ -397,7 +392,7 @@ impl ObjectStorageInput {
             operation_timeout,
             Duration::from_secs(1)..=Duration::from_mins(15),
         ));
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "object_storage.provider",
             provider == ProviderKind::Local,
             local_development,
@@ -412,7 +407,7 @@ impl ObjectStorageInput {
             provider,
             &bucket,
             CredentialFields {
-                kind: credentials,
+                kind: credentials_kind,
                 access_key_id,
                 secret_access_key,
             },

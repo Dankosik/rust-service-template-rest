@@ -8,8 +8,8 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::{Engine, Operation, POLL_INTERVAL, observe_failure, observe_recovery};
 
 const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(1);
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
-const RECONNECT_BASE_CAP: Duration = Duration::from_secs(15);
+const RECONNECT_DELAY_CAP: Duration = Duration::from_secs(30);
+const RECONNECT_UNJITTERED_CAP: Duration = Duration::from_secs(15);
 
 type ReconnectBackoff = <backon::ExponentialBuilder as backon::BackoffBuilder>::Backoff;
 
@@ -24,7 +24,7 @@ pub(crate) async fn run_listener(engine: &Engine, cancel: CancellationToken) {
 fn reconnect_backoff() -> ReconnectBackoff {
     backon::ExponentialBuilder::default()
         .with_min_delay(POLL_INTERVAL)
-        .with_max_delay(RECONNECT_BASE_CAP)
+        .with_max_delay(RECONNECT_UNJITTERED_CAP)
         .with_jitter()
         .without_max_times()
         .build()
@@ -33,8 +33,8 @@ fn reconnect_backoff() -> ReconnectBackoff {
 fn next_reconnect_delay(backoff: &mut ReconnectBackoff) -> Duration {
     backoff
         .next()
-        .unwrap_or(RECONNECT_MAX_DELAY)
-        .min(RECONNECT_MAX_DELAY)
+        .unwrap_or(RECONNECT_DELAY_CAP)
+        .min(RECONNECT_DELAY_CAP)
 }
 
 async fn listen(engine: &Engine, listener_pool: &ListenerPool) -> ! {
@@ -99,12 +99,12 @@ mod tests {
         for _ in 0..16 {
             last = next_reconnect_delay(&mut backoff);
             assert!(
-                last <= RECONNECT_MAX_DELAY,
+                last <= RECONNECT_DELAY_CAP,
                 "jittered cap stays bounded: {last:?}"
             );
         }
         assert!(
-            last >= RECONNECT_BASE_CAP && last <= RECONNECT_MAX_DELAY,
+            last >= RECONNECT_UNJITTERED_CAP && last <= RECONNECT_DELAY_CAP,
             "{last:?}"
         );
     }

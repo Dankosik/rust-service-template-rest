@@ -22,6 +22,9 @@ const SECRET_KEY_PATTERNS: &[&str] = &[
     // template:begin object-storage:secret-policy-object-storage
     "object_storage.secret_access_key",
     // template:end object-storage:secret-policy-object-storage
+    // template:begin clickhouse:secret-policy-clickhouse
+    "clickhouse.password",
+    // template:end clickhouse:secret-policy-clickhouse
     // template:begin inbound-webhooks:secret-policy-inbound-webhooks
     "inbound_webhooks.secrets.*",
     // template:end inbound-webhooks:secret-policy-inbound-webhooks
@@ -56,22 +59,22 @@ fn matches_pattern(pattern: &str, key: &str) -> bool {
 }
 
 pub(crate) fn first_secret_key(table: &toml::Table) -> Option<String> {
-    let mut path = Vec::new();
-    find_secret(table, &mut path)
+    let mut segments = Vec::new();
+    find_secret(table, &mut segments)
 }
 
-fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
+fn find_secret<'a>(table: &'a toml::Table, segments: &mut Vec<&'a str>) -> Option<String> {
     for (key, value) in table {
-        path.push(key);
-        let dotted = path.join(".");
+        segments.push(key);
+        let dotted = segments.join(".");
         let found = if is_secret_key(&dotted) && has_value(value) {
             Some(dotted)
         } else {
             value
                 .as_table()
-                .and_then(|nested| find_secret(nested, path))
+                .and_then(|nested| find_secret(nested, segments))
         };
-        path.pop();
+        segments.pop();
         if found.is_some() {
             return found;
         }
@@ -119,6 +122,9 @@ mod tests {
             // template:begin object-storage:secret-key-object-storage-vector
             "object_storage.secret_access_key",
             // template:end object-storage:secret-key-object-storage-vector
+            // template:begin clickhouse:secret-key-clickhouse-vector
+            "clickhouse.password",
+            // template:end clickhouse:secret-key-clickhouse-vector
             // template:begin inbound-webhooks:secret-key-inbound-webhooks-vector
             "inbound_webhooks.secrets.partner_v2",
             // template:end inbound-webhooks:secret-key-inbound-webhooks-vector
@@ -151,6 +157,9 @@ mod tests {
             "observability.otel.exporter.otlp_endpoint",
             "cache.key_prefix",
             "cache.client_key_path",
+            "clickhouse.password_file",
+            "clickhouse.client_key_path",
+            "clickhouse.root_ca_path",
             "object_storage.access_key_id",
             "inbound_webhooks.secrets.",
             "inbound_webhooks.secrets.partner.extra",

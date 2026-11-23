@@ -129,9 +129,9 @@ pub struct OtelExporterConfig {
 impl ObservabilityInput {
     pub(crate) fn admit(self, v: &mut Violations) -> ObservabilityConfig {
         v.check(validate_service_name(&self.otel.service_name));
-        v.check(sampler_arg(self.otel.traces_sampler_arg));
+        v.check(validate_traces_sampler_arg(self.otel.traces_sampler_arg));
         if let Some(endpoint) = self.otel.exporter.otlp_endpoint.as_deref() {
-            v.check(otlp_endpoint(endpoint));
+            v.check(validate_otlp_endpoint(endpoint));
         }
         let ratio = self.otel.traces_sampler_arg;
         let traces_sampler = match self.otel.traces_sampler {
@@ -157,7 +157,7 @@ pub(crate) fn validate_service_name(name: &str) -> Result<(), ValidationError> {
     non_blank("observability.otel.service_name", name)
 }
 
-fn sampler_arg(arg: f64) -> Result<(), ValidationError> {
+fn validate_traces_sampler_arg(arg: f64) -> Result<(), ValidationError> {
     let key = "observability.otel.traces_sampler_arg";
     if !arg.is_finite() {
         return Err(ValidationError::new(key, "must be finite"));
@@ -171,7 +171,7 @@ fn sampler_arg(arg: f64) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
+fn validate_otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
     let key = "observability.otel.exporter.otlp_endpoint";
     let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
     if !is_http_url {

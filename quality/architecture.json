@@ -25,6 +25,7 @@
         "members": [
           "crates/infra-bearerauthn/Cargo.toml",
           "crates/infra-cache/Cargo.toml",
+          "crates/infra-clickhouse/Cargo.toml",
           "crates/infra-grpc/Cargo.toml",
           "crates/infra-http/Cargo.toml",
           "crates/infra-jobs/Cargo.toml",
@@ -41,6 +42,7 @@
     "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
     "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
     "crates/infra-cache/Cargo.toml": {"role": "cache"},
+    "crates/infra-clickhouse/Cargo.toml": {"role": "feature-provider"},
     "crates/infra-grpc/Cargo.toml": {"role": "grpc"},
     "crates/infra-grpc-core/Cargo.toml": {"role": "grpc-core"},
     "crates/infra-http/Cargo.toml": {"role": "http"},
@@ -122,6 +124,10 @@
           "reason": "Features own keys and policy for object operations and presigned GET.",
           "authority": "docs/repo-architecture.md#global-invariants"
         },
+        "crates/infra-clickhouse/Cargo.toml": {
+          "reason": "Features own analytical queries, row schemas, and batch/async insert calls.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
         "crates/infra-temporal/Cargo.toml": {
           "reason": "Features invoke typed Temporal client workflow operations through the adapter seam.",
           "authority": "docs/repo-architecture.md#global-invariants"
@@ -136,6 +142,10 @@
       "allow_members": {
         "crates/infra-object-storage/Cargo.toml": {
           "reason": "File routes bind streaming storage operations to the HTTP request and response lifetimes and render pre-header failures.",
+          "authority": "docs/repo-architecture.md#global-invariants"
+        },
+        "crates/infra-clickhouse/Cargo.toml": {
+          "reason": "Analytical HTTP routes bind ClickHouse insert outcome tracking to request budgets and project query/insert failures to Problem responses.",
           "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/service-failure/Cargo.toml": {

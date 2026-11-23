@@ -385,7 +385,11 @@
       ]
     },
     "config-url": {
-      "when": {"any": [{"messaging": "nats-jetstream"}, {"temporal": "sdk"}]},
+      "when": {"any": [{"messaging": "nats-jetstream"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
+      "remove_when_unselected": []
+    },
+    "config-unknown-env-test": {
+      "when": {"any": [{"cache": "redis"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     },
     "outbound-auth": {
@@ -404,12 +408,16 @@
         "test/tests/outbound_http.rs"
       ]
     },
+    "hyper-rustls": {
+      "when": {"any": [{"outbound_http": "bounded"}, {"clickhouse": "http"}]},
+      "remove_when_unselected": []
+    },
     "service-test-tls": {
       "when": {"any": [{"service_auth": "jwt"}, {"outbound_auth": "oauth2-client-credentials"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "tls-fixtures": {
-      "when": {"any": [{"authn": "!none"}, {"outbound_http": "bounded"}, {"grpc": "enabled"}, {"cache": "redis"}, {"database": "postgres"}, {"object_storage": "s3"}]},
+      "when": {"any": [{"authn": "!none"}, {"outbound_http": "bounded"}, {"grpc": "enabled"}, {"cache": "redis"}, {"database": "postgres"}, {"object_storage": "s3"}, {"clickhouse": "http"}]},
       "remove_when_unselected": [
         "crates/tls-test-support/"
       ]
@@ -546,11 +554,11 @@
       "remove_when_unselected": []
     },
     "service-test-tempfile": {
-      "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
+      "when": {"any": [{"database": "postgres"}, {"cache": "redis"}, {"clickhouse": "http"}, {"all": [{"grpc": "enabled"}, {"authn": "oidc-jwt"}]}]},
       "remove_when_unselected": []
     },
     "integration": {
-      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}, {"temporal": "sdk"}]},
+      "when": {"any": [{"database": "postgres"}, {"messaging": "nats-jetstream"}, {"cache": "redis"}, {"object_storage": "s3"}, {"outbound_auth": "oauth2-client-credentials"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": [
         "env/docker-compose.yml",
         "scripts/integration.py",
@@ -607,8 +615,23 @@
       ]
     },
     "rustls": {
-      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}, {"temporal": "sdk"}]},
+      "when": {"any": [{"grpc": "enabled"}, {"cache": "redis"}, {"outbound_http": "bounded"}, {"object_storage": "s3"}, {"clickhouse": "http"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
+    },
+    "clickhouse": {
+      "when": {"clickhouse": "http"},
+      "remove_when_unselected": [
+        "crates/infra-clickhouse/",
+        "crates/infra-http/src/clickhouse.rs",
+        "crates/infra-http/src/clickhouse/",
+        "crates/config/src/clickhouse.rs",
+        "crates/config/src/clickhouse/",
+        "crates/service/src/bootstrap/clickhouse.rs",
+        "crates/shared-rules/src/clickhouse.rs",
+        "docs/decisions/clickhouse-decisions.md",
+        "env/clickhouse/",
+        "vendor/clickhouse/"
+      ]
     },
     "cache": {
       "when": {"cache": "redis"},
@@ -686,10 +709,6 @@
     },
     "object-storage-temporal": {
       "when": {"all": [{"object_storage": "s3"}, {"temporal": "sdk"}]},
-      "remove_when_unselected": []
-    },
-    "config-unknown-env-key": {
-      "when": {"any": [{"cache": "redis"}, {"temporal": "sdk"}]},
       "remove_when_unselected": []
     }
   }

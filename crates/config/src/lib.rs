@@ -17,6 +17,9 @@ mod cache;
 // template:begin object-storage:config-module
 mod object_storage;
 // template:end object-storage:config-module
+// template:begin clickhouse:config-module
+mod clickhouse;
+// template:end clickhouse:config-module
 // template:begin authn:config-module
 mod authn;
 // template:end authn:config-module
@@ -99,6 +102,9 @@ pub use object_storage::{
     ObjectStorageProvider,
 };
 // template:end object-storage:config-export
+// template:begin clickhouse:config-export
+pub use clickhouse::{ClickHouseClientCertificate, ClickHouseConfig, ClickHouseQuerySettings};
+// template:end clickhouse:config-export
 // template:begin authn:config-export
 pub use authn::{Audiences, AuthnConfig};
 // template:end authn:config-export
@@ -150,7 +156,7 @@ pub(crate) struct ConfigInput {
     inbound_webhooks: inbound_webhooks::InboundWebhooksInput,
     // template:end inbound-webhooks:config-inbound-webhooks-input-field
     // template:begin webhooks:config-outbound-webhooks-input-field
-    webhooks: webhooks::ServiceWebhooksInput,
+    webhooks: webhooks::WebhooksInput,
     // template:end webhooks:config-outbound-webhooks-input-field
     health: HealthConfig,
     log: LogConfig,
@@ -162,6 +168,9 @@ pub(crate) struct ConfigInput {
     // template:begin object-storage:config-input-field
     object_storage: object_storage::ObjectStorageInput,
     // template:end object-storage:config-input-field
+    // template:begin clickhouse:config-input-field
+    clickhouse: clickhouse::ClickHouseInput,
+    // template:end clickhouse:config-input-field
     // template:begin authn:config-input-field
     authn: authn::AuthnInput,
     // template:end authn:config-input-field
@@ -187,11 +196,8 @@ impl ConfigInput {
     ) -> Result<Config, ValidationErrors> {
         admit_with(|v| {
             let app = self.app.admit(build, v);
-            #[allow(
-                unused_variables,
-                reason = "only the gRPC profile consumes the HTTP drain budget"
-            )]
-            let (http, drain_budget) = self.http.admit(shutdown_tail, v);
+            let drain_budget = self.http.admit_drain_budget(shutdown_tail, v);
+            let http = self.http.admit(drain_budget, v);
             // template:begin service-auth:config-grpc-enabled
             let grpc_enabled = self.grpc.enabled;
             // template:end service-auth:config-grpc-enabled
@@ -214,6 +220,9 @@ impl ConfigInput {
             // template:begin object-storage:config-admit
             let object_storage = self.object_storage.admit(app.is_local_development(), v);
             // template:end object-storage:config-admit
+            // template:begin clickhouse:config-admit
+            let clickhouse = self.clickhouse.admit(app.is_local_development(), v);
+            // template:end clickhouse:config-admit
             // template:begin authn:config-admit
             let authn = self.authn.admit(v);
             // template:end authn:config-admit
@@ -266,6 +275,9 @@ impl ConfigInput {
                 // template:begin object-storage:config-admitted-field
                 object_storage: object_storage?,
                 // template:end object-storage:config-admitted-field
+                // template:begin clickhouse:config-admitted-field
+                clickhouse: clickhouse?,
+                // template:end clickhouse:config-admitted-field
                 // template:begin authn:config-admitted-field
                 authn: authn?,
                 // template:end authn:config-admitted-field
@@ -309,6 +321,9 @@ pub struct Config {
     // template:begin object-storage:config-field
     object_storage: Option<ObjectStorageConfig>,
     // template:end object-storage:config-field
+    // template:begin clickhouse:config-field
+    clickhouse: Option<ClickHouseConfig>,
+    // template:end clickhouse:config-field
     // template:begin authn:config-field
     authn: AuthnConfig,
     // template:end authn:config-field
@@ -393,6 +408,13 @@ impl Config {
         self.object_storage.as_ref()
     }
     // template:end object-storage:config-accessor
+
+    // template:begin clickhouse:config-accessor
+    #[must_use]
+    pub const fn clickhouse(&self) -> Option<&ClickHouseConfig> {
+        self.clickhouse.as_ref()
+    }
+    // template:end clickhouse:config-accessor
 
     // template:begin authn:config-accessor
     #[must_use]

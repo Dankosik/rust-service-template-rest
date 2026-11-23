@@ -174,6 +174,12 @@ deleted; selected ones stay inert until configured.
   File routes use the [HTTP upload and download helpers](crates/infra-http/src/object_storage.rs)
   with the configured [storage client](crates/infra-object-storage).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
+<!-- template:begin clickhouse:docs-readme-clickhouse-profile -->
+- `CLICKHOUSE=http`: an optional hardened ClickHouse OLAP client
+  ([`infra-clickhouse`](crates/infra-clickhouse)) with bounded reads,
+  explicit batched and async writes, `password_file` rotation, and
+  [decision and rollout guidance](docs/decisions/clickhouse-decisions.md).
+<!-- template:end clickhouse:docs-readme-clickhouse-profile -->
 <!-- template:begin temporal:docs-readme-temporal-profile -->
 - `TEMPORAL=sdk`: durable workflows and heartbeating activities over Temporal
   gRPC ([`infra-temporal`](crates/infra-temporal)), with a dedicated

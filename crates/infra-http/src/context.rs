@@ -37,6 +37,9 @@ pub(super) struct RequestTracking {
     // template:begin object-storage:http-request-put-outcomes
     put_outcomes: std::sync::OnceLock<infra_object_storage::PutOutcomes>,
     // template:end object-storage:http-request-put-outcomes
+    // template:begin clickhouse:http-request-clickhouse-outcomes
+    clickhouse_insert_outcomes: std::sync::OnceLock<infra_clickhouse::InsertOutcomes>,
+    // template:end clickhouse:http-request-clickhouse-outcomes
 }
 
 impl RequestContext {
@@ -82,6 +85,16 @@ impl RequestContext {
         Some(BodyReadTracker::new(Arc::clone(tracking), deadline))
     }
     // template:end object-storage:http-observe-put-outcomes
+
+    // template:begin clickhouse:http-observe-clickhouse-outcomes
+    pub(super) fn clickhouse_insert_outcomes(&self) -> Option<&infra_clickhouse::InsertOutcomes> {
+        self.tracking.as_deref().map(|tracking| {
+            tracking
+                .clickhouse_insert_outcomes
+                .get_or_init(Default::default)
+        })
+    }
+    // template:end clickhouse:http-observe-clickhouse-outcomes
 }
 
 fn stopped_response(
@@ -103,9 +116,19 @@ fn stopped_response(
         .and_then(|tracking| tracking.put_outcomes.get())
         .is_some_and(infra_object_storage::PutOutcomes::has_unconfirmed_write)
     {
-        return pending_problem(crate::object_storage::unconfirmed_write(problem));
+        return pending_problem(crate::object_storage::with_unconfirmed_write_detail(
+            problem,
+        ));
     }
     // template:end object-storage:http-stopped-put-outcome
+    // template:begin clickhouse:http-stopped-clickhouse-outcome
+    if tracking
+        .and_then(|tracking| tracking.clickhouse_insert_outcomes.get())
+        .is_some_and(infra_clickhouse::InsertOutcomes::has_unconfirmed_write)
+    {
+        return pending_problem(crate::clickhouse::with_unconfirmed_insert_detail(problem));
+    }
+    // template:end clickhouse:http-stopped-clickhouse-outcome
     pending_problem(problem)
 }
 
@@ -143,26 +166,25 @@ impl<T: Deref<Target = RequestTracking>> BodyReadTracker<T> {
     }
 
     fn release_count(&mut self) {
-        if self.counted {
-            self.counted = false;
-            if self.deadline.expired() {
-                self.tracking
-                    .pending_at_deadline
-                    .store(true, Ordering::Relaxed);
-            }
-            self.tracking.pending_reads.fetch_sub(1, Ordering::Release);
+        if !self.counted {
+            return;
         }
+        self.counted = false;
+        if self.deadline.expired() {
+            self.tracking
+                .pending_at_deadline
+                .store(true, Ordering::Relaxed);
+        }
+        self.tracking.pending_reads.fetch_sub(1, Ordering::Release);
     }
 
     pub(crate) fn poll_with<R>(&mut self, poll: impl FnOnce() -> Poll<R>) -> Poll<R> {
         let polled = poll();
-        if polled.is_pending() {
-            if !self.counted && !self.deadline.expired() {
-                self.tracking.pending_reads.fetch_add(1, Ordering::Relaxed);
-                self.counted = true;
-            }
-        } else {
+        if polled.is_ready() {
             self.release_count();
+        } else if !self.counted && !self.deadline.expired() {
+            self.tracking.pending_reads.fetch_add(1, Ordering::Relaxed);
+            self.counted = true;
         }
         polled
     }
@@ -328,6 +350,9 @@ where
     // template:begin object-storage:http-opening-put-outcomes
     let track_request = track_request || !request.method().is_safe();
     // template:end object-storage:http-opening-put-outcomes
+    // template:begin clickhouse:http-opening-clickhouse-outcomes
+    let track_request = track_request || !request.method().is_safe();
+    // template:end clickhouse:http-opening-clickhouse-outcomes
     let tracking: Option<Arc<RequestTracking>> = track_request.then(Arc::default);
     let version = request.version();
     let extensions = request.extensions_mut();
@@ -361,12 +386,16 @@ fn upload_timeout_response(version: Version) -> Response {
         Problem::new(Code::RequestTimeout)
             .detail_static("request body was not received within the request budget"),
     );
+    close_http1_connection(&mut response, version);
+    response
+}
+
+pub(crate) fn close_http1_connection(response: &mut Response, version: Version) {
     if version < Version::HTTP_2 {
         response
             .headers_mut()
             .insert(CONNECTION, HeaderValue::from_static("close"));
     }
-    response
 }
 
 impl From<Stopped> for Problem {

@@ -1,3 +1,9 @@
+/// RFC 9110 §5.5
+#[must_use]
+pub fn has_ascii_control(bytes: &[u8]) -> bool {
+    bytes.iter().any(|&byte| byte < 0x20 || byte == 0x7f)
+}
+
 /// RFC 9110 §5.6.2
 #[must_use]
 pub fn is_tchar(byte: u8) -> bool {
@@ -17,7 +23,20 @@ pub fn is_json_content_type(content_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_json_content_type;
+    use super::{has_ascii_control, is_json_content_type};
+
+    #[test]
+    fn ascii_control_bytes_match_rfc9110_ctl_range() {
+        assert!(!has_ascii_control(b""));
+        for byte in 0_u8..=u8::MAX {
+            let expected = byte < 0x20 || byte == 0x7f;
+            assert_eq!(has_ascii_control(&[byte]), expected, "byte 0x{byte:02x}");
+        }
+        assert!(has_ascii_control(b"ok\nline"));
+        assert!(has_ascii_control(b"ok\tline"));
+        assert!(has_ascii_control(b"ok\x7fdel"));
+        assert!(!has_ascii_control(b"visible ascii \x80\xff"));
+    }
 
     #[test]
     fn parameters_whitespace_and_case_do_not_change_the_media_type() {

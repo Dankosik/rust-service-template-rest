@@ -6,13 +6,13 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
 
-use crate::app::local_development_only;
+use crate::app::insecure_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictCount};
 use crate::validate::{
     Rejected, ValidationError, Violations, missing, non_blank, nonzero_usize_range, required,
 };
 
-const DELIVERY_OVERHEAD_BYTES: u64 = shared_rules::messaging::HEADER_LIMIT_BYTES as u64;
+const HEADER_ALLOWANCE_BYTES: u64 = shared_rules::messaging::HEADER_LIMIT_BYTES as u64;
 const MAX_PAYLOAD_BYTES: usize =
     shared_rules::messaging::PUBLICATION_WINDOW_BYTES - shared_rules::messaging::HEADER_LIMIT_BYTES;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = shared_rules::messaging::PUBLICATION_WINDOW_BYTES as u64;
@@ -105,12 +105,12 @@ impl MessagingInput {
         local_development: bool,
         v: &mut Violations,
     ) -> Result<MessagingConfig, Rejected> {
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "messaging.allow_plaintext",
             self.allow_plaintext,
             local_development,
         ));
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "messaging.allow_unauthenticated",
             self.allow_unauthenticated,
             local_development,
@@ -226,7 +226,7 @@ fn check_resident_delivery_bound(
     consumer_concurrency: NonZeroU32,
 ) -> Result<(), ValidationError> {
     let resident = u64::from(consumer_concurrency.get())
-        * (max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES);
+        * (max_payload_bytes.as_u64() + HEADER_ALLOWANCE_BYTES);
     if resident <= MAX_RESIDENT_DELIVERY_BYTES {
         return Ok(());
     }
@@ -235,7 +235,7 @@ fn check_resident_delivery_bound(
         format!(
             "{consumer_concurrency} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
             max_payload_bytes.as_u64(),
-            DELIVERY_OVERHEAD_BYTES / KIB,
+            HEADER_ALLOWANCE_BYTES / KIB,
         ),
     ))
 }

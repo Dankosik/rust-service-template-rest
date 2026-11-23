@@ -657,6 +657,176 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
 }
 // template:end object-storage:service-object-storage-lifecycle-admission
 
+// template:begin clickhouse:service-clickhouse-lifecycle-admission
+#[test]
+fn inert_omitted_clickhouse_starts_ready_and_logs_disabled() {
+    let service = Service::spawn(&[]);
+    let starting = service.await_record("service_starting");
+    assert_eq!(starting["clickhouse.enabled"], false, "{starting}");
+    let api = service.await_addr("http listener bound");
+    let diagnostics = service.await_addr("diagnostics listener bound");
+    service.await_record("service_ready");
+    assert!(
+        poll_until(
+            &format!("http://{api}/health/ready"),
+            200,
+            Duration::from_secs(5)
+        )
+        .is_some(),
+        "service with omitted [clickhouse] must become ready"
+    );
+    let (status, metrics) = get(&format!("http://{diagnostics}/metrics")).unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        !metrics.contains("clickhouse_operations_in_flight"),
+        "inert clickhouse must not register metrics:\n{metrics}"
+    );
+    service.terminate();
+    let (code, stdout, stderr) = service.wait_output();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+    assert!(!stdout.contains("clickhouse_closed"), "{stdout}");
+}
+
+#[test]
+fn unreachable_https_clickhouse_still_binds_becomes_ready_and_exposes_metrics() {
+    let url = format!("https://{}", available_address());
+    let secret = "clickhouse-secret-sentinel";
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__CLICKHOUSE__URL", &url),
+        ("APP__CLICKHOUSE__DATABASE", "app"),
+        ("APP__CLICKHOUSE__USERNAME", "app"),
+        ("APP__CLICKHOUSE__PASSWORD", secret),
+    ]);
+    let starting = service.await_record("service_starting");
+    assert_eq!(starting["clickhouse.enabled"], true, "{starting}");
+    let api = service.await_addr("http listener bound");
+    let diagnostics = service.await_addr("diagnostics listener bound");
+    service.await_record("service_ready");
+    assert!(
+        poll_until(
+            &format!("http://{api}/health/ready"),
+            200,
+            Duration::from_secs(5)
+        )
+        .is_some(),
+        "unreachable clickhouse must not keep service from becoming ready"
+    );
+    let (status, metrics) = get(&format!("http://{diagnostics}/metrics")).unwrap();
+    assert_eq!(status, 200);
+    assert!(
+        metrics
+            .lines()
+            .any(|line| line == "clickhouse_operations_in_flight 0"),
+        "metrics missing zero-initialized clickhouse_operations_in_flight:\n{metrics}"
+    );
+    service.terminate();
+    let (code, stdout, stderr) = service.wait_output();
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+    assert!(stdout.contains("clickhouse_closed"), "{stdout}");
+    assert!(
+        !stdout.contains(secret) && !stderr.contains(secret),
+        "clickhouse secret leaked into process output"
+    );
+}
+
+#[test]
+fn invalid_production_clickhouse_config_exits_before_listener_without_leaking_secrets() {
+    let secret = "ch-invalid-url-secret-sentinel";
+    for (url, allow_plaintext, reason) in [
+        ("http://127.0.0.1:8123", "false", "clickhouse.url"),
+        (
+            "http://127.0.0.1:8123",
+            "true",
+            "clickhouse.allow_plaintext",
+        ),
+        (
+            "https://alice:ch-invalid-url-secret-sentinel@127.0.0.1:8443",
+            "false",
+            "clickhouse.url",
+        ),
+    ] {
+        let (code, stdout, stderr) = Service::spawn(&[
+            ("APP__APP__ENV", "production"),
+            ("APP__CLICKHOUSE__URL", url),
+            ("APP__CLICKHOUSE__ALLOW_PLAINTEXT", allow_plaintext),
+            ("APP__CLICKHOUSE__DATABASE", "app"),
+            ("APP__CLICKHOUSE__USERNAME", "app"),
+            ("APP__CLICKHOUSE__PASSWORD", secret),
+        ])
+        .wait_output();
+        assert_eq!(
+            code,
+            Some(1),
+            "url={url}; stdout: {stdout}; stderr: {stderr}"
+        );
+        assert!(stdout.is_empty(), "url={url}; stdout: {stdout}");
+        assert!(stderr.contains(reason), "url={url}; stderr: {stderr}");
+        assert!(
+            !stdout.contains(secret) && !stderr.contains(secret),
+            "secret leaked for url={url}"
+        );
+    }
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "process lifecycle fixture runs the service binary to observe rejected config exit status"
+)]
+fn clickhouse_toml_password_is_rejected_before_binding_the_listener() {
+    use std::io::Write as _;
+
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    let secret = "ch-toml-secret-sentinel";
+    writeln!(
+        file,
+        "[clickhouse]\nurl = \"https://127.0.0.1:8443\"\ndatabase = \"app\"\nusername = \"app\"\npassword = \"{secret}\""
+    )
+    .unwrap();
+    let output = Service::command(&[])
+        .args(["--config", file.path().to_str().unwrap()])
+        .output()
+        .expect("run service with clickhouse password in TOML");
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.is_empty(), "stdout: {stdout}");
+    assert!(stderr.contains("clickhouse.password"), "stderr: {stderr}");
+    assert!(
+        !stdout.contains(secret) && !stderr.contains(secret),
+        "TOML secret leaked"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_clickhouse_password_fifo_is_rejected_before_binding_the_listener() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("password");
+    nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    let service = Service::spawn(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__CLICKHOUSE__URL", "https://127.0.0.1:8443"),
+        ("APP__CLICKHOUSE__DATABASE", "app"),
+        ("APP__CLICKHOUSE__USERNAME", "app"),
+        ("APP__CLICKHOUSE__PASSWORD_FILE", path.to_str().unwrap()),
+    ]);
+    let (code, stdout, stderr) = service.wait_output();
+    assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(
+        stdout.contains("clickhouse password_file could not be read"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("shutdown_finishing"), "{stdout}");
+    assert!(!stdout.contains("http listener bound"), "{stdout}");
+    assert!(!stdout.contains("diagnostics listener bound"), "{stdout}");
+    assert!(stderr.is_empty(), "stderr: {stderr}");
+}
+// template:end clickhouse:service-clickhouse-lifecycle-admission
+
 // template:begin temporal:service-temporal-lifecycle-tests
 #[test]
 #[expect(

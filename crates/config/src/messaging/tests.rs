@@ -41,7 +41,7 @@ fn default_delivery_fits_a_broker_with_the_default_payload_limit() {
     const BROKER_DEFAULT_MAX_PAYLOAD: u64 = 1024 * 1024;
     let config = admit(MessagingInput::default(), false).unwrap();
     assert!(
-        u64::try_from(config.max_payload_bytes).unwrap() + DELIVERY_OVERHEAD_BYTES
+        u64::try_from(config.max_payload_bytes).unwrap() + HEADER_ALLOWANCE_BYTES
             <= BROKER_DEFAULT_MAX_PAYLOAD
     );
 }

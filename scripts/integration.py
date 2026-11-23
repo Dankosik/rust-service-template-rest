@@ -96,6 +96,14 @@ def cmd_compile(suite: str) -> None:
                 }
             ),
         )
+    if (lib.ROOT / "crates/infra-clickhouse").is_dir():
+        lib.run(
+            [
+                "cargo", "test", "--locked", "-p", "infra-clickhouse", "--features", "integration",
+                "--test", "clickhouse", "--no-run",
+            ],
+            env=lib.clean_pg_env({"CLICKHOUSE_URL": "compile-only"}),
+        )
     if suite == "retained" and (lib.ROOT / "crates/infra-oauth2-client-credentials").is_dir():
         lib.run(
             [
@@ -378,6 +386,40 @@ def cmd_oauth(extra: Sequence[str]) -> None:
         lib.run(cmd, env=env)
 
 
+def cmd_clickhouse(extra: Sequence[str]) -> None:
+    if not (lib.ROOT / "crates/infra-clickhouse").is_dir():
+        raise lib.ScriptError("clickhouse profile not present", exit_code=2)
+    cmd = [
+        "cargo", "test", "--locked", "-p", "infra-clickhouse",
+        "--features", "integration", "--test", "clickhouse", *extra,
+    ]
+    compose_creds = {
+        "CLICKHOUSE_DATABASE": "app",
+        "CLICKHOUSE_USER": "app",
+        "CLICKHOUSE_PASSWORD": "app",
+        "CLICKHOUSE_READONLY_USER": "app_ro",
+        "CLICKHOUSE_READONLY_PASSWORD": "app_ro",
+    }
+    override_creds = {k: os.environ.get(k) or v for k, v in compose_creds.items()}
+    if _is_no_run(extra):
+        lib.run(cmd, env=lib.clean_pg_env({**override_creds, "CLICKHOUSE_URL": os.environ.get("CLICKHOUSE_URL") or "compile-only"}))
+        return
+    if existing := os.environ.get("CLICKHOUSE_URL"):
+        lib.run(cmd, env=lib.clean_pg_env({**override_creds, "CLICKHOUSE_URL": existing}))
+        return
+    lib.require_docker(allow_refusal=True)
+    with lib.ComposeStack("service-clickhouse") as stack:
+        port = stack.start("clickhouse", 8123)
+        env = lib.clean_pg_env({**compose_creds, "CLICKHOUSE_URL": f"http://127.0.0.1:{port}"})
+        compile_cmd = [
+            "cargo", "test", "--locked", "-p", "infra-clickhouse",
+            "--features", "integration", "--test", "clickhouse", "--no-run",
+        ]
+        lib.run(compile_cmd, env=env)
+        stack.wait("clickhouse", port)
+        lib.run(cmd, env=env)
+
+
 # template:begin temporal:integration-cmd-temporal
 def cmd_temporal(extra: Sequence[str]) -> None:
     if not (lib.ROOT / "crates/infra-temporal").is_dir():
@@ -453,6 +495,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "object-storage",
         "messaging",
         "oauth",
+        "clickhouse",
         # template:begin temporal:integration-subparser-temporal
         "temporal",
         # template:end temporal:integration-subparser-temporal
@@ -481,6 +524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "object-storage": cmd_object_storage,
                     "messaging": cmd_messaging,
                     "oauth": cmd_oauth,
+                    "clickhouse": cmd_clickhouse,
                     # template:begin temporal:integration-dispatch-temporal
                     "temporal": cmd_temporal,
                     # template:end temporal:integration-dispatch-temporal

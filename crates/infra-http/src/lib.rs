@@ -4,6 +4,9 @@ pub mod extract;
 // template:begin object-storage:http-object-storage-module
 pub mod object_storage;
 // template:end object-storage:http-object-storage-module
+// template:begin clickhouse:http-clickhouse-module
+pub mod clickhouse;
+// template:end clickhouse:http-clickhouse-module
 pub mod problem;
 // template:begin temporal:http-temporal-module
 pub mod temporal;

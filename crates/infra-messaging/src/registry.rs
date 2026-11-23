@@ -42,7 +42,7 @@ trait ErasedEventHandler: Send + Sync {
         &self,
         id: &str,
         occurred_at: time::UtcDateTime,
-        payload: &[u8],
+        payload_json: &[u8],
         context: OperationContext,
     ) -> Result<HandlerFuture<'_>, serde_json::Error>;
 }
@@ -189,25 +189,25 @@ impl<T: EventPayload> std::fmt::Debug for PublicationRoute<T> {
 
 impl<T: EventPayload + Serialize> PublicationRoute<T> {
     pub fn prepare(&self, event: &Event<T>) -> Result<crate::PreparedEvent, crate::PrepareError> {
-        self.prepare_with_id(event, || event.id.clone())
+        self.prepare_with_message_id(event, || event.id.clone())
     }
 
-    pub(crate) fn prepare_with_id(
+    pub(crate) fn prepare_with_message_id(
         &self,
         event: &Event<T>,
-        make_id: impl FnOnce() -> String,
+        make_message_id: impl FnOnce() -> String,
     ) -> Result<crate::PreparedEvent, crate::PrepareError> {
-        crate::PreparedEvent::prepare_with_id(
+        crate::PreparedEvent::prepare_with_message_id(
             self.route.subject.clone(),
             event,
             self.max_payload_bytes,
-            make_id,
+            make_message_id,
         )
     }
 }
 
 pub struct RouteEntry<'a, T> {
-    entry: &'a mut RegisteredRoute,
+    registered: &'a mut RegisteredRoute,
     max_publication_bytes: &'a mut usize,
     payload: PhantomData<fn(T) -> T>,
 }
@@ -217,8 +217,8 @@ impl<T: EventPayload> std::fmt::Debug for RouteEntry<'_, T> {
         formatter
             .debug_struct("RouteEntry")
             .field("key", &route_key::<T>())
-            .field("subject", &self.entry.subject)
-            .field("documented", &self.entry.schema.is_some())
+            .field("subject", &self.registered.subject)
+            .field("documented", &self.registered.schema.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -229,8 +229,8 @@ impl<T: EventPayload + 'static> RouteEntry<'_, T> {
         *self.max_publication_bytes = (*self.max_publication_bytes).max(max_payload_bytes);
         PublicationRoute {
             route: Route {
-                subject: self.entry.subject.clone(),
-                schema: self.entry.schema,
+                subject: self.registered.subject.clone(),
+                schema: self.registered.schema,
                 payload: PhantomData,
             },
             max_payload_bytes,
@@ -241,7 +241,7 @@ impl<T: EventPayload + 'static> RouteEntry<'_, T> {
     where
         T: DeserializeOwned,
     {
-        self.entry.bind_handler(handler);
+        self.registered.bind_handler(handler);
     }
 }
 
@@ -320,7 +320,7 @@ impl std::fmt::Debug for Registry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let subjects = std::fmt::from_fn(|f| {
             f.debug_map()
-                .entries(self.routes.iter().map(|(key, entry)| (key, &entry.subject)))
+                .entries(self.routes.iter().map(|(key, route)| (key, &route.subject)))
                 .finish()
         });
         formatter
@@ -332,7 +332,7 @@ impl std::fmt::Debug for Registry {
                 &self
                     .routes
                     .values()
-                    .filter(|entry| entry.schema.is_some())
+                    .filter(|route| route.schema.is_some())
                     .count(),
             )
             .field(
@@ -340,7 +340,7 @@ impl std::fmt::Debug for Registry {
                 &self
                     .routes
                     .values()
-                    .filter(|entry| entry.is_handled())
+                    .filter(|route| route.is_handled())
                     .count(),
             )
             .finish()
@@ -381,7 +381,7 @@ impl Registry {
             handler: None,
         });
         Ok(RouteEntry {
-            entry: registered,
+            registered,
             max_publication_bytes: &mut self.max_publication_bytes,
             payload: PhantomData,
         })
@@ -396,23 +396,23 @@ impl Registry {
         T: EventPayload + DeserializeOwned + 'static,
     {
         let key = route_key::<T>();
-        let Some(entry) = self
+        let Some(registered) = self
             .routes
             .get_mut(&key)
-            .filter(|entry| entry.matches(route))
+            .filter(|registered| registered.matches(route))
         else {
             return Err(RegistryError::MissingRoute {
                 event_type: key.event_type,
                 schema_version: key.schema_version,
             });
         };
-        if entry.is_handled() {
+        if registered.is_handled() {
             return Err(RegistryError::DuplicateHandler {
                 event_type: key.event_type,
                 schema_version: key.schema_version,
             });
         }
-        entry.bind_handler(handler);
+        registered.bind_handler(handler);
         Ok(())
     }
 
@@ -450,16 +450,16 @@ impl Registry {
     pub(crate) fn handled_routes(
         &self,
     ) -> impl Iterator<Item = (&RouteKey<'static>, &RegisteredRoute)> {
-        self.routes().filter(|(_, entry)| entry.is_handled())
+        self.routes().filter(|(_, route)| route.is_handled())
     }
 
     pub(crate) fn into_handled_routes(
         self,
     ) -> impl Iterator<Item = (RouteKey<'static>, async_nats::Subject, BoundHandler)> {
-        self.routes.into_iter().filter_map(|(key, entry)| {
-            entry
+        self.routes.into_iter().filter_map(|(key, route)| {
+            route
                 .handler
-                .map(|handler| (key, entry.subject, BoundHandler(handler)))
+                .map(|handler| (key, route.subject, BoundHandler(handler)))
         })
     }
 }

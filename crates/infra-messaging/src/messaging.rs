@@ -138,16 +138,14 @@ impl Messaging {
         context: &OperationContext,
     ) -> Result<Self, MessagingError> {
         let mut startup = Self::prepare(options, context)?;
-        match startup.admit().await {
-            Ok(messaging) => Ok(messaging),
-            Err(error) => {
-                let outcome = startup.close(context).await;
-                if outcome != CloseOutcome::Complete {
-                    tracing::warn!(?outcome, "messaging_admission_close_incomplete");
-                }
-                Err(error)
+        let admitted = startup.admit().await;
+        if admitted.is_err() {
+            let outcome = startup.close(context).await;
+            if outcome != CloseOutcome::Complete {
+                tracing::warn!(?outcome, "messaging_admission_close_incomplete");
             }
         }
+        admitted
     }
 
     pub fn prepare(

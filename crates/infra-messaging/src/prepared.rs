@@ -69,11 +69,11 @@ pub(crate) struct Publication<'a> {
 }
 
 impl PreparedEvent {
-    pub(crate) fn prepare_with_id<T: EventPayload + Serialize>(
+    pub(crate) fn prepare_with_message_id<T: EventPayload + Serialize>(
         subject: Subject,
         event: &Event<T>,
         max_payload_bytes: usize,
-        make_id: impl FnOnce() -> String,
+        make_message_id: impl FnOnce() -> String,
     ) -> Result<Self, PrepareError> {
         let payload =
             json_payload::to_vec_bounded(&event.payload, max_payload_bytes).map_err(|error| {
@@ -92,7 +92,7 @@ impl PreparedEvent {
         let occurred_at = CreatedAt::new_outbound(event.occurred_at)?;
         Ok(Self {
             subject,
-            message_id: make_id(),
+            message_id: make_message_id(),
             distinct_publication_id: None,
             event_type: Cow::Borrowed(key.event_type),
             schema_version: key.schema_version,
@@ -569,7 +569,7 @@ mod tests {
             calls: Cell::new(0),
         });
         let prepared =
-            PreparedEvent::prepare_with_id(subject.clone(), &event, 4, || event.id.clone())
+            PreparedEvent::prepare_with_message_id(subject.clone(), &event, 4, || event.id.clone())
                 .unwrap();
         assert!(std::ptr::eq(
             prepared.message_id(),
@@ -607,7 +607,7 @@ mod tests {
 
         event.id.clear();
         std::assert_matches!(
-            PreparedEvent::prepare_with_id(subject, &event, 4, || {
+            PreparedEvent::prepare_with_message_id(subject, &event, 4, || {
                 panic!("invalid identity must be rejected before building the ID")
             }),
             Err(PrepareError::Identity)

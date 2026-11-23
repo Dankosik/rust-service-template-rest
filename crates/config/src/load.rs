@@ -41,6 +41,9 @@ const RETAINED_SECTIONS: &[&str] = &[
     // template:begin object-storage:config-section
     "object_storage",
     // template:end object-storage:config-section
+    // template:begin clickhouse:config-section
+    "clickhouse",
+    // template:end clickhouse:config-section
     // template:begin authn:config-section
     "authn",
     // template:end authn:config-section
@@ -183,7 +186,7 @@ pub(crate) fn load_with_tail_from(
     shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<Config, Error> {
-    let input: ConfigInput = merge(options, environment)?;
+    let input: ConfigInput = load_input(options, environment)?;
     Ok(input.admit(build, shutdown_tail)?)
 }
 
@@ -211,7 +214,7 @@ pub(crate) fn load_worker_with_tail_from(
     shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::WorkerConfig, Error> {
-    let input: crate::WorkerInput = merge(options, environment)?;
+    let input: crate::WorkerInput = load_input(options, environment)?;
     Ok(input.admit(build, shutdown_tail)?)
 }
 // template:end worker:load-worker
@@ -240,7 +243,7 @@ pub(crate) fn load_temporal_worker_with_tail_from(
     shutdown_tail: crate::ShutdownTail,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::TemporalWorkerConfig, Error> {
-    let input: crate::temporal_worker::TemporalWorkerInput = merge(options, environment)?;
+    let input: crate::temporal_worker::TemporalWorkerInput = load_input(options, environment)?;
     Ok(input.admit(build, shutdown_tail)?)
 }
 // template:end temporal:load-temporal-worker
@@ -266,7 +269,7 @@ pub(crate) fn load_migration_from(
     build: BuildInfo,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::MigrationConfig, MigrationLoadError> {
-    let input: crate::postgres::MigrationInput = merge(options, environment)?;
+    let input: crate::postgres::MigrationInput = load_input(options, environment)?;
     input.admit(build)
 }
 // template:end postgres:load-migration
@@ -290,12 +293,12 @@ pub(crate) fn load_jobs_operator_from(
     options: &LoadOptions,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<crate::JobsOperatorConfig, JobsOperatorLoadError> {
-    let input: crate::jobs::JobsOperatorInput = merge(options, environment)?;
+    let input: crate::jobs::JobsOperatorInput = load_input(options, environment)?;
     input.admit()
 }
 // template:end jobs:load-jobs-operator
 
-fn merge<T: DeserializeOwned>(
+fn load_input<T: DeserializeOwned>(
     options: &LoadOptions,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<T, Error> {

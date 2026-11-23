@@ -21,6 +21,9 @@ exclude = [
     "vendor/aws-smithy-http-client",
 # template:end object-storage:workspace-object-storage-vendor-exclude
     "vendor/hyper-util",
+# template:begin clickhouse:workspace-clickhouse-vendor-exclude
+    "vendor/clickhouse",
+# template:end clickhouse:workspace-clickhouse-vendor-exclude
 ]
 
 [workspace.package]
@@ -89,6 +92,9 @@ infra-cache = { path = "crates/infra-cache" }
 # template:begin object-storage:workspace-object-storage-crate
 infra-object-storage = { path = "crates/infra-object-storage" }
 # template:end object-storage:workspace-object-storage-crate
+# template:begin clickhouse:workspace-clickhouse-crate
+infra-clickhouse = { path = "crates/infra-clickhouse" }
+# template:end clickhouse:workspace-clickhouse-crate
 # template:begin webhooks-common:workspace-webhooks-crate
 infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
@@ -120,6 +126,9 @@ simdutf8 = { version = "0.1.5", default-features = false }
 pem = { version = "=4.0.0", default-features = false }
 redis = { version = "1.7.1", default-features = false }
 # template:end cache:workspace-cache-client
+# template:begin clickhouse:workspace-clickhouse-client
+clickhouse = { version = "0.15.3", default-features = false }
+# template:end clickhouse:workspace-clickhouse-client
 # template:begin object-storage:workspace-object-storage-client
 # The AWS SDK family releases weekly and yanked one release on 2026-09-14:
 # move these pins together in one reviewed change
@@ -136,7 +145,7 @@ aws-smithy-checksums = { version = "=0.65.1", default-features = false }
 aws-smithy-runtime = { version = "=1.16.1", default-features = false }
 # Existing SDK types used by adapter tests through the supported interceptor API.
 aws-smithy-runtime-api = { version = "=1.20.0", default-features = false }
-aws-smithy-types = { version = "=1.9.3", default-features = false }
+aws-smithy-types = { version = "=1.9.4", default-features = false }
 # A request body (axum's `Body`) is not `Sync`; the SDK requires one.
 sync_wrapper = { version = "1.0.2", default-features = false }
 # template:end object-storage:workspace-object-storage-client
@@ -167,7 +176,7 @@ tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.7.1", default-features = false }
 # Pinned with tonic. Outside the gRPC block because the telemetry tests decode
 # OTLP export bodies with it in every profile.
-prost = { version = "=0.14.4", default-features = false }
+prost = { version = "=0.14.6", default-features = false }
 # template:begin tonic:workspace-tonic-dependency
 tonic = { version = "=0.14.8", default-features = false }
 # template:end tonic:workspace-tonic-dependency
@@ -176,7 +185,7 @@ tonic-prost = { version = "=0.14.8", default-features = false }
 tonic-health = { version = "=0.14.8", default-features = false }
 tonic-reflection = { version = "=0.14.8", default-features = false }
 tonic-types = { version = "=0.14.8", default-features = false }
-prost-types = { version = "=0.14.4", default-features = false }
+prost-types = { version = "=0.14.6", default-features = false }
 prost-reflect = { version = "0.16.5", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
 # template:begin rustls:workspace-rustls
@@ -191,9 +200,9 @@ clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", default-features = false }
 serde_path_to_error = { version = "0.1.20", default-features = false }
-serde_html_form = { version = "0.2.8", default-features = false }
+serde_html_form = { version = "0.4.1", default-features = false }
 toml = { version = "1.1.6", default-features = false }
-jiff = { version = "0.2.37", default-features = false }
+jiff = { version = "1.0.0", default-features = false }
 bytesize = { version = "2.7.0", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
 
@@ -226,7 +235,7 @@ sha2 = { version = "0.11.0", default-features = false }
 serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }
 derive-where = { version = "1.7.0", default-features = false }
-educe = { version = "0.7.6", default-features = false }
+educe = { version = "0.8.2", default-features = false }
 const_format = { version = "0.2.37", default-features = false }
 fastrand = { version = "2.5.0", default-features = false }
 pin-project-lite = { version = "0.2.17", default-features = false }
@@ -271,11 +280,11 @@ backon = { version = "1.6.0", default-features = false }
 moka = { version = "0.12.16", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
-# template:begin outbound-http:workspace-outbound-http-transport
+# template:begin hyper-rustls:workspace-hyper-rustls
 hyper-rustls = { version = "0.27.9", default-features = false }
-# template:end outbound-http:workspace-outbound-http-transport
+# template:end hyper-rustls:workspace-hyper-rustls
 # template:begin jsonwebtoken:workspace-jsonwebtoken
-jsonwebtoken = { version = "=11.1.0", default-features = false }
+jsonwebtoken = { version = "=12.0.0", default-features = false }
 # template:end jsonwebtoken:workspace-jsonwebtoken
 aws-lc-rs = { version = "=1.19.0", default-features = false }
 # template:begin webhooks:workspace-webhooks-httpdate
@@ -285,7 +294,7 @@ httpdate = { version = "1.0.3", default-features = false }
 axum-test = { version = "21.1.0", default-features = false }
 rstest = { version = "0.28.0", default-features = false }
 tempfile = { version = "3", default-features = false }
-nix = { version = "0.31.3", default-features = false }
+nix = { version = "0.32.0", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
@@ -457,3 +466,7 @@ hyper-util = { path = "vendor/hyper-util" }
 # The client dispatcher reports decoded RPC outcomes. See vendor/tonic/PATCHES.md.
 tonic = { path = "vendor/tonic" }
 # template:end tonic:workspace-tonic-patch
+# template:begin clickhouse:workspace-clickhouse-patch
+# Abort detached InsertFormatted tasks and cap error bodies; see vendor/clickhouse/PATCHES.md.
+clickhouse = { path = "vendor/clickhouse" }
+# template:end clickhouse:workspace-clickhouse-patch

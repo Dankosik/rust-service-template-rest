@@ -108,14 +108,14 @@ impl Producer {
             .send(publication, &span, budget, admission)
             .instrument(span.clone())
             .await;
-        let outcome = match &result {
-            Ok(_) => PublishOutcome::Acknowledged,
-            Err(PublishError::Rejected(_)) => PublishOutcome::Rejected,
-            Err(PublishError::Ambiguous) => PublishOutcome::Ambiguous,
+        let (outcome, error) = match &result {
+            Ok(_) => (PublishOutcome::Acknowledged, None),
+            Err(error @ PublishError::Rejected(_)) => (PublishOutcome::Rejected, Some(error)),
+            Err(error @ PublishError::Ambiguous) => (PublishOutcome::Ambiguous, Some(error)),
         };
         let label = outcome.label();
-        record_span_outcome(&span, label, result.is_err().then_some(label));
-        if let Err(error) = &result {
+        record_span_outcome(&span, label, error.map(|_| label));
+        if let Some(error) = error {
             span.in_scope(|| {
                 tracing::warn!(
                     subject,
@@ -197,11 +197,10 @@ pub(crate) async fn send_publication(
             duplicate: ack.duplicate,
         })
     };
-    let result = tokio::select! {
-        biased;
-        _ = budget.wait_stopped() => Err(PublishError::Ambiguous),
-        result = exchange => result,
-    };
+    let result = budget
+        .run_until_stopped(exchange)
+        .await
+        .unwrap_or(Err(PublishError::Ambiguous));
     if matches!(
         result,
         Err(PublishError::Rejected(PublishRejection::WindowFull))

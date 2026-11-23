@@ -18,6 +18,9 @@ pub mod cache {
     pub const MAX_ENTRY_BYTES: usize = 512 * 1024 * 1024;
 }
 // template:end cache:shared-rules-cache
+// template:begin clickhouse:shared-rules-clickhouse
+pub mod clickhouse;
+// template:end clickhouse:shared-rules-clickhouse
 pub mod error_chain;
 // template:begin grpc:shared-rules-grpc
 pub mod grpc;

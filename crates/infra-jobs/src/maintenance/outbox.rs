@@ -1,6 +1,6 @@
 use super::{
     Operation, OperationError, SAMPLE_STATEMENT_TIMEOUT, WorkerGroup, in_maintenance_tx,
-    observe_failure, observe_recovery, observed,
+    observe_operation, observed,
 };
 use crate::outbox::KIND;
 use metrics::Unit;
@@ -14,7 +14,7 @@ const ORDERED_SAMPLE_CAP: i64 = 1_000;
 pub(super) struct OutboxGauges {
     oldest_unconfirmed: metrics::Gauge,
     oldest_blocked: metrics::Gauge,
-    observed_at: metrics::Gauge,
+    observation_timestamp: metrics::Gauge,
     last_attempt_success: metrics::Gauge,
 }
 
@@ -45,7 +45,7 @@ impl OutboxGauges {
         Some(Self {
             oldest_unconfirmed: metrics::gauge!(OLDEST_UNCONFIRMED_AGE_METRIC),
             oldest_blocked: metrics::gauge!(OLDEST_BLOCKED_AGE_METRIC),
-            observed_at: metrics::gauge!(OUTBOX_OBSERVATION_TIMESTAMP_METRIC),
+            observation_timestamp: metrics::gauge!(OUTBOX_OBSERVATION_TIMESTAMP_METRIC),
             last_attempt_success: metrics::gauge!(LAST_ATTEMPT_SUCCESS_METRIC),
         })
     }
@@ -53,23 +53,20 @@ impl OutboxGauges {
     pub(super) fn reset(&self) {
         self.oldest_unconfirmed.set(f64::NAN);
         self.oldest_blocked.set(f64::NAN);
-        self.observed_at.set(0.0);
+        self.observation_timestamp.set(0.0);
         self.last_attempt_success.set(0.0);
     }
 
     pub(super) async fn sample(&self, primary_group: &WorkerGroup) {
-        match read_outbox_sample(primary_group).await {
-            Ok(sample) => {
+        let result = read_outbox_sample(primary_group).await;
+        match observe_operation(primary_group, Operation::SampleOutbox, result) {
+            Some(sample) => {
                 self.oldest_unconfirmed.set(sample.oldest_unconfirmed_age);
                 self.oldest_blocked.set(sample.oldest_blocked_age);
-                self.observed_at.set(sample.observed_at);
+                self.observation_timestamp.set(sample.observed_at);
                 self.last_attempt_success.set(1.0);
-                observe_recovery(primary_group, Operation::SampleOutbox);
             }
-            Err(error) => {
-                self.last_attempt_success.set(0.0);
-                observe_failure(primary_group, Operation::SampleOutbox, &error);
-            }
+            None => self.last_attempt_success.set(0.0),
         }
     }
 }

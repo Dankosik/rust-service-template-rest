@@ -44,14 +44,7 @@ impl HistoryError {
 
 pub async fn verify_history(pool: &Pool) -> Result<(), HistoryError> {
     let history = read_history_within_budget(pool).await?;
-    let unapplied = pending(&MIGRATOR, &history).map_err(|error| {
-        let (cause, version) = match error {
-            PendingError::ChecksumMismatch(v) => ("checksum_mismatch", v),
-            PendingError::MissingVersion(v) => ("version_missing", v),
-            PendingError::DuplicateVersion(v) => ("duplicate_version", v),
-        };
-        HistoryError::Mismatch.logged("compare", cause, None, Some(version))
-    })?;
+    let unapplied = pending(&MIGRATOR, &history).map_err(log_mismatch)?;
     match unapplied.first() {
         Some(next) => {
             Err(HistoryError::Pending.logged("compare", "pending", None, Some(next.version)))
@@ -60,14 +53,23 @@ pub async fn verify_history(pool: &Pool) -> Result<(), HistoryError> {
     }
 }
 
+fn log_mismatch(error: PendingError) -> HistoryError {
+    let (cause, version) = match error {
+        PendingError::ChecksumMismatch(v) => ("checksum_mismatch", v),
+        PendingError::MissingVersion(v) => ("version_missing", v),
+        PendingError::DuplicateVersion(v) => ("duplicate_version", v),
+    };
+    HistoryError::Mismatch.logged("compare", cause, None, Some(version))
+}
+
 async fn read_history_within_budget(pool: &Pool) -> Result<Vec<AppliedMigration>, HistoryError> {
     let mut stage = "acquire";
-    let check = async {
+    let history_read = async {
         let mut conn = pool.acquire("check migration history").await?;
         stage = "read";
         read_history(&mut conn, &MIGRATOR.table_name).await
     };
-    match tokio::time::timeout(HISTORY_VERIFY_BUDGET, check).await {
+    match tokio::time::timeout(HISTORY_VERIFY_BUDGET, history_read).await {
         Ok(Ok(HistoryRead::History(history))) => Ok(history),
         Ok(Ok(HistoryRead::NotVisible)) => {
             Err(HistoryError::NotVisible.logged(stage, "not_visible", None, None))
@@ -134,7 +136,7 @@ pub(crate) async fn applied_history(
     conn.list_applied_migrations(table).await
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum PendingError {
     ChecksumMismatch(i64),
     MissingVersion(i64),

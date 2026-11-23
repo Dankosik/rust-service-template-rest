@@ -53,6 +53,8 @@ enum NodeKind {
     Table(BTreeMap<String, Node>),
 }
 
+const DATETIME: Unexpected<'static> = Unexpected::Other("TOML datetime");
+
 impl NodeKind {
     fn unexpected(&self) -> Unexpected<'_> {
         match self {
@@ -60,7 +62,7 @@ impl NodeKind {
             Self::Integer(value) => Unexpected::Signed(*value),
             Self::Float(value) => Unexpected::Float(*value),
             Self::Boolean(value) => Unexpected::Bool(*value),
-            Self::Datetime => Unexpected::Other("TOML datetime"),
+            Self::Datetime => DATETIME,
             Self::Array(_) => Unexpected::Seq,
             Self::Table(_) => Unexpected::Map,
         }
@@ -484,10 +486,7 @@ impl<'de> Deserializer<'de> for Node {
             NodeKind::Integer(value) => visitor.visit_i64(value),
             NodeKind::Float(value) => visitor.visit_f64(value),
             NodeKind::Boolean(value) => visitor.visit_bool(value),
-            NodeKind::Datetime => Err(DecodeError::invalid_type(
-                Unexpected::Other("TOML datetime"),
-                &visitor,
-            )),
+            NodeKind::Datetime => Err(DecodeError::invalid_type(DATETIME, &visitor)),
             NodeKind::Array(items) => visitor.visit_seq(NodeSeq {
                 items: items.into_iter(),
                 index: 0,

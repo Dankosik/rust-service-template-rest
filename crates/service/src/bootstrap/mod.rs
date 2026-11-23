@@ -12,6 +12,9 @@ mod authn;
 // template:begin cache:service-bootstrap-cache-module
 mod cache;
 // template:end cache:service-bootstrap-cache-module
+// template:begin clickhouse:service-bootstrap-clickhouse-module
+mod clickhouse;
+// template:end clickhouse:service-bootstrap-clickhouse-module
 // template:begin http-idempotency:bootstrap-http-idempotency-module
 mod idempotency;
 // template:end http-idempotency:bootstrap-http-idempotency-module
@@ -92,6 +95,10 @@ pub(crate) enum BootstrapError {
     #[error("object storage configuration: {0}")]
     ObjectStorage(#[from] infra_object_storage::ConfigError),
     // template:end object-storage:service-bootstrap-object-storage-errors
+    // template:begin clickhouse:service-bootstrap-clickhouse-errors
+    #[error("clickhouse startup: {0}")]
+    ClickHouse(#[from] infra_clickhouse::StartError),
+    // template:end clickhouse:service-bootstrap-clickhouse-errors
     // template:begin temporal:service-bootstrap-temporal-errors
     #[error("temporal startup: {0}")]
     Temporal(#[from] infra_temporal::ConnectError),
@@ -484,6 +491,11 @@ async fn start(
         .map(object_storage::open)
         .transpose()?;
     // template:end object-storage:service-bootstrap-object-storage-startup
+    // template:begin clickhouse:service-bootstrap-clickhouse-startup
+    if let Some(settings) = config.clickhouse() {
+        dependencies.clickhouse = Some(clickhouse::open(settings).await?);
+    }
+    // template:end clickhouse:service-bootstrap-clickhouse-startup
     // template:begin temporal:service-bootstrap-temporal-startup
     let temporal = if let Some(settings) = config.temporal() {
         let connection =

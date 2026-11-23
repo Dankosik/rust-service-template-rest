@@ -53,6 +53,17 @@ impl<'a> BrokerBudget<'a> {
             () = self.cancellation.cancelled() => Stopped::Cancelled,
         }
     }
+
+    pub(crate) async fn run_until_stopped<T>(
+        self,
+        operation: impl Future<Output = T>,
+    ) -> Result<T, Stopped> {
+        tokio::select! {
+            biased;
+            reason = self.wait_stopped() => Err(reason),
+            output = operation => Ok(output),
+        }
+    }
 }
 
 pub(crate) fn bounded_operation<T>(

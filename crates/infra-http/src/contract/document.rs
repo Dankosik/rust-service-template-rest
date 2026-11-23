@@ -76,7 +76,7 @@ impl StandardMethod {
     }
 }
 
-pub(super) fn fixed_operations(
+pub(super) fn standard_operations(
     item: &PathItem,
 ) -> impl Iterator<Item = (&'static str, &Operation)> {
     StandardMethod::ALL
@@ -88,8 +88,22 @@ pub(super) fn has_extension_operations(item: &PathItem) -> bool {
     item.query.is_some() || !item.additional_operations.is_empty()
 }
 
+pub(super) fn needs_extension_dispatch(item: &PathItem) -> bool {
+    item.query.is_some()
+        || item
+            .additional_operations
+            .keys()
+            .any(|method| method != axum::http::Method::CONNECT.as_str())
+}
+
+// template:begin http-idempotency:http-document-bare-reference
+pub(super) fn is_bare_reference(reference: &Ref) -> bool {
+    *reference == Ref::new(&reference.ref_location)
+}
+// template:end http-idempotency:http-document-bare-reference
+
 pub(super) fn documented_methods(item: &PathItem) -> impl Iterator<Item = &str> {
-    fixed_operations(item)
+    standard_operations(item)
         .map(|(method, _)| method)
         .chain(item.additional_operations.keys().map(String::as_str))
 }

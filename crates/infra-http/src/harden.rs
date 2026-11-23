@@ -8,17 +8,16 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::header::{
-    CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING,
-    X_CONTENT_TYPE_OPTIONS,
+    CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING, X_CONTENT_TYPE_OPTIONS,
 };
-use axum::http::{HeaderName, HeaderValue, StatusCode, Version};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use health::ReadinessReader;
 use http_body::Body as _;
 use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use opentelemetry::context::FutureExt as _;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -32,14 +31,14 @@ use crate::problem::SANITIZED_DETAIL;
 use crate::problem::{Code, Problem, body_too_large, pending_problem, sanitized_problem};
 use crate::request_id;
 
-struct Admission {
+struct AdmissionLimit {
     permits: Semaphore,
     max_wait: Duration,
 }
 
 struct Hardened {
     observer: Arc<Observer>,
-    admission: Option<Admission>,
+    admission: Option<AdmissionLimit>,
     request_timeout: Duration,
     max_body_bytes: usize,
     draining: Option<ReadinessReader>,
@@ -84,7 +83,7 @@ pub(crate) fn assemble(routes: Router, options: &HardenOptions, probes: ProbeRou
     observe::describe();
     let admission = options.max_in_flight.map(|limit| {
         shed_requests_counter().increment(0);
-        Admission {
+        AdmissionLimit {
             permits: Semaphore::new(limit.get() as usize),
             max_wait: options.admission_wait.min(options.request_timeout),
         }
@@ -129,17 +128,13 @@ async fn handle(
 ) -> Response {
     let request_id = request_id::ensure(&mut request);
     let version = request.version();
-    let (mut observation, bypasses_admission) =
-        state
-            .observer
-            .start(&mut request, matched, request_id, state.admission.is_some());
-    let response_id = observation.response_request_id();
+    let (mut observation, is_probe) = state.observer.start(&mut request, matched, request_id);
+    let response_id = observation.request_id();
     let span = observation.span().clone();
     let fallback = observation.take_fallback_context();
 
     let traced = async {
-        let (mut response, cancel_guard) =
-            run_admitted(&state, bypasses_admission, request, next).await;
+        let (mut response, cancel_guard) = run_admitted(&state, is_probe, request, next).await;
         let problem_code = context::attach_request_id(&mut response, response_id);
         (response, cancel_guard, problem_code)
     }
@@ -150,15 +145,12 @@ async fn handle(
         Some(context) => traced.with_context(context).await,
     };
 
-    if version <= Version::HTTP_11
-        && state
-            .draining
-            .as_ref()
-            .is_some_and(ReadinessReader::is_draining)
+    if state
+        .draining
+        .as_ref()
+        .is_some_and(ReadinessReader::is_draining)
     {
-        response
-            .headers_mut()
-            .insert(CONNECTION, HeaderValue::from_static("close"));
+        context::close_http1_connection(&mut response, version);
     }
 
     observation.finish(response, cancel_guard, problem_code)
@@ -166,39 +158,47 @@ async fn handle(
 
 async fn run_admitted(
     state: &Hardened,
-    bypasses_admission: bool,
+    is_probe: bool,
     request: Request,
     next: Next,
 ) -> (Response, Option<context::CancelGuard>) {
-    let admitted = match (&state.admission, bypasses_admission) {
-        (Some(admission), false) => {
-            let arrived = tokio::time::Instant::now();
-            let permit = match infra_http_transport::acquire_borrowed_within(
-                &admission.permits,
-                admission.max_wait,
-                || (),
-            )
-            .await
-            {
-                infra_http_transport::Admission::Immediate(permit) => permit,
-                infra_http_transport::Admission::Waited { permit, waited } => {
-                    admission_wait_histogram().record(waited);
-                    permit
-                }
-                infra_http_transport::Admission::Shed { waited } => {
-                    admission_wait_histogram().record(waited);
-                    shed_requests_counter().increment(1);
-                    return (shed_response(), None);
-                }
-            };
-            Some((arrived, permit))
-        }
+    let admitted = match &state.admission {
+        Some(limit) if !is_probe => match admit(limit).await {
+            Ok(admitted) => Some(admitted),
+            Err(shed) => return (shed, None),
+        },
         _ => None,
     };
     context::enforce_request_budget(state.request_timeout, admitted, request, |request| {
         limit_body(state.max_body_bytes, request, next)
     })
     .await
+}
+
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the shed response the middleware returns"
+)]
+async fn admit(
+    limit: &AdmissionLimit,
+) -> Result<(tokio::time::Instant, SemaphorePermit<'_>), Response> {
+    let arrived = tokio::time::Instant::now();
+    let permit =
+        match infra_http_transport::acquire_borrowed_within(&limit.permits, limit.max_wait, || ())
+            .await
+        {
+            infra_http_transport::Admission::Immediate(permit) => permit,
+            infra_http_transport::Admission::Waited { permit, waited } => {
+                admission_wait_histogram().record(waited);
+                permit
+            }
+            infra_http_transport::Admission::Shed { waited } => {
+                admission_wait_histogram().record(waited);
+                shed_requests_counter().increment(1);
+                return Err(shed_response());
+            }
+        };
+    Ok((arrived, permit))
 }
 
 async fn limit_body(max_bytes: usize, request: Request, next: Next) -> Response {

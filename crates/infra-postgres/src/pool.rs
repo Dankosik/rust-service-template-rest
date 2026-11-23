@@ -1,7 +1,6 @@
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
@@ -279,17 +278,22 @@ impl ListenerPool {
 }
 
 fn startup_session_settings(options: &PoolOptions<'_>) -> Vec<(&'static str, String)> {
-    let mut settings = Vec::new();
-    if options.session_settings_source == SessionSettingsSource::Startup {
-        settings.push(("statement_timeout", format_pg_duration(STATEMENT_TIMEOUT)));
-        settings.push((
+    if options.session_settings_source != SessionSettingsSource::Startup {
+        return Vec::new();
+    }
+    let mut settings = vec![
+        ("statement_timeout", format_pg_duration(STATEMENT_TIMEOUT)),
+        (
             "idle_in_transaction_session_timeout",
             format_pg_duration(IDLE_IN_TRANSACTION_TIMEOUT),
-        ));
-        if let Some(level) = options.default_isolation.as_sql() {
-            settings.push(("default_transaction_isolation", level.to_owned()));
-        }
-    }
+        ),
+    ];
+    settings.extend(
+        options
+            .default_isolation
+            .as_sql()
+            .map(|level| ("default_transaction_isolation", level.to_owned())),
+    );
     settings
 }
 
@@ -482,15 +486,16 @@ impl Pool {
         queue: Queue,
         caller_deadline: Option<Instant>,
     ) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-        let (deadline, budget) = if let Some(deadline) = caller_deadline {
-            (deadline, deadline.saturating_duration_since(Instant::now()))
+        let (deadline, budget, retry_until_deadline) = if let Some(deadline) = caller_deadline {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            (deadline, budget, true)
         } else {
             let budget = self.inner.options().get_acquire_timeout();
-            (Instant::now() + budget, budget)
+            (Instant::now() + budget, budget, false)
         };
         observe_acquisition(operation, budget, async {
             let _slot = take_slot(self.shared.slots.as_ref(), deadline, queue).await?;
-            if caller_deadline.is_some() {
+            if retry_until_deadline {
                 self.acquire_until_deadline(deadline).await
             } else {
                 timeout_at(deadline, self.inner.acquire())
@@ -555,7 +560,7 @@ fn ping_if_idle(
 }
 
 fn accept_connection() -> BoxFuture<'static, Result<bool, sqlx::Error>> {
-    Box::pin(std::future::poll_fn(|_| Poll::Ready(Ok(true))))
+    Box::pin(std::future::ready(Ok(true)))
 }
 
 async fn ping_idle_connection(
@@ -631,6 +636,12 @@ pub async fn connect_session(
     .await
 }
 
+const STATEMENT_LOG_LEVEL: log::LevelFilter = if cfg!(feature = "hotpath") {
+    log::LevelFilter::Debug
+} else {
+    log::LevelFilter::Off
+};
+
 fn session_connect_options<'a>(
     dsn: &Dsn,
     application_name: &str,
@@ -640,9 +651,7 @@ fn session_connect_options<'a>(
         .connect_options()
         .application_name(application_name)
         .extra_float_digits(None)
-        .log_statements(log::LevelFilter::Off);
-    #[cfg(feature = "hotpath")]
-    let options = options.log_statements(log::LevelFilter::Debug);
+        .log_statements(STATEMENT_LOG_LEVEL);
     let mut settings = settings.into_iter().peekable();
     if settings.peek().is_some() {
         options.options(settings)

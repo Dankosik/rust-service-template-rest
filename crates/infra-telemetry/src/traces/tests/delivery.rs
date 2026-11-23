@@ -17,10 +17,6 @@ use prost::Message as _;
 
 use tracing_subscriber::layer::SubscriberExt as _;
 
-// template:begin grpc:telemetry-tls-delivery-hashmap
-use std::collections::HashMap;
-// template:end grpc:telemetry-tls-delivery-hashmap
-
 use super::*;
 
 // template:begin grpc:telemetry-tls-delivery-tests

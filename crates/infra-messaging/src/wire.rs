@@ -393,10 +393,7 @@ fn parse_timestamp(value: &str) -> Option<UtcDateTime> {
 
 #[must_use]
 pub(crate) fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
-    let mut id = String::with_capacity(prefix.len() + SHA256_HEX_LEN);
-    id.push_str(prefix);
-    id.push_str(const_hex::Buffer::<32>::new().format(digest));
-    id
+    [prefix, const_hex::Buffer::<32>::new().format(digest)].concat()
 }
 
 pub(crate) fn is_zero_time(value: UtcDateTime) -> bool {

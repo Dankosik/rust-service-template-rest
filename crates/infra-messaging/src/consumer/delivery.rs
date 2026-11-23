@@ -126,9 +126,9 @@ impl RegisteredHandlers {
 
     fn resolve(&self, event_type: &str) -> DispatchTarget<'_> {
         match self.registered.get(event_type) {
-            Some(entry) => DispatchTarget {
-                metrics: &entry.metrics,
-                routes: &entry.routes,
+            Some(dispatch) => DispatchTarget {
+                metrics: &dispatch.metrics,
+                routes: &dispatch.routes,
             },
             None => DispatchTarget {
                 metrics: &self.unregistered,
@@ -234,9 +234,8 @@ impl DeliveryHandler {
 
     pub(super) async fn handle(&self, message: Message) -> Result<(), ConsumerError> {
         let Some((info, delivery_attempt)) = message.info().ok().and_then(|info| {
-            usize::try_from(info.delivered)
-                .ok()
-                .map(|attempt| (info, attempt))
+            let attempt = usize::try_from(info.delivered).ok()?;
+            Some((info, attempt))
         }) else {
             tracing::warn!(
                 messaging.destination.template = self.filter_subject.as_str(),
@@ -253,7 +252,7 @@ impl DeliveryHandler {
         };
         let Some(envelope) = envelope else {
             return self
-                .dead_letter(
+                .transfer_to_dead_letter(
                     &message,
                     &info,
                     wire::DeadLetterReason::Malformed,
@@ -264,7 +263,7 @@ impl DeliveryHandler {
         let target = self.handlers.resolve(envelope.event_type);
         if delivery_attempt > MAX_DELIVERIES {
             return self
-                .dead_letter(
+                .transfer_to_dead_letter(
                     &message,
                     &info,
                     wire::DeadLetterReason::Exhausted,
@@ -318,7 +317,7 @@ impl DeliveryHandler {
                 Ok(())
             }
             Settlement::DeadLetter(reason) => {
-                self.dead_letter(message, info, reason, target.metrics.event_type)
+                self.transfer_to_dead_letter(message, info, reason, target.metrics.event_type)
                     .await
             }
             Settlement::Redeliver(delay) => {
@@ -362,25 +361,25 @@ impl DeliveryHandler {
         }
     }
 
-    async fn dead_letter(
+    async fn transfer_to_dead_letter(
         &self,
         source: &Message,
         info: &Info<'_>,
         reason: wire::DeadLetterReason,
         event_type: &'static str,
     ) -> Result<(), ConsumerError> {
+        let reason_label = reason.label();
         let Some(publication) =
             build_dead_letter_message(source, info, &self.dead_letter_stream, reason)
         else {
             tracing::error!(
                 messaging.destination.template = self.filter_subject.as_str(),
-                reason = reason.label(),
+                reason = reason_label,
                 "messaging_dead_letter_identity_unavailable"
             );
             redeliver_after(source, SETTLEMENT_RETRY_DELAY, &self.filter_subject).await;
             return Ok(());
         };
-        let reason_label = reason.label();
         let budget = BrokerBudget::new(Deadline::after(BROKER_OPERATION_BUDGET), &self.abort);
         let result =
             send_publication(&self.shared, &self.dead_letter_subject, publication, budget).await;
@@ -495,7 +494,7 @@ async fn bounded_settlement<T, E>(
 
 async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subject: &str) {
     let span = settlement_span(filter_subject, "ack");
-    let sent = match source.reply.as_ref() {
+    let confirmation = match source.reply.as_ref() {
         Some(reply) => {
             let request = Request::new().timeout(None).payload(AckKind::Ack.into());
             bounded_settlement(
@@ -506,7 +505,7 @@ async fn acknowledge(client: &async_nats::Client, source: &Message, filter_subje
         }
         None => Err("missing_reply"),
     };
-    let Err(error_type) = sent else {
+    let Err(error_type) = confirmation else {
         record_span_outcome(&span, "confirmed", None);
         return;
     };

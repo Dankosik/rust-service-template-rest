@@ -117,6 +117,59 @@ class IntegrationRunnerTests(unittest.TestCase):
 
         self.assertEqual(events, ["start:keycloak", "compile", "wait:keycloak", "test", "stack:down"])
 
+    def test_cmd_clickhouse_overlaps_startup_with_compilation_and_injects_env(self) -> None:
+        if not (lib.ROOT / "crates/infra-clickhouse").is_dir():
+            self.skipTest("clickhouse profile not present")
+        events: list[str] = []
+        test_envs: list[dict[str, str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> mock.MagicMock:
+            events.append("compile" if "--no-run" in cmd else "test")
+            if "--no-run" not in cmd:
+                env = kwargs.get("env")
+                assert isinstance(env, dict)
+                test_envs.append(env)
+            return mock.MagicMock(returncode=0)
+
+        with (
+            mock.patch.object(lib, "require_docker"),
+            mock.patch.object(lib, "ComposeStack", return_value=_FakeStack(events)),
+            mock.patch.object(lib, "run", side_effect=fake_run),
+            mock.patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("CLICKHOUSE_URL", None)
+            integration.cmd_clickhouse([])
+
+        self.assertEqual(events, ["start:clickhouse", "compile", "wait:clickhouse", "test", "stack:down"])
+        self.assertEqual(len(test_envs), 1)
+        env = test_envs[0]
+        self.assertEqual(env["CLICKHOUSE_URL"], "http://127.0.0.1:18123")
+        self.assertEqual(env["CLICKHOUSE_DATABASE"], "app")
+        self.assertEqual(env["CLICKHOUSE_USER"], "app")
+        self.assertEqual(env["CLICKHOUSE_PASSWORD"], "app")
+        self.assertEqual(env["CLICKHOUSE_READONLY_USER"], "app_ro")
+        self.assertEqual(env["CLICKHOUSE_READONLY_PASSWORD"], "app_ro")
+
+    def test_cmd_compile_retained_compiles_clickhouse_integration_target(self) -> None:
+        if not (lib.ROOT / "crates/infra-clickhouse").is_dir():
+            self.skipTest("clickhouse profile not present")
+        commands: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> mock.MagicMock:
+            commands.append(list(cmd))
+            return mock.MagicMock(returncode=0)
+
+        with mock.patch.object(lib, "run", side_effect=fake_run):
+            integration.cmd_compile("retained")
+
+        self.assertTrue(
+            any(
+                "-p" in cmd and "infra-clickhouse" in cmd and "--test" in cmd and "clickhouse" in cmd and "--no-run" in cmd
+                for cmd in commands
+            ),
+            commands,
+        )
+
     # template:begin temporal:test-integration-temporal
     def test_cmd_temporal_overlaps_startup_with_compilation_and_runs_both_targets(self) -> None:
         if not (lib.ROOT / "crates/infra-temporal").is_dir():

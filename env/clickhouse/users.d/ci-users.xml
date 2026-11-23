@@ -1,0 +1,38 @@
+<clickhouse>
+    <profiles>
+        <no_dedup>
+            <deduplicate_insert>disable</deduplicate_insert>
+        </no_dedup>
+    </profiles>
+
+    <users>
+        <default remove="remove"/>
+
+        <app>
+            <password>app</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+        </app>
+
+        <app_nodedup>
+            <password>app_nodedup</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>no_dedup</profile>
+            <quota>default</quota>
+        </app_nodedup>
+
+        <app_ro>
+            <password>app_ro</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>readonly</profile>
+            <quota>default</quota>
+        </app_ro>
+    </users>
+</clickhouse>

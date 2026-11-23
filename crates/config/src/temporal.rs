@@ -6,7 +6,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use url::Url;
 
-use crate::app::local_development_only;
+use crate::app::insecure_development_only;
 use crate::de::{BlankAsNone, BlankAsNoneVerbatim, StrictBool, StrictDuration};
 use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, nonzero_usize_range, optional_pair,
@@ -245,12 +245,12 @@ impl TemporalInput {
         if !self.enabled {
             return Ok(None);
         }
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "temporal.allow_plaintext",
             self.allow_plaintext,
             local_development,
         ));
-        v.check(local_development_only(
+        v.check(insecure_development_only(
             "temporal.allow_unauthenticated",
             self.allow_unauthenticated,
             local_development,

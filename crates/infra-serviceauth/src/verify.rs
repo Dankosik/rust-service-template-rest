@@ -246,7 +246,7 @@ impl Verifier {
         let header_json = std::str::from_utf8(&header_bytes).map_err(|_| Reason::Header)?;
         let header: TokenHeader<'_> =
             serde_json::from_str(header_json).map_err(|_| Reason::Header)?;
-        if header.has_crit {
+        if header.has_crit || !header.b64 {
             return Err(Reason::Header);
         }
         if header.alg != "ES256" {
@@ -374,6 +374,13 @@ struct TokenHeader<'a> {
     kid: Option<BorrowableString<'a>>,
     #[serde(rename = "crit", default, deserialize_with = "present")]
     has_crit: bool,
+    #[serde(default = "default_b64")]
+    b64: bool,
+}
+
+// RFC 7797 §3
+const fn default_b64() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -844,7 +851,7 @@ mod tests {
     #[test]
     fn the_header_selects_nothing_but_the_contract_algorithm_type_and_kid() {
         let case = Case::new();
-        let cases: [(Changes<'_>, Reason); 16] = [
+        let cases: [(Changes<'_>, Reason); 18] = [
             (&[("alg", Some(json!("none")))], Reason::Algorithm),
             (&[("alg", Some(json!("es256")))], Reason::Algorithm),
             (&[("alg", Some(json!(7)))], Reason::Header),
@@ -859,6 +866,8 @@ mod tests {
             (&[("crit", Some(json!(["exp"])))], Reason::Header),
             (&[("crit", Some(json!([])))], Reason::Header),
             (&[("crit", Some(Null))], Reason::Header),
+            (&[("b64", Some(json!(false)))], Reason::Header),
+            (&[("b64", Some(Null))], Reason::Header),
             (&[("kid", Some(Null))], Reason::KeyId),
             (&[("typ", Some(Null))], Reason::Type),
         ];
@@ -867,6 +876,11 @@ mod tests {
             assert_eq!(case.check(&token), Err(expected), "{token}");
         }
         let mut header = Case::header(&case.orders);
+        header["b64"] = json!(true);
+        assert_eq!(
+            case.check(&case.orders.sign(&header, &Case::claims())),
+            Ok("orders".to_owned())
+        );
         header["jwk"] = case.billing.jwk();
         let forged = case.billing.sign(&header, &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::Signature));

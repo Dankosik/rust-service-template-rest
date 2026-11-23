@@ -13,8 +13,8 @@ use foldhash::HashMap;
 use jsonwebtoken::{
     Algorithm,
     jwk::{
-        AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
-        RSAKeyParameters,
+        AlgorithmParameters, EllipticCurve, EllipticCurveKeyParameters, Jwk, KeyAlgorithm,
+        KeyOperations, OtherKeyParameters, PublicKeyUse, RSAKeyParameters,
     },
 };
 use serde::Deserialize;
@@ -195,10 +195,7 @@ impl ParsedKeySet {
     }
 }
 
-fn parse_jwks_entries(
-    bytes: &[u8],
-    configured: AllowedAlgorithms,
-) -> Result<ParsedKeySet, JwksError> {
+fn parse_jwks_entries(bytes: &[u8], allowed: AllowedAlgorithms) -> Result<ParsedKeySet, JwksError> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| JwksError::Parse)?;
     let mut rejected = EnumMap::<KeyRejection, u64>::default();
@@ -210,7 +207,7 @@ fn parse_jwks_entries(
                 admit_key(
                     jwk,
                     value.get("alg").and_then(serde_json::Value::as_str),
-                    configured,
+                    allowed,
                 )
             });
         match key {
@@ -218,10 +215,7 @@ fn parse_jwks_entries(
             Err(reason) => rejected[reason] += 1,
         }
     }
-    if enabled_in_family(configured, KeyFamily::Rsa)
-        .nth(1)
-        .is_some()
-    {
+    if enabled_in_family(allowed, KeyFamily::Rsa).nth(1).is_some() {
         rejected[KeyRejection::AlgorithmBinding] += reject_conflicting_rsa_keys(&mut keys);
     }
     Ok(ParsedKeySet { keys, rejected })
@@ -306,7 +300,7 @@ fn reject_conflicting_rsa_keys(keys: &mut Vec<JwtKey>) -> u64 {
 fn admit_key(
     jwk: Jwk,
     raw_alg: Option<&str>,
-    configured: AllowedAlgorithms,
+    allowed: AllowedAlgorithms,
 ) -> Result<JwtKey, KeyRejection> {
     if is_encryption_only(&jwk, raw_alg) {
         return Err(KeyRejection::EncryptionOnly);
@@ -315,7 +309,7 @@ fn admit_key(
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
-    let algorithm = bind_algorithm(jwk.common.key_algorithm, family, configured)
+    let algorithm = bind_algorithm(jwk.common.key_algorithm, family, allowed)
         .ok_or(KeyRejection::AlgorithmBinding)?;
     let public_key = algorithm
         .parse_public_key(&jwk.algorithm)
@@ -330,15 +324,15 @@ fn admit_key(
 fn bind_algorithm(
     explicit: Option<KeyAlgorithm>,
     family: KeyFamily,
-    configured: AllowedAlgorithms,
+    allowed: AllowedAlgorithms,
 ) -> Option<JwtAlgorithm> {
     if let Some(explicit) = explicit {
         Algorithm::try_from(explicit)
             .ok()
             .and_then(JwtAlgorithm::from_jsonwebtoken)
-            .filter(|&algorithm| configured[algorithm] && algorithm.family() == family)
+            .filter(|&algorithm| allowed[algorithm] && algorithm.family() == family)
     } else {
-        let mut matching = enabled_in_family(configured, family);
+        let mut matching = enabled_in_family(allowed, family);
         let algorithm = matching.next()?;
         matching.next().is_none().then_some(algorithm)
     }
@@ -354,22 +348,23 @@ fn is_encryption_only(jwk: &Jwk, raw_alg: Option<&str>) -> bool {
     if operations.is_some_and(|ops| !has_only_encryption_operations(ops)) {
         return false;
     }
-    if !encryption_use && operations.is_none() && raw_alg.is_none() {
+    let declares_encryption = encryption_use || operations.is_some() || raw_alg.is_some();
+    if !declares_encryption {
         return false;
     }
-
     if matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
-        return matches!(
+        matches!(
             raw_alg,
             None | Some("RSA1_5" | "RSA-OAEP" | "RSA-OAEP-256" | "RSA-OAEP-384" | "RSA-OAEP-512")
         ) && JwtAlgorithm::Rs256
             .parse_public_key(&jwk.algorithm)
-            .is_some();
+            .is_some()
+    } else {
+        matches!(
+            raw_alg,
+            None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
+        ) && has_key_agreement_material(&jwk.algorithm)
     }
-    matches!(
-        raw_alg,
-        None | Some("ECDH-ES" | "ECDH-ES+A128KW" | "ECDH-ES+A192KW" | "ECDH-ES+A256KW")
-    ) && has_key_agreement_material(&jwk.algorithm)
 }
 
 fn has_only_encryption_operations(operations: &[KeyOperations]) -> bool {
@@ -389,40 +384,46 @@ fn has_only_encryption_operations(operations: &[KeyOperations]) -> bool {
 
 fn has_key_agreement_material(parameters: &AlgorithmParameters) -> bool {
     match parameters {
-        AlgorithmParameters::EllipticCurve(ec) => {
-            const MAX_EC_POINT_BYTES: usize = 1 + 66 * 2;
-            let (verifier, coord_len) = match ec.curve {
-                EllipticCurve::P256 => (&signature::ECDSA_P256_SHA256_FIXED, 32),
-                EllipticCurve::P384 => (&signature::ECDSA_P384_SHA384_FIXED, 48),
-                EllipticCurve::P521 => (&signature::ECDSA_P521_SHA512_FIXED, 66),
-                _ => return false,
-            };
-            let mut point = [0_u8; MAX_EC_POINT_BYTES];
-            point[0] = 0x04;
-            let (x_out, y_out) = point[1..=coord_len * 2].split_at_mut(coord_len);
-            URL_SAFE_NO_PAD.decode_slice(&ec.x, x_out) == Ok(coord_len)
-                && URL_SAFE_NO_PAD.decode_slice(&ec.y, y_out) == Ok(coord_len)
-                && ParsedPublicKey::new(verifier, &point[..=coord_len * 2]).is_ok()
-        }
+        AlgorithmParameters::EllipticCurve(ec) => is_valid_ec_agreement_point(ec),
         AlgorithmParameters::Other(key)
             if key.fields.get("kty").and_then(serde_json::Value::as_str) == Some("OKP") =>
         {
-            const X25519_PUBLIC_KEY_BYTES: usize = 32;
-            const X448_PUBLIC_KEY_BYTES: usize = 56;
-            let length = match key.fields.get("crv").and_then(serde_json::Value::as_str) {
-                Some("X25519") => X25519_PUBLIC_KEY_BYTES,
-                Some("X448") => X448_PUBLIC_KEY_BYTES,
-                _ => return false,
-            };
-            let Some(x) = key.fields.get("x").and_then(serde_json::Value::as_str) else {
-                return false;
-            };
-            let mut bytes = [0_u8; X448_PUBLIC_KEY_BYTES];
-            URL_SAFE_NO_PAD.decode_slice(x, &mut bytes) == Ok(length)
-                && bytes[..length].iter().any(|&byte| byte != 0)
+            is_nonzero_okp_agreement_key(key)
         }
         _ => false,
     }
+}
+
+fn is_valid_ec_agreement_point(ec: &EllipticCurveKeyParameters) -> bool {
+    const MAX_EC_POINT_BYTES: usize = 1 + 66 * 2;
+    let (verifier, coord_len) = match ec.curve {
+        EllipticCurve::P256 => (&signature::ECDSA_P256_SHA256_FIXED, 32),
+        EllipticCurve::P384 => (&signature::ECDSA_P384_SHA384_FIXED, 48),
+        EllipticCurve::P521 => (&signature::ECDSA_P521_SHA512_FIXED, 66),
+        _ => return false,
+    };
+    let mut point = [0_u8; MAX_EC_POINT_BYTES];
+    point[0] = 0x04;
+    let (x_out, y_out) = point[1..=coord_len * 2].split_at_mut(coord_len);
+    URL_SAFE_NO_PAD.decode_slice(&ec.x, x_out) == Ok(coord_len)
+        && URL_SAFE_NO_PAD.decode_slice(&ec.y, y_out) == Ok(coord_len)
+        && ParsedPublicKey::new(verifier, &point[..=coord_len * 2]).is_ok()
+}
+
+fn is_nonzero_okp_agreement_key(key: &OtherKeyParameters) -> bool {
+    const X25519_PUBLIC_KEY_BYTES: usize = 32;
+    const X448_PUBLIC_KEY_BYTES: usize = 56;
+    let length = match key.fields.get("crv").and_then(serde_json::Value::as_str) {
+        Some("X25519") => X25519_PUBLIC_KEY_BYTES,
+        Some("X448") => X448_PUBLIC_KEY_BYTES,
+        _ => return false,
+    };
+    let Some(x) = key.fields.get("x").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let mut bytes = [0_u8; X448_PUBLIC_KEY_BYTES];
+    URL_SAFE_NO_PAD.decode_slice(x, &mut bytes) == Ok(length)
+        && bytes[..length].iter().any(|&byte| byte != 0)
 }
 
 fn permits_signature_verification(jwk: &Jwk) -> bool {
@@ -527,6 +528,7 @@ fn without_leading_zeros(bytes: &[u8]) -> Option<&[u8]> {
     Some(&bytes[start..])
 }
 
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) enum JwksSource {
     Configured(EndpointUrl),
     Discovery(IssuerUrl),
@@ -539,7 +541,7 @@ impl JwksSource {
         algorithms: AllowedAlgorithms,
         deadline: Instant,
     ) -> Result<Arc<KeySet>, KeySetFailure> {
-        let (uri, acquired_at) = match self {
+        let (uri, discovery_started_at) = match self {
             Self::Configured(uri) => (Cow::Borrowed(uri), None),
             Self::Discovery(issuer) => {
                 let started = Instant::now();
@@ -551,11 +553,11 @@ impl JwksSource {
             }
         };
         let bytes = provider
-            .get_document(uri.url(), Document::Jwks, Some(deadline))
+            .get_document(uri.url(), Document::Jwks, deadline)
             .await
             .map_err(JwksError::Fetch)?;
         let parsed = parse_jwks_entries(&bytes, algorithms)?;
-        let keys = build_key_set(parsed, acquired_at.unwrap_or_else(Instant::now))?;
+        let keys = build_key_set(parsed, discovery_started_at.unwrap_or_else(Instant::now))?;
         Ok(Arc::new(keys))
     }
 }

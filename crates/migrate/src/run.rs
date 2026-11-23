@@ -131,7 +131,7 @@ pub const RECORD_TARGET: &str = "migrate_record";
 
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
     ensure_deadline_representable(options.deadline)?;
-    let session = SessionOptions {
+    let session_options = SessionOptions {
         application_name: options.application_name,
         statement_timeout: options.statement_timeout,
         idle_in_transaction_timeout: options.statement_timeout,
@@ -141,10 +141,13 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             ("client_connection_check_interval", "1s"),
         ],
     };
-    let mut conn = tokio::time::timeout(ACQUIRE_TIMEOUT, connect_session(options.dsn, &session))
-        .await
-        .map_err(|_| RunError::ConnectTimeout(ACQUIRE_TIMEOUT))?
-        .map_err(RunError::Connect)?;
+    let mut conn = tokio::time::timeout(
+        ACQUIRE_TIMEOUT,
+        connect_session(options.dsn, &session_options),
+    )
+    .await
+    .map_err(|_| RunError::ConnectTimeout(ACQUIRE_TIMEOUT))?
+    .map_err(RunError::Connect)?;
     let deadline_at = deadline_instant(options.deadline)?;
     let mut report = Report::default();
     let outcome = tokio::time::timeout_at(

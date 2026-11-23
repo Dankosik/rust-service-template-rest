@@ -21,7 +21,7 @@ pub(crate) struct Slots {
 #[derive(Debug)]
 struct State {
     free: usize,
-    next_waiter: u64,
+    next_waiter_id: u64,
     probes: BTreeMap<u64, oneshot::Sender<()>>,
     regular: RegularQueue,
 }
@@ -35,7 +35,7 @@ struct ActiveRegularQueue {
     waiters: BTreeMap<u64, oneshot::Sender<()>>,
 }
 
-struct DequeuedWaiter {
+struct AfterUnlock {
     grant: oneshot::Sender<()>,
     emptied_queue: Option<ActiveRegularQueue>,
 }
@@ -49,7 +49,7 @@ impl RegularQueue {
         active.waiters.insert(id, grant);
     }
 
-    fn pop(&mut self) -> Option<DequeuedWaiter> {
+    fn pop(&mut self) -> Option<AfterUnlock> {
         let active = self.0.as_mut()?;
         let newest_first = active.waiters.len() > 1 && active.since.elapsed() > STANDING_AFTER;
         let (_, grant) = if newest_first {
@@ -60,20 +60,20 @@ impl RegularQueue {
         Some(self.dequeued(grant))
     }
 
-    fn remove(&mut self, id: u64) -> Option<DequeuedWaiter> {
+    fn remove(&mut self, id: u64) -> Option<AfterUnlock> {
         let grant = self.0.as_mut()?.waiters.remove(&id)?;
         Some(self.dequeued(grant))
     }
 
-    fn dequeued(&mut self, grant: oneshot::Sender<()>) -> DequeuedWaiter {
-        DequeuedWaiter {
+    fn dequeued(&mut self, grant: oneshot::Sender<()>) -> AfterUnlock {
+        AfterUnlock {
             grant,
             emptied_queue: self.0.take_if(|active| active.waiters.is_empty()),
         }
     }
 }
 
-impl DequeuedWaiter {
+impl AfterUnlock {
     fn probe(grant: oneshot::Sender<()>) -> Self {
         Self {
             grant,
@@ -97,7 +97,7 @@ impl Slots {
         Self {
             state: Mutex::new(State {
                 free: capacity,
-                next_waiter: 0,
+                next_waiter_id: 0,
                 probes: BTreeMap::new(),
                 regular: RegularQueue::default(),
             }),
@@ -111,8 +111,8 @@ impl Slots {
                 state.free -= 1;
                 return Ok(Slot(self));
             }
-            let id = state.next_waiter;
-            state.next_waiter += 1;
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
             let (grant, granted) = oneshot::channel();
             match queue {
                 Queue::Probe => {
@@ -134,14 +134,14 @@ impl Slots {
             let handoff = state
                 .probes
                 .pop_first()
-                .map(|(_, grant)| DequeuedWaiter::probe(grant))
+                .map(|(_, grant)| AfterUnlock::probe(grant))
                 .or_else(|| state.regular.pop());
             if handoff.is_none() {
                 state.free += 1;
             }
             handoff
         };
-        if let Some(DequeuedWaiter {
+        if let Some(AfterUnlock {
             grant,
             emptied_queue,
         }) = handoff
@@ -155,13 +155,13 @@ impl Slots {
         let removed = {
             let mut state = self.state.lock();
             match queue {
-                Queue::Probe => state.probes.remove(&id).map(DequeuedWaiter::probe),
+                Queue::Probe => state.probes.remove(&id).map(AfterUnlock::probe),
                 Queue::Regular => state.regular.remove(id),
             }
         };
         drop(receiver);
         match removed {
-            Some(waiter) => drop(waiter),
+            Some(after_unlock) => drop(after_unlock),
             None => self.release(),
         }
     }

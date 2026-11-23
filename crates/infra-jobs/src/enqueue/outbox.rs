@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{
-    EnqueueError, MAX_UNIQUE_KEY_BYTES, encode_payload_with_capacity, is_valid_unique_key,
+    EnqueueError, MAX_UNIQUE_KEY_BYTES, encode_payload, is_valid_unique_key,
     notify_workers_after_commit,
 };
 use crate::{Handler, JobId, KindError, Kinds, Policy, trace_context};
@@ -178,7 +178,7 @@ where
     if order.is_some_and(|order| !is_valid_unique_key(order.aggregate_key) || order.version < 1) {
         return Err(OutboxEnqueueError::InvalidOrder);
     }
-    let payload = encode_payload_with_capacity(intent.payload, intent.capacity_hint)?;
+    let payload = encode_payload(intent.payload, intent.capacity_hint)?;
     if contains_decoded_nul(&payload) {
         return Err(OutboxEnqueueError::PayloadContainsNul);
     }

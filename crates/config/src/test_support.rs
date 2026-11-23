@@ -131,7 +131,7 @@ mod unit {
         );
     }
 
-    // template:begin config-unknown-env-key:test-support-unknown-env-key
+    // template:begin config-unknown-env-test:test-support-unknown-env-key
     #[track_caller]
     pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
         assert_matches!(
@@ -139,5 +139,5 @@ mod unit {
             Err(crate::load::Error(ErrorKind::Deserialize(_)))
         );
     }
-    // template:end config-unknown-env-key:test-support-unknown-env-key
+    // template:end config-unknown-env-test:test-support-unknown-env-key
 }
