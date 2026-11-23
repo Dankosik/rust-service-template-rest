@@ -646,6 +646,103 @@ async fn assert_rolling_schema_evolution_and_busy_shedding(
     }
 }
 
+async fn assert_dedup_override_under_disabled_profile(
+    url: String,
+    db: String,
+    table: &str,
+    ctx: &OperationContext,
+) {
+    let nodedup = ClickHouse::start(options_for(
+        url,
+        db,
+        "app_nodedup".to_owned(),
+        "app_nodedup".to_owned(),
+        QuerySettings::Client,
+    ))
+    .await
+    .expect("start app_nodedup");
+
+    let profile_setting: String = nodedup
+        .query(
+            "check_nodedup_profile",
+            "SELECT getSetting('deduplicate_insert')",
+        )
+        .fetch_one(ctx)
+        .await
+        .expect("read deduplicate_insert setting");
+    assert_eq!(profile_setting, "disable");
+
+    let uid = uuid::Uuid::new_v4();
+    let day = time::Date::from_calendar_date(2026, time::Month::November, 22).expect("date");
+    let ts =
+        time::OffsetDateTime::from_unix_timestamp_nanos(1_763_820_000_123_000_000).expect("ts");
+
+    let plain_batch_rows = [make_event(10, "batch_plain", uid, day, ts)];
+    for summary in ["nodedup_plain_1", "nodedup_plain_2"] {
+        nodedup
+            .insert_batch(
+                ctx,
+                summary,
+                table,
+                &plain_batch_rows,
+                BatchInsertOptions::new(),
+            )
+            .await
+            .expect(summary);
+    }
+
+    let batch_tok_rows = [make_event(11, "batch_tok", uid, day, ts)];
+    let batch_tok_opts = BatchInsertOptions::new().deduplication_token("nodedup-batch-tok-1");
+    for summary in ["nodedup_batch_1", "nodedup_batch_2"] {
+        nodedup
+            .insert_batch(ctx, summary, table, &batch_tok_rows, batch_tok_opts)
+            .await
+            .expect(summary);
+    }
+
+    let hash_rows = [make_event(12, "nodedup_hash", uid, day, ts)];
+    let hash_opts = AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByPayloadHash);
+    for summary in ["nodedup_hash_1", "nodedup_hash_2"] {
+        nodedup
+            .insert_async(ctx, summary, table, &hash_rows, hash_opts)
+            .await
+            .expect(summary);
+    }
+
+    let async_tok_rows = [make_event(13, "nodedup_tok", uid, day, ts)];
+    let async_tok_opts =
+        AsyncInsertOptions::new().deduplication(AsyncDeduplication::ByToken("nodedup-async-tok-1"));
+    for summary in ["nodedup_async_tok_1", "nodedup_async_tok_2"] {
+        nodedup
+            .insert_async(ctx, summary, table, &async_tok_rows, async_tok_opts)
+            .await
+            .expect(summary);
+    }
+
+    let fetched = nodedup
+        .query(
+            "read_back_nodedup",
+            &format!("SELECT id, kind, trace_id, day, ts FROM {table} WHERE id >= 10 ORDER BY id"),
+        )
+        .fetch_all::<EventRow>(ctx)
+        .await
+        .expect("read back nodedup rows");
+    assert_eq!(
+        fetched,
+        vec![
+            plain_batch_rows[0].clone(),
+            plain_batch_rows[0].clone(),
+            batch_tok_rows[0].clone(),
+            hash_rows[0].clone(),
+            async_tok_rows[0].clone(),
+        ]
+    );
+    assert_eq!(
+        nodedup.close(Duration::from_secs(2)).await,
+        CloseOutcome::Complete
+    );
+}
+
 #[tokio::test]
 async fn live_clickhouse_26_8_full_hardened_runtime_suite() {
     let mut builder = PrometheusBuilder::new();
@@ -704,6 +801,7 @@ async fn live_clickhouse_26_8_full_hardened_runtime_suite() {
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
     assert_param_select(&rw, &ctx).await;
     assert_rw_batch_async_dedup_and_empty(&rw, &ctx, &table).await;
+    assert_dedup_override_under_disabled_profile(url.clone(), db.clone(), &table, &ctx).await;
     assert_read_bounds_cardinality_and_cancellation(&rw, &ctx, &table).await;
     assert_readonly_behavior(url.clone(), db.clone(), ro_user, ro_password, &table, &ctx).await;
 

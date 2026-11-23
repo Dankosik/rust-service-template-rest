@@ -47,6 +47,7 @@ fn gauge_value(scrape: &str, name: &str) -> Option<f64> {
 struct TelemetryServer {
     addr: std::net::SocketAddr,
     traceparents: Arc<Mutex<Vec<Option<String>>>>,
+    query_ids: Arc<Mutex<Vec<String>>>,
     stall_describe: Arc<AtomicUsize>,
     stall_insert: Arc<AtomicUsize>,
     stalled_notify: Arc<Notify>,
@@ -54,25 +55,67 @@ struct TelemetryServer {
     handle: tokio::task::JoinHandle<()>,
 }
 
+fn extract_wire_query_id(uri: &http::Uri) -> Option<String> {
+    uri.query()?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("query_id="))
+        .map(str::to_owned)
+}
+
+fn telemetry_read_response(body: &str) -> (StatusCode, Bytes) {
+    match () {
+        () if body.contains("too_many") => (StatusCode::OK, rbwnat_u64_rows("id", &[1, 2])),
+        () if body.contains("raw_db_err") => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(b"Code: 47. DB::Exception: SENSITIVE_RAW_SQL_LEAK_MARKER"),
+        ),
+        () if body.contains("auth_516") => (
+            StatusCode::FORBIDDEN,
+            Bytes::from_static(b"Code: 516. DB::Exception: Authentication failed"),
+        ),
+        () if body.contains("access_497") => (
+            StatusCode::FORBIDDEN,
+            Bytes::from_static(b"Code: 497. DB::Exception: Not enough privileges"),
+        ),
+        () if body.contains("readonly_164") => (
+            StatusCode::FORBIDDEN,
+            Bytes::from_static(b"Code: 164. DB::Exception: Cannot modify setting"),
+        ),
+        () if body.contains("timeout_159") => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(b"Code: 159. DB::Exception: Timeout exceeded"),
+        ),
+        () if body.contains("oom_241") => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Bytes::from_static(b"Code: 241. DB::Exception: Memory limit exceeded"),
+        ),
+        () => (StatusCode::OK, rbwnat_u64_rows("id", &[1])),
+    }
+}
+
 async fn spawn_telemetry_server() -> TelemetryServer {
     let traceparents = Arc::new(Mutex::new(Vec::new()));
+    let query_ids = Arc::new(Mutex::new(Vec::new()));
     let stall_describe = Arc::new(AtomicUsize::new(0));
     let stall_insert = Arc::new(AtomicUsize::new(0));
     let stalled_notify = Arc::new(Notify::new());
     let release_stall = Arc::new(Notify::new());
 
     let traceparents_srv = Arc::clone(&traceparents);
+    let query_ids_srv = Arc::clone(&query_ids);
     let describe_stall = Arc::clone(&stall_describe);
     let insert_stall = Arc::clone(&stall_insert);
     let stalled_sig = Arc::clone(&stalled_notify);
     let release_sig = Arc::clone(&release_stall);
     let (addr, handle) = spawn_http_server(move |req: Request<Incoming>| {
         let tp = Arc::clone(&traceparents_srv);
+        let qids = Arc::clone(&query_ids_srv);
         let sd = Arc::clone(&describe_stall);
         let si = Arc::clone(&insert_stall);
         let sn = Arc::clone(&stalled_sig);
         let rs = Arc::clone(&release_sig);
         async move {
+            let wire_qid = extract_wire_query_id(req.uri());
             let uri = req.uri().to_string();
             let header = req
                 .headers()
@@ -92,6 +135,9 @@ async fn spawn_telemetry_server() -> TelemetryServer {
                     .body(Full::new(rbwnat_describe_id_column()))
                     .expect("resp");
             }
+            if let Some(qid) = wire_qid {
+                qids.lock().await.push(qid);
+            }
             if uri.contains("INSERT") || s.contains("INSERT") {
                 if si.load(Ordering::SeqCst) == 1 {
                     sn.notify_one();
@@ -107,36 +153,10 @@ async fn spawn_telemetry_server() -> TelemetryServer {
                 rs.notified().await;
             }
             if s.contains("hang_forever") {
+                sn.notify_one();
                 std::future::pending::<()>().await;
             }
-            let (status, resp) = match () {
-                () if s.contains("too_many") => (StatusCode::OK, rbwnat_u64_rows("id", &[1, 2])),
-                () if s.contains("raw_db_err") => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Bytes::from_static(b"Code: 47. DB::Exception: SENSITIVE_RAW_SQL_LEAK_MARKER"),
-                ),
-                () if s.contains("auth_516") => (
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"Code: 516. DB::Exception: Authentication failed"),
-                ),
-                () if s.contains("access_497") => (
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"Code: 497. DB::Exception: Not enough privileges"),
-                ),
-                () if s.contains("readonly_164") => (
-                    StatusCode::FORBIDDEN,
-                    Bytes::from_static(b"Code: 164. DB::Exception: Cannot modify setting"),
-                ),
-                () if s.contains("timeout_159") => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Bytes::from_static(b"Code: 159. DB::Exception: Timeout exceeded"),
-                ),
-                () if s.contains("oom_241") => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Bytes::from_static(b"Code: 241. DB::Exception: Memory limit exceeded"),
-                ),
-                () => (StatusCode::OK, rbwnat_u64_rows("id", &[1])),
-            };
+            let (status, resp) = telemetry_read_response(&s);
             Response::builder()
                 .status(status)
                 .body(Full::new(resp))
@@ -148,6 +168,7 @@ async fn spawn_telemetry_server() -> TelemetryServer {
     TelemetryServer {
         addr,
         traceparents,
+        query_ids,
         stall_describe,
         stall_insert,
         stalled_notify,
@@ -332,7 +353,11 @@ async fn exercise_read_telemetry(
     );
 }
 
-async fn exercise_read_failure_diagnostics(ch: &ClickHouse, ctx: &OperationContext) {
+async fn exercise_read_failure_diagnostics(
+    ch: &ClickHouse,
+    ctx: &OperationContext,
+    srv: &TelemetryServer,
+) {
     for (summary, sql, expected) in [
         ("auth_err", "SELECT auth_516", QueryError::Rejected),
         ("access_err", "SELECT access_497", QueryError::Rejected),
@@ -350,20 +375,43 @@ async fn exercise_read_failure_diagnostics(ch: &ClickHouse, ctx: &OperationConte
             "{summary}"
         );
     }
-    assert_eq!(
+
+    let notified = srv.stalled_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    let mut client_to = Box::pin(
         ch.query("client_timeout_err", "SELECT hang_forever")
-            .timeout(Duration::from_millis(25))
-            .fetch_one::<SampleRow>(ctx)
-            .await,
-        Err(QueryError::Unavailable)
+            .timeout(Duration::from_millis(500))
+            .fetch_one::<SampleRow>(ctx),
     );
-    let short_parent = OperationContext::with_timeout(Duration::from_millis(25));
-    assert_eq!(
+    tokio::select! {
+        res = &mut client_to => panic!("unexpected client_timeout_err completion: {res:?}"),
+        () = notified => {}
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(client_to.await, Err(QueryError::Unavailable));
+    tokio::time::resume();
+
+    let notified = srv.stalled_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    let short_parent = OperationContext::with_timeout(Duration::from_millis(500));
+    let mut parent_to = Box::pin(
         ch.query("parent_deadline_err", "SELECT hang_forever")
-            .fetch_one::<SampleRow>(&short_parent)
-            .await,
+            .fetch_one::<SampleRow>(&short_parent),
+    );
+    tokio::select! {
+        res = &mut parent_to => panic!("unexpected parent_deadline_err completion: {res:?}"),
+        () = notified => {}
+    }
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        parent_to.await,
         Err(QueryError::Stopped(operation_context::Stopped::Deadline))
     );
+    tokio::time::resume();
 }
 
 fn otel_attr(span: &SpanData, key: &str) -> Option<String> {
@@ -531,11 +579,47 @@ const EXPECTED_SPANS: &[ExpectedSpan] = &[
     ExpectedSpan::ok("SELECT", "no_tp_q"),
 ];
 
+fn assert_failure_event(
+    spec: &ExpectedSpan,
+    cap: &observe_test_support::CapturedSpan,
+    captured_events: &[observe_test_support::CapturedEvent],
+    error_type: &str,
+) {
+    let summary = spec.summary;
+    let event = captured_events
+        .iter()
+        .find(|ev| ev.unquoted("db.query.summary") == Some(summary))
+        .unwrap_or_else(|| panic!("missing failure event for {summary}"));
+    assert_eq!(
+        event.message(),
+        Some("clickhouse_operation_failed"),
+        "{summary}"
+    );
+    assert_eq!(Some(event.level), spec.event_level, "{summary}");
+    assert_eq!(event.unquoted("error.type"), Some(error_type), "{summary}");
+    assert_eq!(
+        event.unquoted("clickhouse.error.reason"),
+        spec.reason,
+        "{summary}"
+    );
+    assert_eq!(
+        event.unquoted("db.response.status_code"),
+        spec.status_code,
+        "{summary}"
+    );
+    assert_eq!(
+        event.unquoted("clickhouse.query_id"),
+        cap.unquoted("clickhouse.query_id"),
+        "{summary}"
+    );
+}
+
 fn assert_single_span_and_event(
     spec: &ExpectedSpan,
     otel: &SpanData,
     cap: &observe_test_support::CapturedSpan,
     captured_events: &[observe_test_support::CapturedEvent],
+    wire_query_ids: &[String],
     expected_address: &str,
     expected_port: &str,
 ) {
@@ -562,16 +646,22 @@ fn assert_single_span_and_event(
         };
         assert_eq!(cap_val, Some(value), "{summary}:{key}");
     }
-    assert_eq!(
-        otel_attr(otel, "clickhouse.query_id").is_some(),
-        spec.expect_query_id,
-        "{summary}"
-    );
-    assert_eq!(
-        cap.unquoted("clickhouse.query_id").is_some(),
-        spec.expect_query_id,
-        "{summary}"
-    );
+    let otel_qid = otel_attr(otel, "clickhouse.query_id");
+    let cap_qid = cap.unquoted("clickhouse.query_id");
+    if spec.expect_query_id {
+        let qid = otel_qid
+            .as_deref()
+            .unwrap_or_else(|| panic!("missing OTel clickhouse.query_id for {summary}"));
+        assert_eq!(cap_qid, Some(qid), "{summary}");
+        assert!(uuid::Uuid::parse_str(qid).is_ok(), "{summary}: {qid}");
+        assert!(
+            wire_query_ids.iter().any(|wire| wire == qid),
+            "{summary}: query_id {qid} missing from wire requests {wire_query_ids:?}"
+        );
+    } else {
+        assert_eq!(otel_qid, None, "{summary}");
+        assert_eq!(cap_qid, None, "{summary}");
+    }
     assert_eq!(
         otel_attr(otel, "db.response.status_code").as_deref(),
         spec.status_code,
@@ -602,33 +692,7 @@ fn assert_single_span_and_event(
         assert!(matches!(otel.status, Status::Error { .. }), "{summary}");
         assert_eq!(cap.unquoted("error.type"), Some(error_type), "{summary}");
         assert_eq!(cap.unquoted("otel.status_code"), Some("ERROR"), "{summary}");
-
-        let event = captured_events
-            .iter()
-            .find(|ev| ev.unquoted("db.query.summary") == Some(summary))
-            .unwrap_or_else(|| panic!("missing failure event for {summary}"));
-        assert_eq!(
-            event.message(),
-            Some("clickhouse_operation_failed"),
-            "{summary}"
-        );
-        assert_eq!(Some(event.level), spec.event_level, "{summary}");
-        assert_eq!(event.unquoted("error.type"), Some(error_type), "{summary}");
-        assert_eq!(
-            event.unquoted("clickhouse.error.reason"),
-            spec.reason,
-            "{summary}"
-        );
-        assert_eq!(
-            event.unquoted("db.response.status_code"),
-            spec.status_code,
-            "{summary}"
-        );
-        assert_eq!(
-            event.unquoted("clickhouse.query_id"),
-            cap.unquoted("clickhouse.query_id"),
-            "{summary}"
-        );
+        assert_failure_event(spec, cap, captured_events, error_type);
     } else {
         assert_eq!(otel_attr(otel, "error.type"), None, "{summary}");
         assert_eq!(otel.status, Status::Unset, "{summary}");
@@ -647,6 +711,7 @@ fn assert_span_contracts(
     finished: &[SpanData],
     captured: &[observe_test_support::CapturedSpan],
     captured_events: &[observe_test_support::CapturedEvent],
+    wire_query_ids: &[String],
     expected_address: &str,
     expected_port: &str,
 ) {
@@ -694,6 +759,7 @@ fn assert_span_contracts(
             otel,
             cap,
             &clickhouse_events,
+            wire_query_ids,
             expected_address,
             expected_port,
         );
@@ -705,6 +771,7 @@ fn assert_scrape_and_redaction(
     exporter: &InMemorySpanExporter,
     spans: &SpanCapture,
     events: &EventCapture,
+    wire_query_ids: &[String],
     expected_address: &str,
     expected_port: &str,
 ) {
@@ -715,6 +782,7 @@ fn assert_scrape_and_redaction(
         &finished,
         &captured_spans,
         &captured_events,
+        wire_query_ids,
         expected_address,
         expected_port,
     );
@@ -819,9 +887,9 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
     );
     assert_pre_admission_silent(&ch, &recorder, &spans).await;
 
-    let ctx = OperationContext::with_timeout(Duration::from_secs(5));
+    let ctx = OperationContext::with_timeout(Duration::from_secs(30));
     exercise_read_telemetry(&ch, &ctx, &srv, &recorder, &exporter).await;
-    exercise_read_failure_diagnostics(&ch, &ctx).await;
+    exercise_read_failure_diagnostics(&ch, &ctx, &srv).await;
 
     ch.insert_batch(
         &ctx,
@@ -847,11 +915,13 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
 
     let expected_address = srv.addr.ip().to_string();
     let expected_port = srv.addr.port().to_string();
+    let wire_query_ids = srv.query_ids.lock().await.clone();
     assert_scrape_and_redaction(
         &recorder,
         &exporter,
         &spans,
         &events,
+        &wire_query_ids,
         &expected_address,
         &expected_port,
     );

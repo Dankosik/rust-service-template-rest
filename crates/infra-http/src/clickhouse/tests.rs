@@ -121,9 +121,9 @@ async fn clickhouse_problems_preserve_route_policy_and_unconfirmed_inserts() {
     use InsertFailure as F;
     use QueryError as Q;
 
-    let read = |error| query_problem(error, || Problem::new(Code::NotFound));
+    let read = |error| query_problem(error, || Problem::new(Code::Forbidden));
     for (problem, status, code) in [
-        (read(Q::NotFound), 404, "not_found"),
+        (read(Q::NotFound), 403, "forbidden"),
         (read(Q::Busy), 503, "service_unavailable"),
         (read(Q::Unavailable), 503, "service_unavailable"),
         (read(Q::Stopped(Stopped::Deadline)), 504, "gateway_timeout"),
@@ -217,30 +217,44 @@ async fn request_budget_timeout_distinguishes_pre_dispatch_describe_from_dispatc
     };
 
     let handler = |State(client): State<ClickHouse>, context: RequestContext, request: Request| async move {
-        let table = request.uri().query().unwrap_or("events");
+        let query = request.uri().query().unwrap_or("batch:events");
+        let (mode, table) = query.split_once(':').unwrap_or(("batch", query));
         let rows = [EventRow { id: 1 }];
-        context
-            .clickhouse_insert_batch(&client, "ingest", table, &rows, BatchInsertOptions::new())
-            .await
-            .map(|_| StatusCode::ACCEPTED)
-            .map_err(insert_problem)
+        let result = if mode == "async" {
+            context
+                .clickhouse_insert_async(&client, "ingest", table, &rows, AsyncInsertOptions::new())
+                .await
+        } else {
+            context
+                .clickhouse_insert_batch(&client, "ingest", table, &rows, BatchInsertOptions::new())
+                .await
+        };
+        result.map(|_| StatusCode::ACCEPTED).map_err(insert_problem)
     };
 
     let (_provider, app, client) = clickhouse_route(post(provider), post(handler)).await;
 
-    for (table, expected_detail) in [
+    for (query, expected_detail) in [
         (
-            "stall_describe",
+            "batch:stall_describe",
             "request budget expired before a response could be committed",
         ),
         (
-            "stall_insert",
+            "async:stall_describe_async",
+            "request budget expired before a response could be committed",
+        ),
+        (
+            "batch:stall_insert",
+            "the analytics database could not confirm whether the insert took effect",
+        ),
+        (
+            "async:stall_insert_async",
             "the analytics database could not confirm whether the insert took effect",
         ),
     ] {
         let response = tokio::spawn(
             app.clone().oneshot(
-                Request::post(format!("/events?{table}"))
+                Request::post(format!("/events?{query}"))
                     .body(Body::empty())
                     .unwrap(),
             ),
@@ -253,11 +267,11 @@ async fn request_budget_timeout_distinguishes_pre_dispatch_describe_from_dispatc
         let response = response.await.unwrap().unwrap();
         tokio::time::resume();
 
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT, "{table}");
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT, "{query}");
         assert!(!response.headers().contains_key(RETRY_AFTER));
         let problem = body_json(response).await;
         assert_eq!(problem["code"], "gateway_timeout");
-        assert_eq!(problem["detail"], expected_detail, "{table}");
+        assert_eq!(problem["detail"], expected_detail, "{query}");
     }
 
     drop(release_tx);
@@ -304,6 +318,19 @@ async fn run_insert_scenario(
                     "unconfirmed",
                     &rows,
                     BatchInsertOptions::new(),
+                )
+                .await
+                .unwrap_err();
+            std::assert_matches!(err, InsertError::OutcomeUnknown(_));
+        }
+        Some("unconfirmed_async") => {
+            let err = context
+                .clickhouse_insert_async(
+                    client,
+                    "ingest",
+                    "unconfirmed",
+                    &rows,
+                    AsyncInsertOptions::new(),
                 )
                 .await
                 .unwrap_err();
@@ -369,6 +396,10 @@ async fn a_later_timeout_distinguishes_settled_and_unconfirmed_clickhouse_insert
         ),
         (
             "/events?unconfirmed",
+            "the analytics database could not confirm whether the insert took effect",
+        ),
+        (
+            "/events?unconfirmed_async",
             "the analytics database could not confirm whether the insert took effect",
         ),
     ] {
