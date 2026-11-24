@@ -30,9 +30,9 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseAuth, ClickHouseOptions,
-    CloseOutcome, HISTOGRAMS, InsertError, InsertFailure, QueryError, QuerySettings, Row,
-    TransportSecurity, UnknownOutcome, error,
+    ClickHouse, ClickHouseAuth, ClickHouseOptions, CloseOutcome, HISTOGRAMS, InsertError,
+    InsertFailure, InsertOptions, QueryError, QuerySettings, Row, TransportSecurity,
+    UnknownOutcome, error,
 };
 
 pub(super) fn base_options(url: String) -> ClickHouseOptions {
@@ -44,7 +44,9 @@ pub(super) fn base_options(url: String) -> ClickHouseOptions {
             password: SecretString::from("app"),
         },
         transport: TransportSecurity::Plaintext,
-        query_settings: QuerySettings::Client,
+        query_settings: QuerySettings::Client {
+            max_memory_usage: Some(NonZeroU64::new(512 * 1024 * 1024).expect("nz")),
+        },
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
         max_read_concurrency: NonZeroUsize::new(32).expect("nz"),
@@ -52,7 +54,6 @@ pub(super) fn base_options(url: String) -> ClickHouseOptions {
         max_result_rows: NonZeroU64::new(100_000).expect("nz"),
         max_result_bytes: NonZeroUsize::new(16 * 1024 * 1024).expect("nz"),
         http_response_buffer_size: NonZeroUsize::new(2 * 1024 * 1024).expect("nz"),
-        max_memory_usage: Some(NonZeroU64::new(512 * 1024 * 1024).expect("nz")),
         propagate_trace_context: true,
     }
 }
@@ -222,6 +223,13 @@ async fn serve_capture_conn(stream: TcpStream, captured: Arc<Mutex<Vec<CapturedR
 
 #[tokio::test]
 async fn a4_1_and_a4_3_compile_and_send_futures() {
+    #[derive(Serialize, Row)]
+    #[clickhouse(crate = "crate")]
+    struct BorrowedRow<'a> {
+        id: u64,
+        label: &'a str,
+    }
+
     fn assert_send<F: Future + Send>(_: &F) {}
 
     let client = ClickHouse::start(base_options("http://127.0.0.1:8123".to_owned()))
@@ -232,20 +240,26 @@ async fn a4_1_and_a4_3_compile_and_send_futures() {
 
     let ctx = OperationContext::unbounded();
     let rows = [SampleRow { id: 1 }];
-    let batch_fut = client.insert_batch(
-        &ctx,
-        "batch_smoke",
-        "events",
-        &rows,
-        BatchInsertOptions::new(),
-    );
+    let batch_fut = client.insert(&ctx, "batch_smoke", "events", &rows, InsertOptions::batch());
     assert_send(&batch_fut);
-    let async_fut = client.insert_async(
+    let borrowed_rows = [BorrowedRow {
+        id: 1,
+        label: "created",
+    }];
+    let borrowed_fut = client.insert(
+        &ctx,
+        "borrowed_smoke",
+        "events",
+        &borrowed_rows,
+        InsertOptions::batch_with_token("tok"),
+    );
+    assert_send(&borrowed_fut);
+    let async_fut = client.insert(
         &ctx,
         "async_smoke",
         "events",
         &rows,
-        AsyncInsertOptions::with_payload_hash(),
+        InsertOptions::async_with_payload_hash(),
     );
     assert_send(&async_fut);
     let read_fut = client
@@ -972,12 +986,12 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
         .expect("start");
     let ctx = OperationContext::unbounded();
     let err = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "fail_idx0",
             "events",
             &[FailRow { id: 1 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect_err("idx 0 serialize must fail");
@@ -1041,7 +1055,7 @@ fn row_derive_uses_crate_root_and_reexported_ipv4_and_uuid_vec_serde() {
         correlation_ids: Vec<uuid::Uuid>,
     }
 
-    fn assert_row<R: crate::ReadRow + crate::WriteRow>() {}
+    fn assert_row<'a, R: crate::ReadRow + crate::WriteRow<'a>>() {}
 
     assert_row::<NetworkAuditRow>();
     let row = NetworkAuditRow {
@@ -1054,6 +1068,20 @@ fn row_derive_uses_crate_root_and_reexported_ipv4_and_uuid_vec_serde() {
 
 #[tokio::test]
 async fn param_conversions_and_owned_param_names_serialize_without_manual_casts() {
+    fn build_query<'a>(
+        ch: &'a ClickHouse,
+        table: &str,
+        owned_str: &'a String,
+        cow_str: std::borrow::Cow<'a, str>,
+        ip: std::net::Ipv4Addr,
+    ) -> crate::Query<'a> {
+        ch.query("param_ergonomics", format!("SELECT id FROM {table}"))
+            .param("s_ref", owned_str)
+            .param("s_cow", cow_str)
+            .param("ip", ip)
+            .param("ip_arr", [ip])
+    }
+
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, server) = spawn_http_capture_server(Arc::clone(&captured)).await;
 
@@ -1064,14 +1092,12 @@ async fn param_conversions_and_owned_param_names_serialize_without_manual_casts(
 
     let owned_str = "owned-string-param".to_owned();
     let cow_str = std::borrow::Cow::Borrowed("cow-param");
+    let ip = std::net::Ipv4Addr::new(192, 0, 2, 1);
     let utc_dt = time::UtcDateTime::from_unix_timestamp(1_700_000_123).expect("utc dt");
     let arr_ref = ["gamma".to_owned(), "delta".to_owned()];
     let vec_nums = vec![1_i32, 2_i32];
 
-    let mut query = ch
-        .query("param_ergonomics", "SELECT id FROM t")
-        .param("s_ref", &owned_str)
-        .param("s_cow", cow_str)
+    let mut query = build_query(&ch, "t", &owned_str, cow_str, ip)
         .param("utc_dt", utc_dt)
         .param("arr_ref", &arr_ref)
         .param("vec_ref", &vec_nums);
@@ -1086,8 +1112,11 @@ async fn param_conversions_and_owned_param_names_serialize_without_manual_casts(
     let reqs = captured.lock().await;
     let body_text = String::from_utf8_lossy(&reqs[0].body);
     for expected in [
+        "SELECT id FROM t",
         "name=\"param_s_ref\"\r\n\r\nowned-string-param\r\n",
         "name=\"param_s_cow\"\r\n\r\ncow-param\r\n",
+        "name=\"param_ip\"\r\n\r\n192.0.2.1\r\n",
+        "name=\"param_ip_arr\"\r\n\r\n['192.0.2.1']\r\n",
         "name=\"param_utc_dt\"\r\n\r\n1700000123\r\n",
         "name=\"param_arr_ref\"\r\n\r\n['gamma','delta']\r\n",
         "name=\"param_vec_ref\"\r\n\r\n[1,2]\r\n",
@@ -1100,6 +1129,101 @@ async fn param_conversions_and_owned_param_names_serialize_without_manual_casts(
         );
     }
     drop(reqs);
+
+    assert_eq!(
+        ch.close(Duration::from_secs(1)).await,
+        CloseOutcome::Complete
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn borrowed_row_inserts_without_owning_fields() {
+    #[derive(Serialize, Row)]
+    #[clickhouse(crate = "crate")]
+    struct BorrowedEventRow<'a> {
+        id: u64,
+        label: &'a str,
+    }
+
+    let describe_body = {
+        let mut out = Vec::new();
+        encode_varuint(7, &mut out);
+        for col in [
+            "name",
+            "type",
+            "default_type",
+            "default_expression",
+            "comment",
+            "codec_expression",
+            "ttl_expression",
+        ] {
+            encode_ch_str(col, &mut out);
+        }
+        for _ in 0..7 {
+            encode_ch_str("String", &mut out);
+        }
+        for (name, ty) in [("id", "UInt64"), ("label", "String")] {
+            encode_ch_str(name, &mut out);
+            encode_ch_str(ty, &mut out);
+            for _ in 0..5 {
+                encode_ch_str("", &mut out);
+            }
+        }
+        Bytes::from(out)
+    };
+    let inserted = Arc::new(Mutex::new(Vec::<Bytes>::new()));
+    let inserted_srv = Arc::clone(&inserted);
+    let (addr, server) = spawn_http_server(move |req: Request<Incoming>| {
+        let describe_body = describe_body.clone();
+        let inserted = Arc::clone(&inserted_srv);
+        async move {
+            let uri = req.uri().to_string();
+            let body = req.into_body().collect().await.expect("body").to_bytes();
+            if uri.contains("DESCRIBE") || String::from_utf8_lossy(&body).contains("DESCRIBE") {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(describe_body))
+                    .expect("describe resp");
+            }
+            inserted.lock().await.push(body);
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Full::new(Bytes::new()))
+                .expect("insert resp")
+        }
+    })
+    .await;
+
+    let ch = ClickHouse::start(base_options(format!("http://{addr}")))
+        .await
+        .expect("start");
+    let ctx = OperationContext::with_timeout(Duration::from_secs(2));
+    let first = "alpha".to_owned();
+    let second = "beta".to_owned();
+    let rows = [
+        BorrowedEventRow {
+            id: 1,
+            label: &first,
+        },
+        BorrowedEventRow {
+            id: 2,
+            label: &second,
+        },
+    ];
+    let report = ch
+        .insert(
+            &ctx,
+            "borrowed_ins",
+            "events",
+            &rows,
+            InsertOptions::batch(),
+        )
+        .await
+        .expect("borrowed row insert succeeds");
+    assert_eq!(report.rows, 2);
+    assert_eq!(inserted.lock().await.len(), 1);
+    assert!(!inserted.lock().await[0].is_empty());
 
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,

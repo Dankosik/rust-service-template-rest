@@ -7,8 +7,14 @@ use tls_test_support::TlsMaterial;
 use super::base_options;
 use crate::{
     ClickHouse, ClickHouseAuth, ClickHouseOptions, ClientCertificate, CloseOutcome, Param,
-    StartError, TransportSecurity,
+    QuerySettings, StartError, TransportSecurity,
 };
+
+fn memory_settings(bytes: u64) -> QuerySettings {
+    QuerySettings::Client {
+        max_memory_usage: Some(NonZeroU64::new(bytes).expect("nz")),
+    }
+}
 
 #[tokio::test]
 async fn url_database_and_limits_admission_boundaries() {
@@ -68,8 +74,8 @@ async fn url_database_and_limits_admission_boundaries() {
             o.max_result_bytes = NonZeroUsize::new(128 * 1024).expect("nz");
             o.http_response_buffer_size = NonZeroUsize::new(256 * 1024).expect("nz");
         },
-        |o| o.max_memory_usage = Some(NonZeroU64::new(16 * 1024 * 1024 - 1).expect("nz")),
-        |o| o.max_memory_usage = Some(NonZeroU64::new(64 * 1024 * 1024 * 1024 + 1).expect("nz")),
+        |o| o.query_settings = memory_settings(16 * 1024 * 1024 - 1),
+        |o| o.query_settings = memory_settings(64 * 1024 * 1024 * 1024 + 1),
     ];
 
     for mutate in limit_failures {
@@ -80,6 +86,7 @@ async fn url_database_and_limits_admission_boundaries() {
 
     let mut min_boundary = base_options("https://localhost:8443/prefix/".to_owned());
     min_boundary.transport = TransportSecurity::default();
+    min_boundary.query_settings = QuerySettings::default();
     min_boundary.query_timeout = Duration::from_millis(10);
     min_boundary.insert_timeout = Duration::from_mins(5);
     min_boundary.max_read_concurrency = NonZeroUsize::MIN;
@@ -87,7 +94,6 @@ async fn url_database_and_limits_admission_boundaries() {
     min_boundary.max_result_rows = NonZeroU64::MIN;
     min_boundary.max_result_bytes = NonZeroUsize::new(64 * 1024).expect("nz");
     min_boundary.http_response_buffer_size = NonZeroUsize::new(64 * 1024).expect("nz");
-    min_boundary.max_memory_usage = None;
     let ch = ClickHouse::start(min_boundary).await.expect("boundary ok");
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,

@@ -263,6 +263,12 @@ impl ObservedFailure<QueryError> {
     }
 }
 
+impl From<BoundedStop> for ObservedFailure<QueryError> {
+    fn from(stop: BoundedStop) -> Self {
+        Self::from_stop(stop)
+    }
+}
+
 impl ObservedFailure<InsertError> {
     pub(crate) const fn pre_dispatch_stop(stop: BoundedStop) -> Self {
         let error = match stop {

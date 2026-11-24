@@ -17,9 +17,8 @@ use super::{
     SampleRow, base_options, rbwnat_describe_id_column, rbwnat_u64_rows, spawn_http_server,
 };
 use crate::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClientCertificate, CloseOutcome,
-    InsertError, InsertFailure, InsertReport, QueryError, QuerySettings, Row, TransportSecurity,
-    UnknownOutcome,
+    ClickHouse, ClientCertificate, CloseOutcome, InsertError, InsertFailure, InsertOptions,
+    InsertReport, QueryError, QuerySettings, Row, TransportSecurity, UnknownOutcome,
 };
 
 async fn spawn_read_fault_server(
@@ -376,12 +375,12 @@ async fn assert_write_code_precedence_and_close(ch: ClickHouse, ctx: &OperationC
         ),
     ] {
         assert_eq!(
-            ch.insert_batch(
+            ch.insert(
                 ctx,
                 "code_probe",
                 table,
                 &[SampleRow { id: 1 }],
-                BatchInsertOptions::new()
+                InsertOptions::batch()
             )
             .await,
             Err(expected),
@@ -394,12 +393,12 @@ async fn assert_write_code_precedence_and_close(ch: ClickHouse, ctx: &OperationC
         CloseOutcome::Complete
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             ctx,
             "closed",
             "events",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Unavailable))
@@ -429,12 +428,12 @@ async fn write_pre_dispatch_validation_and_empty_noop() {
         &bad_table_long,
     ] {
         assert_eq!(
-            ch.insert_batch(
+            ch.insert(
                 &ctx,
                 "bad_table",
                 table,
                 &[SampleRow { id: 1 }],
-                BatchInsertOptions::new()
+                InsertOptions::batch()
             )
             .await,
             Err(InsertError::NotApplied(InsertFailure::InvalidInput))
@@ -443,35 +442,35 @@ async fn write_pre_dispatch_validation_and_empty_noop() {
     let bad_tok_long = "k".repeat(257);
     for token in ["", "tok\n", "tok\0", &bad_tok_long] {
         assert_eq!(
-            ch.insert_async(
+            ch.insert(
                 &ctx,
                 "bad_tok",
                 "events",
                 &[SampleRow { id: 1 }],
-                AsyncInsertOptions::with_token(token)
+                InsertOptions::async_with_token(token)
             )
             .await,
             Err(InsertError::NotApplied(InsertFailure::InvalidInput))
         );
     }
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "zero_to",
             "events",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new().timeout(Duration::ZERO)
+            InsertOptions::batch().timeout(Duration::ZERO)
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::InvalidInput))
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "empty",
             "events",
             &[] as &[SampleRow],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Ok(InsertReport { rows: 0 })
@@ -509,39 +508,39 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
         .expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
 
-    ch.insert_batch(
+    ch.insert(
         &ctx,
         "batch",
         "events",
         &[SampleRow { id: 1 }],
-        BatchInsertOptions::new().deduplication_token("tok-b"),
+        InsertOptions::batch_with_token("tok-b"),
     )
     .await
     .expect("batch ok");
-    ch.insert_async(
+    ch.insert(
         &ctx,
         "async_disabled",
         "events",
         &[SampleRow { id: 2 }],
-        AsyncInsertOptions::without_deduplication(),
+        InsertOptions::async_without_deduplication(),
     )
     .await
     .expect("async disabled ok");
-    ch.insert_async(
+    ch.insert(
         &ctx,
         "async_hash",
         "events",
         &[SampleRow { id: 3 }],
-        AsyncInsertOptions::with_payload_hash(),
+        InsertOptions::async_with_payload_hash(),
     )
     .await
     .expect("async hash ok");
-    ch.insert_async(
+    ch.insert(
         &ctx,
         "async_tok",
         "events",
         &[SampleRow { id: 4 }],
-        AsyncInsertOptions::with_token("tok-a"),
+        InsertOptions::async_with_token("tok-a"),
     )
     .await
     .expect("async tok ok");
@@ -549,12 +548,12 @@ async fn write_settings_idx_nonzero_and_code_precedence() {
     assert_captured_write_uris(&captured_uris.lock().await);
 
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "idx1_fail",
             "events",
             &[SecondFailRow { id: 1 }, SecondFailRow { id: 2 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::OutcomeUnknown(UnknownOutcome::Unavailable))
@@ -696,12 +695,12 @@ async fn tls_handshake_failure_is_not_applied() {
     );
     assert_eq!(
         ch_bad
-            .insert_batch(
+            .insert(
                 &ctx,
                 "ins",
                 "events",
                 &[SampleRow { id: 1 }],
-                BatchInsertOptions::new()
+                InsertOptions::batch()
             )
             .await,
         Err(InsertError::NotApplied(InsertFailure::Unavailable))
@@ -782,12 +781,12 @@ async fn response_phase_tls_fault_is_outcome_unknown() {
     };
     let ch_mtls = ClickHouse::start(valid_opts).await.expect("start mtls");
     let err = ch_mtls
-        .insert_batch(
+        .insert(
             &ctx,
             "tls_response_alert",
             "events",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect_err("response-phase TLS alert must fail closed");
@@ -880,12 +879,12 @@ async fn close_drains_in_flight_operations_and_times_out() {
     tokio::pin!(i_entered);
     i_entered.as_mut().enable();
     let i_task = tokio::spawn(async move {
-        ch_i.insert_batch(
+        ch_i.insert(
             &ctx_i,
             "drain_i",
             "events_stall",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
     });
@@ -903,12 +902,12 @@ async fn close_drains_in_flight_operations_and_times_out() {
         Err(QueryError::Unavailable)
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "post_close_i",
             "events",
             &[SampleRow { id: 2 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Unavailable))
@@ -946,12 +945,12 @@ async fn close_token_barrier_rejects_post_close_tasks_without_io() {
         Err(QueryError::Unavailable)
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "barrier_i",
             "events",
             &[SampleRow { id: 3 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Unavailable))

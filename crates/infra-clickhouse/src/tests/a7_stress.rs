@@ -16,9 +16,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use super::{SampleRow, base_options, rbwnat_describe_id_column, spawn_http_server};
-use crate::{
-    BatchInsertOptions, ClickHouse, CloseOutcome, InsertError, QueryError, UnknownOutcome,
-};
+use crate::{ClickHouse, CloseOutcome, InsertError, InsertOptions, QueryError, UnknownOutcome};
 
 struct OpenGuard(Arc<AtomicUsize>);
 
@@ -102,8 +100,8 @@ async fn a7_cancelled_insert_does_not_leak_detached_tasks_or_connections() {
         let notified = insert_received.notified();
         tokio::pin!(notified);
         let row = [SampleRow { id: i }];
-        let opts = BatchInsertOptions::new();
-        let fut = ch.insert_batch(&ctx, "a7_cancel", "events", &row, opts);
+        let opts = InsertOptions::batch();
+        let fut = ch.insert(&ctx, "a7_cancel", "events", &row, opts);
         tokio::pin!(fut);
         tokio::select! {
             res = &mut fut => panic!("unexpected completion: {res:?}"),
@@ -166,12 +164,12 @@ async fn a7_local_timeout_insert_does_not_leak_detached_tasks_or_connections() {
     let ctx = OperationContext::unbounded();
     for i in 0..10_u64 {
         let res = ch
-            .insert_batch(
+            .insert(
                 &ctx,
                 "a7_timeout",
                 "events",
                 &[SampleRow { id: i }],
-                BatchInsertOptions::new(),
+                InsertOptions::batch(),
             )
             .await;
         assert_eq!(
@@ -463,23 +461,23 @@ async fn a7_oversized_http_500_error_bodies_are_capped_and_classified() {
         );
     }
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "oversized_insert_252",
             "events_252",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Err(InsertError::NotApplied(crate::InsertFailure::TooManyParts))
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "oversized_insert_prose",
             "events_prose",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Err(InsertError::OutcomeUnknown(UnknownOutcome::Unavailable))

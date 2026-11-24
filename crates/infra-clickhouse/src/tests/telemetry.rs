@@ -20,8 +20,7 @@ use super::{
     spawn_http_server,
 };
 use crate::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, ClickHouseAuth, CloseOutcome, InsertError,
-    InsertFailure, QueryError,
+    ClickHouse, ClickHouseAuth, CloseOutcome, InsertError, InsertFailure, InsertOptions, QueryError,
 };
 
 fn count_lines_with(scrape: &str, prefix: &str, labels: &[&str]) -> u64 {
@@ -199,18 +198,18 @@ async fn exercise_drop_and_busy_paths(
     srv.release_stall.notify_waiters();
 
     srv.stall_describe.store(1, Ordering::SeqCst);
-    let mut pre_fut = Box::pin(ch.insert_batch(
+    let mut pre_fut = Box::pin(ch.insert(
         ctx,
         "drop_pre_dispatch",
         "cold_table",
         &[SampleRow { id: 1 }],
-        BatchInsertOptions::new(),
+        InsertOptions::batch(),
     ));
     tokio::select! {
         res = &mut pre_fut => panic!("unexpected pre-dispatch completion: {res:?}"),
         () = srv.stalled_notify.notified() => {
             assert_eq!(
-                ch.insert_batch(ctx, "busy_ins", "events_table", &[SampleRow { id: 1 }], BatchInsertOptions::new()).await,
+                ch.insert(ctx, "busy_ins", "events_table", &[SampleRow { id: 1 }], InsertOptions::batch()).await,
                 Err(InsertError::NotApplied(InsertFailure::Busy))
             );
             drop(pre_fut);
@@ -220,12 +219,12 @@ async fn exercise_drop_and_busy_paths(
     srv.release_stall.notify_waiters();
 
     srv.stall_insert.store(1, Ordering::SeqCst);
-    let mut post_fut = Box::pin(ch.insert_batch(
+    let mut post_fut = Box::pin(ch.insert(
         ctx,
         "drop_post_dispatch",
         "events_table",
         &[SampleRow { id: 1 }],
-        BatchInsertOptions::new(),
+        InsertOptions::batch(),
     ));
     tokio::select! {
         res = &mut post_fut => panic!("unexpected post-dispatch completion: {res:?}"),
@@ -252,21 +251,21 @@ async fn assert_pre_admission_silent(
         .fetch_one::<SampleRow>(&ctx)
         .await;
     let _ = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "pre_bad",
             "db.t",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await;
     let _ = ch
-        .insert_async(
+        .insert(
             &ctx,
             "zero",
             "events",
             &[] as &[SampleRow],
-            AsyncInsertOptions::with_payload_hash(),
+            InsertOptions::async_with_payload_hash(),
         )
         .await;
     assert_eq!(spans.snapshot(), []);
@@ -897,12 +896,12 @@ async fn telemetry_contract_spans_w3c_metrics_and_redaction() {
     exercise_read_telemetry(&ch, &ctx, &srv, &recorder, &exporter).await;
     exercise_read_failure_diagnostics(&ch, &ctx, &srv).await;
 
-    ch.insert_batch(
+    ch.insert(
         &ctx,
         "batch_ok",
         "events_table",
         &[SampleRow { id: 1 }, SampleRow { id: 2 }],
-        BatchInsertOptions::new(),
+        InsertOptions::batch(),
     )
     .await
     .expect("batch ok");

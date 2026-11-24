@@ -1,43 +1,26 @@
 use infra_clickhouse::{
-    AsyncInsertOptions, BatchInsertOptions, ClickHouse, InsertError, InsertFailure, InsertReport,
-    QueryError, UnknownOutcome, WriteRow,
+    ClickHouse, InsertError, InsertFailure, InsertOptions, InsertReport, QueryError,
+    UnknownOutcome, WriteRow,
 };
 
 use crate::problem::{body_too_large, sanitized_problem};
 use crate::{Code, Problem, RequestContext};
 
 impl RequestContext {
-    pub async fn clickhouse_insert_batch<'a, R: WriteRow>(
+    pub async fn clickhouse_insert<'a, 'r, R: WriteRow<'r>>(
         &'a self,
-        client: &'a ClickHouse,
+        client: &ClickHouse,
         summary: &'static str,
-        table: &'a str,
-        rows: &'a [R],
-        options: BatchInsertOptions<'a>,
+        table: &str,
+        rows: &[R],
+        options: InsertOptions<'a>,
     ) -> Result<InsertReport, InsertError> {
         let options = match self.clickhouse_insert_outcomes() {
             Some(outcomes) => options.observe_outcomes(outcomes),
             None => options,
         };
         client
-            .insert_batch(self.operation(), summary, table, rows, options)
-            .await
-    }
-
-    pub async fn clickhouse_insert_async<'a, R: WriteRow>(
-        &'a self,
-        client: &'a ClickHouse,
-        summary: &'static str,
-        table: &'a str,
-        rows: &'a [R],
-        options: AsyncInsertOptions<'a>,
-    ) -> Result<InsertReport, InsertError> {
-        let options = match self.clickhouse_insert_outcomes() {
-            Some(outcomes) => options.observe_outcomes(outcomes),
-            None => options,
-        };
-        client
-            .insert_async(self.operation(), summary, table, rows, options)
+            .insert(self.operation(), summary, table, rows, options)
             .await
     }
 }
