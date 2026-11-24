@@ -18,10 +18,25 @@ const REACTIVE_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PASSWORD_FILE_BYTES: usize = 16 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CredEpoch(u64);
+
+impl CredEpoch {
+    pub(crate) const INITIAL: Self = Self(1);
+
+    pub(crate) const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(derive_more::Debug)]
-#[debug("ActiveCredentials {{ cred_epoch: {}, .. }}", self.cred_epoch)]
+#[debug("ActiveCredentials {{ cred_epoch: {}, .. }}", self.cred_epoch.get())]
 pub(crate) struct ActiveCredentials {
-    pub(crate) cred_epoch: u64,
+    pub(crate) cred_epoch: CredEpoch,
     pub(crate) read_client: clickhouse::Client,
     pub(crate) password: Option<Zeroizing<String>>,
 }
@@ -81,26 +96,25 @@ impl PasswordRefresh {
     }
 
     async fn run(mut self, shared: &Shared, trigger: &Notify) {
-        loop {
-            if !self.wait_next(shared, trigger).await {
-                return;
-            }
-            let result = tokio::select! {
-                biased;
-                () = shared.shutdown.cancelled() => return,
-                result = read_once(&self.reading, &self.path) => result,
-            };
-            if shared.shutdown.is_cancelled() {
-                return;
-            }
-            self.apply_result(shared, result);
+        tokio::select! {
+            biased;
+            () = shared.shutdown.cancelled() => {}
+            () = async {
+                loop {
+                    self.wait_next(trigger).await;
+                    let result = read_once(&self.reading, &self.path).await;
+                    if shared.shutdown.is_cancelled() {
+                        return;
+                    }
+                    self.apply_result(shared, result);
+                }
+            } => {}
         }
     }
 
-    async fn wait_next(&mut self, shared: &Shared, trigger: &Notify) -> bool {
+    async fn wait_next(&mut self, trigger: &Notify) {
         let reactive = tokio::select! {
             biased;
-            () = shared.shutdown.cancelled() => return false,
             () = trigger.notified() => true,
             () = tokio::time::sleep_until(self.next_refresh) => false,
         };
@@ -108,18 +122,13 @@ impl PasswordRefresh {
             && let Some(prev) = self.last_reactive_refresh
             && let Some(wait) = REACTIVE_REFRESH_COOLDOWN.checked_sub(prev.elapsed())
         {
-            tokio::select! {
-                biased;
-                () = shared.shutdown.cancelled() => return false,
-                () = tokio::time::sleep(wait) => {}
-            }
+            tokio::time::sleep(wait).await;
         }
         let now = Instant::now();
         if reactive {
             self.last_reactive_refresh = Some(now);
         }
         self.next_refresh = now + PASSWORD_REFRESH_INTERVAL;
-        true
     }
 
     fn apply_result(
@@ -136,7 +145,7 @@ impl PasswordRefresh {
                         .metrics
                         .record_password_refresh(PasswordRefreshOutcome::Unchanged);
                 } else {
-                    let next_epoch = current.cred_epoch.saturating_add(1);
+                    let next_epoch = current.cred_epoch.next();
                     let next_client = current
                         .read_client
                         .clone()
@@ -152,7 +161,7 @@ impl PasswordRefresh {
                     tracing::info!(
                         server.address = %shared.endpoint.host,
                         server.port = shared.endpoint.port,
-                        cred_epoch = next_epoch,
+                        cred_epoch = next_epoch.get(),
                         "clickhouse_password_reloaded"
                     );
                 }
@@ -174,11 +183,8 @@ impl PasswordRefresh {
     }
 }
 
-pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf) {
-    let Some(trigger) = shared.password_refresh_trigger.as_ref() else {
-        return;
-    };
-    PasswordRefresh::new(path).run(&shared, trigger).await;
+pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf, trigger: Arc<Notify>) {
+    PasswordRefresh::new(path).run(&shared, &trigger).await;
 }
 
 async fn read_once(

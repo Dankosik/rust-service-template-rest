@@ -5,13 +5,15 @@ use std::time::Duration;
 use operation_context::OperationContext;
 
 use crate::error::{
-    FailureReason, InsertError, InsertFailure, ObservedFailure, UnknownOutcome,
-    classify_post_dispatch_insert_error, is_auth_failure, is_local_serialization_error,
-    is_schema_drift_error,
+    FailureReason, InsertBatchSize, InsertError, InsertFailure, ObservedFailure, UnknownOutcome,
+    classify_post_dispatch_insert_error, is_local_serialization_error, is_schema_drift_error,
 };
-use crate::metadata;
-use crate::observe::{InsertModeLabel, Operation, OperationGuard};
-use crate::{ClickHouse, QuerySettings, Shared, format_execution_timeout_secs, within_bounded};
+use crate::metadata::{self, SchemaGen};
+use crate::observe::{InsertModeLabel, Operation};
+use crate::{
+    AdmitFailure, ClickHouse, QuerySettings, Shared, apply_client_budget_settings,
+    format_execution_timeout_secs, within_bounded,
+};
 
 const MAX_TABLE_BYTES: usize = 128;
 const MAX_DEDUP_TOKEN_BYTES: usize = 256;
@@ -40,30 +42,11 @@ impl DispatchedInsert<'_> {
     }
 }
 
-mod sealed {
-    pub trait Same<T: ?Sized> {
-        fn as_same(&self) -> &T;
-    }
+pub trait WriteRow<'a>: clickhouse::RowWrite + std::borrow::Borrow<Self::Value<'a>> + Sync {}
 
-    impl<T: ?Sized> Same<T> for T {
-        fn as_same(&self) -> &T {
-            self
-        }
-    }
-}
-
-pub trait WriteRow<'a>: clickhouse::RowWrite + Sync {
-    #[doc(hidden)]
-    fn as_row_value(&self) -> &Self::Value<'a>;
-}
-
-impl<'a, R> WriteRow<'a> for R
-where
-    R: clickhouse::RowWrite + Sync + sealed::Same<R::Value<'a>>,
+impl<'a, R> WriteRow<'a> for R where
+    R: clickhouse::RowWrite + std::borrow::Borrow<R::Value<'a>> + Sync
 {
-    fn as_row_value(&self) -> &Self::Value<'a> {
-        self.as_same()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,17 +147,12 @@ impl ClickHouse {
             InsertMode::Batch { .. } => (Operation::InsertBatch, InsertModeLabel::Batch),
             InsertMode::Async { .. } => (Operation::InsertAsync, InsertModeLabel::Async),
         };
-        let Ok(_permit) = shared.write_permits.try_acquire() else {
-            shared.metrics.record_admission_refused(operation);
-            return Err(InsertError::NotApplied(InsertFailure::Busy));
-        };
-        let _task_token = shared.tasks.token();
-        if shared.is_closing() {
-            return Err(InsertError::NotApplied(InsertFailure::Unavailable));
-        }
-
-        let mut guard =
-            OperationGuard::start(&shared.metrics, operation, summary, &shared.endpoint);
+        let mut admitted = shared
+            .admit_operation(operation, summary)
+            .map_err(|failure| match failure {
+                AdmitFailure::Busy => InsertError::NotApplied(InsertFailure::Busy),
+                AdmitFailure::Closing => InsertError::NotApplied(InsertFailure::Unavailable),
+            })?;
         let result = async {
             let effective_timeout = shared
                 .policy
@@ -186,22 +164,28 @@ impl ClickHouse {
                 .map_err(ObservedFailure::pre_dispatch_stop)?;
 
             let query_id = uuid::Uuid::new_v4().to_string();
-            guard.record_query_id(query_id.clone());
+            admitted.guard_mut().record_query_id(query_id.clone());
 
             let creds_snap = shared.credentials.load();
             let slot =
                 shared
                     .table_slots
                     .get_or_create(table, &creds_snap, &shared.endpoint.database);
-            let (insert, observed_gen) =
-                metadata::prepare_insert::<R>(&slot, table, &query_id, shared, &guard, &bounded)
-                    .await?;
+            let (insert, observed_gen) = metadata::prepare_insert::<R>(
+                &slot,
+                table,
+                &query_id,
+                shared,
+                admitted.guard(),
+                &bounded,
+            )
+            .await?;
 
             bounded
                 .check()
                 .map_err(ObservedFailure::pre_dispatch_stop)?;
             let insert = configure_insert(insert, shared, options.mode, bounded.remaining());
-            guard.mark_dispatched();
+            admitted.guard_mut().mark_dispatched();
             let dispatched = options.outcomes.map(InsertOutcomes::begin_dispatch);
             let outcome =
                 write_and_end_insert(insert, rows, &bounded, &slot, observed_gen, shared).await;
@@ -219,12 +203,7 @@ impl ClickHouse {
             outcome
         }
         .await;
-        if let Err(failure) = &result
-            && is_auth_failure(failure.detail)
-        {
-            shared.notify_auth_failure();
-        }
-        guard.finish_insert(mode_label, result)
+        admitted.finish_insert(mode_label, result)
     }
 }
 
@@ -234,9 +213,19 @@ fn configure_insert<R: clickhouse::Row>(
     mode: InsertMode<'_>,
     remaining: Duration,
 ) -> clickhouse::insert::Insert<R> {
-    insert = shared.apply_client_budget(insert, remaining, |insert, key, value| {
-        insert.with_setting(key, value)
-    });
+    let client_timeout = match shared.policy.query_settings {
+        QuerySettings::Client { max_memory_usage } => {
+            let timeout_secs = format_execution_timeout_secs(remaining);
+            insert = apply_client_budget_settings(
+                insert,
+                max_memory_usage,
+                &timeout_secs,
+                |insert, key, value| insert.with_setting(key, value),
+            );
+            Some(timeout_secs)
+        }
+        QuerySettings::Server => None,
+    };
     // ClickHouse 26.2+ deduplicate_insert setting
     match mode {
         InsertMode::Batch { dedup_token } => {
@@ -251,9 +240,8 @@ fn configure_insert<R: clickhouse::Row>(
             insert = insert
                 .with_setting("async_insert", "1")
                 .with_setting("wait_for_async_insert", "1");
-            if matches!(shared.policy.query_settings, QuerySettings::Client { .. }) {
-                let timeout_secs = format_execution_timeout_secs(remaining);
-                insert = insert.with_setting("wait_for_async_insert_timeout", &timeout_secs);
+            if let Some(timeout_secs) = client_timeout {
+                insert = insert.with_setting("wait_for_async_insert_timeout", timeout_secs);
             }
             match dedup {
                 AsyncDeduplication::Disabled => {
@@ -278,12 +266,13 @@ async fn write_and_end_insert<'r, R: WriteRow<'r>>(
     rows: &[R],
     bounded: &operation_context::BoundedContext,
     slot: &metadata::TableSlot,
-    observed_gen: u64,
+    observed_gen: SchemaGen,
     shared: &Shared,
 ) -> Result<InsertReport, ObservedFailure<InsertError>> {
-    let single_row = rows.len() == 1;
+    let batch_size = InsertBatchSize::from_len(rows.len());
     for (idx, row) in rows.iter().enumerate() {
-        match within_bounded(bounded, insert.write(row.as_row_value())).await {
+        let value: &R::Value<'r> = std::borrow::Borrow::borrow(row);
+        match within_bounded(bounded, insert.write(value)).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 if is_schema_drift_error(&err) {
@@ -304,7 +293,7 @@ async fn write_and_end_insert<'r, R: WriteRow<'r>>(
                 if let Some(stop) = bounded.stopped() {
                     return Err(ObservedFailure::post_dispatch_stop(stop));
                 }
-                return Err(classify_post_dispatch_insert_error(&err, single_row));
+                return Err(classify_post_dispatch_insert_error(&err, batch_size));
             }
             Err(stop) => return Err(ObservedFailure::post_dispatch_stop(stop)),
         }
@@ -325,7 +314,7 @@ async fn write_and_end_insert<'r, R: WriteRow<'r>>(
             if let Some(stop) = bounded.stopped() {
                 return Err(ObservedFailure::post_dispatch_stop(stop));
             }
-            Err(classify_post_dispatch_insert_error(&err, single_row))
+            Err(classify_post_dispatch_insert_error(&err, batch_size))
         }
         Err(stop) => Err(ObservedFailure::post_dispatch_stop(stop)),
     }

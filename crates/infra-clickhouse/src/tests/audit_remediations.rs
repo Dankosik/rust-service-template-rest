@@ -1085,45 +1085,73 @@ async fn datetime_and_decimal_query_param_formatting_and_validation() {
         time::OffsetDateTime::from_unix_timestamp_nanos(946_684_799_500_000_000).expect("1999");
     let neg_1_5 = time::OffsetDateTime::from_unix_timestamp_nanos(-1_500_000_000).expect("-1.5s");
     let neg_half = time::OffsetDateTime::from_unix_timestamp_nanos(-500_000_000).expect("-0.5s");
+    let utc_ts = time::UtcDateTime::from_unix_timestamp(1_763_820_000)
+        .expect("utc ts")
+        .replace_nanosecond(123_000_000)
+        .expect("ns");
+    let num = 7_u64;
+    let opt_num = Some(num);
+    let opt_str = Some("zeta".to_owned());
+    let none_str: Option<String> = None;
+    let str_vec = vec!["alpha".to_owned(), "beta".to_owned()];
+    let decimals = [Decimal64::<2>::new(1234), Decimal64::<2>::new(-500)];
     let _ = ch
         .query("param_fmt", "SELECT param_check")
         .param("dt_modern", ts)
         .param("dt_secs", Param::datetime_secs(ts))
+        .param("dt_utc_secs", Param::datetime_secs(utc_ts))
+        .param("dt_utc_ref", Param::from(&utc_ts))
         .param("dt_1999", y1999)
         .param("dt_epoch", time::OffsetDateTime::UNIX_EPOCH)
         .param("dt_neg", neg_1_5)
         .param("dt_neg_half", neg_half)
         .param("dec_neg", Decimal64::<2>::new(-5))
-        .param("dec_int", Param::decimal(42, 0))
+        .param("dec_int", Param::try_decimal(42, 0).expect("valid scale"))
         .param(
-            "dec_arr",
-            vec![Decimal64::<2>::new(1234), Decimal64::<2>::new(-500)],
+            "dec_scaled",
+            Param::try_decimal(12_345, 3).expect("valid scale"),
         )
+        .param(
+            "dec_max_scale",
+            Param::try_decimal(1, 38).expect("max scale"),
+        )
+        .param("dec_arr", decimals.as_slice())
+        .param("ref_num", Param::from(&num))
+        .param("opt_num_ref", opt_num.as_ref())
+        .param("opt_ref", opt_str.as_ref())
+        .param("none_ref", none_str.as_ref())
+        .param("str_iter", Param::from_iter(&str_vec))
         .fetch_one::<SampleRow>(&ctx)
         .await
         .expect("params ok");
+    assert_eq!(opt_str.as_deref(), Some("zeta"));
+    assert!(none_str.is_none());
+    assert_eq!(str_vec.len(), 2);
     let body = captured_bodies.lock().await.last().cloned().expect("body");
     for expected in [
         "name=\"param_dt_modern\"\r\n\r\n1763820000.123000000\r\n",
         "name=\"param_dt_secs\"\r\n\r\n1763820000\r\n",
+        "name=\"param_dt_utc_secs\"\r\n\r\n1763820000\r\n",
+        "name=\"param_dt_utc_ref\"\r\n\r\n1763820000.123000000\r\n",
         "name=\"param_dt_1999\"\r\n\r\n0946684799.500000000\r\n",
         "name=\"param_dt_epoch\"\r\n\r\n0000000000\r\n",
         "name=\"param_dt_neg\"\r\n\r\n-0000000001.500000000\r\n",
         "name=\"param_dt_neg_half\"\r\n\r\n1969-12-31 23:59:59.500000000\r\n",
         "name=\"param_dec_neg\"\r\n\r\n-0.05\r\n",
         "name=\"param_dec_int\"\r\n\r\n42\r\n",
+        "name=\"param_dec_scaled\"\r\n\r\n12.345\r\n",
+        "name=\"param_dec_max_scale\"\r\n\r\n0.00000000000000000000000000000000000001\r\n",
         "name=\"param_dec_arr\"\r\n\r\n[12.34,-5.00]\r\n",
+        "name=\"param_ref_num\"\r\n\r\n7\r\n",
+        "name=\"param_opt_num_ref\"\r\n\r\n7\r\n",
+        "name=\"param_opt_ref\"\r\n\r\nzeta\r\n",
+        "name=\"param_none_ref\"\r\n\r\n\\N\r\n",
+        "name=\"param_str_iter\"\r\n\r\n['alpha','beta']\r\n",
     ] {
         assert!(body.contains(expected), "missing {expected:?} in {body}");
     }
 
-    assert_eq!(
-        ch.query("bad_dec_scale", "SELECT 1")
-            .param("d", Param::decimal(1, 39))
-            .fetch_one::<SampleRow>(&ctx)
-            .await,
-        Err(QueryError::Rejected)
-    );
+    assert!(Param::try_decimal(1, 39).is_none());
 
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,

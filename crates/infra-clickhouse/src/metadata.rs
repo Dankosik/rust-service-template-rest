@@ -1,4 +1,5 @@
 use std::mem::DropGuard;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,44 +8,90 @@ use operation_context::BoundedContext;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::credentials::ActiveCredentials;
+use crate::credentials::{ActiveCredentials, CredEpoch};
 use crate::error::{InsertError, ObservedFailure, classify_metadata_error, is_schema_drift_error};
 use crate::observe::OperationGuard;
-use crate::{Shared, within_bounded};
+use crate::{
+    QuerySettings, Shared, apply_client_budget_settings, format_execution_timeout_secs,
+    within_bounded,
+};
 
 pub(crate) const MAX_TABLE_SLOTS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SchemaGen(u64);
+
+impl SchemaGen {
+    pub(crate) const INITIAL: Self = Self(1);
+
+    pub(crate) const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LeaderId(u64);
+
+impl LeaderId {
+    const INITIAL: Self = Self(0);
+
+    const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoordinatorState {
-    Cold { generation: u64 },
-    Priming { generation: u64, leader_id: u64 },
-    Warm { generation: u64 },
+    Cold {
+        generation: SchemaGen,
+    },
+    Priming {
+        generation: SchemaGen,
+        leader_id: LeaderId,
+    },
+    Warm {
+        generation: SchemaGen,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AcquireDecision {
-    Ready { generation: u64 },
-    LeadPrime { generation: u64, leader_id: u64 },
-    WaitPrime { generation: u64 },
+    Ready {
+        generation: SchemaGen,
+    },
+    LeadPrime {
+        generation: SchemaGen,
+        leader_id: LeaderId,
+    },
+    WaitPrime {
+        generation: SchemaGen,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InvalidateOutcome {
-    Invalidated { new_generation: u64 },
+    Invalidated { new_generation: SchemaGen },
     AlreadyInvalidated,
 }
 
 #[derive(Debug)]
 pub(crate) struct MetadataCoordinator {
     state: CoordinatorState,
-    next_leader_id: u64,
+    next_leader_id: LeaderId,
 }
 
 impl MetadataCoordinator {
     pub(crate) const fn new() -> Self {
         Self {
-            state: CoordinatorState::Cold { generation: 1 },
-            next_leader_id: 0,
+            state: CoordinatorState::Cold {
+                generation: SchemaGen::INITIAL,
+            },
+            next_leader_id: LeaderId::INITIAL,
         }
     }
 
@@ -56,8 +103,8 @@ impl MetadataCoordinator {
     pub(crate) const fn acquire(&mut self) -> AcquireDecision {
         match self.state {
             CoordinatorState::Cold { generation } => {
-                self.next_leader_id = self.next_leader_id.saturating_add(1);
-                let leader_id = self.next_leader_id;
+                let leader_id = self.next_leader_id.next();
+                self.next_leader_id = leader_id;
                 self.state = CoordinatorState::Priming {
                     generation,
                     leader_id,
@@ -74,7 +121,11 @@ impl MetadataCoordinator {
         }
     }
 
-    pub(crate) fn on_prime_populated(&mut self, generation: u64, leader_id: u64) -> bool {
+    pub(crate) fn on_prime_populated(
+        &mut self,
+        generation: SchemaGen,
+        leader_id: LeaderId,
+    ) -> bool {
         if self.state
             == (CoordinatorState::Priming {
                 generation,
@@ -88,7 +139,7 @@ impl MetadataCoordinator {
         }
     }
 
-    pub(crate) fn on_prime_aborted(&mut self, generation: u64, leader_id: u64) -> bool {
+    pub(crate) fn on_prime_aborted(&mut self, generation: SchemaGen, leader_id: LeaderId) -> bool {
         if self.state
             == (CoordinatorState::Priming {
                 generation,
@@ -102,14 +153,17 @@ impl MetadataCoordinator {
         }
     }
 
-    pub(crate) const fn on_schema_mismatch(&mut self, observed_gen: u64) -> InvalidateOutcome {
+    pub(crate) const fn on_schema_mismatch(
+        &mut self,
+        observed_gen: SchemaGen,
+    ) -> InvalidateOutcome {
         let current_gen = match self.state {
             CoordinatorState::Cold { generation }
             | CoordinatorState::Priming { generation, .. }
             | CoordinatorState::Warm { generation } => generation,
         };
-        if current_gen == observed_gen {
-            let new_generation = current_gen.saturating_add(1);
+        if current_gen.0 == observed_gen.0 {
+            let new_generation = current_gen.next();
             self.state = CoordinatorState::Cold {
                 generation: new_generation,
             };
@@ -123,7 +177,7 @@ impl MetadataCoordinator {
 struct TableSlotState {
     coordinator: MetadataCoordinator,
     client: clickhouse::Client,
-    cred_epoch: u64,
+    cred_epoch: CredEpoch,
 }
 
 pub(crate) struct TableSlot {
@@ -131,16 +185,71 @@ pub(crate) struct TableSlot {
     notify: Notify,
 }
 
-enum PrepareStep {
-    Ready {
-        generation: u64,
-        client: clickhouse::Client,
-    },
-    LeadPrime {
-        generation: u64,
-        leader_id: u64,
-        client: clickhouse::Client,
-    },
+struct PrimeLeaseInner<'a> {
+    slot: &'a TableSlot,
+    generation: SchemaGen,
+    leader_id: LeaderId,
+}
+
+impl PrimeLeaseInner<'_> {
+    fn abort(self) {
+        self.slot.mark_aborted(self.generation, self.leader_id);
+    }
+}
+
+struct PrimeLease<'a>(DropGuard<PrimeLeaseInner<'a>, fn(PrimeLeaseInner<'a>)>);
+
+impl<'a> PrimeLease<'a> {
+    fn new(slot: &'a TableSlot, generation: SchemaGen, leader_id: LeaderId) -> Self {
+        Self(DropGuard::new(
+            PrimeLeaseInner {
+                slot,
+                generation,
+                leader_id,
+            },
+            PrimeLeaseInner::abort,
+        ))
+    }
+
+    fn generation(&self) -> SchemaGen {
+        self.0.generation
+    }
+
+    fn complete(self) -> SchemaGen {
+        let inner = DropGuard::dismiss(self.0);
+        inner.slot.mark_populated(inner.generation, inner.leader_id);
+        inner.generation
+    }
+}
+
+enum AcquiredSlot<'a> {
+    Warm(SchemaGen),
+    Priming(PrimeLease<'a>),
+}
+
+impl AcquiredSlot<'_> {
+    fn generation(&self) -> SchemaGen {
+        match self {
+            Self::Warm(generation) => *generation,
+            Self::Priming(lease) => lease.generation(),
+        }
+    }
+
+    const fn is_warm(&self) -> bool {
+        matches!(self, Self::Warm(_))
+    }
+
+    fn finish(self) -> SchemaGen {
+        match self {
+            Self::Warm(generation) => generation,
+            Self::Priming(lease) => lease.complete(),
+        }
+    }
+}
+
+struct PrepareStep<'a> {
+    slot: AcquiredSlot<'a>,
+    client: clickhouse::Client,
 }
 
 impl TableSlot {
@@ -155,7 +264,7 @@ impl TableSlot {
         }
     }
 
-    fn acquire_step(&self, creds: &ActiveCredentials) -> Option<PrepareStep> {
+    fn acquire_step(&self, creds: &ActiveCredentials) -> Option<PrepareStep<'_>> {
         let mut state = self.state.lock();
         if state.cred_epoch < creds.cred_epoch {
             if let Some(password) = creds.password.as_ref() {
@@ -164,23 +273,22 @@ impl TableSlot {
             state.cred_epoch = creds.cred_epoch;
         }
         match state.coordinator.acquire() {
-            AcquireDecision::Ready { generation } => Some(PrepareStep::Ready {
-                generation,
+            AcquireDecision::Ready { generation } => Some(PrepareStep {
+                slot: AcquiredSlot::Warm(generation),
                 client: state.client.clone(),
             }),
             AcquireDecision::LeadPrime {
                 generation,
                 leader_id,
-            } => Some(PrepareStep::LeadPrime {
-                generation,
-                leader_id,
+            } => Some(PrepareStep {
+                slot: AcquiredSlot::Priming(PrimeLease::new(self, generation, leader_id)),
                 client: state.client.clone(),
             }),
             AcquireDecision::WaitPrime { .. } => None,
         }
     }
 
-    fn mark_populated(&self, generation: u64, leader_id: u64) {
+    fn mark_populated(&self, generation: SchemaGen, leader_id: LeaderId) {
         let wake = self
             .state
             .lock()
@@ -191,7 +299,7 @@ impl TableSlot {
         }
     }
 
-    fn mark_aborted(&self, generation: u64, leader_id: u64) {
+    fn mark_aborted(&self, generation: SchemaGen, leader_id: LeaderId) {
         let wake = self
             .state
             .lock()
@@ -204,7 +312,7 @@ impl TableSlot {
 
     pub(crate) fn invalidate_if_gen(
         &self,
-        observed_gen: u64,
+        observed_gen: SchemaGen,
         creds: &ActiveCredentials,
         database: &str,
     ) {
@@ -282,22 +390,28 @@ fn configure_prepare_client(
         client = guard.inject_trace_context(client);
     }
     client = client.with_setting("query_id", query_id);
-    shared.apply_client_budget(client, remaining, |client, key, value| {
-        client.with_setting(key, value)
-    })
+    if let QuerySettings::Client { max_memory_usage } = shared.policy.query_settings {
+        let timeout_secs = format_execution_timeout_secs(remaining);
+        client = apply_client_budget_settings(
+            client,
+            max_memory_usage,
+            &timeout_secs,
+            |client, key, value| client.with_setting(key, value),
+        );
+    }
+    client
 }
 
-async fn acquire_prepare_step(
-    slot: &TableSlot,
+async fn acquire_prepare_step<'a>(
+    slot: &'a TableSlot,
     shared: &Shared,
     bounded: &BoundedContext,
-) -> Result<PrepareStep, ObservedFailure<InsertError>> {
+) -> Result<PrepareStep<'a>, ObservedFailure<InsertError>> {
     loop {
         if let Some(step) = slot.acquire_step(&shared.credentials.load()) {
             return Ok(step);
         }
-        let notified = slot.notify.notified();
-        tokio::pin!(notified);
+        let mut notified = pin!(slot.notify.notified());
         notified.as_mut().enable();
         if let Some(step) = slot.acquire_step(&shared.credentials.load()) {
             return Ok(step);
@@ -315,37 +429,23 @@ pub(crate) async fn prepare_insert<R: clickhouse::Row>(
     shared: &Shared,
     guard: &OperationGuard<'_>,
     bounded: &BoundedContext,
-) -> Result<(clickhouse::insert::Insert<R>, u64), ObservedFailure<InsertError>> {
+) -> Result<(clickhouse::insert::Insert<R>, SchemaGen), ObservedFailure<InsertError>> {
     let mut retried_warm_drift = false;
     loop {
-        let (generation, prime_guard, client) =
-            match acquire_prepare_step(slot, shared, bounded).await? {
-                PrepareStep::Ready { generation, client } => (generation, None, client),
-                PrepareStep::LeadPrime {
-                    generation,
-                    leader_id,
-                    client,
-                } => {
-                    let abort_guard =
-                        DropGuard::new((slot, generation, leader_id), |(slot, generation, id)| {
-                            slot.mark_aborted(generation, id);
-                        });
-                    (generation, Some(abort_guard), client)
-                }
-            };
-        let call_client =
-            configure_prepare_client(client, query_id, shared, guard, bounded.remaining());
+        let prepared = acquire_prepare_step(slot, shared, bounded).await?;
+        let generation = prepared.slot.generation();
+        let call_client = configure_prepare_client(
+            prepared.client,
+            query_id,
+            shared,
+            guard,
+            bounded.remaining(),
+        );
         match within_bounded(bounded, call_client.insert::<R>(table)).await {
-            Ok(Ok(insert)) => {
-                if let Some(abort_guard) = prime_guard {
-                    let (slot, generation, leader_id) = DropGuard::dismiss(abort_guard);
-                    slot.mark_populated(generation, leader_id);
-                }
-                return Ok((insert, generation));
-            }
+            Ok(Ok(insert)) => return Ok((insert, prepared.slot.finish())),
             Ok(Err(error)) => {
-                let was_warm = prime_guard.is_none();
-                drop(prime_guard);
+                let was_warm = prepared.slot.is_warm();
+                drop(prepared.slot);
                 if is_schema_drift_error(&error) {
                     slot.invalidate_if_gen(
                         generation,
@@ -360,7 +460,7 @@ pub(crate) async fn prepare_insert<R: clickhouse::Row>(
                 return Err(classify_metadata_error(&error));
             }
             Err(stop) => {
-                drop(prime_guard);
+                drop(prepared.slot);
                 return Err(ObservedFailure::pre_dispatch_stop(stop));
             }
         }
