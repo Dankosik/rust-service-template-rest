@@ -20,7 +20,8 @@ use crate::credentials::{read_password_file, read_regular_file, read_secret_file
 use crate::error::StartErrorKind;
 use crate::observe::EndpointMetadata;
 use crate::{
-    ClickHouseAuth, ClickHouseOptions, ClientCertificate, RuntimePolicy, TransportSecurity,
+    ClickHouseAuth, ClickHouseOptions, ClientCertificate, QuerySettings, RuntimePolicy,
+    TransportSecurity,
 };
 
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -127,7 +128,6 @@ pub(crate) fn admit(options: ClickHouseOptions) -> Result<Admitted, StartErrorKi
             max_result_rows: options.max_result_rows,
             max_result_bytes: options.max_result_bytes,
             http_response_buffer_size: options.http_response_buffer_size,
-            max_memory_usage: options.max_memory_usage,
             propagate_trace_context: options.propagate_trace_context,
         },
     })
@@ -151,7 +151,9 @@ fn validate_limits(options: &ClickHouseOptions) -> Result<(), StartErrorKind> {
     {
         return Err(StartErrorKind::InvalidLimits);
     }
-    if let Some(mem) = options.max_memory_usage
+    if let QuerySettings::Client {
+        max_memory_usage: Some(mem),
+    } = options.query_settings
         && !(MIN_MEMORY_USAGE..=MAX_MEMORY_USAGE).contains(&mem.get())
     {
         return Err(StartErrorKind::InvalidLimits);
@@ -285,18 +287,10 @@ where
 }
 
 fn read_root_ca(path: &Path) -> Result<rustls::RootCertStore, StartErrorKind> {
-    use rustls::pki_types::pem::PemObject as _;
-
     let bytes = read_regular_file(path, MAX_PEM_CHAIN_BYTES)
         .map_err(|error| StartErrorKind::CaFile { kind: error.kind() })?;
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| StartErrorKind::InvalidCa)?;
-    if certs.is_empty() {
-        return Err(StartErrorKind::InvalidCa);
-    }
     let mut roots = rustls::RootCertStore::empty();
-    for cert in certs {
+    for cert in pem_certificates(&bytes).ok_or(StartErrorKind::InvalidCa)? {
         roots.add(cert).map_err(|_| StartErrorKind::InvalidCa)?;
     }
     Ok(roots)
@@ -309,15 +303,19 @@ fn read_client_certificate(cert: &ClientCertificate) -> Result<ClientIdentity, S
         .map_err(|error| StartErrorKind::ClientCertificateFile { kind: error.kind() })?;
     let key_bytes = read_secret_file(&cert.key_path, MAX_PRIVATE_KEY_BYTES)
         .map_err(|error| StartErrorKind::ClientKeyFile { kind: error.kind() })?;
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| StartErrorKind::InvalidClientCertificate)?;
-    if chain.is_empty() {
-        return Err(StartErrorKind::InvalidClientCertificate);
-    }
+    let chain = pem_certificates(&cert_bytes).ok_or(StartErrorKind::InvalidClientCertificate)?;
     let key =
         PrivateKeyDer::from_pem_slice(&key_bytes).map_err(|_| StartErrorKind::InvalidClientKey)?;
     Ok(ClientIdentity { chain, key })
+}
+
+fn pem_certificates(bytes: &[u8]) -> Option<Vec<CertificateDer<'static>>> {
+    use rustls::pki_types::pem::PemObject as _;
+
+    CertificateDer::pem_slice_iter(bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .filter(|certs| !certs.is_empty())
 }
 
 fn validate_printable_non_blank(value: &str, err: StartErrorKind) -> Result<(), StartErrorKind> {

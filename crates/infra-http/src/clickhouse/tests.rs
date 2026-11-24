@@ -77,7 +77,9 @@ async fn clickhouse_route(
         database: "app".to_owned(),
         auth: ClickHouseAuth::Unauthenticated { username: None },
         transport: TransportSecurity::Plaintext,
-        query_settings: QuerySettings::Client,
+        query_settings: QuerySettings::Client {
+            max_memory_usage: None,
+        },
         query_timeout: Duration::from_mins(2),
         insert_timeout: Duration::from_mins(2),
         max_read_concurrency: NonZeroUsize::new(4).unwrap(),
@@ -85,7 +87,6 @@ async fn clickhouse_route(
         max_result_rows: NonZeroU64::new(1_000).unwrap(),
         max_result_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
         http_response_buffer_size: NonZeroUsize::new(256 * 1024).unwrap(),
-        max_memory_usage: None,
         propagate_trace_context: false,
     })
     .await
@@ -218,22 +219,16 @@ async fn request_budget_timeout_distinguishes_pre_dispatch_describe_from_dispatc
         let query = request.uri().query().unwrap_or("batch:events");
         let (mode, table) = query.split_once(':').unwrap_or(("batch", query));
         let rows = [EventRow { id: 1 }];
-        let result = if mode == "async" {
-            context
-                .clickhouse_insert_async(
-                    &client,
-                    "ingest",
-                    table,
-                    &rows,
-                    AsyncInsertOptions::with_payload_hash(),
-                )
-                .await
+        let options = if mode == "async" {
+            InsertOptions::async_with_payload_hash()
         } else {
-            context
-                .clickhouse_insert_batch(&client, "ingest", table, &rows, BatchInsertOptions::new())
-                .await
+            InsertOptions::batch()
         };
-        result.map(|_| StatusCode::ACCEPTED).map_err(insert_problem)
+        context
+            .clickhouse_insert(&client, "ingest", table, &rows, options)
+            .await
+            .map(|_| StatusCode::ACCEPTED)
+            .map_err(insert_problem)
     };
 
     let (_provider, app, client) = clickhouse_route(post(provider), post(handler)).await;
@@ -291,24 +286,24 @@ async fn run_insert_scenario(
     match scenario {
         Some("acknowledged") => {
             context
-                .clickhouse_insert_async(
+                .clickhouse_insert(
                     client,
                     "ingest",
                     "events_ok",
                     &rows,
-                    AsyncInsertOptions::with_token("tok"),
+                    InsertOptions::async_with_token("tok"),
                 )
                 .await
                 .unwrap();
         }
         Some("not_applied") => {
             let err = context
-                .clickhouse_insert_batch(
+                .clickhouse_insert(
                     client,
                     "ingest",
                     "not_applied",
                     &rows,
-                    BatchInsertOptions::new(),
+                    InsertOptions::batch(),
                 )
                 .await
                 .unwrap_err();
@@ -316,12 +311,12 @@ async fn run_insert_scenario(
         }
         Some("unconfirmed") => {
             let err = context
-                .clickhouse_insert_batch(
+                .clickhouse_insert(
                     client,
                     "ingest",
                     "unconfirmed",
                     &rows,
-                    BatchInsertOptions::new(),
+                    InsertOptions::batch(),
                 )
                 .await
                 .unwrap_err();
@@ -329,12 +324,12 @@ async fn run_insert_scenario(
         }
         Some("unconfirmed_async") => {
             let err = context
-                .clickhouse_insert_async(
+                .clickhouse_insert(
                     client,
                     "ingest",
                     "unconfirmed",
                     &rows,
-                    AsyncInsertOptions::with_payload_hash(),
+                    InsertOptions::async_with_payload_hash(),
                 )
                 .await
                 .unwrap_err();

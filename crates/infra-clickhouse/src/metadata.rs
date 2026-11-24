@@ -1,8 +1,8 @@
-use std::collections::{HashMap, VecDeque};
 use std::mem::DropGuard;
 use std::sync::Arc;
 use std::time::Duration;
 
+use indexmap::IndexMap;
 use operation_context::BoundedContext;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use crate::credentials::ActiveCredentials;
 use crate::error::{InsertError, ObservedFailure, classify_metadata_error, is_schema_drift_error};
 use crate::observe::OperationGuard;
-use crate::{Shared, format_execution_timeout_secs, within_bounded};
+use crate::{Shared, within_bounded};
 
 pub(crate) const MAX_TABLE_SLOTS: usize = 256;
 
@@ -227,22 +227,14 @@ impl TableSlot {
     }
 }
 
-struct RegistryInner {
-    slots: HashMap<String, Arc<TableSlot>>,
-    lru: VecDeque<String>,
-}
-
 pub(crate) struct TableSlotRegistry {
-    inner: Mutex<RegistryInner>,
+    slots: Mutex<IndexMap<String, Arc<TableSlot>>>,
 }
 
 impl TableSlotRegistry {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new(RegistryInner {
-                slots: HashMap::new(),
-                lru: VecDeque::new(),
-            }),
+            slots: Mutex::new(IndexMap::new()),
         }
     }
 
@@ -252,38 +244,30 @@ impl TableSlotRegistry {
         creds: &ActiveCredentials,
         database: &str,
     ) -> Arc<TableSlot> {
-        let mut inner = self.inner.lock();
-        if let Some(slot) = inner.slots.get(table).cloned() {
-            if let Some(pos) = inner.lru.iter().position(|entry| entry == table)
-                && let Some(entry) = inner.lru.remove(pos)
-            {
-                inner.lru.push_back(entry);
+        let mut slots = self.slots.lock();
+        if let Some((idx, _, slot)) = slots.get_full(table) {
+            let slot = Arc::clone(slot);
+            let last = slots.len() - 1;
+            if idx != last {
+                slots.move_index(idx, last);
             }
             return slot;
         }
-        if inner.slots.len() >= MAX_TABLE_SLOTS
-            && let Some(evict_pos) = inner.lru.iter().position(|entry| {
-                inner
-                    .slots
-                    .get(entry)
-                    .is_some_and(|slot| Arc::strong_count(slot) == 1)
-            })
-            && let Some(evicted) = inner.lru.remove(evict_pos)
+        if slots.len() >= MAX_TABLE_SLOTS
+            && let Some(evict_idx) = slots.values().position(|slot| Arc::strong_count(slot) == 1)
         {
-            inner.slots.remove(&evicted);
+            slots.shift_remove_index(evict_idx);
         }
         let slot = Arc::new(TableSlot::new(creds, database));
-        if inner.slots.len() < MAX_TABLE_SLOTS {
-            let key = table.to_owned();
-            inner.slots.insert(key.clone(), Arc::clone(&slot));
-            inner.lru.push_back(key);
+        if slots.len() < MAX_TABLE_SLOTS {
+            slots.insert(table.to_owned(), Arc::clone(&slot));
         }
         slot
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.lock().slots.len()
+        self.slots.lock().len()
     }
 }
 
@@ -298,8 +282,7 @@ fn configure_prepare_client(
         client = guard.inject_trace_context(client);
     }
     client = client.with_setting("query_id", query_id);
-    let timeout_secs = format_execution_timeout_secs(remaining);
-    shared.apply_client_budget(client, &timeout_secs, |client, key, value| {
+    shared.apply_client_budget(client, remaining, |client, key, value| {
         client.with_setting(key, value)
     })
 }
@@ -326,7 +309,7 @@ async fn acquire_prepare_step(
 }
 
 pub(crate) async fn prepare_insert<R: clickhouse::Row>(
-    slot: &Arc<TableSlot>,
+    slot: &TableSlot,
     table: &str,
     query_id: &str,
     shared: &Shared,
@@ -343,12 +326,10 @@ pub(crate) async fn prepare_insert<R: clickhouse::Row>(
                     leader_id,
                     client,
                 } => {
-                    let abort_guard = DropGuard::new(
-                        (Arc::clone(slot), generation, leader_id),
-                        |(slot, generation, leader_id)| {
-                            slot.mark_aborted(generation, leader_id);
-                        },
-                    );
+                    let abort_guard =
+                        DropGuard::new((slot, generation, leader_id), |(slot, generation, id)| {
+                            slot.mark_aborted(generation, id);
+                        });
                     (generation, Some(abort_guard), client)
                 }
             };

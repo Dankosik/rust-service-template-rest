@@ -21,8 +21,8 @@ use super::{
     rbwnat_u64_rows, spawn_http_server,
 };
 use crate::{
-    BatchInsertOptions, ClickHouse, CloseOutcome, Decimal32, Decimal64, Decimal128, InsertError,
-    InsertFailure, Param, QueryError, QuerySettings, Row, UnknownOutcome,
+    ClickHouse, CloseOutcome, Decimal32, Decimal64, Decimal128, InsertError, InsertFailure,
+    InsertOptions, Param, QueryError, QuerySettings, Row, UnknownOutcome,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Row)]
@@ -141,12 +141,12 @@ async fn multi_chunk_insert_surfaces_early_errors_invalidates_long_117_and_rejec
         .collect();
 
     let err_53 = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "big_53",
             "events",
             &multi_chunk,
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect_err("early 53 on multi-chunk batch");
@@ -154,12 +154,12 @@ async fn multi_chunk_insert_surfaces_early_errors_invalidates_long_117_and_rejec
     assert_eq!(describe_calls.load(Ordering::SeqCst), 1);
 
     let err_117 = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "big_117_long",
             "events",
             &multi_chunk,
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect_err("multi-row long Code 117 header mismatch");
@@ -167,12 +167,12 @@ async fn multi_chunk_insert_surfaces_early_errors_invalidates_long_117_and_rejec
     assert_eq!(describe_calls.load(Ordering::SeqCst), 2);
 
     let err_early_200 = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "early_200_drop",
             "events",
             &multi_chunk,
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect_err("early HTTP 200 after dropping unsent chunks must not report Ok");
@@ -183,14 +183,14 @@ async fn multi_chunk_insert_surfaces_early_errors_invalidates_long_117_and_rejec
     assert_eq!(describe_calls.load(Ordering::SeqCst), 3);
 
     let ok_after = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "after_reprime",
             "events",
             &[WideStringRow {
                 payload: "z".to_owned(),
             }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect("subsequent small insert succeeds");
@@ -243,14 +243,14 @@ async fn warm_slot_connect_refused_returns_not_applied_instead_of_channel_closed
         .await
         .expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
-    ch.insert_batch(
+    ch.insert(
         &ctx,
         "prime",
         "events",
         &[WideStringRow {
             payload: "a".to_owned(),
         }],
-        BatchInsertOptions::new(),
+        InsertOptions::batch(),
     )
     .await
     .expect("prime warm slot");
@@ -264,12 +264,12 @@ async fn warm_slot_connect_refused_returns_not_applied_instead_of_channel_closed
         })
         .collect();
     let err = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "after_down",
             "events",
             &multi_chunk,
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect_err("ECONNREFUSED on multi-chunk warm slot must fail");
@@ -305,23 +305,23 @@ async fn multi_row_code_252_is_outcome_unknown_while_single_row_is_not_applied()
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
 
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "single_252",
             "events",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::TooManyParts))
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "multi_252",
             "events",
             &[SampleRow { id: 1 }, SampleRow { id: 2 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Err(InsertError::OutcomeUnknown(UnknownOutcome::Unavailable))
@@ -358,12 +358,12 @@ async fn nullable_and_low_cardinality_nullable_without_default_are_omittable() {
         .expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
     let report = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "cold_nullable",
             "events",
             &[SampleRow { id: 42 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect("omitting Nullable without explicit DEFAULT must succeed");
@@ -601,12 +601,12 @@ async fn describe_settings_fetch_one_row_cap_and_fractional_timeouts_are_enforce
         Err(QueryError::TooLarge)
     );
 
-    ch.insert_batch(
+    ch.insert(
         &ctx,
         "ins",
         "events",
         &[SampleRow { id: 1 }],
-        BatchInsertOptions::new(),
+        InsertOptions::batch(),
     )
     .await
     .expect("insert ok");
@@ -731,12 +731,12 @@ async fn separate_read_and_write_concurrency_permits_do_not_starve_each_other() 
         Err(QueryError::Busy)
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "write_ok",
             "events",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await
         .expect("write succeeds while read permit is full")
@@ -751,23 +751,23 @@ async fn separate_read_and_write_concurrency_permits_do_not_starve_each_other() 
     w_wait.as_mut().enable();
     let (ch_w, ctx_w) = (ch.clone(), ctx.clone());
     let w_holder = tokio::spawn(async move {
-        ch_w.insert_batch(
+        ch_w.insert(
             &ctx_w,
             "hold_write",
             "hold_write",
             &[SampleRow { id: 2 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
     });
     w_wait.await;
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "shed_write",
             "events",
             &[SampleRow { id: 3 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Busy))
@@ -967,51 +967,51 @@ async fn assert_typed_mismatches_rejected(
         Err(QueryError::Decode)
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             ctx,
             "bad_scale32_write",
             "typed_events_bad32",
             &[WrongScale32Row {
                 d32: Decimal32::new(100),
             }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Encode))
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             ctx,
             "bad_scale_write",
             "typed_events_bad1",
             &[WrongScaleRow {
                 d64: Decimal64::new(100),
             }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Encode))
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             ctx,
             "bad_scale128_write",
             "typed_events_bad128",
             &[WrongScale128Row {
                 d128: Decimal128::new(100),
             }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Encode))
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             ctx,
             "bad_prec_write",
             "typed_events_bad2",
             &[WrongPrecisionTsRow { ts }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await,
         Err(InsertError::NotApplied(InsertFailure::Encode))
@@ -1043,7 +1043,7 @@ async fn decimal_scale_and_datetime64_precision_are_strictly_validated() {
         Ok(expected)
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "valid_write",
             "typed_events",
@@ -1054,7 +1054,7 @@ async fn decimal_scale_and_datetime64_precision_are_strictly_validated() {
                 opt_d64: None,
                 ts,
             }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect("valid typed write")

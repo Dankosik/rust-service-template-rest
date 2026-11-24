@@ -61,50 +61,77 @@ impl RefreshReadFailure {
     }
 }
 
-pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf, trigger: Arc<Notify>) {
-    let reading = Arc::new(Semaphore::new(1));
-    let mut warned_read_failure = false;
-    let mut last_reactive_refresh: Option<Instant> = None;
-    let mut next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
+struct PasswordRefresh {
+    path: PathBuf,
+    reading: Arc<Semaphore>,
+    warned_read_failure: bool,
+    last_reactive_refresh: Option<Instant>,
+    next_refresh: Instant,
+}
 
-    loop {
+impl PasswordRefresh {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            reading: Arc::new(Semaphore::new(1)),
+            warned_read_failure: false,
+            last_reactive_refresh: None,
+            next_refresh: Instant::now() + PASSWORD_REFRESH_INTERVAL,
+        }
+    }
+
+    async fn run(mut self, shared: &Shared, trigger: &Notify) {
+        loop {
+            if !self.wait_next(shared, trigger).await {
+                return;
+            }
+            let result = tokio::select! {
+                biased;
+                () = shared.shutdown.cancelled() => return,
+                result = read_once(&self.reading, &self.path) => result,
+            };
+            if shared.shutdown.is_cancelled() {
+                return;
+            }
+            self.apply_result(shared, result);
+        }
+    }
+
+    async fn wait_next(&mut self, shared: &Shared, trigger: &Notify) -> bool {
         let reactive = tokio::select! {
             biased;
-            () = shared.shutdown.cancelled() => return,
+            () = shared.shutdown.cancelled() => return false,
             () = trigger.notified() => true,
-            () = tokio::time::sleep_until(next_refresh) => false,
+            () = tokio::time::sleep_until(self.next_refresh) => false,
         };
         if reactive
-            && let Some(prev) = last_reactive_refresh
+            && let Some(prev) = self.last_reactive_refresh
             && let Some(wait) = REACTIVE_REFRESH_COOLDOWN.checked_sub(prev.elapsed())
         {
             tokio::select! {
                 biased;
-                () = shared.shutdown.cancelled() => return,
+                () = shared.shutdown.cancelled() => return false,
                 () = tokio::time::sleep(wait) => {}
             }
         }
         let now = Instant::now();
         if reactive {
-            last_reactive_refresh = Some(now);
+            self.last_reactive_refresh = Some(now);
         }
-        next_refresh = now + PASSWORD_REFRESH_INTERVAL;
+        self.next_refresh = now + PASSWORD_REFRESH_INTERVAL;
+        true
+    }
 
-        let result = tokio::select! {
-            biased;
-            () = shared.shutdown.cancelled() => return,
-            result = read_once(&reading, &path) => result,
-        };
-
-        if shared.shutdown.is_cancelled() {
-            return;
-        }
-
+    fn apply_result(
+        &mut self,
+        shared: &Shared,
+        result: Result<Zeroizing<String>, RefreshReadFailure>,
+    ) {
         match result {
             Ok(new_password) => {
-                warned_read_failure = false;
+                self.warned_read_failure = false;
                 let current = shared.credentials.load();
-                if current.password.as_deref().map(String::as_str) == Some(new_password.as_str()) {
+                if current.password.as_ref() == Some(&new_password) {
                     shared
                         .metrics
                         .record_password_refresh(PasswordRefreshOutcome::Unchanged);
@@ -134,7 +161,7 @@ pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf, tri
                 shared
                     .metrics
                     .record_password_refresh(PasswordRefreshOutcome::ReadFailed);
-                if !std::mem::replace(&mut warned_read_failure, true) {
+                if !std::mem::replace(&mut self.warned_read_failure, true) {
                     tracing::warn!(
                         server.address = %shared.endpoint.host,
                         server.port = shared.endpoint.port,
@@ -145,6 +172,13 @@ pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf, tri
             }
         }
     }
+}
+
+pub(crate) async fn run_password_refresh(shared: Arc<Shared>, path: PathBuf) {
+    let Some(trigger) = shared.password_refresh_trigger.as_ref() else {
+        return;
+    };
+    PasswordRefresh::new(path).run(&shared, trigger).await;
 }
 
 async fn read_once(

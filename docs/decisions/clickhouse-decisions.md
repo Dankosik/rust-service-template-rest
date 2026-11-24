@@ -77,15 +77,16 @@ dependencies.
 3. **Explicit deduplication and non-atomic batch failures:** `infra-clickhouse`
    never retries dispatched writes and targets ClickHouse 26.2+ unified
    `deduplicate_insert` (reopen if a deployment must target ClickHouse < 26.2).
-   `AsyncInsertOptions` has no silent disabled default: callers must choose
-   `with_token`, `with_payload_hash`, or explicit `without_deduplication`.
+   `InsertOptions` has no silent disabled default: callers must choose
+   `batch`, `batch_with_token`, `async_with_token`, `async_with_payload_hash`,
+   or explicit `async_without_deduplication`.
    Because ClickHouse only guarantees insert atomicity within a single block
    and single partition, `Code: 252` (`TOO_MANY_PARTS`) maps to
    `NotApplied(TooManyParts)` only for single-row inserts and to
    `OutcomeUnknown(Unavailable)` (with `clickhouse.error.reason = "too_many_parts"`
    and `db.response.status_code = "252"`) for multi-row inserts. Callers
    receiving `InsertError::OutcomeUnknown(_)` must retry only with an explicit
-   `insert_deduplication_token` (`BatchInsertOptions::deduplication_token` or
-   `AsyncInsertOptions::with_token` / `with_payload_hash`) or domain
+   `insert_deduplication_token` (`InsertOptions::batch_with_token` or
+   `InsertOptions::async_with_token` / `async_with_payload_hash`) or domain
    reconciliation.
 <!-- template:end clickhouse:docs-clickhouse-decisions -->

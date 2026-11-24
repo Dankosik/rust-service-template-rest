@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::net::Ipv4Addr;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use crate::error::{
 };
 use crate::observe::{Operation, OperationGuard};
 use crate::{
-    ClickHouse, Decimal32, Decimal64, Decimal128, QuerySettings, format_execution_timeout_secs,
+    ClickHouse, Decimal32, Decimal64, Decimal128, QuerySettings, RuntimePolicy, Shared,
     within_bounded,
 };
 
@@ -24,9 +25,9 @@ impl<R: clickhouse::RowOwned + clickhouse::RowRead + Send> ReadRow for R {}
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("Param(..)")]
-pub struct Param(ParamValue);
+pub struct Param<'a>(ParamValue<'a>);
 
-impl Param {
+impl Param<'_> {
     #[must_use]
     pub const fn datetime_secs(value: time::OffsetDateTime) -> Self {
         Self(ParamValue::DateTimeSecs(value))
@@ -39,7 +40,7 @@ impl Param {
 }
 
 #[derive(Clone)]
-enum ParamValue {
+enum ParamValue<'a> {
     Bool(bool),
     I8(i8),
     I16(i16),
@@ -55,8 +56,9 @@ enum ParamValue {
     Usize(usize),
     F32(f32),
     F64(f64),
-    Str(String),
+    Str(Cow<'a, str>),
     Uuid(uuid::Uuid),
+    Ipv4(Ipv4Addr),
     Date(time::Date),
     DateTime(time::OffsetDateTime),
     DateTimeSecs(time::OffsetDateTime),
@@ -65,7 +67,7 @@ enum ParamValue {
     Array(Vec<Self>),
 }
 
-impl Serialize for ParamValue {
+impl Serialize for ParamValue<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Bool(v) => v.serialize(serializer),
@@ -88,6 +90,7 @@ impl Serialize for ParamValue {
                 let mut buf = uuid::Uuid::encode_buffer();
                 serializer.serialize_str(v.as_hyphenated().encode_lower(&mut buf))
             }
+            Self::Ipv4(v) => serializer.collect_str(v),
             Self::Date(v) => serializer.collect_str(&format_args!(
                 "{:04}-{:02}-{:02}",
                 v.year(),
@@ -136,7 +139,7 @@ fn serialize_datetime_param<S: serde::Serializer>(
 macro_rules! impl_param_from {
     ($($ty:ty => $variant:ident),* $(,)?) => {
         $(
-            impl From<$ty> for Param {
+            impl From<$ty> for Param<'_> {
                 fn from(value: $ty) -> Self {
                     Self(ParamValue::$variant(value))
                 }
@@ -161,55 +164,61 @@ impl_param_from!(
     usize => Usize,
     f32 => F32,
     f64 => F64,
-    String => Str,
     uuid::Uuid => Uuid,
+    Ipv4Addr => Ipv4,
     time::Date => Date,
     time::OffsetDateTime => DateTime,
 );
 
-impl<const SCALE: u8> From<Decimal32<SCALE>> for Param {
+impl<const SCALE: u8> From<Decimal32<SCALE>> for Param<'_> {
     fn from(value: Decimal32<SCALE>) -> Self {
         Self::decimal(i128::from(value.unscaled()), value.scale())
     }
 }
 
-impl<const SCALE: u8> From<Decimal64<SCALE>> for Param {
+impl<const SCALE: u8> From<Decimal64<SCALE>> for Param<'_> {
     fn from(value: Decimal64<SCALE>) -> Self {
         Self::decimal(i128::from(value.unscaled()), value.scale())
     }
 }
 
-impl<const SCALE: u8> From<Decimal128<SCALE>> for Param {
+impl<const SCALE: u8> From<Decimal128<SCALE>> for Param<'_> {
     fn from(value: Decimal128<SCALE>) -> Self {
         Self::decimal(value.unscaled(), value.scale())
     }
 }
 
-impl From<&str> for Param {
-    fn from(value: &str) -> Self {
-        Self(ParamValue::Str(value.to_owned()))
+impl From<String> for Param<'_> {
+    fn from(value: String) -> Self {
+        Self(ParamValue::Str(Cow::Owned(value)))
     }
 }
 
-impl From<&String> for Param {
-    fn from(value: &String) -> Self {
+impl<'a> From<&'a str> for Param<'a> {
+    fn from(value: &'a str) -> Self {
+        Self(ParamValue::Str(Cow::Borrowed(value)))
+    }
+}
+
+impl<'a> From<&'a String> for Param<'a> {
+    fn from(value: &'a String) -> Self {
         Self::from(value.as_str())
     }
 }
 
-impl From<Cow<'_, str>> for Param {
-    fn from(value: Cow<'_, str>) -> Self {
-        Self(ParamValue::Str(value.into_owned()))
+impl<'a> From<Cow<'a, str>> for Param<'a> {
+    fn from(value: Cow<'a, str>) -> Self {
+        Self(ParamValue::Str(value))
     }
 }
 
-impl From<time::UtcDateTime> for Param {
+impl From<time::UtcDateTime> for Param<'_> {
     fn from(value: time::UtcDateTime) -> Self {
         time::OffsetDateTime::from(value).into()
     }
 }
 
-impl<T: Into<Self>> From<Option<T>> for Param {
+impl<T: Into<Self>> From<Option<T>> for Param<'_> {
     fn from(value: Option<T>) -> Self {
         match value {
             Some(inner) => inner.into(),
@@ -218,7 +227,7 @@ impl<T: Into<Self>> From<Option<T>> for Param {
     }
 }
 
-impl<T: Into<Self>> From<Vec<T>> for Param {
+impl<T: Into<Self>> From<Vec<T>> for Param<'_> {
     fn from(values: Vec<T>) -> Self {
         Self(ParamValue::Array(
             values.into_iter().map(|value| value.into().0).collect(),
@@ -226,7 +235,7 @@ impl<T: Into<Self>> From<Vec<T>> for Param {
     }
 }
 
-impl<T: Clone + Into<Self>> From<&[T]> for Param {
+impl<T: Clone + Into<Self>> From<&[T]> for Param<'_> {
     fn from(values: &[T]) -> Self {
         Self(ParamValue::Array(
             values.iter().cloned().map(|value| value.into().0).collect(),
@@ -234,7 +243,7 @@ impl<T: Clone + Into<Self>> From<&[T]> for Param {
     }
 }
 
-impl<T: Into<Self>, const N: usize> From<[T; N]> for Param {
+impl<T: Into<Self>, const N: usize> From<[T; N]> for Param<'_> {
     fn from(values: [T; N]) -> Self {
         Self(ParamValue::Array(
             values.into_iter().map(|value| value.into().0).collect(),
@@ -242,16 +251,65 @@ impl<T: Into<Self>, const N: usize> From<[T; N]> for Param {
     }
 }
 
-impl<T: Clone + Into<Self>, const N: usize> From<&[T; N]> for Param {
+impl<T: Clone + Into<Self>, const N: usize> From<&[T; N]> for Param<'_> {
     fn from(values: &[T; N]) -> Self {
         Self::from(values.as_slice())
     }
 }
 
-impl<T: Clone + Into<Self>> From<&Vec<T>> for Param {
+impl<T: Clone + Into<Self>> From<&Vec<T>> for Param<'_> {
     fn from(values: &Vec<T>) -> Self {
         Self::from(values.as_slice())
     }
+}
+
+#[derive(Clone, Copy)]
+enum ReadOperation {
+    One,
+    Optional,
+    All,
+}
+
+impl ReadOperation {
+    const fn operation(self) -> Operation {
+        match self {
+            Self::One => Operation::FetchOne,
+            Self::Optional => Operation::FetchOptional,
+            Self::All => Operation::FetchAll,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReadCardinality {
+    All,
+    AtMostOne { server_capped: bool },
+}
+
+impl ReadCardinality {
+    const fn cap(self) -> Option<usize> {
+        match self {
+            Self::All => None,
+            Self::AtMostOne { .. } => Some(2),
+        }
+    }
+
+    const fn is_server_capped(self) -> bool {
+        matches!(
+            self,
+            Self::AtMostOne {
+                server_capped: true
+            }
+        )
+    }
+}
+
+struct QueryLimits {
+    timeout: Duration,
+    max_rows: u64,
+    server_max_rows: u64,
+    max_bytes: usize,
+    cardinality: ReadCardinality,
 }
 
 #[must_use]
@@ -259,15 +317,15 @@ impl<T: Clone + Into<Self>> From<&Vec<T>> for Param {
 pub struct Query<'a> {
     client: &'a ClickHouse,
     summary: &'static str,
-    sql: &'a str,
-    params: SmallVec<[(Cow<'a, str>, Param); 4]>,
+    sql: Cow<'a, str>,
+    params: SmallVec<[(Cow<'a, str>, Param<'a>); 4]>,
     timeout: Option<Duration>,
     max_result_rows: Option<NonZeroU64>,
     max_result_bytes: Option<NonZeroUsize>,
 }
 
 impl<'a> Query<'a> {
-    pub(crate) fn new(client: &'a ClickHouse, summary: &'static str, sql: &'a str) -> Self {
+    pub(crate) fn new(client: &'a ClickHouse, summary: &'static str, sql: Cow<'a, str>) -> Self {
         Self {
             client,
             summary,
@@ -279,7 +337,7 @@ impl<'a> Query<'a> {
         }
     }
 
-    pub fn param(mut self, name: impl Into<Cow<'a, str>>, value: impl Into<Param>) -> Self {
+    pub fn param(mut self, name: impl Into<Cow<'a, str>>, value: impl Into<Param<'a>>) -> Self {
         self.params.push((name.into(), value.into()));
         self
     }
@@ -300,14 +358,15 @@ impl<'a> Query<'a> {
     }
 
     pub async fn fetch_one<R: ReadRow>(self, ctx: &OperationContext) -> Result<R, QueryError> {
-        self.execute_bounded::<R, _>(ctx, Operation::FetchOne, Some(2), |mut rows| {
-            match rows.len() {
-                0 => Err(ObservedFailure::with_reason(
+        self.execute_bounded::<R, _>(ctx, ReadOperation::One, |rows| {
+            let mut iter = rows.into_iter();
+            match (iter.next(), iter.next()) {
+                (None, _) => Err(ObservedFailure::with_reason(
                     QueryError::NotFound,
                     FailureReason::NotFound,
                 )),
-                1 => Ok(rows.remove(0)),
-                _ => Err(ObservedFailure::with_reason(
+                (Some(row), None) => Ok(row),
+                (Some(_), Some(_)) => Err(ObservedFailure::with_reason(
                     QueryError::TooManyRows,
                     FailureReason::TooManyRows,
                 )),
@@ -320,32 +379,59 @@ impl<'a> Query<'a> {
         self,
         ctx: &OperationContext,
     ) -> Result<Option<R>, QueryError> {
-        self.execute_bounded::<R, _>(
-            ctx,
-            Operation::FetchOptional,
-            Some(2),
-            |mut rows| match rows.len() {
-                0 => Ok(None),
-                1 => Ok(Some(rows.remove(0))),
-                _ => Err(ObservedFailure::with_reason(
+        self.execute_bounded::<R, _>(ctx, ReadOperation::Optional, |rows| {
+            let mut iter = rows.into_iter();
+            match (iter.next(), iter.next()) {
+                (None, _) => Ok(None),
+                (Some(row), None) => Ok(Some(row)),
+                (Some(_), Some(_)) => Err(ObservedFailure::with_reason(
                     QueryError::TooManyRows,
                     FailureReason::TooManyRows,
                 )),
-            },
-        )
+            }
+        })
         .await
     }
 
     pub async fn fetch_all<R: ReadRow>(self, ctx: &OperationContext) -> Result<Vec<R>, QueryError> {
-        self.execute_bounded::<R, _>(ctx, Operation::FetchAll, None, Ok)
+        self.execute_bounded::<R, _>(ctx, ReadOperation::All, Ok)
             .await
+    }
+
+    fn resolve_limits(&self, policy: &RuntimePolicy, read_op: ReadOperation) -> QueryLimits {
+        let timeout = policy
+            .query_timeout
+            .min(self.timeout.unwrap_or(policy.query_timeout));
+        let max_rows = policy
+            .max_result_rows
+            .min(self.max_result_rows.unwrap_or(policy.max_result_rows))
+            .get();
+        let cardinality = match read_op {
+            ReadOperation::All => ReadCardinality::All,
+            ReadOperation::One | ReadOperation::Optional => ReadCardinality::AtMostOne {
+                server_capped: matches!(policy.query_settings, QuerySettings::Client { .. }),
+            },
+        };
+        let server_max_rows = cardinality.cap().map_or(max_rows, |cap| {
+            max_rows.min(u64::try_from(cap).unwrap_or(u64::MAX))
+        });
+        let max_bytes = policy
+            .max_result_bytes
+            .min(self.max_result_bytes.unwrap_or(policy.max_result_bytes))
+            .get();
+        QueryLimits {
+            timeout,
+            max_rows,
+            server_max_rows,
+            max_bytes,
+            cardinality,
+        }
     }
 
     async fn execute_bounded<R: ReadRow, T>(
         self,
         ctx: &OperationContext,
-        operation: Operation,
-        cardinality_cap: Option<usize>,
+        read_op: ReadOperation,
         finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
     ) -> Result<T, QueryError> {
         let shared = &self.client.inner.shared;
@@ -353,8 +439,9 @@ impl<'a> Query<'a> {
             return Err(QueryError::Unavailable);
         }
         ctx.check().map_err(QueryError::Stopped)?;
-        validate_query_inputs(self.sql, &self.params, self.timeout)?;
+        validate_query_inputs(&self.sql, &self.params, self.timeout)?;
 
+        let operation = read_op.operation();
         let Ok(_permit) = shared.read_permits.try_acquire() else {
             shared.metrics.record_admission_refused(operation);
             return Err(QueryError::Busy);
@@ -367,58 +454,31 @@ impl<'a> Query<'a> {
         let mut guard =
             OperationGuard::start(&shared.metrics, operation, self.summary, &shared.endpoint);
         let result = async {
-            let policy = &shared.policy;
-            let effective_timeout = policy
-                .query_timeout
-                .min(self.timeout.unwrap_or(policy.query_timeout));
-            let effective_max_rows = policy
-                .max_result_rows
-                .min(self.max_result_rows.unwrap_or(policy.max_result_rows))
-                .get();
-            let server_max_rows = cardinality_cap.map_or(effective_max_rows, |cap| {
-                effective_max_rows.min(u64::try_from(cap).unwrap_or(u64::MAX))
-            });
-            let effective_max_bytes = policy
-                .max_result_bytes
-                .min(self.max_result_bytes.unwrap_or(policy.max_result_bytes))
-                .get();
-            let max_bytes_u64 = u64::try_from(effective_max_bytes).unwrap_or(u64::MAX);
-
-            let bounded = ctx.bounded(effective_timeout);
-            bounded.check().map_err(ObservedFailure::from_stop)?;
+            let limits = self.resolve_limits(&shared.policy, read_op);
+            let bounded = ctx.bounded(limits.timeout);
+            bounded.check()?;
 
             let creds = shared.credentials.load();
             let mut client = creds.read_client.clone();
-            if policy.propagate_trace_context {
+            if shared.policy.propagate_trace_context {
                 client = guard.inject_trace_context(client);
             }
             let (ch_query, query_id) = build_clickhouse_query(
                 &client,
                 shared,
-                self.sql,
-                self.params,
+                &self.sql,
+                &self.params,
                 bounded.remaining(),
-                server_max_rows,
-                effective_max_bytes,
+                &limits,
             );
             guard.record_query_id(query_id);
-            bounded.check().map_err(ObservedFailure::from_stop)?;
-            let server_cardinality_capped =
-                policy.query_settings == QuerySettings::Client && cardinality_cap.is_some();
+            bounded.check()?;
             let cursor = ch_query
                 .fetch::<R>()
-                .map_err(|err| classify_query_error(&err, server_cardinality_capped))?
-                .with_max_decoded_bytes(max_bytes_u64);
+                .map_err(|err| classify_query_error(&err, limits.cardinality.is_server_capped()))?
+                .with_max_decoded_bytes(u64::try_from(limits.max_bytes).unwrap_or(u64::MAX));
 
-            consume_bounded_rows(
-                cursor,
-                &bounded,
-                effective_max_rows,
-                cardinality_cap,
-                server_cardinality_capped,
-                finish_rows,
-            )
-            .await
+            consume_bounded_rows(cursor, &bounded, &limits, finish_rows).await
         }
         .await;
         if let Err(failure) = &result
@@ -432,18 +492,17 @@ impl<'a> Query<'a> {
 
 fn build_clickhouse_query(
     client: &clickhouse::Client,
-    shared: &crate::Shared,
+    shared: &Shared,
     sql: &str,
-    params: SmallVec<[(Cow<'_, str>, Param); 4]>,
+    params: &[(Cow<'_, str>, Param<'_>)],
     remaining: Duration,
-    effective_max_rows: u64,
-    effective_max_bytes: usize,
+    limits: &QueryLimits,
 ) -> (clickhouse::query::Query, String) {
     let buffer_size = shared
         .policy
         .http_response_buffer_size
         .get()
-        .min(effective_max_bytes);
+        .min(limits.max_bytes);
     let query_id = uuid::Uuid::new_v4().to_string();
     let mut buffer_buf = std::fmt::NumBuffer::new();
     let mut ch_query = client
@@ -452,22 +511,21 @@ fn build_clickhouse_query(
         .with_setting("buffer_size", buffer_size.format_into(&mut buffer_buf))
         .with_setting("query_id", &query_id);
 
-    if shared.policy.query_settings == QuerySettings::Client {
-        let timeout_secs = format_execution_timeout_secs(remaining);
+    if matches!(shared.policy.query_settings, QuerySettings::Client { .. }) {
         let mut rows_buf = std::fmt::NumBuffer::new();
         let mut bytes_buf = std::fmt::NumBuffer::new();
         ch_query = shared
-            .apply_client_budget(ch_query, &timeout_secs, |query, key, value| {
+            .apply_client_budget(ch_query, remaining, |query, key, value| {
                 query.with_setting(key, value)
             })
             .with_setting("result_overflow_mode", "throw")
             .with_setting(
                 "max_result_rows",
-                effective_max_rows.format_into(&mut rows_buf),
+                limits.server_max_rows.format_into(&mut rows_buf),
             )
             .with_setting(
                 "max_result_bytes",
-                effective_max_bytes.format_into(&mut bytes_buf),
+                limits.max_bytes.format_into(&mut bytes_buf),
             )
             .with_setting("readonly", "2")
             .with_setting("cancel_http_readonly_queries_on_client_close", "1")
@@ -483,26 +541,22 @@ fn build_clickhouse_query(
 async fn consume_bounded_rows<R: ReadRow, T>(
     mut cursor: clickhouse::query::RowCursor<R>,
     bounded: &operation_context::BoundedContext,
-    effective_max_rows: u64,
-    cardinality_cap: Option<usize>,
-    server_cardinality_capped: bool,
+    limits: &QueryLimits,
     finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
 ) -> Result<(T, u64, u64), ObservedFailure<QueryError>> {
     let mut rows = Vec::new();
     loop {
-        let next = within_bounded(bounded, cursor.next())
-            .await
-            .map_err(ObservedFailure::from_stop)?;
+        let next = within_bounded(bounded, cursor.next()).await?;
         match next {
             Ok(Some(row)) => {
-                if cursor.returned_rows() > effective_max_rows {
+                if cursor.returned_rows() > limits.max_rows {
                     return Err(ObservedFailure::with_reason(
                         QueryError::TooLarge,
                         FailureReason::ResultLimit,
                     ));
                 }
                 rows.push(row);
-                if let Some(cap) = cardinality_cap
+                if let Some(cap) = limits.cardinality.cap()
                     && rows.len() >= cap
                 {
                     let returned_rows = cursor.returned_rows();
@@ -517,9 +571,12 @@ async fn consume_bounded_rows<R: ReadRow, T>(
             }
             Err(err) => {
                 if let Some(stop) = bounded.stopped() {
-                    return Err(ObservedFailure::from_stop(stop));
+                    return Err(stop.into());
                 }
-                return Err(classify_query_error(&err, server_cardinality_capped));
+                return Err(classify_query_error(
+                    &err,
+                    limits.cardinality.is_server_capped(),
+                ));
             }
         }
     }
@@ -527,7 +584,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
 
 fn validate_query_inputs(
     sql: &str,
-    params: &[(Cow<'_, str>, Param)],
+    params: &[(Cow<'_, str>, Param<'_>)],
     timeout: Option<Duration>,
 ) -> Result<(), QueryError> {
     if sql.trim().is_empty() || timeout.is_some_and(|limit| limit.is_zero()) {
@@ -544,7 +601,7 @@ fn validate_query_inputs(
     Ok(())
 }
 
-fn is_valid_param_value(value: &ParamValue) -> bool {
+fn is_valid_param_value(value: &ParamValue<'_>) -> bool {
     match value {
         ParamValue::Decimal(_, scale) => *scale <= MAX_DECIMAL_SCALE,
         ParamValue::Array(items) => items.iter().all(is_valid_param_value),

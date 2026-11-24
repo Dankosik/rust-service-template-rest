@@ -18,7 +18,7 @@ use crate::metadata::{
     AcquireDecision, CoordinatorState, InvalidateOutcome, MAX_TABLE_SLOTS, MetadataCoordinator,
     TableSlotRegistry,
 };
-use crate::{BatchInsertOptions, ClickHouse, CloseOutcome, InsertError, InsertFailure, Row};
+use crate::{ClickHouse, CloseOutcome, InsertError, InsertFailure, InsertOptions, Row};
 
 #[test]
 fn metadata_coordinator_single_flight_and_cas_invalidation() {
@@ -74,10 +74,35 @@ fn table_slot_registry_caps_lru_and_falls_back_when_all_active() {
     };
     let registry = TableSlotRegistry::new();
 
-    for i in 0..300 {
+    let slot_0 = registry.get_or_create("t_0", &creds, "app");
+    let weak_0 = Arc::downgrade(&slot_0);
+    drop(slot_0);
+    let slot_1 = registry.get_or_create("t_1", &creds, "app");
+    let weak_1 = Arc::downgrade(&slot_1);
+    drop(slot_1);
+    let slot_2 = registry.get_or_create("t_2", &creds, "app");
+    let weak_2 = Arc::downgrade(&slot_2);
+    drop(slot_2);
+    for i in 3..MAX_TABLE_SLOTS {
         let slot = registry.get_or_create(&format!("t_{i}"), &creds, "app");
         drop(slot);
     }
+    assert_eq!(registry.len(), MAX_TABLE_SLOTS);
+
+    let touched_0 = registry.get_or_create("t_0", &creds, "app");
+    assert!(Arc::ptr_eq(
+        &touched_0,
+        &weak_0.upgrade().expect("t_0 live")
+    ));
+    drop(touched_0);
+
+    drop(registry.get_or_create("evict_1", &creds, "app"));
+    assert!(weak_0.upgrade().is_some(), "promoted t_0 must survive");
+    assert!(weak_1.upgrade().is_none(), "LRU t_1 must be evicted");
+
+    drop(registry.get_or_create("evict_2", &creds, "app"));
+    assert!(weak_0.upgrade().is_some(), "shift removal preserves order");
+    assert!(weak_2.upgrade().is_none(), "next LRU t_2 must be evicted");
     assert_eq!(registry.len(), MAX_TABLE_SLOTS);
 
     let mut pinned = Vec::with_capacity(MAX_TABLE_SLOTS);
@@ -200,23 +225,23 @@ async fn single_flight_metadata_isolation_and_schema_drift_recovery() {
     let ctx_leader = ctx.clone();
     let leader_handle = tokio::spawn(async move {
         ch_leader
-            .insert_batch(
+            .insert(
                 &ctx_leader,
                 "prime_a",
                 "table_a",
                 &[SampleRow { id: 1 }],
-                BatchInsertOptions::new(),
+                InsertOptions::batch(),
             )
             .await
     });
     state.a_leader_entered.notified().await;
 
-    ch.insert_batch(
+    ch.insert(
         &ctx,
         "write_b",
         "table_b",
         &[SampleRow { id: 10 }],
-        BatchInsertOptions::new(),
+        InsertOptions::batch(),
     )
     .await
     .expect("table_b must not block behind table_a");
@@ -227,12 +252,12 @@ async fn single_flight_metadata_isolation_and_schema_drift_recovery() {
         let ch_w = ch.clone();
         let ctx_w = ctx.clone();
         waiters.push(tokio::spawn(async move {
-            ch_w.insert_batch(
+            ch_w.insert(
                 &ctx_w,
                 "wait_a",
                 "table_a",
                 &[SampleRow { id: i }],
-                BatchInsertOptions::new(),
+                InsertOptions::batch(),
             )
             .await
         }));
@@ -249,12 +274,12 @@ async fn single_flight_metadata_isolation_and_schema_drift_recovery() {
 
     state.a_evolved.store(1, Ordering::SeqCst);
     let report = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "drift_a_auto_reprime",
             "table_a",
             &[EvolvedRow { id: 5, extra: 9 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect("stale warm slot transparently re-primes once before dispatch");
@@ -263,12 +288,12 @@ async fn single_flight_metadata_isolation_and_schema_drift_recovery() {
     assert_eq!(state.describe_b.load(Ordering::SeqCst), 1);
 
     let report2 = ch
-        .insert_batch(
+        .insert(
             &ctx,
             "recovered_a",
             "table_a",
             &[EvolvedRow { id: 6, extra: 7 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
         .expect("re-primed write succeeds from warm cache");
@@ -327,12 +352,12 @@ async fn metadata_leader_cancel_wakes_waiter_to_take_over() {
     let ch_l = ch.clone();
     let l_ctx = leader_ctx.clone();
     let leader = tokio::spawn(async move {
-        ch_l.insert_batch(
+        ch_l.insert(
             &l_ctx,
             "leader",
             "events",
             &[SampleRow { id: 1 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
     });
@@ -340,12 +365,12 @@ async fn metadata_leader_cancel_wakes_waiter_to_take_over() {
 
     let ch_w = ch.clone();
     let waiter = tokio::spawn(async move {
-        ch_w.insert_batch(
+        ch_w.insert(
             &waiter_ctx,
             "waiter",
             "events",
             &[SampleRow { id: 2 }],
-            BatchInsertOptions::new(),
+            InsertOptions::batch(),
         )
         .await
     });

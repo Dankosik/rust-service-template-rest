@@ -45,7 +45,9 @@ pub(super) async fn open(clickhouse: &ClickHouseConfig) -> Result<ClickHouse, St
         auth,
         transport,
         query_settings: match clickhouse.query_settings {
-            ClickHouseQuerySettings::Client => QuerySettings::Client,
+            ClickHouseQuerySettings::Client => QuerySettings::Client {
+                max_memory_usage: clickhouse.max_memory_usage,
+            },
             ClickHouseQuerySettings::Server => QuerySettings::Server,
         },
         query_timeout: clickhouse.query_timeout,
@@ -55,7 +57,6 @@ pub(super) async fn open(clickhouse: &ClickHouseConfig) -> Result<ClickHouse, St
         max_result_rows: clickhouse.max_result_rows,
         max_result_bytes: clickhouse.max_result_bytes,
         http_response_buffer_size: clickhouse.http_response_buffer_size,
-        max_memory_usage: clickhouse.max_memory_usage,
         propagate_trace_context: clickhouse.propagate_trace_context,
     };
     ClickHouse::start(options).await
@@ -68,7 +69,7 @@ mod tests {
 
     use axum::extract::State;
     use axum::http::StatusCode;
-    use infra_clickhouse::{AsyncInsertOptions, BatchInsertOptions, ClickHouse, CloseOutcome};
+    use infra_clickhouse::{ClickHouse, CloseOutcome, InsertOptions};
     use infra_http::clickhouse::{insert_problem, query_problem};
     use infra_http::{Code, Problem, RequestContext};
 
@@ -77,6 +78,13 @@ mod tests {
     struct EventRow {
         id: u64,
         label: String,
+    }
+
+    #[derive(serde::Serialize, infra_clickhouse::Row)]
+    #[clickhouse(crate = "infra_clickhouse")]
+    struct BorrowedEventRow<'a> {
+        id: u64,
+        label: &'a str,
     }
 
     #[test]
@@ -98,27 +106,27 @@ mod tests {
                         .fetch_one::<EventRow>(request.operation())
                         .await
                         .map_err(|error| query_problem(error, || Problem::new(Code::NotFound)))?;
-                    let rows = [EventRow {
+                    let rows = [BorrowedEventRow {
                         id: 1,
-                        label: "created".to_owned(),
+                        label: "created",
                     }];
                     let _batch = request
-                        .clickhouse_insert_batch(
+                        .clickhouse_insert(
                             &client,
                             "events_batch",
                             "events",
                             &rows,
-                            BatchInsertOptions::new(),
+                            InsertOptions::batch(),
                         )
                         .await
                         .map_err(insert_problem)?;
                     let _async_insert = request
-                        .clickhouse_insert_async(
+                        .clickhouse_insert(
                             &client,
                             "events_async",
                             "events",
                             &rows,
-                            AsyncInsertOptions::with_token("tok"),
+                            InsertOptions::async_with_token("tok"),
                         )
                         .await
                         .map_err(insert_problem)?;

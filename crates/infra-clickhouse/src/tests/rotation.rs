@@ -14,8 +14,7 @@ use super::{
     spawn_http_server,
 };
 use crate::{
-    BatchInsertOptions, ClickHouse, ClickHouseAuth, CloseOutcome, InsertError, InsertFailure,
-    QueryError,
+    ClickHouse, ClickHouseAuth, CloseOutcome, InsertError, InsertFailure, InsertOptions, QueryError,
 };
 
 fn metric_counter(scrape: &str, name: &str, outcome: &str) -> u64 {
@@ -207,12 +206,12 @@ async fn password_file_rotates_every_5s_and_retains_valid_password_on_ctl_error(
         1
     );
     assert_eq!(
-        ch.insert_batch(
+        ch.insert(
             &ctx,
             "ins_rot",
             "events",
             &[SampleRow { id: 7 }],
-            BatchInsertOptions::new()
+            InsertOptions::batch()
         )
         .await
         .expect("rotated insert ok")
@@ -443,12 +442,12 @@ async fn password_file_reloads_reactively_on_query_and_insert_code_516() {
 
     assert_eq!(
         ch_write
-            .insert_batch(
+            .insert(
                 &ctx,
                 "stale_insert_516",
                 "events",
                 &[SampleRow { id: 2 }],
-                BatchInsertOptions::new(),
+                InsertOptions::batch(),
             )
             .await,
         Err(InsertError::NotApplied(InsertFailure::Rejected))
@@ -462,12 +461,12 @@ async fn password_file_reloads_reactively_on_query_and_insert_code_516() {
     .await;
     assert_eq!(
         ch_write
-            .insert_batch(
+            .insert(
                 &ctx,
                 "recovered_insert",
                 "events",
                 &[SampleRow { id: 3 }],
-                BatchInsertOptions::new(),
+                InsertOptions::batch(),
             )
             .await
             .expect("insert recovered")

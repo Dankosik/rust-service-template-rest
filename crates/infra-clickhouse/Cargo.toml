@@ -27,6 +27,7 @@ enum-map = { workspace = true, features = ["derive"] }
 http = { workspace = true }
 hyper-rustls = { workspace = true, features = ["aws-lc-rs", "http1", "tls12"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+indexmap = { workspace = true, features = ["std"] }
 metrics = { workspace = true }
 operation-context = { workspace = true }
 parking_lot = { workspace = true }

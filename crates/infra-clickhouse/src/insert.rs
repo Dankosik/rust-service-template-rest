@@ -40,40 +40,29 @@ impl DispatchedInsert<'_> {
     }
 }
 
-pub trait WriteRow: clickhouse::RowOwned + clickhouse::RowWrite + Send + Sync {}
+mod sealed {
+    pub trait Same<T: ?Sized> {
+        fn as_same(&self) -> &T;
+    }
 
-impl<R: clickhouse::RowOwned + clickhouse::RowWrite + Send + Sync> WriteRow for R {}
-
-#[must_use]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BatchInsertOptions<'a> {
-    timeout: Option<Duration>,
-    deduplication_token: Option<&'a str>,
-    outcomes: Option<&'a InsertOutcomes>,
-}
-
-impl<'a> BatchInsertOptions<'a> {
-    pub const fn new() -> Self {
-        Self {
-            timeout: None,
-            deduplication_token: None,
-            outcomes: None,
+    impl<T: ?Sized> Same<T> for T {
+        fn as_same(&self) -> &T {
+            self
         }
     }
+}
 
-    pub const fn timeout(mut self, limit: Duration) -> Self {
-        self.timeout = Some(limit);
-        self
-    }
+pub trait WriteRow<'a>: clickhouse::RowWrite + Sync {
+    #[doc(hidden)]
+    fn as_row_value(&self) -> &Self::Value<'a>;
+}
 
-    pub const fn deduplication_token(mut self, token: &'a str) -> Self {
-        self.deduplication_token = Some(token);
-        self
-    }
-
-    pub const fn observe_outcomes(mut self, outcomes: &'a InsertOutcomes) -> Self {
-        self.outcomes = Some(outcomes);
-        self
+impl<'a, R> WriteRow<'a> for R
+where
+    R: clickhouse::RowWrite + Sync + sealed::Same<R::Value<'a>>,
+{
+    fn as_row_value(&self) -> &Self::Value<'a> {
+        self.as_same()
     }
 }
 
@@ -84,33 +73,55 @@ enum AsyncDeduplication<'a> {
     ByToken(&'a str),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InsertMode<'a> {
+    Batch { dedup_token: Option<&'a str> },
+    Async { dedup: AsyncDeduplication<'a> },
+}
+
 #[must_use]
 #[derive(Clone, Copy, Debug)]
-pub struct AsyncInsertOptions<'a> {
+pub struct InsertOptions<'a> {
+    mode: InsertMode<'a>,
     timeout: Option<Duration>,
-    deduplication: AsyncDeduplication<'a>,
     outcomes: Option<&'a InsertOutcomes>,
 }
 
-impl<'a> AsyncInsertOptions<'a> {
-    const fn new(deduplication: AsyncDeduplication<'a>) -> Self {
+impl<'a> InsertOptions<'a> {
+    const fn new(mode: InsertMode<'a>) -> Self {
         Self {
+            mode,
             timeout: None,
-            deduplication,
             outcomes: None,
         }
     }
 
-    pub const fn with_token(token: &'a str) -> Self {
-        Self::new(AsyncDeduplication::ByToken(token))
+    pub const fn batch() -> Self {
+        Self::new(InsertMode::Batch { dedup_token: None })
     }
 
-    pub const fn with_payload_hash() -> Self {
-        Self::new(AsyncDeduplication::ByPayloadHash)
+    pub const fn batch_with_token(token: &'a str) -> Self {
+        Self::new(InsertMode::Batch {
+            dedup_token: Some(token),
+        })
     }
 
-    pub const fn without_deduplication() -> Self {
-        Self::new(AsyncDeduplication::Disabled)
+    pub const fn async_with_token(token: &'a str) -> Self {
+        Self::new(InsertMode::Async {
+            dedup: AsyncDeduplication::ByToken(token),
+        })
+    }
+
+    pub const fn async_with_payload_hash() -> Self {
+        Self::new(InsertMode::Async {
+            dedup: AsyncDeduplication::ByPayloadHash,
+        })
+    }
+
+    pub const fn async_without_deduplication() -> Self {
+        Self::new(InsertMode::Async {
+            dedup: AsyncDeduplication::Disabled,
+        })
     }
 
     pub const fn timeout(mut self, limit: Duration) -> Self {
@@ -129,74 +140,14 @@ pub struct InsertReport {
     pub rows: u64,
 }
 
-#[derive(Clone, Copy)]
-enum InsertMode<'a> {
-    Batch { dedup_token: Option<&'a str> },
-    Async { dedup: AsyncDeduplication<'a> },
-}
-
-struct InsertDispatch<'a> {
-    summary: &'static str,
-    table: &'a str,
-    timeout: Option<Duration>,
-    outcomes: Option<&'a InsertOutcomes>,
-    mode: InsertMode<'a>,
-}
-
 impl ClickHouse {
-    pub async fn insert_batch<R: WriteRow>(
+    pub async fn insert<'r, R: WriteRow<'r>>(
         &self,
         ctx: &OperationContext,
         summary: &'static str,
         table: &str,
         rows: &[R],
-        options: BatchInsertOptions<'_>,
-    ) -> Result<InsertReport, InsertError> {
-        self.execute_insert(
-            ctx,
-            rows,
-            InsertDispatch {
-                summary,
-                table,
-                timeout: options.timeout,
-                outcomes: options.outcomes,
-                mode: InsertMode::Batch {
-                    dedup_token: options.deduplication_token,
-                },
-            },
-        )
-        .await
-    }
-
-    pub async fn insert_async<R: WriteRow>(
-        &self,
-        ctx: &OperationContext,
-        summary: &'static str,
-        table: &str,
-        rows: &[R],
-        options: AsyncInsertOptions<'_>,
-    ) -> Result<InsertReport, InsertError> {
-        self.execute_insert(
-            ctx,
-            rows,
-            InsertDispatch {
-                summary,
-                table,
-                timeout: options.timeout,
-                outcomes: options.outcomes,
-                mode: InsertMode::Async {
-                    dedup: options.deduplication,
-                },
-            },
-        )
-        .await
-    }
-
-    async fn execute_insert<R: WriteRow>(
-        &self,
-        ctx: &OperationContext,
-        rows: &[R],
-        dispatch: InsertDispatch<'_>,
+        options: InsertOptions<'_>,
     ) -> Result<InsertReport, InsertError> {
         let shared = &self.inner.shared;
         if shared.is_closing() {
@@ -204,12 +155,12 @@ impl ClickHouse {
         }
         ctx.check()
             .map_err(|stopped| InsertError::NotApplied(InsertFailure::Stopped(stopped)))?;
-        validate_insert_inputs(dispatch.table, dispatch.timeout, &dispatch.mode)?;
+        validate_insert_inputs(table, options)?;
         if rows.is_empty() {
             return Ok(InsertReport { rows: 0 });
         }
 
-        let (operation, mode_label) = match dispatch.mode {
+        let (operation, mode_label) = match options.mode {
             InsertMode::Batch { .. } => (Operation::InsertBatch, InsertModeLabel::Batch),
             InsertMode::Async { .. } => (Operation::InsertAsync, InsertModeLabel::Async),
         };
@@ -222,17 +173,13 @@ impl ClickHouse {
             return Err(InsertError::NotApplied(InsertFailure::Unavailable));
         }
 
-        let mut guard = OperationGuard::start(
-            &shared.metrics,
-            operation,
-            dispatch.summary,
-            &shared.endpoint,
-        );
+        let mut guard =
+            OperationGuard::start(&shared.metrics, operation, summary, &shared.endpoint);
         let result = async {
             let effective_timeout = shared
                 .policy
                 .insert_timeout
-                .min(dispatch.timeout.unwrap_or(shared.policy.insert_timeout));
+                .min(options.timeout.unwrap_or(shared.policy.insert_timeout));
             let bounded = ctx.bounded(effective_timeout);
             bounded
                 .check()
@@ -242,27 +189,20 @@ impl ClickHouse {
             guard.record_query_id(query_id.clone());
 
             let creds_snap = shared.credentials.load();
-            let slot = shared.table_slots.get_or_create(
-                dispatch.table,
-                &creds_snap,
-                &shared.endpoint.database,
-            );
-            let (insert, observed_gen) = metadata::prepare_insert::<R>(
-                &slot,
-                dispatch.table,
-                &query_id,
-                shared,
-                &guard,
-                &bounded,
-            )
-            .await?;
+            let slot =
+                shared
+                    .table_slots
+                    .get_or_create(table, &creds_snap, &shared.endpoint.database);
+            let (insert, observed_gen) =
+                metadata::prepare_insert::<R>(&slot, table, &query_id, shared, &guard, &bounded)
+                    .await?;
 
             bounded
                 .check()
                 .map_err(ObservedFailure::pre_dispatch_stop)?;
-            let insert = configure_insert(insert, shared, dispatch.mode, bounded.remaining());
+            let insert = configure_insert(insert, shared, options.mode, bounded.remaining());
             guard.mark_dispatched();
-            let dispatched = dispatch.outcomes.map(InsertOutcomes::begin_dispatch);
+            let dispatched = options.outcomes.map(InsertOutcomes::begin_dispatch);
             let outcome =
                 write_and_end_insert(insert, rows, &bounded, &slot, observed_gen, shared).await;
             if let Some(inflight) = dispatched
@@ -288,14 +228,13 @@ impl ClickHouse {
     }
 }
 
-fn configure_insert<R: WriteRow>(
+fn configure_insert<R: clickhouse::Row>(
     mut insert: clickhouse::insert::Insert<R>,
     shared: &Shared,
     mode: InsertMode<'_>,
     remaining: Duration,
 ) -> clickhouse::insert::Insert<R> {
-    let timeout_secs = format_execution_timeout_secs(remaining);
-    insert = shared.apply_client_budget(insert, &timeout_secs, |insert, key, value| {
+    insert = shared.apply_client_budget(insert, remaining, |insert, key, value| {
         insert.with_setting(key, value)
     });
     // ClickHouse 26.2+ deduplicate_insert setting
@@ -312,7 +251,8 @@ fn configure_insert<R: WriteRow>(
             insert = insert
                 .with_setting("async_insert", "1")
                 .with_setting("wait_for_async_insert", "1");
-            if shared.policy.query_settings == QuerySettings::Client {
+            if matches!(shared.policy.query_settings, QuerySettings::Client { .. }) {
+                let timeout_secs = format_execution_timeout_secs(remaining);
                 insert = insert.with_setting("wait_for_async_insert_timeout", &timeout_secs);
             }
             match dedup {
@@ -333,7 +273,7 @@ fn configure_insert<R: WriteRow>(
     insert
 }
 
-async fn write_and_end_insert<R: WriteRow>(
+async fn write_and_end_insert<'r, R: WriteRow<'r>>(
     mut insert: clickhouse::insert::Insert<R>,
     rows: &[R],
     bounded: &operation_context::BoundedContext,
@@ -343,7 +283,7 @@ async fn write_and_end_insert<R: WriteRow>(
 ) -> Result<InsertReport, ObservedFailure<InsertError>> {
     let single_row = rows.len() == 1;
     for (idx, row) in rows.iter().enumerate() {
-        match within_bounded(bounded, insert.write(row)).await {
+        match within_bounded(bounded, insert.write(row.as_row_value())).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 if is_schema_drift_error(&err) {
@@ -391,19 +331,15 @@ async fn write_and_end_insert<R: WriteRow>(
     }
 }
 
-fn validate_insert_inputs(
-    table: &str,
-    timeout: Option<Duration>,
-    mode: &InsertMode<'_>,
-) -> Result<(), InsertError> {
-    if !is_valid_table_name(table) || timeout.is_some_and(|limit| limit.is_zero()) {
+fn validate_insert_inputs(table: &str, options: InsertOptions<'_>) -> Result<(), InsertError> {
+    if !is_valid_table_name(table) || options.timeout.is_some_and(|limit| limit.is_zero()) {
         return Err(InsertError::NotApplied(InsertFailure::InvalidInput));
     }
-    let token = match mode {
-        InsertMode::Batch { dedup_token } => *dedup_token,
+    let token = match options.mode {
+        InsertMode::Batch { dedup_token } => dedup_token,
         InsertMode::Async {
             dedup: AsyncDeduplication::ByToken(token),
-        } => Some(*token),
+        } => Some(token),
         InsertMode::Async { .. } => None,
     };
     if let Some(tok) = token
