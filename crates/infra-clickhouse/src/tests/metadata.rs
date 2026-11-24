@@ -13,62 +13,68 @@ use super::{
     SampleRow, base_options, encode_ch_str, encode_varuint, rbwnat_describe_id_column,
     spawn_http_server,
 };
-use crate::credentials::ActiveCredentials;
+use crate::credentials::{ActiveCredentials, CredEpoch};
 use crate::metadata::{
-    AcquireDecision, CoordinatorState, InvalidateOutcome, MAX_TABLE_SLOTS, MetadataCoordinator,
-    TableSlotRegistry,
+    AcquireDecision, CoordinatorState, InvalidateOutcome, LeaderId, MAX_TABLE_SLOTS,
+    MetadataCoordinator, SchemaGen, TableSlotRegistry,
 };
 use crate::{ClickHouse, CloseOutcome, InsertError, InsertFailure, InsertOptions, Row};
 
 #[test]
 fn metadata_coordinator_single_flight_and_cas_invalidation() {
     let mut coord = MetadataCoordinator::new();
-    assert_eq!(coord.state(), CoordinatorState::Cold { generation: 1 });
+    let gen1 = SchemaGen::INITIAL;
+    let gen2 = gen1.next();
+    let leader1 = LeaderId::new(1);
+    let leader2 = LeaderId::new(2);
+    assert_eq!(coord.state(), CoordinatorState::Cold { generation: gen1 });
 
     assert_eq!(
         coord.acquire(),
         AcquireDecision::LeadPrime {
-            generation: 1,
-            leader_id: 1
+            generation: gen1,
+            leader_id: leader1,
         }
     );
     assert_eq!(
         coord.acquire(),
-        AcquireDecision::WaitPrime { generation: 1 }
+        AcquireDecision::WaitPrime { generation: gen1 }
     );
 
-    assert!(!coord.on_prime_populated(1, 999));
-    assert!(!coord.on_prime_aborted(2, 1));
+    assert!(!coord.on_prime_populated(gen1, LeaderId::new(999)));
+    assert!(!coord.on_prime_aborted(gen2, leader1));
 
-    assert!(coord.on_prime_aborted(1, 1));
-    assert_eq!(coord.state(), CoordinatorState::Cold { generation: 1 });
+    assert!(coord.on_prime_aborted(gen1, leader1));
+    assert_eq!(coord.state(), CoordinatorState::Cold { generation: gen1 });
     assert_eq!(
         coord.acquire(),
         AcquireDecision::LeadPrime {
-            generation: 1,
-            leader_id: 2
+            generation: gen1,
+            leader_id: leader2,
         }
     );
-    assert!(coord.on_prime_populated(1, 2));
-    assert_eq!(coord.state(), CoordinatorState::Warm { generation: 1 });
-    assert_eq!(coord.acquire(), AcquireDecision::Ready { generation: 1 });
+    assert!(coord.on_prime_populated(gen1, leader2));
+    assert_eq!(coord.state(), CoordinatorState::Warm { generation: gen1 });
+    assert_eq!(coord.acquire(), AcquireDecision::Ready { generation: gen1 });
 
     assert_eq!(
-        coord.on_schema_mismatch(1),
-        InvalidateOutcome::Invalidated { new_generation: 2 }
+        coord.on_schema_mismatch(gen1),
+        InvalidateOutcome::Invalidated {
+            new_generation: gen2,
+        }
     );
     assert_eq!(
-        coord.on_schema_mismatch(1),
+        coord.on_schema_mismatch(gen1),
         InvalidateOutcome::AlreadyInvalidated
     );
-    assert_eq!(coord.state(), CoordinatorState::Cold { generation: 2 });
-    assert!(!coord.on_prime_populated(1, 2));
+    assert_eq!(coord.state(), CoordinatorState::Cold { generation: gen2 });
+    assert!(!coord.on_prime_populated(gen1, leader2));
 }
 
 #[test]
 fn table_slot_registry_caps_lru_and_falls_back_when_all_active() {
     let creds = ActiveCredentials {
-        cred_epoch: 1,
+        cred_epoch: CredEpoch::INITIAL,
         read_client: clickhouse::Client::default().with_url("http://127.0.0.1:8123"),
         password: None,
     };

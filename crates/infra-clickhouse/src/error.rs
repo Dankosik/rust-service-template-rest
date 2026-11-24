@@ -135,9 +135,31 @@ pub enum UnknownOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum InsertError {
     #[error("clickhouse insert was not applied: {0}")]
-    NotApplied(#[source] InsertFailure),
+    NotApplied(#[from] InsertFailure),
     #[error("clickhouse insert outcome is unknown: {0}")]
-    OutcomeUnknown(#[source] UnknownOutcome),
+    OutcomeUnknown(#[from] UnknownOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueryRowCap {
+    Uncapped,
+    ServerAtMostOne,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InsertBatchSize {
+    SingleRow,
+    MultiRow,
+}
+
+impl InsertBatchSize {
+    pub(crate) const fn from_len(len: usize) -> Self {
+        if len == 1 {
+            Self::SingleRow
+        } else {
+            Self::MultiRow
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -453,7 +475,7 @@ const fn is_http_rejection(reason: FailureReason) -> bool {
 
 pub(crate) fn classify_query_error(
     error: &clickhouse::error::Error,
-    cardinality_capped: bool,
+    row_cap: QueryRowCap,
 ) -> ObservedFailure<QueryError> {
     match error {
         clickhouse::error::Error::RowNotFound => {
@@ -482,7 +504,7 @@ pub(crate) fn classify_query_error(
                 code,
                 result_rows_limit: true,
                 ..
-            } if cardinality_capped => ObservedFailure::new(
+            } if row_cap == QueryRowCap::ServerAtMostOne => ObservedFailure::new(
                 QueryError::TooManyRows,
                 FailureDetail::with_clickhouse_code(FailureReason::TooManyRows, code),
             ),
@@ -572,7 +594,7 @@ pub(crate) fn classify_metadata_error(
 
 pub(crate) fn classify_post_dispatch_insert_error(
     error: &clickhouse::error::Error,
-    single_row: bool,
+    batch_size: InsertBatchSize,
 ) -> ObservedFailure<InsertError> {
     if is_hyper_connect_error(error) {
         return ObservedFailure::with_reason(
@@ -589,11 +611,13 @@ pub(crate) fn classify_post_dispatch_insert_error(
                 ..
             } => {
                 let mapped = match code {
-                    CODE_TOO_MANY_PARTS if single_row => {
+                    CODE_TOO_MANY_PARTS if batch_size == InsertBatchSize::SingleRow => {
                         InsertError::NotApplied(InsertFailure::TooManyParts)
                     }
                     CODE_TOO_MANY_BYTES => InsertError::NotApplied(InsertFailure::TooLarge),
-                    CODE_INCORRECT_DATA if header_mismatch || single_row => {
+                    CODE_INCORRECT_DATA
+                        if header_mismatch || batch_size == InsertBatchSize::SingleRow =>
+                    {
                         InsertError::NotApplied(InsertFailure::Rejected)
                     }
                     _ if matches!(

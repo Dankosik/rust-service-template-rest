@@ -29,7 +29,7 @@ enforces exact scale and precision via `vendor/clickhouse` patch #5:
 - **Decimals (`Decimal32`, `Decimal64`, `Decimal128`):** Features reading or
   writing ClickHouse `Decimal(P, S)` columns must use the scale-tagged types
   `infra_clickhouse::{Decimal32<SCALE>, Decimal64<SCALE>, Decimal128<SCALE>}`
-  (and `Param::from(...)` / `Param::decimal(unscaled, scale)` for SQL
+  (and `Param::from(...)` / `Param::try_decimal(unscaled, scale)` for SQL
   parameters). Raw `i32`/`i64`/`i128` and scale mismatches fail validation with
   `SchemaMismatch` (`Encode` on write, `Decode` on read). `Decimal256` is
   unsupported.

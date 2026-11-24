@@ -20,8 +20,9 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use operation_context::{BoundedContext, BoundedStop};
 use secrecy::SecretString;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio_util::sync::{CancellationToken, DropGuard as CancelDropGuard};
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 
 pub use clickhouse::Row;
@@ -37,13 +38,13 @@ pub mod serde {
 }
 
 use self::admission::Admitted;
-use self::credentials::ActiveCredentials;
-use self::error::StartErrorKind;
+use self::credentials::{ActiveCredentials, CredEpoch};
 pub use self::error::{InsertError, InsertFailure, QueryError, StartError, UnknownOutcome};
+use self::error::{ObservedFailure, StartErrorKind, is_auth_failure};
 pub use self::insert::{InsertOptions, InsertOutcomes, InsertReport, WriteRow};
 use self::metadata::TableSlotRegistry;
 pub use self::observe::HISTOGRAMS;
-use self::observe::{ClientMetrics, EndpointMetadata};
+use self::observe::{ClientMetrics, EndpointMetadata, InsertModeLabel, Operation, OperationGuard};
 pub use self::query::{Param, Query, ReadRow};
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,7 +65,7 @@ impl Default for QuerySettings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientCertificate {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
@@ -86,7 +87,7 @@ pub enum ClickHouseAuth {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransportSecurity {
     Tls {
         root_ca_path: Option<PathBuf>,
@@ -151,7 +152,7 @@ pub(crate) struct RuntimePolicy {
 
 pub(crate) struct Shared {
     credentials: ArcSwap<ActiveCredentials>,
-    password_refresh_trigger: Option<Notify>,
+    password_refresh_trigger: Option<Arc<Notify>>,
     table_slots: TableSlotRegistry,
     endpoint: EndpointMetadata,
     metrics: ClientMetrics,
@@ -160,6 +161,53 @@ pub(crate) struct Shared {
     write_permits: Semaphore,
     shutdown: CancellationToken,
     tasks: TaskTracker,
+}
+
+pub(crate) enum AdmitFailure {
+    Closing,
+    Busy,
+}
+
+pub(crate) struct AdmittedOperation<'a> {
+    guard: OperationGuard<'a>,
+    _task_token: TaskTrackerToken,
+    _permit: SemaphorePermit<'a>,
+    shared: &'a Shared,
+}
+
+impl<'a> AdmittedOperation<'a> {
+    pub(crate) fn guard(&self) -> &OperationGuard<'a> {
+        &self.guard
+    }
+
+    pub(crate) fn guard_mut(&mut self) -> &mut OperationGuard<'a> {
+        &mut self.guard
+    }
+
+    pub(crate) fn finish_query<T>(
+        self,
+        result: Result<(T, u64, u64), ObservedFailure<QueryError>>,
+    ) -> Result<T, QueryError> {
+        if let Err(failure) = &result
+            && is_auth_failure(failure.detail)
+        {
+            self.shared.notify_auth_failure();
+        }
+        self.guard.finish_query(result)
+    }
+
+    pub(crate) fn finish_insert(
+        self,
+        mode: InsertModeLabel,
+        result: Result<InsertReport, ObservedFailure<InsertError>>,
+    ) -> Result<InsertReport, InsertError> {
+        if let Err(failure) = &result
+            && is_auth_failure(failure.detail)
+        {
+            self.shared.notify_auth_failure();
+        }
+        self.guard.finish_insert(mode, result)
+    }
 }
 
 impl Shared {
@@ -173,24 +221,48 @@ impl Shared {
         }
     }
 
-    pub(crate) fn apply_client_budget<T>(
+    pub(crate) fn admit_operation(
         &self,
-        mut target: T,
-        remaining: Duration,
-        mut with_setting: impl FnMut(T, &'static str, &str) -> T,
-    ) -> T {
-        let QuerySettings::Client { max_memory_usage } = self.policy.query_settings else {
-            return target;
+        operation: Operation,
+        summary: &'static str,
+    ) -> Result<AdmittedOperation<'_>, AdmitFailure> {
+        let permits = match operation {
+            Operation::FetchOne | Operation::FetchOptional | Operation::FetchAll => {
+                &self.read_permits
+            }
+            Operation::InsertBatch | Operation::InsertAsync => &self.write_permits,
         };
-        let timeout_secs = format_execution_timeout_secs(remaining);
-        target = with_setting(target, "max_execution_time", &timeout_secs);
-        target = with_setting(target, "timeout_overflow_mode", "throw");
-        if let Some(mem) = max_memory_usage {
-            let mut buf = std::fmt::NumBuffer::new();
-            target = with_setting(target, "max_memory_usage", mem.get().format_into(&mut buf));
+        let Ok(permit) = permits.try_acquire() else {
+            self.metrics.record_admission_refused(operation);
+            return Err(AdmitFailure::Busy);
+        };
+        let task_token = self.tasks.token();
+        if self.is_closing() {
+            return Err(AdmitFailure::Closing);
         }
-        target
+        let guard = OperationGuard::start(&self.metrics, operation, summary, &self.endpoint);
+        Ok(AdmittedOperation {
+            guard,
+            _task_token: task_token,
+            _permit: permit,
+            shared: self,
+        })
     }
+}
+
+pub(crate) fn apply_client_budget_settings<T>(
+    mut target: T,
+    max_memory_usage: Option<NonZeroU64>,
+    timeout_secs: &str,
+    mut with_setting: impl FnMut(T, &'static str, &str) -> T,
+) -> T {
+    target = with_setting(target, "max_execution_time", timeout_secs);
+    target = with_setting(target, "timeout_overflow_mode", "throw");
+    if let Some(mem) = max_memory_usage {
+        let mut buf = std::fmt::NumBuffer::new();
+        target = with_setting(target, "max_memory_usage", mem.get().format_into(&mut buf));
+    }
+    target
 }
 
 pub(crate) fn format_execution_timeout_secs(remaining: Duration) -> String {
@@ -214,12 +286,17 @@ impl ClickHouse {
     fn from_admitted(admitted: Admitted) -> Self {
         observe::describe();
         let metrics = ClientMetrics::register();
-        let password_refresh_trigger = admitted.password_file.as_ref().map(|_| Notify::new());
+        let password_refresh = admitted
+            .password_file
+            .map(|path| (path, Arc::new(Notify::new())));
+        let password_refresh_trigger = password_refresh
+            .as_ref()
+            .map(|(_, trigger)| Arc::clone(trigger));
         let shutdown = CancellationToken::new();
         let shutdown_guard = shutdown.clone().drop_guard();
         let shared = Arc::new(Shared {
             credentials: ArcSwap::from_pointee(ActiveCredentials {
-                cred_epoch: 1,
+                cred_epoch: CredEpoch::INITIAL,
                 read_client: admitted.client,
                 password: admitted.password,
             }),
@@ -233,10 +310,11 @@ impl ClickHouse {
             shutdown,
             tasks: TaskTracker::new(),
         });
-        if let Some(password_file) = admitted.password_file {
+        if let Some((password_file, trigger)) = password_refresh {
             shared.tasks.spawn(credentials::run_password_refresh(
                 Arc::clone(&shared),
                 password_file,
+                trigger,
             ));
         }
         Self {

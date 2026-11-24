@@ -659,7 +659,7 @@ async fn a4_7_bad_response_loopback_probes() {
     assert!(
         matches!(&err_158, clickhouse::error::Error::BadResponse(s) if s.starts_with("Code: 158"))
     );
-    let classified_158 = error::classify_query_error(&err_158, false);
+    let classified_158 = error::classify_query_error(&err_158, error::QueryRowCap::Uncapped);
     assert_eq!(classified_158.error, QueryError::TooLarge);
     assert_eq!(
         (
@@ -686,9 +686,10 @@ async fn a4_7_bad_response_loopback_probes() {
         );
         assert_eq!(
             (
-                error::classify_query_error(&err, false).error,
+                error::classify_query_error(&err, error::QueryRowCap::Uncapped).error,
                 error::classify_metadata_error(&err).error,
-                error::classify_post_dispatch_insert_error(&err, true).error,
+                error::classify_post_dispatch_insert_error(&err, error::InsertBatchSize::SingleRow)
+                    .error,
             ),
             (
                 expected_query,
@@ -767,7 +768,7 @@ fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
         ),
     ] {
         let ch_err = clickhouse::error::Error::BadResponse(message.to_owned());
-        let q = error::classify_query_error(&ch_err, false);
+        let q = error::classify_query_error(&ch_err, error::QueryRowCap::Uncapped);
         assert_eq!(q.error, QueryError::Rejected, "{code}");
         assert!(!q.error.is_retryable(), "{code}");
         assert_eq!(q.detail.reason, expected_reason, "{code}");
@@ -785,7 +786,8 @@ fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
         InsertError::NotApplied(InsertFailure::Rejected)
     );
     assert_eq!(
-        error::classify_post_dispatch_insert_error(&db_err, true).error,
+        error::classify_post_dispatch_insert_error(&db_err, error::InsertBatchSize::SingleRow)
+            .error,
         InsertError::NotApplied(InsertFailure::Rejected)
     );
 }
@@ -832,7 +834,7 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{reason}"
         );
         let ch_err = clickhouse::error::Error::BadResponse(reason.to_owned());
-        let q = error::classify_query_error(&ch_err, false);
+        let q = error::classify_query_error(&ch_err, error::QueryRowCap::Uncapped);
         assert_eq!(q.error, expected_query, "{reason}");
         assert_eq!(
             q.detail.status_code,
@@ -845,7 +847,8 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{reason}"
         );
         assert_eq!(
-            error::classify_post_dispatch_insert_error(&ch_err, true).error,
+            error::classify_post_dispatch_insert_error(&ch_err, error::InsertBatchSize::SingleRow)
+                .error,
             expected_insert,
             "{reason}"
         );
@@ -870,7 +873,7 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
         );
         let ch_err = clickhouse::error::Error::BadResponse(prose.to_owned());
         assert_eq!(
-            error::classify_query_error(&ch_err, false).error,
+            error::classify_query_error(&ch_err, error::QueryRowCap::Uncapped).error,
             QueryError::Unavailable,
             "{prose}"
         );
@@ -880,7 +883,8 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{prose}"
         );
         assert_eq!(
-            error::classify_post_dispatch_insert_error(&ch_err, true).error,
+            error::classify_post_dispatch_insert_error(&ch_err, error::InsertBatchSize::SingleRow)
+                .error,
             InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
             "{prose}"
         );
@@ -1230,4 +1234,134 @@ async fn borrowed_row_inserts_without_owning_fields() {
         CloseOutcome::Complete
     );
     server.abort();
+}
+
+struct CustomParamId(String);
+
+impl<'a> From<&'a CustomParamId> for crate::Param<'a> {
+    fn from(value: &'a CustomParamId) -> Self {
+        Self::from(value.0.as_str())
+    }
+}
+
+fn filter_decoupled_lifetimes<'a>(mut q: crate::Query<'a>, ids: &[u64]) -> crate::Query<'a> {
+    q = q.param("ids", ids);
+    {
+        let local_ids = [1_u64, 2];
+        let local_tags = ["a", "b"];
+        let ids_ref: &[u64; 2] = &local_ids;
+        let tags_ref: &[&str; 2] = &local_tags;
+        let local_opts = [Some(1_u64), None];
+        let local_nested = [vec![1_i64, 2_i64]];
+        q = q
+            .param("local_ids", ids_ref)
+            .param("local_tags", tags_ref)
+            .param("local_tags_iter", crate::Param::from_iter(&local_tags))
+            .param("local_opts", local_opts.as_slice())
+            .param("local_nested", local_nested.as_slice());
+    }
+    q
+}
+
+#[test]
+fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning_and_common_traits_hold() {
+    use std::borrow::Cow;
+    use std::path::PathBuf;
+
+    use crate::{ClientCertificate, Param, Query};
+
+    let _ = std::hint::black_box::<for<'a> fn(Query<'a>, &[u64]) -> Query<'a>>(
+        filter_decoupled_lifetimes,
+    );
+
+    let owned = vec!["alpha".to_owned(), "beta".to_owned()];
+    let expected_ptrs = vec![owned[0].as_ptr(), owned[1].as_ptr()];
+    assert_eq!(
+        Param::from_iter(owned.as_slice()).borrowed_str_ptrs(),
+        expected_ptrs
+    );
+    assert_eq!(Param::from_iter(&owned).borrowed_str_ptrs(), expected_ptrs);
+
+    let arr = ["gamma".to_owned(), "delta".to_owned()];
+    assert_eq!(
+        Param::from_iter(&arr).borrowed_str_ptrs(),
+        vec![arr[0].as_ptr(), arr[1].as_ptr()]
+    );
+
+    let first_owned = "owned-alpha".to_owned();
+    let nested_owned = "owned-nested".to_owned();
+    let first_addr = first_owned.as_ptr();
+    let nested_addr = nested_owned.as_ptr();
+    let owned_params = [Param::from(first_owned), Param::from(vec![nested_owned])];
+    assert_eq!(
+        Param::from(&owned_params[0]).borrowed_str_ptrs(),
+        vec![first_addr]
+    );
+    assert_eq!(
+        Param::from(&owned_params[1]).borrowed_str_ptrs(),
+        vec![nested_addr]
+    );
+    assert_eq!(
+        Param::from_iter(&owned_params).borrowed_str_ptrs(),
+        vec![first_addr, nested_addr]
+    );
+
+    let cow_owned: Cow<'_, str> = Cow::Owned("epsilon".to_owned());
+    assert_eq!(
+        Param::from(&cow_owned).borrowed_str_ptrs(),
+        vec![cow_owned.as_ptr()]
+    );
+
+    let opt_str = Some("zeta".to_owned());
+    assert_eq!(
+        Param::from(opt_str.as_ref()).borrowed_str_ptrs(),
+        vec![opt_str.as_ref().expect("some").as_ptr()]
+    );
+
+    let custom_ids = [
+        CustomParamId("c1".to_owned()),
+        CustomParamId("c2".to_owned()),
+    ];
+    assert_eq!(
+        Param::from(&custom_ids[0]).borrowed_str_ptrs(),
+        vec![custom_ids[0].0.as_ptr()]
+    );
+    assert_eq!(
+        Param::from_iter(&custom_ids).borrowed_str_ptrs(),
+        vec![custom_ids[0].0.as_ptr(), custom_ids[1].0.as_ptr()]
+    );
+
+    let literals: &[&str] = &["one", "two"];
+    let expected_literal_ptrs = vec![literals[0].as_ptr(), literals[1].as_ptr()];
+    assert_eq!(
+        Param::from(literals).borrowed_str_ptrs(),
+        expected_literal_ptrs
+    );
+    assert_eq!(
+        Param::from_iter(literals).borrowed_str_ptrs(),
+        expected_literal_ptrs
+    );
+
+    assert_eq!(
+        InsertError::from(InsertFailure::Busy),
+        InsertError::NotApplied(InsertFailure::Busy)
+    );
+    assert_eq!(
+        InsertError::from(UnknownOutcome::Unavailable),
+        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable)
+    );
+    let cert = ClientCertificate {
+        cert_path: PathBuf::from("/tmp/cert.pem"),
+        key_path: PathBuf::from("/tmp/key.pem"),
+    };
+    assert_eq!(
+        TransportSecurity::Tls {
+            root_ca_path: None,
+            client_certificate: Some(cert.clone()),
+        },
+        TransportSecurity::Tls {
+            root_ca_path: None,
+            client_certificate: Some(cert),
+        }
+    );
 }
