@@ -459,6 +459,42 @@ class HarnessWorkspaceCratesTests(unittest.TestCase):
             ref.write_text("# Workspace utility crates\n\nNo bullets here.\n", encoding="utf-8")
             self.assertTrue(any("contains no crate entries" in item for item in harness.check_workspace_crates_reference(repo)))
 
+    def test_skill_shape_reference_hygiene_and_denied_crates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            skill_dir = repo / ".agents/skills/rust-sample"
+            (skill_dir / "references").mkdir(parents=True)
+            (repo / "deny.toml").write_text('[[bans.deny]]\ncrate = "chrono"\n', encoding="utf-8")
+            para = "**Cluster.** " + " ".join(["word"] * 55)
+            body = f"# Rust Sample\n\n{para}\n\n{para} See [ex](references/ex.md).\n\n{para}\n"
+            (skill_dir / "SKILL.md").write_text(
+                '---\nname: rust-sample\ndescription: "Sample. Use when testing."\n---\n\n' + body,
+                encoding="utf-8",
+            )
+            (skill_dir / "references/ex.md").write_text(
+                "# Example\n\nShort explanation.\n\n```rust\nstruct Sample(u8);\n```\n",
+                encoding="utf-8",
+            )
+            denied = harness._denied_crates_from_deny_toml(repo)
+            fields, parsed_body = harness._parse_frontmatter_and_body((skill_dir / "SKILL.md").read_text(encoding="utf-8"))
+            self.assertEqual(harness._validate_skill_body_and_refs(skill_dir, fields, parsed_body, denied), [])
+
+            (skill_dir / "references/orphan.md").write_text("# Orphan\n\nUnused.\n", encoding="utf-8")
+            (skill_dir / "references/ex.md").write_text(
+                "# Example\n\nShort explanation.\n\n```rust\n// bad comment\nstruct Sample(u8);\n```\n",
+                encoding="utf-8",
+            )
+            bad_body = body + "\n**Bad.** Use `chrono` here.\n"
+            problems = harness._validate_skill_body_and_refs(skill_dir, fields, bad_body, denied)
+            self.assertTrue(any("unreferenced file references/orphan.md" in p for p in problems), problems)
+            self.assertTrue(any("explanatory '//' comment" in p for p in problems), problems)
+            self.assertTrue(any("denied crate `chrono`" in p for p in problems), problems)
+
+    def test_live_skill_rust_examples_compile(self) -> None:
+        if shutil.which("rustc") is None:
+            self.skipTest("rustc not on PATH")
+        self.assertEqual(harness.check_skill_rust_examples(ROOT), [])
+
     def test_ci_template_matrix_shards_cover_every_canonical_profile_once(self) -> None:
         ci_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         section = ci_text.split("template-matrix:", 1)[1].split("  # template:end source-template:ci-template-job", 1)[0]

@@ -43,6 +43,10 @@ review.
    - Remove superseded in-scope paths, confirm the diff stays inside granted
      `Mutable owners` and `Exclusive locks` (excluding `specs/<task>/` and
      unrelated edits), and apply [Engineering](../../../../AGENTS.md#engineering).
+   - Audit every new or changed Rust struct, enum, signature, and helper against
+     `rust-idiomatic` (impossible/inert field states, boundary parsing, borrowed
+     transient views, exhaustive matches) and check any hand-rolled structure or
+     parser against `workspace-crates.md`.
    - For touched Rust crates, verify formatting, lint, and package tests (or
      the proving consumer if a crate has no tests); record any unavailable check
      with its exact reason in `unverified`.

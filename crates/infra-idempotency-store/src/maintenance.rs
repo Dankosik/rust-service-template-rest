@@ -92,7 +92,7 @@ impl Store {
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                i64::from(batch_limit.get()),
+                std::num::NonZeroI64::from(batch_limit).get(),
             )
             .execute(tx),
         )

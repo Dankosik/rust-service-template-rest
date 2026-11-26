@@ -326,9 +326,9 @@ async fn claim(
             &policy.lease_offsets_micros,
             requested,
             worker_id,
-            &claim_limits[..],
+            &*claim_limits,
             rescued_summary,
-            &policy.is_outbox[..],
+            &*policy.is_outbox,
             i32::from(crate::kind::MAX_ATTEMPTS),
         )
         .try_map(|row| row.into_outcome(policy.registry).map_err(ClaimDecodeError::into_sqlx))

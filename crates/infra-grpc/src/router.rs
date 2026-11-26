@@ -494,7 +494,7 @@ where
             *remaining_wait = remaining_wait.saturating_sub(waited);
             permit
         }
-        infra_http_transport::Admission::Shed { waited: _ } => {
+        infra_http_transport::Admission::Shed { .. } => {
             check_open(opening_context)?;
             return Err(reject_shed(opening_context, request).await);
         }

@@ -418,6 +418,10 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
 
 fn encoded_headers(headers: &async_nats::HeaderMap) -> usize {
     let mut encoded = String::from("NATS/1.0\r\n");
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "order-independent total encoded header byte length"
+    )]
     for (name, values) in headers.iter() {
         for value in values {
             use std::fmt::Write as _;

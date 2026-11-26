@@ -289,7 +289,8 @@
         "scripts/tests/test_migrations.py",
         ".sqlx/",
         "env/monitoring/postgres-maintenance.rules.yml",
-        "env/monitoring/tests/postgres-maintenance-rules.yml"
+        "env/monitoring/tests/postgres-maintenance-rules.yml",
+        ".agents/skills/rust-sqlx/"
       ]
     },
     "service-secrets": {

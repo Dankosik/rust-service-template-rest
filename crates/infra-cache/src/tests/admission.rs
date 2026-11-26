@@ -398,7 +398,7 @@ fn options_debug_redacts_the_dsn() {
 
 #[test]
 fn namespace_names_follow_the_grammar() {
-    let longest = format!("a{}", "_9".repeat(31) + "z");
+    let longest = format!("a{}z", "_9".repeat(31));
     let too_long = format!("{longest}a");
     let longest: &'static str = longest.leak();
     let too_long: &'static str = too_long.leak();

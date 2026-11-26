@@ -673,15 +673,15 @@ mod tests {
             "x".repeat(1024)
         );
         assert_eq!(
-            sanitize_summary(CompactString::from("\u{0085}".repeat(1023) + "é")),
+            sanitize_summary(CompactString::from(format!("{}é", "\u{0085}".repeat(1023)))),
             " ".repeat(1023)
         );
         assert_eq!(
-            sanitize_summary(CompactString::from("é".repeat(512) + "tail")),
+            sanitize_summary(CompactString::from(format!("{}tail", "é".repeat(512)))),
             "é".repeat(512)
         );
         assert_eq!(
-            sanitize_summary(CompactString::from("a".repeat(1023) + "é")),
+            sanitize_summary(CompactString::from(format!("{}é", "a".repeat(1023)))),
             "a".repeat(1023)
         );
         let error = serde_json::from_str::<u32>("\"secret\"").unwrap_err();

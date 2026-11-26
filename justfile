@@ -413,6 +413,10 @@ agent-harness-sync harness="all":
 check-instructions harness="all":
     python3 -m template.harness --check --repo . --harness "{{harness}}"
 
+# Compile-check standalone Rust examples inside .agents/skills/*/references/*.md
+check-skill-examples:
+    python3 -m template.harness --check-examples --repo .
+
 # Verify or refresh JetStream Go wire-compatibility golden fixtures (pass --update to refresh)
 [positional-arguments]
 messaging-go-compat *args:
@@ -454,6 +458,7 @@ check: fmt-check lint test unused-deps typos openapi-lint docs-check architectur
     # template:end postgres:just-check-postgres
     # template:begin source-template:just-check-template
     "{{just_executable()}}" check-instructions
+    "{{just_executable()}}" check-skill-examples
     "{{just_executable()}}" template-check
     "{{just_executable()}}" template-test
     # template:end source-template:just-check-template

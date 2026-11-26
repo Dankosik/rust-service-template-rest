@@ -458,6 +458,10 @@ impl SampleGauges {
     }
 
     fn reset(&self) {
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "order-independent per-kind gauge reset"
+        )]
         for gauges in self.by_kind.values() {
             gauges.reset();
         }

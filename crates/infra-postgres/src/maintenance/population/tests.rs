@@ -24,6 +24,10 @@ impl TestMetrics {
 
     fn snapshot(&self) -> Series {
         let series = self.snapshotter.snapshot().into_hashmap();
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "order-independent metric snapshot restoration"
+        )]
         for (composite, (_, _, value)) in &series {
             match value {
                 DebugValue::Counter(count) if *count != 0 => {

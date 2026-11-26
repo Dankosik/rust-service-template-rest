@@ -1144,7 +1144,7 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
          ARRAY[ROW('x-ignored', convert_to('bad', 'UTF8'))::http_idempotency_header_pair] \
          WHERE body = $1",
     )
-    .bind(&stored.as_bytes()[..])
+    .bind(&**stored.as_bytes())
     .execute(&pool)
     .await
     .expect("the record is corrupted");

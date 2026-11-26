@@ -167,6 +167,10 @@ pub(crate) fn decode_envelope_ref<'a>(
     }
     let mut header_bytes = HEADER_PREAMBLE_BYTES;
     let mut found = EnvelopeHeaders::default();
+    #[expect(
+        clippy::iter_over_hash_type,
+        reason = "order-independent header byte sum and distinct-slot decoding"
+    )]
     for (header, values) in headers.iter() {
         let header: &str = header.as_ref();
         for value in values {

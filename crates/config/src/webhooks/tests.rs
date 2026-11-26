@@ -101,7 +101,7 @@ fn webhooks_environment_builds_endpoint_local_signing_keys() {
             .map(std::num::NonZeroU32::get),
         Some(4)
     );
-    let endpoint = cfg.webhooks().endpoints.get("partner").unwrap();
+    let endpoint = &cfg.webhooks().endpoints["partner"];
     assert_eq!(endpoint.url, destination);
     assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
     assert_eq!(
@@ -199,7 +199,7 @@ fn webhooks_hyphenated_endpoint_id_meets_its_environment_secret() {
     )
     .unwrap();
     assert_eq!(cfg.webhooks().endpoints.len(), 1);
-    let endpoint = cfg.webhooks().endpoints.get("partner-v2").unwrap();
+    let endpoint = &cfg.webhooks().endpoints["partner-v2"];
     assert_eq!(endpoint.secret.expose_secret(), "fixture-current-secret");
 }
 
