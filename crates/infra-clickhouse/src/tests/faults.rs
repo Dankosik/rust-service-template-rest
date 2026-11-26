@@ -937,7 +937,7 @@ async fn close_token_barrier_rejects_post_close_tasks_without_io() {
         .await
         .expect("start barrier");
 
-    ch.inner.shared.tasks.close();
+    ch.shared().tasks.close();
     assert_eq!(
         ch.query("barrier_q", "SELECT 1")
             .fetch_one::<SampleRow>(&ctx)

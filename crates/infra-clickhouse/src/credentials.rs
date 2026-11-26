@@ -9,7 +9,7 @@ use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
 use zeroize::{Zeroize as _, Zeroizing};
 
-use crate::Shared;
+use crate::client::Shared;
 use crate::error::StartErrorKind;
 use crate::observe::PasswordRefreshOutcome;
 
@@ -96,20 +96,22 @@ impl PasswordRefresh {
     }
 
     async fn run(mut self, shared: &Shared, trigger: &Notify) {
-        tokio::select! {
-            biased;
-            () = shared.shutdown.cancelled() => {}
-            () = async {
+        let _ = shared
+            .shutdown
+            .run_until_cancelled(async {
                 loop {
                     self.wait_next(trigger).await;
+                    if shared.shutdown.is_cancelled() {
+                        return;
+                    }
                     let result = read_once(&self.reading, &self.path).await;
                     if shared.shutdown.is_cancelled() {
                         return;
                     }
                     self.apply_result(shared, result);
                 }
-            } => {}
-        }
+            })
+            .await;
     }
 
     async fn wait_next(&mut self, trigger: &Notify) {

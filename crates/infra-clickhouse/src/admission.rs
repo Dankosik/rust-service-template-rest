@@ -6,7 +6,7 @@ use std::time::Duration;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use secrecy::ExposeSecret as _;
+use secrecy::{ExposeSecret as _, SecretString};
 use shared_rules::clickhouse::{
     MAX_CONCURRENCY_CEILING, MAX_MEMORY_USAGE, MAX_RESULT_BYTES, MAX_RESULT_ROWS_CEILING,
     MAX_TIMEOUT, MIN_MEMORY_USAGE, MIN_RESULT_BYTES, MIN_TIMEOUT, strip_root_trailing_slash,
@@ -16,13 +16,13 @@ use shared_rules::rfc9110::has_ascii_control;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::credentials::{read_password_file, read_regular_file, read_secret_file};
-use crate::error::StartErrorKind;
-use crate::observe::EndpointMetadata;
-use crate::{
+use crate::client::{
     ClickHouseAuth, ClickHouseOptions, ClientCertificate, QuerySettings, RuntimePolicy,
     TransportSecurity,
 };
+use crate::credentials::{read_password_file, read_regular_file, read_secret_file};
+use crate::error::StartErrorKind;
+use crate::observe::EndpointMetadata;
 
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(5);
@@ -36,11 +36,15 @@ const HTTP1_MAX_HEADERS: usize = 100;
 const MAX_PEM_CHAIN_BYTES: usize = 1024 * 1024;
 const MAX_PRIVATE_KEY_BYTES: usize = 64 * 1024;
 
+pub(crate) struct PasswordFileSeed {
+    pub(crate) path: PathBuf,
+    pub(crate) initial_password: Zeroizing<String>,
+}
+
 pub(crate) struct Admitted {
     pub(crate) client: clickhouse::Client,
     pub(crate) endpoint: EndpointMetadata,
-    pub(crate) password: Option<Zeroizing<String>>,
-    pub(crate) password_file: Option<PathBuf>,
+    pub(crate) password_refresh: Option<PasswordFileSeed>,
     pub(crate) max_read_concurrency: NonZeroUsize,
     pub(crate) max_write_concurrency: NonZeroUsize,
     pub(crate) policy: RuntimePolicy,
@@ -52,10 +56,18 @@ pub(crate) struct AdmittedUrl {
     pub(crate) port: u16,
 }
 
-struct AdmittedCredentials {
-    username: Option<String>,
-    password: Option<Zeroizing<String>>,
-    password_file: Option<PathBuf>,
+enum AdmittedCredentials {
+    Static {
+        username: String,
+        password: SecretString,
+    },
+    Rotating {
+        username: String,
+        seed: PasswordFileSeed,
+    },
+    Unauthenticated {
+        username: Option<String>,
+    },
 }
 
 enum AdmittedTransport {
@@ -103,12 +115,27 @@ pub(crate) fn admit(options: ClickHouseOptions) -> Result<Admitted, StartErrorKi
     }
     .with_url(url.normalized)
     .with_database(&options.database);
-    if let Some(user) = creds.username {
-        client = client.with_user(user);
-    }
-    if let Some(ref secret) = creds.password {
-        client = client.with_password(secret.as_str());
-    }
+
+    let password_refresh = match creds {
+        AdmittedCredentials::Static { username, password } => {
+            client = client
+                .with_user(username)
+                .with_password(password.expose_secret());
+            None
+        }
+        AdmittedCredentials::Rotating { username, seed } => {
+            client = client
+                .with_user(username)
+                .with_password(seed.initial_password.as_str());
+            Some(seed)
+        }
+        AdmittedCredentials::Unauthenticated { username } => {
+            if let Some(user) = username {
+                client = client.with_user(user);
+            }
+            None
+        }
+    };
 
     Ok(Admitted {
         client,
@@ -117,8 +144,7 @@ pub(crate) fn admit(options: ClickHouseOptions) -> Result<Admitted, StartErrorKi
             host: url.host,
             port: url.port,
         },
-        password: creds.password,
-        password_file: creds.password_file,
+        password_refresh,
         max_read_concurrency: options.max_read_concurrency,
         max_write_concurrency: options.max_write_concurrency,
         policy: RuntimePolicy {
@@ -210,27 +236,25 @@ fn admit_credentials(auth: ClickHouseAuth) -> Result<AdmittedCredentials, StartE
     }
     match auth {
         ClickHouseAuth::Password { username, password } => {
-            let exposed = password.expose_secret();
-            validate_printable_non_blank(exposed, StartErrorKind::InvalidCredentials)?;
-            Ok(AdmittedCredentials {
-                username: Some(username),
-                password: Some(Zeroizing::new(exposed.to_owned())),
-                password_file: None,
-            })
+            validate_printable_non_blank(
+                password.expose_secret(),
+                StartErrorKind::InvalidCredentials,
+            )?;
+            Ok(AdmittedCredentials::Static { username, password })
         }
         ClickHouseAuth::PasswordFile { username, path } => {
-            let password = read_password_file(&path)?;
-            Ok(AdmittedCredentials {
-                username: Some(username),
-                password: Some(password),
-                password_file: Some(path),
+            let initial_password = read_password_file(&path)?;
+            Ok(AdmittedCredentials::Rotating {
+                username,
+                seed: PasswordFileSeed {
+                    path,
+                    initial_password,
+                },
             })
         }
-        ClickHouseAuth::Unauthenticated { username } => Ok(AdmittedCredentials {
-            username,
-            password: None,
-            password_file: None,
-        }),
+        ClickHouseAuth::Unauthenticated { username } => {
+            Ok(AdmittedCredentials::Unauthenticated { username })
+        }
     }
 }
 

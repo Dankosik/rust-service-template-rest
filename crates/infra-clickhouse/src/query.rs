@@ -8,12 +8,13 @@ use operation_context::OperationContext;
 use serde::Serialize;
 use smallvec::SmallVec;
 
-use crate::error::{FailureReason, ObservedFailure, QueryError, QueryRowCap, classify_query_error};
-use crate::observe::Operation;
-use crate::{
-    AdmitFailure, ClickHouse, Decimal32, Decimal64, Decimal128, QuerySettings, RuntimePolicy,
-    Shared, apply_client_budget_settings, format_execution_timeout_secs, within_bounded,
+use crate::client::{
+    AdmitFailure, ClickHouse, QuerySettings, RuntimePolicy, Shared, apply_client_budget_settings,
+    format_execution_timeout_secs, within_bounded,
 };
+use crate::error::{FailureReason, ObservedFailure, QueryError, QueryRowCap, classify_query_error};
+use crate::observe::{ReadKind, ReadStats};
+use crate::{Decimal32, Decimal64, Decimal128};
 
 const NANOS_PER_SEC: u128 = 1_000_000_000;
 
@@ -28,21 +29,23 @@ pub struct Param<'a>(ParamValue<'a>);
 impl Param<'_> {
     #[must_use]
     pub fn datetime_secs(value: impl Into<time::OffsetDateTime>) -> Self {
-        Self(ParamValue::DateTimeSecs(value.into()))
+        Self(ParamValue::Scalar(ParamScalar::DateTimeSecs(value.into())))
     }
 
     #[must_use]
     pub const fn try_decimal(unscaled: i128, scale: u8) -> Option<Self> {
         if scale <= MAX_DECIMAL_SCALE {
-            Some(Self(ParamValue::Decimal(unscaled, scale)))
+            Some(Self(ParamValue::Scalar(ParamScalar::Decimal(
+                unscaled, scale,
+            ))))
         } else {
             None
         }
     }
 }
 
-#[derive(Clone)]
-enum ParamValue<'a> {
+#[derive(Clone, Copy)]
+enum ParamScalar {
     Bool(bool),
     I8(i8),
     I16(i16),
@@ -58,18 +61,15 @@ enum ParamValue<'a> {
     Usize(usize),
     F32(f32),
     F64(f64),
-    Str(Cow<'a, str>),
     Uuid(uuid::Uuid),
     Ipv4(Ipv4Addr),
     Date(time::Date),
     DateTime(time::OffsetDateTime),
     DateTimeSecs(time::OffsetDateTime),
     Decimal(i128, u8),
-    None,
-    Array(Vec<Self>),
 }
 
-impl Serialize for ParamValue<'_> {
+impl Serialize for ParamScalar {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Bool(v) => v.serialize(serializer),
@@ -87,7 +87,6 @@ impl Serialize for ParamValue<'_> {
             Self::Usize(v) => v.serialize(serializer),
             Self::F32(v) => v.serialize(serializer),
             Self::F64(v) => v.serialize(serializer),
-            Self::Str(v) => v.serialize(serializer),
             Self::Uuid(v) => {
                 let mut buf = uuid::Uuid::encode_buffer();
                 serializer.serialize_str(v.as_hyphenated().encode_lower(&mut buf))
@@ -104,6 +103,23 @@ impl Serialize for ParamValue<'_> {
             Self::Decimal(unscaled, scale) => {
                 serialize_decimal_param(*unscaled, *scale, serializer)
             }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ParamValue<'a> {
+    Scalar(ParamScalar),
+    Str(Cow<'a, str>),
+    None,
+    Array(Vec<Self>),
+}
+
+impl Serialize for ParamValue<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Scalar(v) => v.serialize(serializer),
+            Self::Str(v) => v.serialize(serializer),
             Self::None => serializer.serialize_none(),
             Self::Array(items) => items.serialize(serializer),
         }
@@ -141,28 +157,8 @@ fn serialize_datetime_param<S: serde::Serializer>(
 impl ParamValue<'_> {
     fn borrow(&self) -> ParamValue<'_> {
         match self {
-            Self::Bool(v) => ParamValue::Bool(*v),
-            Self::I8(v) => ParamValue::I8(*v),
-            Self::I16(v) => ParamValue::I16(*v),
-            Self::I32(v) => ParamValue::I32(*v),
-            Self::I64(v) => ParamValue::I64(*v),
-            Self::I128(v) => ParamValue::I128(*v),
-            Self::Isize(v) => ParamValue::Isize(*v),
-            Self::U8(v) => ParamValue::U8(*v),
-            Self::U16(v) => ParamValue::U16(*v),
-            Self::U32(v) => ParamValue::U32(*v),
-            Self::U64(v) => ParamValue::U64(*v),
-            Self::U128(v) => ParamValue::U128(*v),
-            Self::Usize(v) => ParamValue::Usize(*v),
-            Self::F32(v) => ParamValue::F32(*v),
-            Self::F64(v) => ParamValue::F64(*v),
+            Self::Scalar(v) => ParamValue::Scalar(*v),
             Self::Str(v) => ParamValue::Str(Cow::Borrowed(v.as_ref())),
-            Self::Uuid(v) => ParamValue::Uuid(*v),
-            Self::Ipv4(v) => ParamValue::Ipv4(*v),
-            Self::Date(v) => ParamValue::Date(*v),
-            Self::DateTime(v) => ParamValue::DateTime(*v),
-            Self::DateTimeSecs(v) => ParamValue::DateTimeSecs(*v),
-            Self::Decimal(unscaled, scale) => ParamValue::Decimal(*unscaled, *scale),
             Self::None => ParamValue::None,
             Self::Array(items) => ParamValue::Array(items.iter().map(Self::borrow).collect()),
         }
@@ -174,13 +170,13 @@ macro_rules! impl_param_from {
         $(
             impl From<$ty> for Param<'_> {
                 fn from(value: $ty) -> Self {
-                    Self(ParamValue::$variant(value))
+                    Self(ParamValue::Scalar(ParamScalar::$variant(value)))
                 }
             }
 
             impl From<&$ty> for Param<'_> {
                 fn from(value: &$ty) -> Self {
-                    Self(ParamValue::$variant(*value))
+                    Self(ParamValue::Scalar(ParamScalar::$variant(*value)))
                 }
             }
         )*
@@ -209,53 +205,32 @@ impl_param_from!(
     time::OffsetDateTime => DateTime,
 );
 
-impl<const SCALE: u8> From<Decimal32<SCALE>> for Param<'_> {
-    fn from(value: Decimal32<SCALE>) -> Self {
-        Self(ParamValue::Decimal(
-            i128::from(value.unscaled()),
-            value.scale(),
-        ))
-    }
+macro_rules! impl_decimal_param_from {
+    ($($ty:ident => |$v:ident| $unscaled:expr),* $(,)?) => {
+        $(
+            impl<const SCALE: u8> From<$ty<SCALE>> for Param<'_> {
+                fn from($v: $ty<SCALE>) -> Self {
+                    Self(ParamValue::Scalar(ParamScalar::Decimal(
+                        $unscaled,
+                        $v.scale(),
+                    )))
+                }
+            }
+
+            impl<const SCALE: u8> From<&$ty<SCALE>> for Param<'_> {
+                fn from(value: &$ty<SCALE>) -> Self {
+                    Self::from(*value)
+                }
+            }
+        )*
+    };
 }
 
-impl<const SCALE: u8> From<&Decimal32<SCALE>> for Param<'_> {
-    fn from(value: &Decimal32<SCALE>) -> Self {
-        Self(ParamValue::Decimal(
-            i128::from(value.unscaled()),
-            value.scale(),
-        ))
-    }
-}
-
-impl<const SCALE: u8> From<Decimal64<SCALE>> for Param<'_> {
-    fn from(value: Decimal64<SCALE>) -> Self {
-        Self(ParamValue::Decimal(
-            i128::from(value.unscaled()),
-            value.scale(),
-        ))
-    }
-}
-
-impl<const SCALE: u8> From<&Decimal64<SCALE>> for Param<'_> {
-    fn from(value: &Decimal64<SCALE>) -> Self {
-        Self(ParamValue::Decimal(
-            i128::from(value.unscaled()),
-            value.scale(),
-        ))
-    }
-}
-
-impl<const SCALE: u8> From<Decimal128<SCALE>> for Param<'_> {
-    fn from(value: Decimal128<SCALE>) -> Self {
-        Self(ParamValue::Decimal(value.unscaled(), value.scale()))
-    }
-}
-
-impl<const SCALE: u8> From<&Decimal128<SCALE>> for Param<'_> {
-    fn from(value: &Decimal128<SCALE>) -> Self {
-        Self(ParamValue::Decimal(value.unscaled(), value.scale()))
-    }
-}
+impl_decimal_param_from!(
+    Decimal32 => |v| i128::from(v.unscaled()),
+    Decimal64 => |v| i128::from(v.unscaled()),
+    Decimal128 => |v| v.unscaled(),
+);
 
 impl From<String> for Param<'_> {
     fn from(value: String) -> Self {
@@ -301,13 +276,15 @@ impl<'a> From<&'a Param<'_>> for Param<'a> {
 
 impl From<time::UtcDateTime> for Param<'_> {
     fn from(value: time::UtcDateTime) -> Self {
-        Self(ParamValue::DateTime(time::OffsetDateTime::from(value)))
+        Self(ParamValue::Scalar(ParamScalar::DateTime(
+            time::OffsetDateTime::from(value),
+        )))
     }
 }
 
 impl From<&time::UtcDateTime> for Param<'_> {
     fn from(value: &time::UtcDateTime) -> Self {
-        Self(ParamValue::DateTime(time::OffsetDateTime::from(*value)))
+        Self::from(*value)
     }
 }
 
@@ -320,38 +297,67 @@ impl<'a, T: Into<Param<'a>>> From<Option<T>> for Param<'a> {
     }
 }
 
-impl<'a, T: Into<Param<'a>>> From<Vec<T>> for Param<'a> {
-    fn from(values: Vec<T>) -> Self {
-        Self(ParamValue::Array(
-            values.into_iter().map(|value| value.into().0).collect(),
-        ))
+mod sealed {
+    use super::Param;
+
+    pub trait BorrowParam<'b, 'a>: 'b {
+        fn borrow_param(&'b self) -> Param<'a>;
+    }
+
+    impl<'a, 'b, T: 'b> BorrowParam<'b, 'a> for T
+    where
+        &'b T: Into<Param<'a>>,
+    {
+        fn borrow_param(&'b self) -> Param<'a> {
+            self.into()
+        }
     }
 }
 
-impl<T: Clone + Into<Self>> From<&[T]> for Param<'_> {
-    fn from(values: &[T]) -> Self {
-        Self(ParamValue::Array(
-            values.iter().cloned().map(|value| value.into().0).collect(),
-        ))
+impl<'a, 'b, T: sealed::BorrowParam<'b, 'a>> From<&'b Option<T>> for Param<'a> {
+    fn from(value: &'b Option<T>) -> Self {
+        match value {
+            Some(inner) => inner.borrow_param(),
+            None => Self(ParamValue::None),
+        }
+    }
+}
+
+impl<'a, T: Into<Param<'a>>> From<Vec<T>> for Param<'a> {
+    fn from(values: Vec<T>) -> Self {
+        values.into_iter().collect()
+    }
+}
+
+impl<'a, 'b, T: sealed::BorrowParam<'b, 'a>> From<&'b [T]> for Param<'a> {
+    fn from(values: &'b [T]) -> Self {
+        values
+            .iter()
+            .map(sealed::BorrowParam::borrow_param)
+            .collect()
+    }
+}
+
+impl<'a, 'b, T: sealed::BorrowParam<'b, 'a>> From<&&'b [T]> for Param<'a> {
+    fn from(values: &&'b [T]) -> Self {
+        Self::from(*values)
     }
 }
 
 impl<'a, T: Into<Param<'a>>, const N: usize> From<[T; N]> for Param<'a> {
     fn from(values: [T; N]) -> Self {
-        Self(ParamValue::Array(
-            values.into_iter().map(|value| value.into().0).collect(),
-        ))
+        values.into_iter().collect()
     }
 }
 
-impl<T: Clone + Into<Self>, const N: usize> From<&[T; N]> for Param<'_> {
-    fn from(values: &[T; N]) -> Self {
+impl<'a, 'b, T: sealed::BorrowParam<'b, 'a>, const N: usize> From<&'b [T; N]> for Param<'a> {
+    fn from(values: &'b [T; N]) -> Self {
         Self::from(values.as_slice())
     }
 }
 
-impl<T: Clone + Into<Self>> From<&Vec<T>> for Param<'_> {
-    fn from(values: &Vec<T>) -> Self {
+impl<'a, 'b, T: sealed::BorrowParam<'b, 'a>> From<&'b Vec<T>> for Param<'a> {
+    fn from(values: &'b Vec<T>) -> Self {
         Self::from(values.as_slice())
     }
 }
@@ -361,23 +367,6 @@ impl<'a, T: Into<Param<'a>>> FromIterator<T> for Param<'a> {
         Self(ParamValue::Array(
             iter.into_iter().map(|value| value.into().0).collect(),
         ))
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ReadOperation {
-    One,
-    Optional,
-    All,
-}
-
-impl ReadOperation {
-    const fn operation(self) -> Operation {
-        match self {
-            Self::One => Operation::FetchOne,
-            Self::Optional => Operation::FetchOptional,
-            Self::All => Operation::FetchAll,
-        }
     }
 }
 
@@ -462,7 +451,7 @@ impl<'a> Query<'a> {
     }
 
     pub async fn fetch_one<R: ReadRow>(self, ctx: &OperationContext) -> Result<R, QueryError> {
-        self.execute_bounded::<R, _>(ctx, ReadOperation::One, |rows| {
+        self.execute_bounded::<R, _>(ctx, ReadKind::One, |rows| {
             let mut iter = rows.into_iter();
             match (iter.next(), iter.next()) {
                 (None, _) => Err(ObservedFailure::with_reason(
@@ -483,7 +472,7 @@ impl<'a> Query<'a> {
         self,
         ctx: &OperationContext,
     ) -> Result<Option<R>, QueryError> {
-        self.execute_bounded::<R, _>(ctx, ReadOperation::Optional, |rows| {
+        self.execute_bounded::<R, _>(ctx, ReadKind::Optional, |rows| {
             let mut iter = rows.into_iter();
             match (iter.next(), iter.next()) {
                 (None, _) => Ok(None),
@@ -498,11 +487,10 @@ impl<'a> Query<'a> {
     }
 
     pub async fn fetch_all<R: ReadRow>(self, ctx: &OperationContext) -> Result<Vec<R>, QueryError> {
-        self.execute_bounded::<R, _>(ctx, ReadOperation::All, Ok)
-            .await
+        self.execute_bounded::<R, _>(ctx, ReadKind::All, Ok).await
     }
 
-    fn resolve_limits(&self, policy: &RuntimePolicy, read_op: ReadOperation) -> QueryLimits {
+    fn resolve_limits(&self, policy: &RuntimePolicy, kind: ReadKind) -> QueryLimits {
         let timeout = policy
             .query_timeout
             .min(self.timeout.unwrap_or(policy.query_timeout));
@@ -510,9 +498,9 @@ impl<'a> Query<'a> {
             .max_result_rows
             .min(self.max_result_rows.unwrap_or(policy.max_result_rows))
             .get();
-        let cardinality = match read_op {
-            ReadOperation::All => ReadCardinality::All,
-            ReadOperation::One | ReadOperation::Optional => ReadCardinality::AtMostOne {
+        let cardinality = match kind {
+            ReadKind::All => ReadCardinality::All,
+            ReadKind::One | ReadKind::Optional => ReadCardinality::AtMostOne {
                 server_capped: matches!(policy.query_settings, QuerySettings::Client { .. }),
             },
         };
@@ -535,24 +523,25 @@ impl<'a> Query<'a> {
     async fn execute_bounded<R: ReadRow, T>(
         self,
         ctx: &OperationContext,
-        read_op: ReadOperation,
+        kind: ReadKind,
         finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
     ) -> Result<T, QueryError> {
-        let shared = &self.client.inner.shared;
+        let shared = self.client.shared();
         if shared.is_closing() {
             return Err(QueryError::Unavailable);
         }
         ctx.check().map_err(QueryError::Stopped)?;
         validate_query_inputs(&self.sql, &self.params, self.timeout)?;
 
-        let mut admitted = shared
-            .admit_operation(read_op.operation(), self.summary)
-            .map_err(|failure| match failure {
-                AdmitFailure::Busy => QueryError::Busy,
-                AdmitFailure::Closing => QueryError::Unavailable,
-            })?;
+        let mut admitted =
+            shared
+                .admit_read(kind, self.summary)
+                .map_err(|failure| match failure {
+                    AdmitFailure::Busy => QueryError::Busy,
+                    AdmitFailure::Closing => QueryError::Unavailable,
+                })?;
         let result = async {
-            let limits = self.resolve_limits(&shared.policy, read_op);
+            let limits = self.resolve_limits(&shared.policy, kind);
             let bounded = ctx.bounded(limits.timeout);
             bounded.check()?;
 
@@ -579,7 +568,7 @@ impl<'a> Query<'a> {
             consume_bounded_rows(cursor, &bounded, &limits, finish_rows).await
         }
         .await;
-        admitted.finish_query(result)
+        admitted.finish(result)
     }
 }
 
@@ -639,7 +628,7 @@ async fn consume_bounded_rows<R: ReadRow, T>(
     bounded: &operation_context::BoundedContext,
     limits: &QueryLimits,
     finish_rows: impl FnOnce(Vec<R>) -> Result<T, ObservedFailure<QueryError>>,
-) -> Result<(T, u64, u64), ObservedFailure<QueryError>> {
+) -> Result<(T, ReadStats), ObservedFailure<QueryError>> {
     let mut rows = Vec::new();
     loop {
         let next = within_bounded(bounded, cursor.next()).await?;
@@ -655,15 +644,19 @@ async fn consume_bounded_rows<R: ReadRow, T>(
                 if let Some(cap) = limits.cardinality.cap()
                     && rows.len() >= cap
                 {
-                    let returned_rows = cursor.returned_rows();
-                    let decoded_bytes = cursor.decoded_bytes();
-                    return finish_rows(rows).map(|value| (value, returned_rows, decoded_bytes));
+                    let stats = ReadStats {
+                        rows: cursor.returned_rows(),
+                        decoded_bytes: cursor.decoded_bytes(),
+                    };
+                    return finish_rows(rows).map(|value| (value, stats));
                 }
             }
             Ok(None) => {
-                let returned_rows = cursor.returned_rows();
-                let decoded_bytes = cursor.decoded_bytes();
-                return finish_rows(rows).map(|value| (value, returned_rows, decoded_bytes));
+                let stats = ReadStats {
+                    rows: cursor.returned_rows(),
+                    decoded_bytes: cursor.decoded_bytes(),
+                };
+                return finish_rows(rows).map(|value| (value, stats));
             }
             Err(err) => {
                 if let Some(stop) = bounded.stopped() {

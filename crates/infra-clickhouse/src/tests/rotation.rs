@@ -506,7 +506,7 @@ async fn reactive_password_refresh_enforces_1s_cooldown_before_second_reload() {
 
     write_password_atomic(&staging, &pw_path, "pw-v2\n").await;
     let first_triggered = std::time::Instant::now();
-    ch.inner.shared.notify_auth_failure();
+    ch.shared().notify_auth_failure();
     wait_for_updated_reaches(
         &recorder,
         1,
@@ -516,7 +516,7 @@ async fn reactive_password_refresh_enforces_1s_cooldown_before_second_reload() {
     .await;
 
     write_password_atomic(&staging, &pw_path, "pw-v3\n").await;
-    ch.inner.shared.notify_auth_failure();
+    ch.shared().notify_auth_failure();
     wait_for_updated_reaches(
         &recorder,
         2,
