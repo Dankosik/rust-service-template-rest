@@ -4,7 +4,7 @@ Use this reference when a `loop { tokio::select! }` mixes timers, channels, or s
 
 ## Pinned timers and two-phase channel sends in `loop { select! }`
 
-Creating `tokio::time::sleep` inside `loop { select! }` resets the timer on every received event, starving the timeout. Awaiting `tx.send(msg)` directly inside `select!` drops `msg` if another arm wins. Pin the timer outside the loop and reserve a `Permit` before committing the message synchronously:
+Creating `tokio::time::sleep` inside `loop { select! }` resets the timer on every received event, starving the timeout. Awaiting `tx.send(msg)` directly inside `select!` drops `msg` if another arm wins. Pin the timer outside the loop and poll both `tx.reserve()` and `rx.recv()` alongside `&mut deadline` so neither phase starves timeouts or holds a received message across `.await`:
 
 ```rust
 use std::time::Duration;
@@ -18,20 +18,27 @@ async fn forward_with_idle_timeout(
     tokio::pin!(deadline);
 
     loop {
-        tokio::select! {
+        let permit = tokio::select! {
             () = &mut deadline => break,
-            permit = tx.reserve() => {
-                let Ok(permit) = permit else { break };
-                let Some(msg) = rx.recv().await else { break };
-                permit.send(msg);
-                deadline.as_mut().reset(tokio::time::Instant::now() + idle_limit);
-            }
-        }
+            permit = tx.reserve() => match permit {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+        };
+        let msg = tokio::select! {
+            () = &mut deadline => break,
+            msg = rx.recv() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+        };
+        permit.send(msg);
+        deadline.as_mut().reset(tokio::time::Instant::now() + idle_limit);
     }
 }
 ```
 
-Wait for `tx.reserve()` only after an item is ready when backpressure must not hold a permit across `rx.recv().await`; the key invariant is separating the cancel-safe wait (`reserve().await`) from the infallible move (`permit.send(msg)`). For periodic ticks, use `tokio::time::interval` with an explicit `MissedTickBehavior`.
+If multiple producers share `tx` and holding a `Permit` across `rx.recv()` would stall siblings, buffer the single pending message in `Option<T>` across iterations and return any unsent item explicitly on exit. For periodic ticks, use `tokio::time::interval` with an explicit `MissedTickBehavior`.
 
 ## Release locks before dropping collections or notifying waiters
 

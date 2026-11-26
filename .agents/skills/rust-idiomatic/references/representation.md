@@ -18,16 +18,26 @@ struct RawOptions {
 }
 ```
 
-Strong — illegal combinations and zero bounds cannot be constructed:
+Strong — illegal combinations and zero bounds cannot be constructed, and `Auth` redacts credentials in `Debug`:
 
 ```rust
+use std::fmt;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum Auth {
     Unauthenticated,
     Password(String),
+}
+
+impl fmt::Debug for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unauthenticated => f.write_str("Unauthenticated"),
+            Self::Password(_) => f.write_str("Password(<redacted>)"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

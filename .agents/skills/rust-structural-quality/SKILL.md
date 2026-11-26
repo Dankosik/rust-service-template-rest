@@ -1,6 +1,6 @@
 ---
 name: rust-structural-quality
-description: "Deletion test. Use when reviewing Rust code or adding a crate, module, trait, layer, helper, or parallel path, deciding placement, or consolidating scattered rules."
+description: "Deletion test. Use when adding a crate, module, trait, layer, helper, or parallel path, deciding placement, or consolidating scattered rules."
 ---
 
 # Rust Structural Quality
