@@ -315,5 +315,5 @@ async fn file_download_can_deliver_bytes_after_the_opening_deadline() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(&bytes[..], b"file");
+    assert_eq!(&*bytes, b"file");
 }

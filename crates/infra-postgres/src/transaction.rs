@@ -134,12 +134,8 @@ impl<E: From<TxError>> TxModeExt<E> for () {
 
 impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for OperationDeadline {
     fn expired_acquisition_error(&self, error: &TxError) -> Option<E> {
-        if matches!(error, TxError::Acquire(sqlx::Error::PoolTimedOut)) && Instant::now() >= self.at
-        {
-            Some(OperationDeadlineElapsed.into())
-        } else {
-            None
-        }
+        (matches!(error, TxError::Acquire(sqlx::Error::PoolTimedOut)) && Instant::now() >= self.at)
+            .then(|| OperationDeadlineElapsed.into())
     }
 
     fn check_expiry(&self) -> Result<(), E> {

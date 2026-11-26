@@ -693,7 +693,7 @@ async fn an_http2_tls_connection_serves_requests_after_the_preface_deadline() {
             let response = sender.send_request(request).await.unwrap();
             assert_eq!(response.status(), http::StatusCode::OK);
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(&body[..], b"ok");
+            assert_eq!(&*body, b"ok");
         })
         .await
         .unwrap();

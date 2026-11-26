@@ -486,6 +486,10 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             self = self.with_components(incoming)?;
         }
         self.routes = self.routes.merge(other.routes);
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "order-independent per-method router merge"
+        )]
         for (method, router) in other.extension_routers {
             let existing = self.extension_routers.entry(method).or_default();
             *existing = std::mem::take(existing).merge(router);
@@ -505,6 +509,10 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         let components = other.routes.get_openapi_mut().components.take();
         other.routes = OpenApiRouter::default().nest(prefix, other.routes);
         other.routes.get_openapi_mut().components = components;
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "order-independent per-method router nesting"
+        )]
         for router in other.extension_routers.values_mut() {
             *router = Router::new().nest(prefix, std::mem::take(router));
         }

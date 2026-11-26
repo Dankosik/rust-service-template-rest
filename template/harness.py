@@ -8,6 +8,8 @@ import difflib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -162,6 +164,14 @@ _MODEL_BODY_RE = re.compile(r"^[A-Za-z0-9._/:=-]+$")
 _WORKSPACE_CRATES_REF = ".agents/skills/rust-dependencies/references/workspace-crates.md"
 _WORKSPACE_CRATES_BULLET_RE = re.compile(r"^- \*\*[^*]+\*\* \u2014 (?P<crates>`[^`]+`(?:, `[^`]+`)*):")
 _BACKTICK_TOKEN_RE = re.compile(r"`([^`]+)`")
+_RUST_FENCE_RE = re.compile(r"```rust\n(.*?)```", re.S)
+_DECISION_SKILL_KEYS = frozenset({"name", "description"})
+_WORKFLOW_SKILL_KEYS = frozenset({"name", "description", "metadata", "disable-model-invocation"})
+_SKILL_MIN_WORDS = 150
+_SKILL_MAX_WORDS = 1000
+_SKILL_MAX_PARA_WORDS = 125
+_WORKFLOW_MAX_WORDS = 600
+_REF_MAX_PROSE_WORDS = 500
 
 
 def selected_adapters(harness: str) -> tuple[str, ...]:
@@ -400,7 +410,7 @@ def _render_codex_config(repo: Path, role_names: list[str]) -> bytes:
     return (f"{RUNTIME_START}\n{text}{RUNTIME_END}\n\n" + "\n".join(registry) + "\n").encode("utf-8")
 
 
-def _parse_frontmatter(text: str) -> dict[str, str]:
+def _parse_frontmatter_and_body(text: str) -> tuple[dict[str, str], str]:
     if not text.startswith("---\n"):
         raise HarnessError("missing frontmatter")
     end = text.find("\n---\n", 4)
@@ -413,7 +423,126 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
         key, sep, value = line.partition(":")
         if sep:
             fields[key.strip()] = value.strip().strip('"')
-    return fields
+    return fields, text[end + 5 :]
+
+
+def _denied_crates_from_deny_toml(repo: Path) -> frozenset[str]:
+    deny_path = repo / "deny.toml"
+    if not deny_path.is_file():
+        return frozenset()
+    data = tomllib.loads(deny_path.read_text(encoding="utf-8"))
+    denied: set[str] = set()
+    for item in data.get("bans", {}).get("deny", []):
+        if isinstance(item, dict) and not item.get("deny-multiple-versions") and isinstance(item.get("crate"), str):
+            denied.add(item["crate"])
+    return frozenset(denied)
+
+
+def _validate_skill_body_and_refs(entry: Path, fields: dict[str, str], body: str, denied_crates: frozenset[str]) -> list[str]:
+    problems: list[str] = []
+    name = entry.name
+    is_workflow = "disable-model-invocation" in fields
+    allowed = _WORKFLOW_SKILL_KEYS if is_workflow else _DECISION_SKILL_KEYS
+    extra = sorted(set(fields) - allowed)
+    if extra:
+        problems.append(f"{name}: disallowed frontmatter key(s): {', '.join(extra)}")
+
+    stripped_body = body.strip()
+    h1_lines = [line for line in stripped_body.splitlines() if line.startswith("# ")]
+    if not is_workflow and len(h1_lines) != 1:
+        problems.append(f"{name}: decision skill must have exactly one H1 heading")
+    paras = [p.strip() for p in re.split(r"\n\s*\n", stripped_body) if p.strip() and not p.strip().startswith("#")]
+    total_words = sum(len(p.split()) for p in paras)
+    if is_workflow:
+        if total_words > _WORKFLOW_MAX_WORDS:
+            problems.append(f"{name}: workflow skill exceeds {_WORKFLOW_MAX_WORDS} words ({total_words})")
+    else:
+        if len(paras) < 3:
+            problems.append(f"{name}: decision skill needs at least 3 prose paragraphs ({len(paras)})")
+        if not (_SKILL_MIN_WORDS <= total_words <= _SKILL_MAX_WORDS):
+            problems.append(f"{name}: decision skill words ({total_words}) outside {_SKILL_MIN_WORDS}-{_SKILL_MAX_WORDS}")
+        for idx, para in enumerate(paras, start=1):
+            pwords = len(para.split())
+            if pwords > _SKILL_MAX_PARA_WORDS:
+                problems.append(f"{name}: paragraph {idx} exceeds {_SKILL_MAX_PARA_WORDS} words ({pwords})")
+            if not para.startswith("**"):
+                problems.append(f"{name}: paragraph {idx} must start with a bold cluster anchor (**...**)")
+
+    for token in _BACKTICK_TOKEN_RE.findall(body):
+        if token in denied_crates:
+            problems.append(f"{name}: references denied crate `{token}` from deny.toml")
+
+    refs_dir = entry / "references"
+    if refs_dir.is_dir():
+        for ref in sorted(refs_dir.glob("*.md")):
+            rel_link = f"references/{ref.name}"
+            if rel_link not in body:
+                problems.append(f"{name}: unreferenced file {rel_link}")
+            ref_text = ref.read_text(encoding="utf-8")
+            for idx, match in enumerate(_RUST_FENCE_RE.finditer(ref_text), start=1):
+                if "//" in match.group(1):
+                    problems.append(f"{name}/{rel_link}: rust block {idx} contains explanatory '//' comment")
+            if ref.name != "workspace-crates.md":
+                prose = _RUST_FENCE_RE.sub("", ref_text)
+                prose = "\n".join(
+                    line for line in prose.splitlines()
+                    if not line.startswith("#") and not line.startswith("Sources:")
+                )
+                ref_words = len(prose.split())
+                if ref_words > _REF_MAX_PROSE_WORDS:
+                    problems.append(f"{name}/{rel_link}: prose exceeds {_REF_MAX_PROSE_WORDS} words ({ref_words})")
+    return problems
+
+
+def check_skill_rust_examples(repo: Path) -> list[str]:
+    rustc = shutil.which("rustc")
+    if rustc is None:
+        raise HarnessError("rustc not found on PATH; cannot compile skill Rust examples")
+    sysroot = subprocess.check_output([rustc, "--print", "sysroot"], text=True).strip()
+    clippy_driver = Path(sysroot) / "bin" / "clippy-driver"
+    if not clippy_driver.is_file():
+        raise HarnessError(f"clippy-driver not found under {sysroot}")
+    problems: list[str] = []
+    skills_root = repo / ".agents/skills"
+    for ref in sorted(skills_root.glob("*/references/*.md")):
+        ref_rel = ref.relative_to(repo).as_posix()
+        text = ref.read_text(encoding="utf-8")
+        for idx, match in enumerate(_RUST_FENCE_RE.finditer(text), start=1):
+            code = match.group(1)
+            if "//" in code:
+                problems.append(f"{ref_rel}: rust block {idx} contains '//' comment")
+            if "tokio::" in code or not re.search(r"(?m)^\s*(?:pub\s+)?(?:struct|enum|trait|fn|const|type|mod)\b", code):
+                continue
+            if "struct Batch" in code:
+                continue
+            with tempfile.TemporaryDirectory() as tmp:
+                src = Path(tmp) / "example.rs"
+                out = Path(tmp) / "libexample.rmeta"
+                src.write_text("#![allow(dead_code)]\n" + code, encoding="utf-8")
+                proc = subprocess.run(
+                    [
+                        str(clippy_driver),
+                        "--crate-type",
+                        "lib",
+                        "--edition",
+                        "2024",
+                        "-D",
+                        "warnings",
+                        "-W",
+                        "clippy::pedantic",
+                        "--emit=metadata",
+                        "-o",
+                        str(out),
+                        str(src),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    first_err = proc.stderr.strip().splitlines()[:6]
+                    problems.append(f"{ref_rel}: rust block {idx} failed clippy-driver:\n" + "\n".join(first_err))
+    return problems
 
 
 def check_workspace_crates_reference(repo: Path, *, check_manifest: bool = True) -> list[str]:
@@ -450,6 +579,7 @@ def _validate_skills(repo: Path) -> list[str]:
         raise HarnessError(".agents/skills is missing")
     names: list[str] = []
     problems: list[str] = []
+    denied_crates = _denied_crates_from_deny_toml(repo) if (repo / "template/init.py").is_file() else frozenset()
     for entry in sorted(skills_root.iterdir()):
         if entry.is_symlink() or not entry.is_dir():
             problems.append(f".agents/skills/{entry.name}: must be a regular directory")
@@ -459,7 +589,7 @@ def _validate_skills(repo: Path) -> list[str]:
             problems.append(f"{entry.name}: missing SKILL.md")
             continue
         try:
-            fields = _parse_frontmatter(skill.read_text(encoding="utf-8"))
+            fields, body = _parse_frontmatter_and_body(skill.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, HarnessError) as err:
             problems.append(f"{entry.name}: {err}")
             continue
@@ -467,6 +597,7 @@ def _validate_skills(repo: Path) -> list[str]:
             problems.append(f"{entry.name}: frontmatter name must match directory name")
         if not fields.get("description"):
             problems.append(f"{entry.name}: empty description")
+        problems.extend(_validate_skill_body_and_refs(entry, fields, body, denied_crates))
         names.append(entry.name)
     problems.extend(check_workspace_crates_reference(repo, check_manifest=(repo / "template/init.py").is_file()))
     if not names:
@@ -599,12 +730,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--apply", dest="mode", action="store_const", const="apply")
     modes.add_argument("--check", dest="mode", action="store_const", const="check")
+    modes.add_argument("--check-examples", dest="mode", action="store_const", const="check-examples")
     parser.add_argument("--repo", type=Path, default=Path("."))
     parser.add_argument("--harness", choices=HARNESS_CHOICES, default="all")
     parser.add_argument("--require-materialized", action="store_true")
     args = parser.parse_args(argv)
     try:
-        sync_or_check(args.repo.resolve(strict=True), args.mode, args.harness, require_materialized=args.require_materialized)
+        resolved = args.repo.resolve(strict=True)
+        if args.mode == "check-examples":
+            problems = check_skill_rust_examples(resolved)
+            if problems:
+                raise HarnessError("\n".join(problems))
+            print("agent harness: skill Rust examples compiled cleanly with clippy::pedantic")
+        else:
+            sync_or_check(resolved, args.mode, args.harness, require_materialized=args.require_materialized)
     except (HarnessError, OSError, tomllib.TOMLDecodeError) as exc:
         print(f"agent harness: {exc}", file=sys.stderr)
         return 1

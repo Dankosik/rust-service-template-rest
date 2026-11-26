@@ -125,7 +125,7 @@ pub(crate) fn extract_context_from_headers(
         return opentelemetry::Context::new();
     };
     let context_data = SerializationContextData::None;
-    let Ok(raw_map) = converter.from_payload::<HashMap<String, String>>(
+    let Ok(raw_map) = converter.from_payload::<std::collections::BTreeMap<String, String>>(
         &SerializationContext::new(&context_data, converter),
         payload.clone(),
     ) else {

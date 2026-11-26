@@ -351,7 +351,7 @@ mod tests {
             build_publish_message(
                 &publication,
                 &tracing::Span::none(),
-                &HeaderValue::from(stream + "s"),
+                &HeaderValue::from(format!("{stream}s")),
                 4
             ),
             Err(PublishRejection::InvalidEnvelope(

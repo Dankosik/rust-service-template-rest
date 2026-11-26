@@ -255,7 +255,7 @@ fn terminal_fixture() {
         .enable_all()
         .build()
         .unwrap();
-    let _blocking_release = if scenario == "runtime_blocked" {
+    let _blocking_release = (scenario == "runtime_blocked").then(|| {
         let (release, wait) = mpsc::channel::<()>();
         let (started, running) = mpsc::channel();
         runtime.spawn_blocking(move || {
@@ -263,10 +263,8 @@ fn terminal_fixture() {
             let _ = wait.recv();
         });
         running.recv_timeout(Duration::from_secs(5)).unwrap();
-        Some(release)
-    } else {
-        None
-    };
+        release
+    });
     let outcome = match scenario.as_str() {
         "error" => Err(Failure::Setup("bad config".to_owned())),
         "no_change" => Ok(Report {

@@ -20,10 +20,10 @@ their owning policy. Skip checks deterministic tooling (`rustc`, `clippy`,
 
 | Mode | Read inputs | Standards to load |
 | --- | --- | --- |
-| Single reviewer (Axes 1–4) | Diff, accepted bundle, check receipts, production files + callers, tests | [Rust Testing](../../../.agents/skills/rust-testing/SKILL.md), [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), and domain skills matching touched risks |
+| Single reviewer (Axes 1–4) | Diff, accepted bundle, check receipts, production files + callers, tests | [Rust Testing](../../../.agents/skills/rust-testing/SKILL.md), [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), [Rust Idiomatic](../../../.agents/skills/rust-idiomatic/SKILL.md), and domain skills matching touched risks |
 | Lens A — Spec, Scope & Proof (Axes 1 + 4) | Diff, `spec.md`, `tasks.md`, packets, check receipts, tests, and touched production code strictly for reachability and Mutation Mental Test | [Rust Testing](../../../.agents/skills/rust-testing/SKILL.md); add `rust-api-contract` if HTTP/OpenAPI changed |
-| Lens B — Runtime, Seams & Structure (Axes 2 + 3) | Diff, touched production files + surrounding modules + callers, `design.md` (or `spec.md#architecture` when inline), task `decisions` | [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), plus 1–2 matching domain skills for touched risks (`rust-sqlx`, `rust-tokio`, `rust-security`, `rust-axum`, `rust-reliability`, `rust-errors`, `rust-config`) |
-| [Structure-Only](#structure-only-review) (Axis 3) | Diff hunks and callers for each structural addition named in the brief | [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md) |
+| Lens B — Runtime, Seams & Structure (Axes 2 + 3) | Diff, touched production files + surrounding modules + callers, `design.md` (or `spec.md#architecture` when inline), task `decisions` | [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), [Rust Idiomatic](../../../.agents/skills/rust-idiomatic/SKILL.md), plus 1–2 matching domain skills for touched risks (`rust-sqlx`, `rust-tokio`, `rust-security`, `rust-axum`, `rust-reliability`, `rust-errors`, `rust-config`; add `rust-dependencies` or `rust-performance` when adding data structures, parsers, caches, or editing hot paths) |
+| [Structure-Only](#structure-only-review) (Axis 3) | Diff hunks and callers for each structural addition named in the brief | [Rust Structural Quality](../../../.agents/skills/rust-structural-quality/SKILL.md), [Rust Idiomatic](../../../.agents/skills/rust-idiomatic/SKILL.md) |
 
 ## Adversarial Falsifiers
 
@@ -51,9 +51,20 @@ axis never masks another's defect:
      defaults, and `decisions` across `Provides -> Depends on` seams
      (`INTEGRATION_DEFECT`); flag duplicated helpers or divergent error shapes
      and telemetry across parallel tasks.
-3. **Structure & Single Ownership.** Apply the deletion test and deep-module
-   standards against touched code and recorded decisions. Name the violated
-   constraint and concrete action (`delete | collapse | bind | delegate <item>`).
+3. **Structure & Single Ownership.** Apply the deletion test, deep-module
+   standards, and behind-the-seam type/readability checks against touched code
+   and recorded decisions:
+   - *Type & ownership invariants (`rust-idiomatic`):* illegal or inert
+     `Option`/`bool` combinations, raw primitives where `NonZero*` or newtypes
+     prevent bugs, repeated runtime validation instead of boundary parsing, and
+     needless owned/cloning shapes on transient per-call descriptors.
+   - *Delegation & exhaustiveness (`rust-dependencies`, `rust-coder`):*
+     hand-rolled collections, parsers, or caches already covered by
+     `workspace-crates.md`, and catch-all `_ =>` arms hiding additions to closed
+     workspace or upstream enums.
+   - *Role clarity (`rust-structural-quality`):* functions mixing distinct roles
+     or hiding invariants behind unclear names. Name the violated constraint and
+     concrete action (`delete | collapse | bind | delegate | narrow-type <item>`).
 4. **Test & Proof Falsifiability.** Run the **Mutation Mental Test** on every
    added or edited test: mentally invert or delete the single production branch
    it claims to guard—would it go **red**? Flag tautological assertions, mocking
@@ -75,7 +86,7 @@ lens), grouped by axis:
 ## Axis <N> — <Axis Name>
 - none — attacked: <concrete scenario, probe, or mutated branch + catching test>
 # OR per finding:
-- [<TASK_DEFECT | INTEGRATION_DEFECT | UPSTREAM_GAP | FOLLOW_UP>] <path::Symbol> — violated: <anchor/rule>; trace: <reachable counterexample, surviving mutant, or structural action>; owner: <smallest owner>
+- [<TASK_DEFECT | INTEGRATION_DEFECT | UPSTREAM_GAP | FOLLOW_UP>] <path::Symbol> — violated: <anchor/rule>; trace: <reachable counterexample, surviving mutant, or structural action>; fix: <minimal concrete replacement or signature sketch>; owner: <smallest owner>
 ```
 
 Record compact `evidence_boundary` summaries (obligations traced and mutated

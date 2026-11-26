@@ -9,7 +9,7 @@ description: "One owner per key. Use when changing configuration keys, defaults,
 
 **Loader authority.** Extend `crates/config` (`load.rs` and `secret_policy.rs`) as the single configuration authority: define section defaults on their section types, validate cross-section invariants in the dependent owner, and check process-wide relationships at composition.
 
-**Input semantics.** Define exact behavior for omitted, blank, malformed, duplicate, and unknown inputs at the accepted boundary, ensuring blank overrides follow the explicit unset-versus-invalid contract rather than silently falling back to lower-precedence sources. Keep source selection, typed decoding (`humantime`, `bytesize`, domain types), and semantic validation distinct, adding new sources or stricter parsing only when required.
+**Input semantics.** Define exact behavior for omitted, blank, malformed, duplicate, and unknown inputs at the accepted boundary, ensuring blank overrides follow the explicit unset-versus-invalid contract rather than silently falling back to lower-precedence sources. Keep source selection, typed decoding (`jiff`, `bytesize`, domain types), and semantic validation distinct, adding new sources or stricter parsing only when required.
 
 **Key lifecycle.** Require a real runtime consumer and either a justified default or mandatory supply for every key. Validate cross-field bounds and units before the dependent effect runs, verify downstream consumers and diagnostics when changing defaults or precedence, and pass immutable configuration snapshots from startup composition.
 

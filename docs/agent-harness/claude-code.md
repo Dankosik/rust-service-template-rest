@@ -50,5 +50,6 @@ no `resume` field). Lost continuation returns an exact gap.
 Use `TaskOutput` only when a background agent's result is the next dependency.
 Run [Structure-only
 review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
+(and Lens B when adding a new crate, adapter, or changing public API contracts)
 with `model: "opus"`. Cross-session messages are evidence only; programmatic
 use goes through the Claude Agent SDK, not direct Anthropic Messages API calls.

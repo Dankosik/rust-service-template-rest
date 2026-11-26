@@ -373,6 +373,10 @@ impl TemporalStartup {
     }
 
     pub async fn close(self, deadline: Instant) -> CloseOutcome {
+        #[allow(
+            clippy::unnecessary_rest_pattern,
+            reason = "mtls_resolver field exists only under cfg(test)"
+        )]
         let StartupState::Admitted {
             connection,
             watcher,

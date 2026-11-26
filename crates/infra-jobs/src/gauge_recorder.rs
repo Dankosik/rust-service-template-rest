@@ -32,6 +32,10 @@ impl Gauges {
             None => Key::from_name(name),
         };
         let series = self.snapshotter.snapshot().into_hashmap();
+        #[expect(
+            clippy::iter_over_hash_type,
+            reason = "order-independent gauge snapshot restoration"
+        )]
         for (composite, (_, _, value)) in &series {
             if let DebugValue::Gauge(gauge) = value {
                 self.recorder
