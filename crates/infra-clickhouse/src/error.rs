@@ -163,6 +163,18 @@ impl InsertBatchSize {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WriteStage {
+    Row(usize),
+    End,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClassifiedInsertError {
+    pub(crate) failure: ObservedFailure<InsertError>,
+    pub(crate) schema_drift: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ResponseStatusCode {
     ClickHouse(u32),
     Http(u16),
@@ -364,33 +376,57 @@ const fn http_status_reason(status: u16) -> FailureReason {
     }
 }
 
+enum ClickHouseException {
+    HeaderMismatch { code: u32 },
+    ResultRowsLimit { code: u32 },
+    Standard { code: u32, reason: FailureReason },
+}
+
+impl ClickHouseException {
+    const fn is_schema_drift(&self) -> bool {
+        matches!(
+            self,
+            Self::HeaderMismatch { .. }
+                | Self::Standard {
+                    code: CODE_NO_SUCH_COLUMN_IN_TABLE
+                        | CODE_UNKNOWN_IDENTIFIER
+                        | CODE_TYPE_MISMATCH,
+                    ..
+                }
+        )
+    }
+
+    const fn code_and_reason(&self) -> (u32, FailureReason) {
+        match *self {
+            Self::HeaderMismatch { code } => (code, FailureReason::QueryInvalid),
+            Self::ResultRowsLimit { code } => (code, FailureReason::ResultLimit),
+            Self::Standard { code, reason } => (code, reason),
+        }
+    }
+}
+
 enum ParsedBadResponse {
-    ClickHouse {
-        code: u32,
-        reason: FailureReason,
-        header_mismatch: bool,
-        result_rows_limit: bool,
-    },
-    Http {
-        status: u16,
-        reason: FailureReason,
-    },
+    ClickHouse(ClickHouseException),
+    Http { status: u16, reason: FailureReason },
     Opaque,
 }
 
 fn parse_bad_response(message: &str) -> ParsedBadResponse {
     if let Some(code) = extract_exception_code(message) {
-        let header_mismatch =
-            code == CODE_INCORRECT_DATA && message.contains("while reading header");
-        let result_rows_limit = code == CODE_TOO_MANY_ROWS_OR_BYTES
+        let exception = if code == CODE_INCORRECT_DATA && message.contains("while reading header") {
+            ClickHouseException::HeaderMismatch { code }
+        } else if code == CODE_TOO_MANY_ROWS_OR_BYTES
             && message.contains("Limit for result exceeded")
-            && message.contains("max rows");
-        return ParsedBadResponse::ClickHouse {
-            code,
-            reason: clickhouse_code_reason(code),
-            header_mismatch,
-            result_rows_limit,
+            && message.contains("max rows")
+        {
+            ClickHouseException::ResultRowsLimit { code }
+        } else {
+            ClickHouseException::Standard {
+                code,
+                reason: clickhouse_code_reason(code),
+            }
         };
+        return ParsedBadResponse::ClickHouse(exception);
     }
     if let Some(status) = extract_http_status_from_bad_response(message) {
         return ParsedBadResponse::Http {
@@ -403,23 +439,6 @@ fn parse_bad_response(message: &str) -> ParsedBadResponse {
 
 pub(crate) const fn is_auth_failure(detail: FailureDetail) -> bool {
     matches!(detail.reason, FailureReason::Auth)
-}
-
-pub(crate) fn is_schema_drift_error(error: &clickhouse::error::Error) -> bool {
-    match error {
-        clickhouse::error::Error::SchemaMismatch(_) => true,
-        clickhouse::error::Error::BadResponse(message) => matches!(
-            parse_bad_response(message),
-            ParsedBadResponse::ClickHouse {
-                code: CODE_NO_SUCH_COLUMN_IN_TABLE | CODE_UNKNOWN_IDENTIFIER | CODE_TYPE_MISMATCH,
-                ..
-            } | ParsedBadResponse::ClickHouse {
-                header_mismatch: true,
-                ..
-            }
-        ),
-        _ => false,
-    }
 }
 
 fn extract_exception_code(message: &str) -> Option<u32> {
@@ -500,18 +519,21 @@ pub(crate) fn classify_query_error(
             ObservedFailure::with_reason(QueryError::Decode, FailureReason::Decode)
         }
         clickhouse::error::Error::BadResponse(message) => match parse_bad_response(message) {
-            ParsedBadResponse::ClickHouse {
-                code,
-                result_rows_limit: true,
-                ..
-            } if row_cap == QueryRowCap::ServerAtMostOne => ObservedFailure::new(
-                QueryError::TooManyRows,
-                FailureDetail::with_clickhouse_code(FailureReason::TooManyRows, code),
-            ),
-            ParsedBadResponse::ClickHouse { code, reason, .. } => ObservedFailure::new(
-                query_error_from_clickhouse_reason(reason),
-                FailureDetail::with_clickhouse_code(reason, code),
-            ),
+            ParsedBadResponse::ClickHouse(ClickHouseException::ResultRowsLimit { code })
+                if row_cap == QueryRowCap::ServerAtMostOne =>
+            {
+                ObservedFailure::new(
+                    QueryError::TooManyRows,
+                    FailureDetail::with_clickhouse_code(FailureReason::TooManyRows, code),
+                )
+            }
+            ParsedBadResponse::ClickHouse(exception) => {
+                let (code, reason) = exception.code_and_reason();
+                ObservedFailure::new(
+                    query_error_from_clickhouse_reason(reason),
+                    FailureDetail::with_clickhouse_code(reason, code),
+                )
+            }
             ParsedBadResponse::Http { status, reason } => {
                 let error = if is_http_rejection(reason) {
                     QueryError::Rejected
@@ -535,19 +557,28 @@ pub(crate) fn classify_query_error(
     }
 }
 
-pub(crate) fn classify_metadata_error(
-    error: &clickhouse::error::Error,
-) -> ObservedFailure<InsertError> {
+pub(crate) fn classify_metadata_error(error: &clickhouse::error::Error) -> ClassifiedInsertError {
     match error {
-        clickhouse::error::Error::SchemaMismatch(_)
-        | clickhouse::error::Error::InvalidColumnsHeader(_)
+        clickhouse::error::Error::SchemaMismatch(_) => ClassifiedInsertError {
+            failure: ObservedFailure::with_reason(
+                InsertError::NotApplied(InsertFailure::Encode),
+                FailureReason::Encode,
+            ),
+            schema_drift: true,
+        },
+        clickhouse::error::Error::InvalidColumnsHeader(_)
         | clickhouse::error::Error::DataFormat(_)
-        | clickhouse::error::Error::NotEnoughData => ObservedFailure::with_reason(
-            InsertError::NotApplied(InsertFailure::Encode),
-            FailureReason::Encode,
-        ),
+        | clickhouse::error::Error::NotEnoughData => ClassifiedInsertError {
+            failure: ObservedFailure::with_reason(
+                InsertError::NotApplied(InsertFailure::Encode),
+                FailureReason::Encode,
+            ),
+            schema_drift: false,
+        },
         clickhouse::error::Error::BadResponse(message) => match parse_bad_response(message) {
-            ParsedBadResponse::ClickHouse { code, reason, .. } => {
+            ParsedBadResponse::ClickHouse(exception) => {
+                let schema_drift = exception.is_schema_drift();
+                let (code, reason) = exception.code_and_reason();
                 let failure = match code {
                     CODE_UNKNOWN_IDENTIFIER
                     | CODE_UNKNOWN_TABLE
@@ -557,10 +588,13 @@ pub(crate) fn classify_metadata_error(
                     | CODE_AUTHENTICATION_FAILED => InsertFailure::Rejected,
                     _ => InsertFailure::Unavailable,
                 };
-                ObservedFailure::new(
-                    InsertError::NotApplied(failure),
-                    FailureDetail::with_clickhouse_code(reason, code),
-                )
+                ClassifiedInsertError {
+                    failure: ObservedFailure::new(
+                        InsertError::NotApplied(failure),
+                        FailureDetail::with_clickhouse_code(reason, code),
+                    ),
+                    schema_drift,
+                }
             }
             ParsedBadResponse::Http { status, reason } => {
                 let failure = if is_http_rejection(reason) {
@@ -568,15 +602,21 @@ pub(crate) fn classify_metadata_error(
                 } else {
                     InsertFailure::Unavailable
                 };
-                ObservedFailure::new(
-                    InsertError::NotApplied(failure),
-                    FailureDetail::with_http_status(reason, status),
-                )
+                ClassifiedInsertError {
+                    failure: ObservedFailure::new(
+                        InsertError::NotApplied(failure),
+                        FailureDetail::with_http_status(reason, status),
+                    ),
+                    schema_drift: false,
+                }
             }
-            ParsedBadResponse::Opaque => ObservedFailure::with_reason(
-                InsertError::NotApplied(InsertFailure::Unavailable),
-                FailureReason::ServerError,
-            ),
+            ParsedBadResponse::Opaque => ClassifiedInsertError {
+                failure: ObservedFailure::with_reason(
+                    InsertError::NotApplied(InsertFailure::Unavailable),
+                    FailureReason::ServerError,
+                ),
+                schema_drift: false,
+            },
         },
         _ => {
             let reason = if is_hyper_connect_error(error) {
@@ -584,63 +624,98 @@ pub(crate) fn classify_metadata_error(
             } else {
                 FailureReason::Transport
             };
-            ObservedFailure::with_reason(
-                InsertError::NotApplied(InsertFailure::Unavailable),
-                reason,
-            )
+            ClassifiedInsertError {
+                failure: ObservedFailure::with_reason(
+                    InsertError::NotApplied(InsertFailure::Unavailable),
+                    reason,
+                ),
+                schema_drift: false,
+            }
         }
     }
+}
+
+pub(crate) fn classify_write_error(
+    error: &clickhouse::error::Error,
+    stage: WriteStage,
+    batch_size: InsertBatchSize,
+    stopped: Option<BoundedStop>,
+) -> ClassifiedInsertError {
+    if matches!(stage, WriteStage::Row(_)) && is_local_serialization_error(error) {
+        let insert_error = if stage == WriteStage::Row(0) {
+            InsertError::NotApplied(InsertFailure::Encode)
+        } else {
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable)
+        };
+        return ClassifiedInsertError {
+            failure: ObservedFailure::with_reason(insert_error, FailureReason::Encode),
+            schema_drift: matches!(error, clickhouse::error::Error::SchemaMismatch(_)),
+        };
+    }
+    let classified = classify_post_dispatch_insert_error(error, batch_size);
+    if let Some(stop) = stopped {
+        return ClassifiedInsertError {
+            failure: ObservedFailure::post_dispatch_stop(stop),
+            schema_drift: classified.schema_drift,
+        };
+    }
+    classified
 }
 
 pub(crate) fn classify_post_dispatch_insert_error(
     error: &clickhouse::error::Error,
     batch_size: InsertBatchSize,
-) -> ObservedFailure<InsertError> {
+) -> ClassifiedInsertError {
     if is_hyper_connect_error(error) {
-        return ObservedFailure::with_reason(
-            InsertError::NotApplied(InsertFailure::Unavailable),
-            FailureReason::Connect,
-        );
+        return ClassifiedInsertError {
+            failure: ObservedFailure::with_reason(
+                InsertError::NotApplied(InsertFailure::Unavailable),
+                FailureReason::Connect,
+            ),
+            schema_drift: false,
+        };
     }
     if let clickhouse::error::Error::BadResponse(message) = error {
         return match parse_bad_response(message) {
-            ParsedBadResponse::ClickHouse {
-                code,
-                reason,
-                header_mismatch,
-                ..
-            } => {
-                let mapped = match code {
-                    CODE_TOO_MANY_PARTS if batch_size == InsertBatchSize::SingleRow => {
-                        InsertError::NotApplied(InsertFailure::TooManyParts)
+            ParsedBadResponse::ClickHouse(exception) => {
+                let schema_drift = exception.is_schema_drift();
+                let (mapped, detail) = match exception {
+                    ClickHouseException::HeaderMismatch { code } => (
+                        InsertError::NotApplied(InsertFailure::Rejected),
+                        FailureDetail::with_clickhouse_code(FailureReason::Schema, code),
+                    ),
+                    ClickHouseException::ResultRowsLimit { code } => (
+                        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+                        FailureDetail::with_clickhouse_code(FailureReason::ResultLimit, code),
+                    ),
+                    ClickHouseException::Standard { code, reason } => {
+                        let mapped = match code {
+                            CODE_TOO_MANY_PARTS if batch_size == InsertBatchSize::SingleRow => {
+                                InsertError::NotApplied(InsertFailure::TooManyParts)
+                            }
+                            CODE_TOO_MANY_BYTES => InsertError::NotApplied(InsertFailure::TooLarge),
+                            CODE_INCORRECT_DATA if batch_size == InsertBatchSize::SingleRow => {
+                                InsertError::NotApplied(InsertFailure::Rejected)
+                            }
+                            _ if matches!(
+                                reason,
+                                FailureReason::Schema
+                                    | FailureReason::Readonly
+                                    | FailureReason::Access
+                                    | FailureReason::Auth
+                            ) =>
+                            {
+                                InsertError::NotApplied(InsertFailure::Rejected)
+                            }
+                            _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+                        };
+                        (mapped, FailureDetail::with_clickhouse_code(reason, code))
                     }
-                    CODE_TOO_MANY_BYTES => InsertError::NotApplied(InsertFailure::TooLarge),
-                    CODE_INCORRECT_DATA
-                        if header_mismatch || batch_size == InsertBatchSize::SingleRow =>
-                    {
-                        InsertError::NotApplied(InsertFailure::Rejected)
-                    }
-                    _ if matches!(
-                        reason,
-                        FailureReason::Schema
-                            | FailureReason::Readonly
-                            | FailureReason::Access
-                            | FailureReason::Auth
-                    ) =>
-                    {
-                        InsertError::NotApplied(InsertFailure::Rejected)
-                    }
-                    _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
                 };
-                let effective_reason = if header_mismatch {
-                    FailureReason::Schema
-                } else {
-                    reason
-                };
-                ObservedFailure::new(
-                    mapped,
-                    FailureDetail::with_clickhouse_code(effective_reason, code),
-                )
+                ClassifiedInsertError {
+                    failure: ObservedFailure::new(mapped, detail),
+                    schema_drift,
+                }
             }
             ParsedBadResponse::Http { status, reason } => {
                 let mapped = match reason {
@@ -650,21 +725,33 @@ pub(crate) fn classify_post_dispatch_insert_error(
                     }
                     _ => InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
                 };
-                ObservedFailure::new(mapped, FailureDetail::with_http_status(reason, status))
+                ClassifiedInsertError {
+                    failure: ObservedFailure::new(
+                        mapped,
+                        FailureDetail::with_http_status(reason, status),
+                    ),
+                    schema_drift: false,
+                }
             }
-            ParsedBadResponse::Opaque => ObservedFailure::with_reason(
-                InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-                FailureReason::ServerError,
-            ),
+            ParsedBadResponse::Opaque => ClassifiedInsertError {
+                failure: ObservedFailure::with_reason(
+                    InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+                    FailureReason::ServerError,
+                ),
+                schema_drift: false,
+            },
         };
     }
-    ObservedFailure::with_reason(
-        InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
-        FailureReason::Transport,
-    )
+    ClassifiedInsertError {
+        failure: ObservedFailure::with_reason(
+            InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
+            FailureReason::Transport,
+        ),
+        schema_drift: matches!(error, clickhouse::error::Error::SchemaMismatch(_)),
+    }
 }
 
-pub(crate) fn is_local_serialization_error(error: &clickhouse::error::Error) -> bool {
+fn is_local_serialization_error(error: &clickhouse::error::Error) -> bool {
     matches!(
         error,
         clickhouse::error::Error::Custom(_)

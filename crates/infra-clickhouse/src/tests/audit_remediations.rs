@@ -1095,6 +1095,7 @@ async fn datetime_and_decimal_query_param_formatting_and_validation() {
     let none_str: Option<String> = None;
     let str_vec = vec!["alpha".to_owned(), "beta".to_owned()];
     let decimals = [Decimal64::<2>::new(1234), Decimal64::<2>::new(-500)];
+    let nested_slices = [str_vec.as_slice()];
     let _ = ch
         .query("param_fmt", "SELECT param_check")
         .param("dt_modern", ts)
@@ -1120,6 +1121,9 @@ async fn datetime_and_decimal_query_param_formatting_and_validation() {
         .param("opt_num_ref", opt_num.as_ref())
         .param("opt_ref", opt_str.as_ref())
         .param("none_ref", none_str.as_ref())
+        .param("opt_borrowed", &opt_str)
+        .param("none_borrowed", &none_str)
+        .param("nested_slice", nested_slices.as_slice())
         .param("str_iter", Param::from_iter(&str_vec))
         .fetch_one::<SampleRow>(&ctx)
         .await
@@ -1146,6 +1150,9 @@ async fn datetime_and_decimal_query_param_formatting_and_validation() {
         "name=\"param_opt_num_ref\"\r\n\r\n7\r\n",
         "name=\"param_opt_ref\"\r\n\r\nzeta\r\n",
         "name=\"param_none_ref\"\r\n\r\n\\N\r\n",
+        "name=\"param_opt_borrowed\"\r\n\r\nzeta\r\n",
+        "name=\"param_none_borrowed\"\r\n\r\n\\N\r\n",
+        "name=\"param_nested_slice\"\r\n\r\n[['alpha','beta']]\r\n",
         "name=\"param_str_iter\"\r\n\r\n['alpha','beta']\r\n",
     ] {
         assert!(body.contains(expected), "missing {expected:?} in {body}");

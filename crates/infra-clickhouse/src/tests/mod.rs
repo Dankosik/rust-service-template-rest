@@ -687,8 +687,9 @@ async fn a4_7_bad_response_loopback_probes() {
         assert_eq!(
             (
                 error::classify_query_error(&err, error::QueryRowCap::Uncapped).error,
-                error::classify_metadata_error(&err).error,
+                error::classify_metadata_error(&err).failure.error,
                 error::classify_post_dispatch_insert_error(&err, error::InsertBatchSize::SingleRow)
+                    .failure
                     .error,
             ),
             (
@@ -782,11 +783,12 @@ fn clickhouse_permanent_db_and_query_param_codes_classify_as_rejected() {
         "Code: 81. DB::Exception: Database missing does not exist".to_owned(),
     );
     assert_eq!(
-        error::classify_metadata_error(&db_err).error,
+        error::classify_metadata_error(&db_err).failure.error,
         InsertError::NotApplied(InsertFailure::Rejected)
     );
     assert_eq!(
         error::classify_post_dispatch_insert_error(&db_err, error::InsertBatchSize::SingleRow)
+            .failure
             .error,
         InsertError::NotApplied(InsertFailure::Rejected)
     );
@@ -842,12 +844,13 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{reason}"
         );
         assert_eq!(
-            error::classify_metadata_error(&ch_err).error,
+            error::classify_metadata_error(&ch_err).failure.error,
             InsertError::NotApplied(expected_metadata),
             "{reason}"
         );
         assert_eq!(
             error::classify_post_dispatch_insert_error(&ch_err, error::InsertBatchSize::SingleRow)
+                .failure
                 .error,
             expected_insert,
             "{reason}"
@@ -878,12 +881,13 @@ fn a4_7_canonical_http_status_fallback_and_prose_fail_closed() {
             "{prose}"
         );
         assert_eq!(
-            error::classify_metadata_error(&ch_err).error,
+            error::classify_metadata_error(&ch_err).failure.error,
             InsertError::NotApplied(InsertFailure::Unavailable),
             "{prose}"
         );
         assert_eq!(
             error::classify_post_dispatch_insert_error(&ch_err, error::InsertBatchSize::SingleRow)
+                .failure
                 .error,
             InsertError::OutcomeUnknown(UnknownOutcome::Unavailable),
             "{prose}"
@@ -1264,11 +1268,10 @@ fn filter_decoupled_lifetimes<'a>(mut q: crate::Query<'a>, ids: &[u64]) -> crate
 }
 
 #[test]
-fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning_and_common_traits_hold() {
+fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning() {
     use std::borrow::Cow;
-    use std::path::PathBuf;
 
-    use crate::{ClientCertificate, Param, Query};
+    use crate::{Param, Query};
 
     let _ = std::hint::black_box::<for<'a> fn(Query<'a>, &[u64]) -> Query<'a>>(
         filter_decoupled_lifetimes,
@@ -1277,12 +1280,21 @@ fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning_and_common_tr
     let owned = vec!["alpha".to_owned(), "beta".to_owned()];
     let expected_ptrs = vec![owned[0].as_ptr(), owned[1].as_ptr()];
     assert_eq!(
+        Param::from(owned.as_slice()).borrowed_str_ptrs(),
+        expected_ptrs
+    );
+    assert_eq!(Param::from(&owned).borrowed_str_ptrs(), expected_ptrs);
+    assert_eq!(
         Param::from_iter(owned.as_slice()).borrowed_str_ptrs(),
         expected_ptrs
     );
     assert_eq!(Param::from_iter(&owned).borrowed_str_ptrs(), expected_ptrs);
 
     let arr = ["gamma".to_owned(), "delta".to_owned()];
+    assert_eq!(
+        Param::from(&arr).borrowed_str_ptrs(),
+        vec![arr[0].as_ptr(), arr[1].as_ptr()]
+    );
     assert_eq!(
         Param::from_iter(&arr).borrowed_str_ptrs(),
         vec![arr[0].as_ptr(), arr[1].as_ptr()]
@@ -1302,6 +1314,10 @@ fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning_and_common_tr
         vec![nested_addr]
     );
     assert_eq!(
+        Param::from(&owned_params).borrowed_str_ptrs(),
+        vec![first_addr, nested_addr]
+    );
+    assert_eq!(
         Param::from_iter(&owned_params).borrowed_str_ptrs(),
         vec![first_addr, nested_addr]
     );
@@ -1310,25 +1326,6 @@ fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning_and_common_tr
     assert_eq!(
         Param::from(&cow_owned).borrowed_str_ptrs(),
         vec![cow_owned.as_ptr()]
-    );
-
-    let opt_str = Some("zeta".to_owned());
-    assert_eq!(
-        Param::from(opt_str.as_ref()).borrowed_str_ptrs(),
-        vec![opt_str.as_ref().expect("some").as_ptr()]
-    );
-
-    let custom_ids = [
-        CustomParamId("c1".to_owned()),
-        CustomParamId("c2".to_owned()),
-    ];
-    assert_eq!(
-        Param::from(&custom_ids[0]).borrowed_str_ptrs(),
-        vec![custom_ids[0].0.as_ptr()]
-    );
-    assert_eq!(
-        Param::from_iter(&custom_ids).borrowed_str_ptrs(),
-        vec![custom_ids[0].0.as_ptr(), custom_ids[1].0.as_ptr()]
     );
 
     let literals: &[&str] = &["one", "two"];
@@ -1341,6 +1338,73 @@ fn param_borrowed_conversions_preserve_lifetimes_and_avoid_cloning_and_common_tr
         Param::from_iter(literals).borrowed_str_ptrs(),
         expected_literal_ptrs
     );
+}
+
+#[test]
+fn param_borrowed_options_and_custom_types_avoid_cloning() {
+    use crate::Param;
+
+    fn borrow_generic<'a, 'b, T: 'b>(xs: &'b [T], opts: &'b [Option<T>]) -> (Param<'a>, Param<'a>)
+    where
+        &'b T: Into<Param<'a>>,
+    {
+        (Param::from(xs), Param::from(opts))
+    }
+
+    let opt_str = Some("zeta".to_owned());
+    let opts = [Some("eta".to_owned()), None];
+    let owned = vec!["alpha".to_owned(), "beta".to_owned()];
+    let (generic_slice, generic_opts) = borrow_generic(owned.as_slice(), opts.as_slice());
+    assert_eq!(
+        generic_slice.borrowed_str_ptrs(),
+        vec![owned[0].as_ptr(), owned[1].as_ptr()]
+    );
+    assert_eq!(
+        generic_opts.borrowed_str_ptrs(),
+        vec![opts[0].as_ref().expect("some").as_ptr()]
+    );
+    assert_eq!(
+        Param::from(&opt_str).borrowed_str_ptrs(),
+        vec![opt_str.as_ref().expect("some").as_ptr()]
+    );
+    assert_eq!(
+        Param::from(opt_str.as_ref()).borrowed_str_ptrs(),
+        vec![opt_str.as_ref().expect("some").as_ptr()]
+    );
+
+    let nested_slices = [owned.as_slice()];
+    assert_eq!(
+        Param::from(nested_slices.as_slice()).borrowed_str_ptrs(),
+        vec![owned[0].as_ptr(), owned[1].as_ptr()]
+    );
+    assert_eq!(
+        Param::from(&owned.as_slice()).borrowed_str_ptrs(),
+        vec![owned[0].as_ptr(), owned[1].as_ptr()]
+    );
+
+    let custom_ids = [
+        CustomParamId("c1".to_owned()),
+        CustomParamId("c2".to_owned()),
+    ];
+    assert_eq!(
+        Param::from(&custom_ids[0]).borrowed_str_ptrs(),
+        vec![custom_ids[0].0.as_ptr()]
+    );
+    assert_eq!(
+        Param::from(&custom_ids).borrowed_str_ptrs(),
+        vec![custom_ids[0].0.as_ptr(), custom_ids[1].0.as_ptr()]
+    );
+    assert_eq!(
+        Param::from_iter(&custom_ids).borrowed_str_ptrs(),
+        vec![custom_ids[0].0.as_ptr(), custom_ids[1].0.as_ptr()]
+    );
+}
+
+#[test]
+fn common_error_and_transport_traits_hold() {
+    use std::path::PathBuf;
+
+    use crate::ClientCertificate;
 
     assert_eq!(
         InsertError::from(InsertFailure::Busy),

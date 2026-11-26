@@ -15,8 +15,8 @@ use super::{
 };
 use crate::credentials::{ActiveCredentials, CredEpoch};
 use crate::metadata::{
-    AcquireDecision, CoordinatorState, InvalidateOutcome, LeaderId, MAX_TABLE_SLOTS,
-    MetadataCoordinator, SchemaGen, TableSlotRegistry,
+    CoordinatorPhase, LeaderId, MAX_TABLE_SLOTS, MetadataCoordinator, PrimeRole, SchemaGen,
+    TableSlotRegistry,
 };
 use crate::{ClickHouse, CloseOutcome, InsertError, InsertFailure, InsertOptions, Row};
 
@@ -27,47 +27,48 @@ fn metadata_coordinator_single_flight_and_cas_invalidation() {
     let gen2 = gen1.next();
     let leader1 = LeaderId::new(1);
     let leader2 = LeaderId::new(2);
-    assert_eq!(coord.state(), CoordinatorState::Cold { generation: gen1 });
+    assert_eq!(
+        (coord.generation(), coord.phase()),
+        (gen1, CoordinatorPhase::Cold)
+    );
 
     assert_eq!(
         coord.acquire(),
-        AcquireDecision::LeadPrime {
+        Some(PrimeRole::LeadPrime {
             generation: gen1,
             leader_id: leader1,
-        }
+        })
     );
-    assert_eq!(
-        coord.acquire(),
-        AcquireDecision::WaitPrime { generation: gen1 }
-    );
+    assert_eq!(coord.acquire(), None);
 
     assert!(!coord.on_prime_populated(gen1, LeaderId::new(999)));
     assert!(!coord.on_prime_aborted(gen2, leader1));
 
     assert!(coord.on_prime_aborted(gen1, leader1));
-    assert_eq!(coord.state(), CoordinatorState::Cold { generation: gen1 });
+    assert_eq!(
+        (coord.generation(), coord.phase()),
+        (gen1, CoordinatorPhase::Cold)
+    );
     assert_eq!(
         coord.acquire(),
-        AcquireDecision::LeadPrime {
+        Some(PrimeRole::LeadPrime {
             generation: gen1,
             leader_id: leader2,
-        }
+        })
     );
     assert!(coord.on_prime_populated(gen1, leader2));
-    assert_eq!(coord.state(), CoordinatorState::Warm { generation: gen1 });
-    assert_eq!(coord.acquire(), AcquireDecision::Ready { generation: gen1 });
+    assert_eq!(
+        (coord.generation(), coord.phase()),
+        (gen1, CoordinatorPhase::Warm)
+    );
+    assert_eq!(coord.acquire(), Some(PrimeRole::Warm(gen1)));
 
+    assert!(coord.on_schema_mismatch(gen1));
+    assert!(!coord.on_schema_mismatch(gen1));
     assert_eq!(
-        coord.on_schema_mismatch(gen1),
-        InvalidateOutcome::Invalidated {
-            new_generation: gen2,
-        }
+        (coord.generation(), coord.phase()),
+        (gen2, CoordinatorPhase::Cold)
     );
-    assert_eq!(
-        coord.on_schema_mismatch(gen1),
-        InvalidateOutcome::AlreadyInvalidated
-    );
-    assert_eq!(coord.state(), CoordinatorState::Cold { generation: gen2 });
     assert!(!coord.on_prime_populated(gen1, leader2));
 }
 
