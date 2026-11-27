@@ -702,8 +702,8 @@ impl BlockingActivityRpcMock {
             }),
             scheduled_time: Some(now),
             started_time: Some(now),
-            start_to_close_timeout: Duration::from_secs(60).try_into().ok(),
-            schedule_to_close_timeout: Duration::from_secs(120).try_into().ok(),
+            start_to_close_timeout: Duration::from_mins(1).try_into().ok(),
+            schedule_to_close_timeout: Duration::from_mins(2).try_into().ok(),
             attempt: 1,
             ..Default::default()
         }
@@ -1293,8 +1293,8 @@ impl SingleActivityRpcMock {
             }),
             scheduled_time: Some(now),
             started_time: Some(now),
-            start_to_close_timeout: Duration::from_secs(60).try_into().ok(),
-            schedule_to_close_timeout: Duration::from_secs(120).try_into().ok(),
+            start_to_close_timeout: Duration::from_mins(1).try_into().ok(),
+            schedule_to_close_timeout: Duration::from_mins(2).try_into().ok(),
             attempt: 1,
             ..Default::default()
         }

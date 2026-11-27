@@ -61,11 +61,9 @@ pub(crate) fn is_json_media_type(value: &str) -> bool {
 
 pub(crate) fn require_json_content_type(content_type: Option<&HeaderValue>) -> Result<(), Problem> {
     let json = content_type.is_some_and(|value| value.to_str().is_ok_and(is_json_media_type));
-    if json {
-        Ok(())
-    } else {
-        Err(Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL))
-    }
+    json.ok_or_else(|| {
+        Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL)
+    })
 }
 
 pub(crate) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Problem> {

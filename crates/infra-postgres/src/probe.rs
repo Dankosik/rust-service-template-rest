@@ -44,12 +44,9 @@ impl Probe for PostgresProbe {
         let session = session_properties(&mut conn)
             .await
             .map_err(|err| probe_error(&err))?;
-        if !session.writable {
-            return Err(ProbeError::from_static(
-                "the PostgreSQL session is not writable",
-            ));
-        }
-        Ok(())
+        session
+            .writable
+            .ok_or_else(|| ProbeError::from_static("the PostgreSQL session is not writable"))
     }
 }
 

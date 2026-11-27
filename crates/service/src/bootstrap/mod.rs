@@ -762,10 +762,9 @@ mod tests {
     }
 
     pub(super) fn shared_metrics() -> Metrics {
-        static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
-        METRICS
-            .get_or_init(|| telemetry::install_metrics().unwrap())
-            .clone()
+        static METRICS: std::sync::LazyLock<Metrics> =
+            std::sync::LazyLock::new(|| telemetry::install_metrics().unwrap());
+        METRICS.clone()
     }
 
     #[tokio::test(start_paused = true)]

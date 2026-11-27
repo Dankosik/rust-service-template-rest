@@ -157,12 +157,12 @@ mod tests {
             "Page number"
         );
 
-        assert!(matches!(
+        std::assert_matches!(
             root.merge(parameter_contract("Number of pages")),
             Err(FinalizeError(FinalizeKind::ConflictingComponent {
                 kind: ComponentKind::Parameters,
                 name
             })) if name == "Page"
-        ));
+        );
     }
 }

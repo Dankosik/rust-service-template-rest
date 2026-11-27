@@ -40,9 +40,7 @@ type TlsTarget = (TlsConnector, rustls::pki_types::ServerName<'static>);
 type TransportStream = Either<TcpStream, TlsStream<TcpStream>>;
 
 pub(crate) fn unbracket_host(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host)
+    host.strip_circumfix('[', ']').unwrap_or(host)
 }
 
 #[derive(Clone, Copy)]

@@ -233,7 +233,7 @@ fn admitted_credentials_reach_only_the_selected_tls_collector() {
     let ca = pki.certificate_file();
     for mode in ["typed", "empty signal headers", "trace headers"] {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", "traces::tests::delivery::tls::admitted_credentials_reach_only_the_selected_tls_collector", "--nocapture"])
+        child.args(["--exact", "traces::tests::delivery::tls::admitted_credentials_reach_only_the_selected_tls_collector", "--no-capture"])
             .env_clear()
             .env(CHILD, mode)
             .env(CERTIFICATE_VARS[0].1, &ca.path);

@@ -82,11 +82,11 @@ async fn clickhouse_route(
         },
         query_timeout: Duration::from_mins(2),
         insert_timeout: Duration::from_mins(2),
-        max_read_concurrency: NonZeroUsize::new(4).unwrap(),
-        max_write_concurrency: NonZeroUsize::new(4).unwrap(),
-        max_result_rows: NonZeroU64::new(1_000).unwrap(),
-        max_result_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
-        http_response_buffer_size: NonZeroUsize::new(256 * 1024).unwrap(),
+        max_read_concurrency: const { NonZeroUsize::new(4).unwrap() },
+        max_write_concurrency: const { NonZeroUsize::new(4).unwrap() },
+        max_result_rows: const { NonZeroU64::new(1_000).unwrap() },
+        max_result_bytes: const { NonZeroUsize::new(1024 * 1024).unwrap() },
+        http_response_buffer_size: const { NonZeroUsize::new(256 * 1024).unwrap() },
         propagate_trace_context: false,
     })
     .await

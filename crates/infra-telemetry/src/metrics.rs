@@ -213,7 +213,7 @@ impl Metrics {
         let mut expected = Instant::now() + PROGRESS_INTERVAL;
         let mut max_lag = Duration::ZERO;
         let cancelled = cancel.cancelled();
-        tokio::pin!(cancelled);
+        let mut cancelled = std::pin::pin!(cancelled);
         loop {
             tokio::select! {
                 biased;
@@ -351,7 +351,7 @@ mod tests {
         let scraper = metrics.clone();
         let cancel = CancellationToken::new();
         let sampler = metrics.runtime_progress(cancel.clone());
-        tokio::pin!(sampler);
+        let mut sampler = std::pin::pin!(sampler);
         assert!(sampler.as_mut().now_or_never().is_none());
         let startup = scraper.render();
         assert_eq!(value(&startup, SCHEDULER_SAMPLES_METRIC), 0.0);

@@ -88,8 +88,8 @@ async fn a7_cancelled_insert_does_not_leak_detached_tasks_or_connections() {
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.insert_timeout = Duration::from_millis(50);
-    opts.max_read_concurrency = NonZeroUsize::new(4).expect("nz");
-    opts.max_write_concurrency = NonZeroUsize::new(4).expect("nz");
+    opts.max_read_concurrency = const { NonZeroUsize::new(4).expect("nz") };
+    opts.max_write_concurrency = const { NonZeroUsize::new(4).expect("nz") };
     let ch = ClickHouse::start(opts).await.expect("start");
 
     let baseline_tasks = tokio::runtime::Handle::current()
@@ -98,11 +98,11 @@ async fn a7_cancelled_insert_does_not_leak_detached_tasks_or_connections() {
     for i in 0..30_u64 {
         let ctx = OperationContext::with_timeout(Duration::from_secs(2));
         let notified = insert_received.notified();
-        tokio::pin!(notified);
+        let mut notified = std::pin::pin!(notified);
         let row = [SampleRow { id: i }];
         let opts = InsertOptions::batch();
         let fut = ch.insert(&ctx, "a7_cancel", "events", &row, opts);
-        tokio::pin!(fut);
+        let mut fut = std::pin::pin!(fut);
         tokio::select! {
             res = &mut fut => panic!("unexpected completion: {res:?}"),
             () = &mut notified => {
@@ -154,8 +154,8 @@ async fn a7_local_timeout_insert_does_not_leak_detached_tasks_or_connections() {
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.insert_timeout = Duration::from_millis(40);
-    opts.max_read_concurrency = NonZeroUsize::new(4).expect("nz");
-    opts.max_write_concurrency = NonZeroUsize::new(4).expect("nz");
+    opts.max_read_concurrency = const { NonZeroUsize::new(4).expect("nz") };
+    opts.max_write_concurrency = const { NonZeroUsize::new(4).expect("nz") };
     let ch = ClickHouse::start(opts).await.expect("start");
 
     let baseline_tasks = tokio::runtime::Handle::current()

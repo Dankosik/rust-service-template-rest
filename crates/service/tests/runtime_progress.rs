@@ -1978,11 +1978,10 @@ async fn capture_logs(name: &str, directory: &Path) -> Result<()> {
         .spawn()
         .map_err(failure)?;
     if let Ok(status) = timeout(Duration::from_secs(20), child.wait()).await {
-        if status.map_err(failure)?.success() {
-            Ok(())
-        } else {
-            Err("Docker log capture failed".into())
-        }
+        status
+            .map_err(failure)?
+            .success()
+            .ok_or_else(|| "Docker log capture failed".into())
     } else {
         let _ = child.kill().await;
         let _ = child.wait().await;

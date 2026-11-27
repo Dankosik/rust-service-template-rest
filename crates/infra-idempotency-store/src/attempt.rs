@@ -442,15 +442,8 @@ async fn write(
     )
     .await
     .map_err(|err| sql_failed(&err, "write_record"))?;
-    if inserted.rows_affected() == 1 {
-        Ok(())
-    } else {
-        Err(log_failure(
-            "write_record",
-            AttemptError::Internal,
-            "record_not_written",
-        ))
-    }
+    (inserted.rows_affected() == 1)
+        .ok_or_else(|| log_failure("write_record", AttemptError::Internal, "record_not_written"))
 }
 
 enum Stop<R> {

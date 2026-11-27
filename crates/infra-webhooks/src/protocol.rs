@@ -257,7 +257,7 @@ impl KeyRing {
                 SignatureMatch::NoCandidates => false,
             }
         };
-        matched.then_some(()).ok_or(ProtocolError::InvalidSignature)
+        matched.ok_or(ProtocolError::InvalidSignature)
     }
 }
 

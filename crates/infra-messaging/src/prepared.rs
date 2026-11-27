@@ -285,7 +285,7 @@ mod tests {
 
     impl<T: Serialize> Serialize for Counted<T> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.update(|v| v + 1);
             self.value.serialize(serializer)
         }
     }
@@ -303,7 +303,7 @@ mod tests {
 
     impl Serialize for StreamingPayload {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.update(|v| v + 1);
             let mut sequence = serializer.serialize_seq(Some(usize::MAX))?;
             for _ in 0..self.elements {
                 sequence.serialize_element(&0_u8)?;

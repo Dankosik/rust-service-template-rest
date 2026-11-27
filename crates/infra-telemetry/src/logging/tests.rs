@@ -23,7 +23,7 @@ fn invalid_filter_is_reported_without_its_value() {
     let Err(error) = install_subscriber(&options) else {
         panic!("expected malformed filter to be refused");
     };
-    assert!(matches!(error, LoggingError::Directive));
+    std::assert_matches!(error, LoggingError::Directive);
     assert!(error.to_string().contains("log.level"));
     assert!(!format!("{options:?} {error} {error:?}").contains("private-marker"));
 }

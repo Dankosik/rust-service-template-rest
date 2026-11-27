@@ -196,7 +196,7 @@ async fn discovery_deadline_is_a_distinct_transport_category() {
     let (issuer_url, options) = discovery_options(&issuer, &peer);
     let gate = peer.block_resources();
     let setup = Registration::prepare_with_oidc_discovery_for_test_http(issuer_url, options);
-    tokio::pin!(setup);
+    let mut setup = std::pin::pin!(setup);
     poll_pending(setup.as_mut()).await;
     tokio::select! {
         () = peer.resource_received() => {}

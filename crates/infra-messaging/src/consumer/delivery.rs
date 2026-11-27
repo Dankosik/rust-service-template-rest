@@ -26,7 +26,7 @@ const RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(1),
     Duration::from_secs(5),
     Duration::from_secs(30),
-    Duration::from_secs(120),
+    Duration::from_mins(2),
 ];
 const MAX_DELIVERIES: usize = RETRY_DELAYS.len() + 1;
 const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -798,11 +798,7 @@ mod tests {
             .declare(&Route::<Created>::new("orders.created"))
             .unwrap()
             .handle(|event: Event<Created>, _: OperationContext| async move {
-                if event.id == "reject" {
-                    Err(HandlerError::Permanent)
-                } else {
-                    Ok(())
-                }
+                (event.id != "reject").ok_or(HandlerError::Permanent)
             });
         registry
             .declare(&Route::<CreatedV2>::new("orders.created.v2"))

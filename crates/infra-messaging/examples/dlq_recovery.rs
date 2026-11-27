@@ -335,7 +335,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 fn save(path: &Path, value: &impl Serialize, persist: Persist) -> Result<()> {
     let parent = path
         .parent()
-        .filter(|path| !path.as_os_str().is_empty())
+        .filter(|path| !path.is_empty())
         .unwrap_or_else(|| Path::new("."));
     let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|_| "file_create")?;
     serde_json::to_writer_pretty(&mut file, value).map_err(|_| "file_write")?;
@@ -655,7 +655,7 @@ mod tests {
             .args([
                 "--exact",
                 "tests::invalid_invocation_returns_failure_with_a_broken_stderr_pipe",
-                "--nocapture",
+                "--no-capture",
             ])
             .env(CHILD, "1")
             .stdout(Stdio::null())
@@ -783,6 +783,6 @@ mod tests {
     fn an_inaccessible_journal_path_does_not_start_a_new_publication() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().join("selection.state.json");
-        assert!(matches!(read_state(&path, String::new()), Err("file_read")));
+        assert_eq!(read_state(&path, String::new()).err(), Some("file_read"));
     }
 }

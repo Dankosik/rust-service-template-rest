@@ -157,7 +157,7 @@ async fn replicas_with_different_filters_cannot_both_claim_a_new_durable() {
 #[tokio::test]
 async fn admission_refuses_durables_with_inherited_idle_expiry_or_memory_storage() {
     for (inactive_threshold, memory_storage, error_type) in [
-        (Duration::from_secs(60), false, "durable_inactive_threshold"),
+        (Duration::from_mins(1), false, "durable_inactive_threshold"),
         (Duration::ZERO, true, "durable_memory_storage"),
     ] {
         let fixture = Fixture::create(Topology::StreamsOnly).await;
@@ -261,7 +261,7 @@ async fn incompatible_durable_stops_consumption_and_stays_unchanged_on_readmissi
             Change::DlqSubject => {
                 config.metadata = registered.durable_metadata(&fixture.dlq_stream, "other.errors");
             }
-            Change::IdleExpiry => config.inactive_threshold = Duration::from_secs(60),
+            Change::IdleExpiry => config.inactive_threshold = Duration::from_mins(1),
         }
         let changed = stream.update_consumer(config).await.unwrap();
         let (_guard, logged) = capture_logs();

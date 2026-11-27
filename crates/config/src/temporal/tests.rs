@@ -897,10 +897,10 @@ fn duration_and_payload_bounds_and_keep_alive_ordering_are_enforced() {
     let max_ok = admit(
         TemporalInput {
             credential_refresh_interval: Duration::from_mins(15),
-            connect_timeout: Duration::from_secs(60),
+            connect_timeout: Duration::from_mins(1),
             rpc_timeout: Duration::from_mins(5),
             keep_alive_interval: Duration::from_mins(5),
-            keep_alive_timeout: Duration::from_secs(60),
+            keep_alive_timeout: Duration::from_mins(1),
             max_payload_bytes: ByteSize::mib(2),
             ..enabled_https_input()
         },

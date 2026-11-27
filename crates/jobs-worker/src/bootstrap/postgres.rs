@@ -194,7 +194,7 @@ mod tests {
                         Ok(dsn)
                     },
                 );
-                tokio::pin!(admission);
+                let mut admission = std::pin::pin!(admission);
                 assert!(futures_util::poll!(&mut admission).is_pending());
                 started.recv_timeout(WAIT).expect("preparation started");
                 if expired {

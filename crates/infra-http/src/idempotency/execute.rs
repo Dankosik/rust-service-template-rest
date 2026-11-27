@@ -236,7 +236,7 @@ impl TerminalMode for TerminalProblem {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<Rollback<TerminalProblem>>() <= 128);
+const _: () = assert!(size_of::<Rollback<TerminalProblem>>() <= 128);
 
 #[derive(derive_more::Debug, derive_more::From, thiserror::Error)]
 pub enum Rollback<T = Infallible> {

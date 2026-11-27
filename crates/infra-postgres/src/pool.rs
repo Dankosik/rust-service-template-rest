@@ -594,16 +594,12 @@ fn check_budget(
 ) -> Result<(), ConnectError> {
     let within =
         u128::try_from(found_ms).is_ok_and(|found| found > 0 && found <= budget.as_millis());
-    if within {
-        Ok(())
-    } else {
-        Err(ConnectError::SessionBudget {
-            setting,
-            found_ms,
-            budget,
-            session_settings_source,
-        })
-    }
+    within.ok_or(ConnectError::SessionBudget {
+        setting,
+        found_ms,
+        budget,
+        session_settings_source,
+    })
 }
 
 pub async fn connect_session(

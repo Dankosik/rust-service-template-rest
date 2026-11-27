@@ -1112,10 +1112,7 @@ impl Records {
         let render = |prefix: &str, fields: &observe_test_support::FieldMap| {
             let mut line = prefix.to_owned();
             for (name, value) in fields {
-                let value = value
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(value);
+                let value = value.strip_circumfix('"', '"').unwrap_or(value);
                 let _ = write!(line, " {name}={value}");
             }
             line
@@ -1796,11 +1793,7 @@ async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
             };
             assert_eq!(
                 result,
-                if rejected {
-                    Err(MutationError::NotApplied(MutationFailure::Rejected))
-                } else {
-                    Ok(())
-                }
+                (!rejected).ok_or(MutationError::NotApplied(MutationFailure::Rejected))
             );
         }
         assert!(context.stopped().is_some());

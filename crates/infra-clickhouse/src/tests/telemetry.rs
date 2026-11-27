@@ -331,7 +331,7 @@ async fn exercise_read_telemetry(
     );
     assert_eq!(
         ch.query("raw_err_summary", "SELECT raw_db_err")
-            .max_result_rows(NonZeroU64::new(10).expect("nz"))
+            .max_result_rows(const { NonZeroU64::new(10).expect("nz") })
             .fetch_one::<SampleRow>(ctx)
             .await,
         Err(QueryError::Rejected)
@@ -378,7 +378,7 @@ async fn exercise_read_failure_diagnostics(
     }
 
     let notified = srv.stalled_notify.notified();
-    tokio::pin!(notified);
+    let mut notified = std::pin::pin!(notified);
     notified.as_mut().enable();
     let mut client_to = Box::pin(
         ch.query("client_timeout_err", "SELECT hang_forever")
@@ -395,7 +395,7 @@ async fn exercise_read_failure_diagnostics(
     tokio::time::resume();
 
     let notified = srv.stalled_notify.notified();
-    tokio::pin!(notified);
+    let mut notified = std::pin::pin!(notified);
     notified.as_mut().enable();
     let short_parent = OperationContext::with_timeout(Duration::from_millis(500));
     let mut parent_to = Box::pin(
@@ -692,7 +692,7 @@ fn assert_single_span_and_event(
             Some(error_type),
             "{summary}"
         );
-        assert!(matches!(otel.status, Status::Error { .. }), "{summary}");
+        std::assert_matches!(otel.status, Status::Error { .. }, "{summary}");
         assert_eq!(cap.unquoted("error.type"), Some(error_type), "{summary}");
         assert_eq!(cap.unquoted("otel.status_code"), Some("ERROR"), "{summary}");
         assert_failure_event(spec, cap, captured_events, error_type);

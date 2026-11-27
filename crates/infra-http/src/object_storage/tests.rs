@@ -152,7 +152,9 @@ async fn upload_timeout_identifies_the_pending_client_or_provider_on_one_file_ro
         let mut hold_reply = hold_reply.clone();
         async move {
             if let Ok(bytes) = to_bytes(request.into_body(), 1024).await {
-                assert!(bytes.is_empty() || bytes.windows(4).any(|window| window == b"file"));
+                assert!(
+                    bytes.is_empty() || bytes.array_windows::<4>().any(|window| window == b"file")
+                );
                 notify.notify_one();
                 let _ = hold_reply.changed().await;
             }

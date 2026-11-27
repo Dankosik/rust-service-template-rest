@@ -10,7 +10,7 @@ use std::io::Read as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 mod common;
@@ -422,39 +422,37 @@ async fn serve_oidc(
     reason = "process fixture builds the gRPC example binary once before spawning it"
 )]
 fn example_binary() -> PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY
-        .get_or_init(|| {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-            let selection = std::env::var("TEST_PACKAGE_SELECTION")
-                .unwrap_or_else(|_| "--workspace".to_owned());
-            let output = Command::new(env!("CARGO"))
-                .current_dir(&root)
-                .args([
-                    "build",
-                    "--locked",
-                    "--example",
-                    "grpc_oidc",
-                    "--message-format=json-render-diagnostics",
-                ])
-                .args(selection.split_whitespace())
-                .stderr(Stdio::inherit())
-                .output()
-                .expect("build gRPC example");
-            assert!(
-                output.status.success(),
-                "gRPC example build failed: {}",
-                output.status
-            );
-            grpc_example_executable(
-                &output.stdout,
-                concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-            )
-            .unwrap_or_else(|count| {
-                panic!("expected one service gRPC example executable from Cargo, got {count}")
-            })
+    static BINARY: LazyLock<PathBuf> = LazyLock::new(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let selection =
+            std::env::var("TEST_PACKAGE_SELECTION").unwrap_or_else(|_| "--workspace".to_owned());
+        let output = Command::new(env!("CARGO"))
+            .current_dir(&root)
+            .args([
+                "build",
+                "--locked",
+                "--example",
+                "grpc_oidc",
+                "--message-format=json-render-diagnostics",
+            ])
+            .args(selection.split_whitespace())
+            .stderr(Stdio::inherit())
+            .output()
+            .expect("build gRPC example");
+        assert!(
+            output.status.success(),
+            "gRPC example build failed: {}",
+            output.status
+        );
+        grpc_example_executable(
+            &output.stdout,
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        )
+        .unwrap_or_else(|count| {
+            panic!("expected one service gRPC example executable from Cargo, got {count}")
         })
-        .clone()
+    });
+    BINARY.clone()
 }
 
 fn grpc_example_executable(messages: &[u8], manifest: &str) -> Result<PathBuf, usize> {

@@ -243,7 +243,7 @@ async fn outbox_capacity_refuses_new_publication_and_preserves_unread_messages()
     ] {
         let mut config = source.cached_info().config.clone();
         config.retention = stream::RetentionPolicy::WorkQueue;
-        config.max_age = Duration::from_secs(3600);
+        config.max_age = Duration::from_hours(1);
         config.max_messages = max_messages;
         config.max_bytes = max_bytes;
         config.max_messages_per_subject = max_messages_per_subject;

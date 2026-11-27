@@ -56,11 +56,11 @@ fn options_for(
         query_settings,
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
-        max_read_concurrency: NonZeroUsize::new(16).expect("nz"),
-        max_write_concurrency: NonZeroUsize::new(16).expect("nz"),
-        max_result_rows: NonZeroU64::new(100_000).expect("nz"),
-        max_result_bytes: NonZeroUsize::new(16 * 1024 * 1024).expect("nz"),
-        http_response_buffer_size: NonZeroUsize::new(2 * 1024 * 1024).expect("nz"),
+        max_read_concurrency: const { NonZeroUsize::new(16).expect("nz") },
+        max_write_concurrency: const { NonZeroUsize::new(16).expect("nz") },
+        max_result_rows: const { NonZeroU64::new(100_000).expect("nz") },
+        max_result_bytes: const { NonZeroUsize::new(16 * 1024 * 1024).expect("nz") },
+        http_response_buffer_size: const { NonZeroUsize::new(2 * 1024 * 1024).expect("nz") },
         propagate_trace_context: true,
     }
 }
@@ -355,7 +355,7 @@ async fn assert_read_bounds_cardinality_and_cancellation(
 
     let exact_two = rw
         .query("exact_two", "SELECT number AS id FROM numbers(2)")
-        .max_result_rows(NonZeroU64::new(2).expect("nz"))
+        .max_result_rows(const { NonZeroU64::new(2).expect("nz") })
         .fetch_all::<SimpleRow>(ctx)
         .await
         .expect("== 2 rows succeeds");
@@ -363,7 +363,7 @@ async fn assert_read_bounds_cardinality_and_cancellation(
 
     let overflow_three = rw
         .query("over_three", "SELECT number AS id FROM numbers(3)")
-        .max_result_rows(NonZeroU64::new(2).expect("nz"))
+        .max_result_rows(const { NonZeroU64::new(2).expect("nz") })
         .fetch_all::<SimpleRow>(ctx)
         .await
         .expect_err("3 rows with cap 2 must return TooLarge");
@@ -374,7 +374,7 @@ async fn assert_read_bounds_cardinality_and_cancellation(
             "over_bytes",
             "SELECT repeat('x', 1024) AS k FROM numbers(200)",
         )
-        .max_result_bytes(NonZeroUsize::new(64 * 1024).expect("nz"))
+        .max_result_bytes(const { NonZeroUsize::new(64 * 1024).expect("nz") })
         .fetch_all::<String>(ctx)
         .await
         .expect_err("byte overflow must return TooLarge");
@@ -417,7 +417,7 @@ async fn assert_read_bounds_cardinality_and_cancellation(
             "one_big_byte_cap",
             "SELECT repeat('x', 100000) AS k FROM numbers(1)"
         )
-        .max_result_bytes(NonZeroUsize::new(64 * 1024).expect("nz"))
+        .max_result_bytes(const { NonZeroUsize::new(64 * 1024).expect("nz") })
         .fetch_one::<String>(ctx)
         .await,
         Err(QueryError::TooLarge)
@@ -732,7 +732,7 @@ async fn assert_live_busy_shedding(
     let ch_busy = Arc::new(ClickHouse::start(busy_opts).await.expect("start busy"));
     let entered = Arc::new(Notify::new());
     let registered = entered.notified();
-    tokio::pin!(registered);
+    let mut registered = std::pin::pin!(registered);
     registered.as_mut().enable();
     let dispatch = tracing::Dispatch::new(
         tracing_subscriber::Registry::default().with(SpanEnterNotify(Arc::clone(&entered))),

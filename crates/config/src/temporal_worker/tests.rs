@@ -34,7 +34,7 @@ fn defaults_match_temporal_worker_budgets_while_service_and_jobs_worker_stay_at_
     assert_eq!(worker.app().version, "1.2.3");
     assert_eq!(worker.app().commit, "abc123");
     assert_eq!(worker.http().grace_period, Duration::from_secs(90));
-    assert_eq!(worker.http().drain_timeout, Duration::from_secs(60));
+    assert_eq!(worker.http().drain_timeout, Duration::from_mins(1));
     assert!(worker.temporal().is_none());
 
     let rt = worker.temporal_worker();
@@ -107,7 +107,7 @@ fn shared_config_file_loads_in_both_service_and_temporal_worker_and_rejects_unkn
         load_temporal_worker_with_tail_from(&options, BUILD, TEMPORAL_TAIL, env(&[])).unwrap();
     assert!(worker.temporal().is_some());
     assert_eq!(worker.http().grace_period, Duration::from_secs(90));
-    assert_eq!(worker.http().drain_timeout, Duration::from_secs(60));
+    assert_eq!(worker.http().drain_timeout, Duration::from_mins(1));
     assert_eq!(worker.temporal_worker().task_queue(), Some("orders"));
 
     for unknown in [
@@ -296,7 +296,7 @@ fn task_queue_and_queue_keys_enforce_addressability_characters_and_no_collision(
             .queues
             .insert(bad_key.to_owned(), TemporalQueueInput::default());
         let errors =
-            admit_with(|v| input.admit(Some(Duration::from_secs(60)), "svc", "1.0.0", "abc", v))
+            admit_with(|v| input.admit(Some(Duration::from_mins(1)), "svc", "1.0.0", "abc", v))
                 .unwrap_err();
         assert!(
             errors.names("temporal_worker.queues"),
@@ -774,6 +774,6 @@ fn deployment_versioning_behavior_matches_use_worker_versioning(
 fn test_support_temporal_worker_fixture_loads_with_tail() {
     let cfg = crate::test_support::temporal_worker(&[], BUILD, TEMPORAL_TAIL).unwrap();
     assert_eq!(cfg.http().grace_period, Duration::from_secs(90));
-    assert_eq!(cfg.http().drain_timeout, Duration::from_secs(60));
+    assert_eq!(cfg.http().drain_timeout, Duration::from_mins(1));
     assert!(cfg.temporal().is_none());
 }

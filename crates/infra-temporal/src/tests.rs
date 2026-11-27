@@ -638,20 +638,20 @@ async fn options_validation_and_debug_redaction_fail_closed_without_leaking_secr
     plaintext_disallowed.trusted_network = false;
     let mut startup =
         TemporalStartup::prepare(plaintext_disallowed, &OperationContext::unbounded());
-    assert!(matches!(
+    std::assert_matches!(
         startup.admit(CancellationToken::new()).await,
         Err(ConnectError::InvalidConfig(_))
-    ));
+    );
 
     let mut unauth_tls = base_options();
     unauth_tls.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
     unauth_tls.allow_unauthenticated = false;
     unauth_tls.trusted_network = false;
     let mut startup = TemporalStartup::prepare(unauth_tls, &OperationContext::unbounded());
-    assert!(matches!(
+    std::assert_matches!(
         startup.admit(CancellationToken::new()).await,
         Err(ConnectError::InvalidConfig(_))
-    ));
+    );
 
     let mut dynamic_with_dns_lb = base_options();
     dynamic_with_dns_lb.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
@@ -680,10 +680,10 @@ async fn options_validation_and_debug_redaction_fail_closed_without_leaking_secr
         );
     }
     let mut startup = TemporalStartup::prepare(dynamic_with_dns_lb, &OperationContext::unbounded());
-    assert!(matches!(
+    std::assert_matches!(
         startup.admit(CancellationToken::new()).await,
         Err(ConnectError::InvalidConfig(_))
-    ));
+    );
 
     let raw_status = Status::unavailable("internal-endpoint-10.0.0.9:7233 bearer=top-secret");
     let mapped = map_start_status(&raw_status);
@@ -1027,7 +1027,7 @@ async fn dropping_startup_cancels_background_watcher_and_close_observes_watcher_
     let mut options = base_options();
     options.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
     options.auth = TemporalAuth::ApiKeyFile(api_key_path.clone());
-    options.credential_refresh_interval = Duration::from_secs(60);
+    options.credential_refresh_interval = Duration::from_mins(1);
 
     let (startup, _conn) = admit_with_callback(
         options.clone(),
@@ -1554,7 +1554,7 @@ async fn client_propagates_trace_context_memo_update_query_and_describe() {
         },
         "hello".to_owned(),
     )
-    .execution_timeout(Duration::from_secs(60))
+    .execution_timeout(Duration::from_mins(1))
     .run_timeout(Duration::from_secs(30))
     .task_timeout(Duration::from_secs(10))
     .memo(memo)
@@ -1996,7 +1996,7 @@ async fn startup_admit_classifies_cancelled_timed_out_missing_credential_and_bad
     });
     let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded());
     let err = startup.admit(CancellationToken::new()).await.unwrap_err();
-    assert!(matches!(err, ConnectError::TlsSetup(_)));
+    std::assert_matches!(err, ConnectError::TlsSetup(_));
     let dump = format!("{err}; {err:?}");
     assert!(!dump.contains("sentinel-bad-ca.pem"));
     assert!(!dump.contains("temporal.example.invalid"));
@@ -2644,19 +2644,14 @@ async fn proxy_url_validation_admits_only_plaintext_http_without_userinfo() {
         opts.http_proxy_url = Some(parsed.clone());
         let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded());
         let err = startup.admit(CancellationToken::new()).await.unwrap_err();
-        assert!(
-            matches!(err, ConnectError::InvalidConfig(_)),
-            "{bad_proxy}: {err:?}"
-        );
+        std::assert_matches!(err, ConnectError::InvalidConfig(_), "{bad_proxy}: {err:?}");
         if matches!(parsed.scheme(), "https" | "socks5")
             || !parsed.username().is_empty()
             || parsed.password().is_some()
         {
-            assert!(
-                matches!(
-                    proxy_options_from_url(&parsed),
-                    Err(ConnectError::InvalidConfig(_))
-                ),
+            std::assert_matches!(
+                proxy_options_from_url(&parsed),
+                Err(ConnectError::InvalidConfig(_)),
                 "{bad_proxy}"
             );
         }
@@ -2736,8 +2731,9 @@ async fn http_endpoints_reject_tls_options_even_with_plaintext_or_trusted_networ
             let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded())
                 .with_service_override(simple_callback(|_| Ok(Vec::new())));
             let err = startup.admit(CancellationToken::new()).await.unwrap_err();
-            assert!(
-                matches!(err, ConnectError::InvalidConfig(_)),
+            std::assert_matches!(
+                err,
+                ConnectError::InvalidConfig(_),
                 "allow_plaintext={allow_plaintext} trusted_network={trusted_network} case={label}: {err:?}"
             );
         }
@@ -2925,10 +2921,7 @@ async fn inline_api_key_rejects_invalid_values_and_sends_bearer_header_on_rpcs()
         let mut startup = TemporalStartup::prepare(opts, &OperationContext::unbounded())
             .with_service_override(simple_callback(|_| Ok(Vec::new())));
         let err = startup.admit(CancellationToken::new()).await.unwrap_err();
-        assert!(
-            matches!(err, ConnectError::InvalidConfig(_)),
-            "{invalid:?}: {err:?}"
-        );
+        std::assert_matches!(err, ConnectError::InvalidConfig(_), "{invalid:?}: {err:?}");
         let rendered = format!("{err}; {err:?}");
         assert!(!rendered.contains("tok-secret"), "{rendered}");
     }
@@ -2998,7 +2991,7 @@ async fn close_times_out_and_aborts_hung_credential_watcher() {
     let mut opts = base_options();
     opts.endpoint = Url::parse("https://temporal.example.invalid:7233").unwrap();
     opts.auth = TemporalAuth::ApiKeyFile(api_key_path);
-    opts.credential_refresh_interval = Duration::from_secs(60);
+    opts.credential_refresh_interval = Duration::from_mins(1);
 
     let (mut startup, conn) = admit_with_callback(
         opts,
@@ -3236,14 +3229,14 @@ mod worker_tests {
         assert_eq!(opts.metric_prefix, "");
         assert!(!opts.attach_service_name);
         assert!(opts.metrics.is_some());
-        assert!(matches!(
+        std::assert_matches!(
             opts.task_queue_label_strategy,
             TaskQueueLabelStrategy::UseNormal
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             meter.temporal_meter().get_task_queue_label_strategy(),
             TaskQueueLabelStrategy::UseNormal
-        ));
+        );
 
         let runtime = build_runtime(&meter).expect("CoreRuntime initializes with CoreMeter");
         let shutdown = CancellationToken::new();

@@ -133,7 +133,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
     let input = PostgresInput {
         enabled,
         dsn: Some(dsn()),
-        max_connections: Some(NonZeroU32::new(501).unwrap()),
+        max_connections: Some(const { NonZeroU32::new(501).unwrap() }),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -144,7 +144,7 @@ fn pool_size_is_bounded(#[case] enabled: bool) {
 fn every_postgres_violation_is_reported_together() {
     let input = PostgresInput {
         enabled: true,
-        max_connections: Some(NonZeroU32::new(501).unwrap()),
+        max_connections: Some(const { NonZeroU32::new(501).unwrap() }),
         ..PostgresInput::default()
     };
     let errors = admit_with(|v| input.admit(v)).unwrap_err();
@@ -222,7 +222,7 @@ fn debug_output_redacts_the_dsn() {
 }
 
 // template:begin jobs:exclude-messaging-only-postgres-test
-#[cfg(any())]
+#[cfg(false)]
 // template:end jobs:exclude-messaging-only-postgres-test
 // template:begin worker:messaging-only-postgres-test
 #[test]

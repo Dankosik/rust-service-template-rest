@@ -7,14 +7,14 @@ use std::process::Command;
 const STAMP: &str = "VERGEN_GIT_SHA";
 
 fn main() {
-    println!("cargo:rerun-if-env-changed={STAMP}");
+    println!("cargo::rerun-if-env-changed={STAMP}");
     let revision = std::env::var(STAMP)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .or_else(checked_out_revision)
         .unwrap_or_else(|| "unknown".to_owned());
-    println!("cargo:rustc-env={STAMP}={revision}");
+    println!("cargo::rustc-env={STAMP}={revision}");
 }
 
 #[expect(
@@ -31,7 +31,7 @@ fn checked_out_revision() -> Option<String> {
         if let Some(path) = git(&["rev-parse", "--git-path", name])
             && std::path::Path::new(&path).exists()
         {
-            println!("cargo:rerun-if-changed={path}");
+            println!("cargo::rerun-if-changed={path}");
         }
     }
     Some(revision)

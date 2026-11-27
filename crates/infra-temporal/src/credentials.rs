@@ -116,10 +116,7 @@ pub(crate) fn validate_root_ca_pem(pem_bytes: &[u8]) -> Result<(), ()> {
         ParsedCertificate::try_from(&cert).map_err(|_| ())?;
         count += 1;
     }
-    if count == 0 {
-        return Err(());
-    }
-    Ok(())
+    (count != 0).ok_or(())
 }
 
 pub(crate) fn parse_certified_key(

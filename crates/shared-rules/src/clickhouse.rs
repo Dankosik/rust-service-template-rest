@@ -38,7 +38,7 @@ pub fn validate_url_lexical(raw: &str) -> Result<(), UrlLexicalError> {
     if let Some((_, raw_path)) = after_scheme.split_once('/')
         && !raw_path.is_empty()
     {
-        let trimmed = raw_path.strip_suffix('/').unwrap_or(raw_path);
+        let trimmed = raw_path.trim_suffix('/');
         if trimmed.contains("//") {
             return Err(UrlLexicalError::EmptyPathSegment);
         }

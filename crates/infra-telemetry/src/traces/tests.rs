@@ -148,7 +148,7 @@ fn span_processor_uses_positive_sizes_and_preserves_valid_overrides() {
         assert!(config.contains(&format!("max_export_batch_size: {batch_size},")));
         assert_eq!(invalid, expected_invalid, "{vars:?}");
     }
-    assert!(std::mem::size_of::<SpanData>() * SPAN_QUEUE_CAPACITY <= 16 << 20);
+    assert!(size_of::<SpanData>() * SPAN_QUEUE_CAPACITY <= 16 << 20);
 }
 
 pub(super) fn env<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'a {

@@ -289,11 +289,7 @@ pub async fn read_request(pool: &Pool, operation: &Operation) -> Result<Option<A
 }
 
 fn same_operation(encoded: &str, operation: &Operation) -> Result<(), Error> {
-    if serde_json::from_str::<Operation>(encoded)? == *operation {
-        Ok(())
-    } else {
-        Err(Error::Conflict)
-    }
+    (serde_json::from_str::<Operation>(encoded)? == *operation).ok_or(Error::Conflict)
 }
 
 pub async fn apply_effect(

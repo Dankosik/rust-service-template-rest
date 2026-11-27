@@ -573,7 +573,7 @@ mod tests {
 
     impl<T: Serialize> Serialize for Counting<'_, T> {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.update(|v| v + 1);
             self.value.serialize(serializer)
         }
     }
@@ -631,7 +631,7 @@ mod tests {
     impl fmt::Display for Displayed<'_> {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             for fragment in ["first-\"\\", "second"] {
-                self.fragments.set(self.fragments.get() + 1);
+                self.fragments.update(|v| v + 1);
                 formatter.write_str(fragment)?;
             }
             Ok(())
@@ -705,7 +705,7 @@ mod tests {
 
     impl Serialize for Streamed {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.update(|v| v + 1);
             let mut seq = serializer.serialize_seq(self.size_hint)?;
             for _ in 0..self.elements {
                 seq.serialize_element(&0_u8)?;

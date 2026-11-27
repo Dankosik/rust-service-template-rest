@@ -139,10 +139,7 @@ impl<E: From<TxError> + From<OperationDeadlineElapsed>> TxModeExt<E> for Operati
     }
 
     fn check_expiry(&self) -> Result<(), E> {
-        if self.expired {
-            return Err(OperationDeadlineElapsed.into());
-        }
-        Ok(())
+        (!self.expired).ok_or_else(|| OperationDeadlineElapsed.into())
     }
 
     async fn check_before_commit(&mut self) -> Result<(), E> {

@@ -231,7 +231,7 @@ impl<const INLINE: usize> io::Write for Bytes<INLINE> {
 impl<const INLINE: usize> fmt::Write for Bytes<INLINE> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         self.append(text.as_bytes());
-        if self.failed { Err(fmt::Error) } else { Ok(()) }
+        (!self.failed).ok_or(fmt::Error)
     }
 }
 

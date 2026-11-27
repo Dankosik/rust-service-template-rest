@@ -6,7 +6,7 @@ use exporter::{
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use opentelemetry::trace::TracerProvider;
@@ -521,11 +521,9 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
 }
 
 fn resource(options: &TracingOptions<'_>) -> Resource {
-    static PROCESS_INSTANCE_ID: OnceLock<Uuid> = OnceLock::new();
-    let instance_id = non_blank_str(options.instance_id).map_or_else(
-        || PROCESS_INSTANCE_ID.get_or_init(Uuid::new_v4).to_string(),
-        str::to_owned,
-    );
+    static PROCESS_INSTANCE_ID: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
+    let instance_id = non_blank_str(options.instance_id)
+        .map_or_else(|| PROCESS_INSTANCE_ID.to_string(), str::to_owned);
     let attributes = [
         KeyValue::new(attribute::SERVICE_NAME, options.service_name.to_owned()),
         KeyValue::new(

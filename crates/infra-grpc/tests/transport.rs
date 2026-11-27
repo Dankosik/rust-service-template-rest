@@ -1631,7 +1631,7 @@ async fn an_unpolled_unary_response_releases_capacity_at_the_caller_deadline() {
     let mut held = app.clone().oneshot(limited).await.unwrap();
     assert!(grpc_status(&held).is_none());
     let waiting = app.oneshot(call());
-    tokio::pin!(waiting);
+    let mut waiting = std::pin::pin!(waiting);
     assert!(
         timeout(Duration::from_millis(900), &mut waiting)
             .await
@@ -2186,10 +2186,10 @@ async fn one_connection_serves_concurrent_rpcs_and_capacity_returns_after_it_clo
                 let mut excess = TcpStream::connect(fixture.address).await.unwrap();
                 match excess.read(&mut [0]).await {
                     Ok(bytes) => assert_eq!(bytes, 0, "excess peer received HTTP/2 bytes"),
-                    Err(error) => assert!(matches!(
+                    Err(error) => std::assert_matches!(
                         error.kind(),
                         std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset
-                    )),
+                    ),
                 }
                 fixture.echo.hold.release();
             }
@@ -2566,10 +2566,10 @@ async fn receiver_gets_only_the_remaining_rpc_lifetime_after_admission_and_metad
         let lifetime = lifetime_seconds.map(Duration::from_secs);
         if lifetime.is_some_and(|budget| budget <= admission) {
             assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
-            assert!(matches!(
+            std::assert_matches!(
                 wire.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            ));
+            );
             continue;
         }
         let response = result.unwrap();

@@ -171,7 +171,7 @@ async fn password_file_rotates_every_5s_and_retains_valid_password_on_ctl_error(
     opts.query_timeout = Duration::from_secs(30);
     opts.insert_timeout = Duration::from_secs(30);
     let ch = ClickHouse::start(opts).await.expect("start");
-    let ctx = OperationContext::with_timeout(Duration::from_secs(60));
+    let ctx = OperationContext::with_timeout(Duration::from_mins(1));
 
     assert_eq!(
         ch.query("q1", "SELECT 1")
@@ -287,7 +287,7 @@ async fn in_flight_call_keeps_starting_credential_and_drop_cancels_refresh() {
     };
     opts.query_timeout = Duration::from_secs(30);
     let ch = ClickHouse::start(opts).await.expect("start");
-    let ctx = OperationContext::with_timeout(Duration::from_secs(60));
+    let ctx = OperationContext::with_timeout(Duration::from_mins(1));
 
     let ch_first = ch.clone();
     let ctx_first = ctx.clone();

@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use health::Probe as _;
@@ -55,38 +55,38 @@ struct TelemetryHarness {
     task_queues: Mutex<BTreeSet<String>>,
 }
 
-static TELEMETRY: OnceLock<TelemetryHarness> = OnceLock::new();
+static TELEMETRY: LazyLock<TelemetryHarness> = LazyLock::new(|| {
+    global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
+        Box::new(TraceContextPropagator::new()),
+        Box::new(BaggagePropagator::new()),
+    ]));
+    let mut builder = PrometheusBuilder::new();
+    for &(name, buckets) in HISTOGRAMS {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+            .unwrap();
+    }
+    let prometheus = builder.install_recorder().unwrap();
+    let events = EventCapture::new();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(events.clone())
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("infra-temporal-it")));
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+    TelemetryHarness {
+        prometheus,
+        events,
+        exporter,
+        provider,
+        task_queues: Mutex::new(BTreeSet::new()),
+    }
+});
 
 fn telemetry() -> &'static TelemetryHarness {
-    TELEMETRY.get_or_init(|| {
-        global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
-            Box::new(TraceContextPropagator::new()),
-            Box::new(BaggagePropagator::new()),
-        ]));
-        let mut builder = PrometheusBuilder::new();
-        for &(name, buckets) in HISTOGRAMS {
-            builder = builder
-                .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
-                .unwrap();
-        }
-        let prometheus = builder.install_recorder().unwrap();
-        let events = EventCapture::new();
-        let exporter = InMemorySpanExporter::default();
-        let provider = SdkTracerProvider::builder()
-            .with_simple_exporter(exporter.clone())
-            .build();
-        let subscriber = tracing_subscriber::registry()
-            .with(events.clone())
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("infra-temporal-it")));
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-        TelemetryHarness {
-            prometheus,
-            events,
-            exporter,
-            provider,
-            task_queues: Mutex::new(BTreeSet::new()),
-        }
-    })
+    &TELEMETRY
 }
 
 fn unique_task_queue(harness: &TelemetryHarness, prefix: &str) -> String {
@@ -378,7 +378,7 @@ fn prometheus_label_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
         if name == key {
             return Some(value);
         }
-        rest = tail.strip_prefix(',').unwrap_or(tail);
+        rest = tail.trim_prefix(',');
     }
     None
 }

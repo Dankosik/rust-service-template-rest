@@ -684,7 +684,7 @@ async fn accept_loop<F, Fut, IO>(
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let draining = context.shutdown.drain.cancelled();
-    tokio::pin!(draining);
+    let mut draining = std::pin::pin!(draining);
     let permits = max_connections.map(|limit| Arc::new(Semaphore::new(limit.get() as usize)));
 
     loop {
@@ -812,7 +812,7 @@ where
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let closing = wait_for_close(&context.shutdown.drain, age_deadline);
-    tokio::pin!(closing);
+    let mut closing = std::pin::pin!(closing);
     let io = tokio::select! {
         biased;
         () = closing.as_mut() => None,
@@ -833,7 +833,7 @@ where
         .driver
         .builder
         .serve_connection(TokioIo::new(io), service);
-    tokio::pin!(connection);
+    let mut connection = std::pin::pin!(connection);
     // template:begin grpc:http2-wait-initial-read
     if let Some((deadline, received)) = preface {
         tokio::select! {

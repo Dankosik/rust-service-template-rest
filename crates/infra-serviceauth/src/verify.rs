@@ -805,29 +805,26 @@ mod tests {
             r#"{"iss":"orders","sub":"orders","aud":"catalog","iat":1800000000,"exp":1800000060}"#,
         )
         .unwrap();
-        assert!(matches!(
-            single.aud,
-            Some(Audience::Single(Cow::Borrowed("catalog")))
-        ));
+        std::assert_matches!(single.aud, Some(Audience::Single(Cow::Borrowed("catalog"))));
 
         let singleton: Claims<'_> = serde_json::from_str(
             r#"{"iss":"orders","sub":"orders","aud":["catalog"],"iat":1800000000,"exp":1800000060}"#,
         )
         .unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             singleton.aud,
             Some(Audience::Single(Cow::Borrowed("catalog")))
-        ));
+        );
 
         let escaped_payload = format!(
             r#"{{"iss":"ord\u0065rs","sub":"order\u0073","aud":"cata\u006cog","iat":{NOW},"exp":{}}}"#,
             NOW + 60
         );
         let escaped_claims: Claims<'_> = serde_json::from_str(&escaped_payload).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             escaped_claims.aud.as_ref(),
             Some(Audience::Single(Cow::Owned(value))) if value == "catalog"
-        ));
+        );
 
         let case = Case::new();
         let escaped_token = case.orders.sign_raw(

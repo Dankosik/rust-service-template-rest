@@ -52,6 +52,7 @@ pub(crate) const MAX_SIGNATURE_BYTES: usize = MAX_RSA_MODULUS_BITS / 8;
 
 pub(crate) const KEY_REJECTIONS_METRIC: &str = "authn_jwks_key_rejections_total";
 
+#[derive(Debug)]
 pub(crate) enum SignatureVerificationError {
     NoCandidate,
     BadSignature,
@@ -137,11 +138,7 @@ impl KeySet {
         } else {
             keys.all.iter().any(verifies)
         };
-        if signature_matches {
-            Ok(())
-        } else {
-            Err(SignatureVerificationError::BadSignature)
-        }
+        signature_matches.ok_or(SignatureVerificationError::BadSignature)
     }
 
     #[cfg(test)]
@@ -731,14 +728,14 @@ pub(crate) mod tests {
         assert!(verify(Some("shared"), &second_signature).is_ok());
         assert!(verify(None, &second_signature).is_ok());
         assert!(verify(None, &unnamed_signature).is_ok());
-        assert!(matches!(
+        std::assert_matches!(
             verify(Some("shared"), &unnamed_signature),
             Err(SignatureVerificationError::BadSignature)
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             verify(Some("rsa"), &second_signature),
             Err(SignatureVerificationError::NoCandidate)
-        ));
+        );
     }
 
     #[test]

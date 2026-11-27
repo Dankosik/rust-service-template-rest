@@ -231,10 +231,10 @@ async fn lost_source_ack_reply_leaves_handler_success_and_settlement_unconfirmed
         attribute(&settlement, "error.type").as_deref(),
         Some("timeout")
     );
-    assert!(matches!(
+    std::assert_matches!(
         settlement.status,
         opentelemetry::trace::Status::Error { .. }
-    ));
+    );
 
     handle
         .finish(deadline())

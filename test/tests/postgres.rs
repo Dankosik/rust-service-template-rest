@@ -1043,7 +1043,7 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     let policy = health::RefreshPolicy::try_new(
         interval,
         probe_budget,
-        std::num::NonZeroU32::new(3).unwrap(),
+        const { std::num::NonZeroU32::new(3).unwrap() },
     )
     .unwrap();
     let readiness = health::Readiness::new(

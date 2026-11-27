@@ -46,7 +46,7 @@ async fn url_database_and_limits_admission_boundaries() {
         let err = ClickHouse::start(opts)
             .await
             .expect_err("bad URL must be rejected");
-        assert!(matches!(err, StartError(_)), "{bad_url}");
+        std::assert_matches!(err, StartError(_), "{bad_url}");
     }
 
     let plaintext_https = base_options("https://localhost:8443".to_owned());
@@ -60,19 +60,19 @@ async fn url_database_and_limits_admission_boundaries() {
     }
 
     let limit_failures: Vec<fn(&mut ClickHouseOptions)> = vec![
-        |o| o.max_read_concurrency = NonZeroUsize::new(1025).expect("nz"),
-        |o| o.max_write_concurrency = NonZeroUsize::new(1025).expect("nz"),
+        |o| o.max_read_concurrency = const { NonZeroUsize::new(1025).expect("nz") },
+        |o| o.max_write_concurrency = const { NonZeroUsize::new(1025).expect("nz") },
         |o| o.query_timeout = Duration::from_millis(9),
         |o| o.query_timeout = Duration::from_mins(5) + Duration::from_millis(1),
         |o| o.insert_timeout = Duration::from_millis(9),
         |o| o.insert_timeout = Duration::from_mins(5) + Duration::from_millis(1),
-        |o| o.max_result_rows = NonZeroU64::new(10_000_001).expect("nz"),
-        |o| o.max_result_bytes = NonZeroUsize::new(64 * 1024 - 1).expect("nz"),
-        |o| o.max_result_bytes = NonZeroUsize::new(128 * 1024 * 1024 + 1).expect("nz"),
-        |o| o.http_response_buffer_size = NonZeroUsize::new(64 * 1024 - 1).expect("nz"),
+        |o| o.max_result_rows = const { NonZeroU64::new(10_000_001).expect("nz") },
+        |o| o.max_result_bytes = const { NonZeroUsize::new(64 * 1024 - 1).expect("nz") },
+        |o| o.max_result_bytes = const { NonZeroUsize::new(128 * 1024 * 1024 + 1).expect("nz") },
+        |o| o.http_response_buffer_size = const { NonZeroUsize::new(64 * 1024 - 1).expect("nz") },
         |o| {
-            o.max_result_bytes = NonZeroUsize::new(128 * 1024).expect("nz");
-            o.http_response_buffer_size = NonZeroUsize::new(256 * 1024).expect("nz");
+            o.max_result_bytes = const { NonZeroUsize::new(128 * 1024).expect("nz") };
+            o.http_response_buffer_size = const { NonZeroUsize::new(256 * 1024).expect("nz") };
         },
         |o| o.query_settings = memory_settings(16 * 1024 * 1024 - 1),
         |o| o.query_settings = memory_settings(64 * 1024 * 1024 * 1024 + 1),
@@ -92,8 +92,8 @@ async fn url_database_and_limits_admission_boundaries() {
     min_boundary.max_read_concurrency = NonZeroUsize::MIN;
     min_boundary.max_write_concurrency = NonZeroUsize::MIN;
     min_boundary.max_result_rows = NonZeroU64::MIN;
-    min_boundary.max_result_bytes = NonZeroUsize::new(64 * 1024).expect("nz");
-    min_boundary.http_response_buffer_size = NonZeroUsize::new(64 * 1024).expect("nz");
+    min_boundary.max_result_bytes = const { NonZeroUsize::new(64 * 1024).expect("nz") };
+    min_boundary.http_response_buffer_size = const { NonZeroUsize::new(64 * 1024).expect("nz") };
     let ch = ClickHouse::start(min_boundary).await.expect("boundary ok");
     assert_eq!(
         ch.close(Duration::from_secs(1)).await,

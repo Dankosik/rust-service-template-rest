@@ -393,7 +393,7 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     let client = fixture_client(address, &material);
     let context = OperationContext::with_timeout(Duration::from_secs(2));
     let exchange = client.execute(&context, request());
-    tokio::pin!(exchange);
+    let mut exchange = std::pin::pin!(exchange);
     tokio::select! {
         result = &mut exchange => panic!("incomplete body completed: {result:?}"),
         result = dispatched => result.expect("request observed"),
@@ -491,13 +491,7 @@ async fn dispatch_can_be_refused_after_request_setup() {
         .prepare(&context, request())
         .unwrap()
         .send_checked(
-            || {
-                if Instant::now() < credential_expiry {
-                    Ok(())
-                } else {
-                    Err(Refused)
-                }
-            },
+            || (Instant::now() < credential_expiry).ok_or(Refused),
             |status| observed_status = Some(status),
         )
         .with_subscriber(subscriber)

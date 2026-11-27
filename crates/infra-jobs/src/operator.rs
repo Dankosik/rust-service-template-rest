@@ -550,10 +550,7 @@ pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), Ope
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
         target.id.0, target.kind, target.version
     ).execute(&mut *tx)).await?;
-    if result.rows_affected() != 1 {
-        return Err(OperatorError::Stale);
-    }
-    Ok(())
+    (result.rows_affected() == 1).ok_or(OperatorError::Stale)
 }
 
 #[cfg(test)]

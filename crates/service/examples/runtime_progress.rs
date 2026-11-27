@@ -222,7 +222,7 @@ impl Cpu {
             reporter.report();
         }
         let joined = self.join();
-        tokio::pin!(joined);
+        let mut joined = std::pin::pin!(joined);
         loop {
             tokio::select! {
                 () = &mut joined => break,
