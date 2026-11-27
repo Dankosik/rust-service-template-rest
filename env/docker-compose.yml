@@ -27,7 +27,7 @@ services:
       timeout: 3s
       retries: 20
   pgbouncer:
-    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.1@sha256:6c91fd7383b8b098bc0c3b71dba4e98bd568c0d301b9fc66027fbc23259c6a7d
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.26.1@sha256:9f648625e11f67f5171f1edd31648c7d02a1a4a5e1b8adf7d4a9db30dce8c22b
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,7 +58,7 @@ services:
   # template:end messaging:compose-nats-service
   # template:begin cache:compose-valkey-service
   valkey:
-    image: valkey/valkey:9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+    image: valkey/valkey:9.1.4-alpine@sha256:56729e68bdda139cbd3f6a2538683dc3523325fc5711ea1a379938f1b37893f0
     ports:
       - "${VALKEY_PORT:-6379}:6379"
     healthcheck:
@@ -106,7 +106,7 @@ services:
   # template:end outbound-auth:compose-keycloak-service
   # template:begin clickhouse:compose-clickhouse-service
   clickhouse:
-    image: clickhouse/clickhouse-server:26.8.43.13-alpine@sha256:6ae15a7f92842be5c16c77fb8cb099f3527630b2571666ccd97a983c0eab2402
+    image: clickhouse/clickhouse-server:26.10.6.18-alpine@sha256:366b4896eceb5944ad25736b57e8c250132888919848fc42fe0cfbb9d51dc88e
     environment:
       CLICKHOUSE_DB: app
       CLICKHOUSE_USER: app
