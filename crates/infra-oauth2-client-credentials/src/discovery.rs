@@ -72,13 +72,10 @@ pub async fn verify_oidc_metadata(
 }
 
 fn ensure_issuer_differs(issuer: &IssuerUrl, token_url: &Url) -> Result<(), ConfigurationError> {
-    if issuer.url() == token_url {
-        return Err(ConfigurationError {
-            key: "issuer",
-            reason: "must differ from the token endpoint",
-        });
-    }
-    Ok(())
+    (issuer.url() != token_url).ok_or(ConfigurationError {
+        key: "issuer",
+        reason: "must differ from the token endpoint",
+    })
 }
 
 async fn verify_https_metadata(issuer: &IssuerUrl, token_url: &Url) -> Result<(), DiscoveryError> {
@@ -109,7 +106,7 @@ async fn verify_metadata(
 /// `OpenID` Connect Discovery 1.0 §§4.1–4.3
 async fn fetch_metadata(issuer: &Url, client: &Client) -> Result<Metadata, DiscoveryError> {
     let issuer = issuer.as_str();
-    let base = issuer.strip_suffix('/').unwrap_or(issuer);
+    let base = issuer.trim_suffix('/');
     let request = Request::get(format!("{base}/.well-known/openid-configuration"))
         .header(header::ACCEPT, "application/json")
         .body(Bytes::new())

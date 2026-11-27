@@ -79,7 +79,7 @@ async fn read_pre_dispatch_limits_and_cardinality() {
     let mut opts = base_options(format!("http://{addr}"));
     opts.max_read_concurrency = NonZeroUsize::MIN;
     opts.max_write_concurrency = NonZeroUsize::MIN;
-    opts.max_result_rows = NonZeroU64::new(2).expect("nz");
+    opts.max_result_rows = const { NonZeroU64::new(2).expect("nz") };
     opts.query_timeout = Duration::from_millis(80);
     let ch = ClickHouse::start(opts).await.expect("start");
 
@@ -119,7 +119,7 @@ async fn read_pre_dispatch_limits_and_cardinality() {
 
     let two = ch
         .query("exact_two", "SELECT two_rows")
-        .max_result_rows(NonZeroU64::new(999).expect("nz"))
+        .max_result_rows(const { NonZeroU64::new(999).expect("nz") })
         .fetch_all::<SampleRow>(&ctx)
         .await
         .expect("== 2 rows succeeds");
@@ -261,7 +261,7 @@ async fn read_precedence_bytes_cap_busy_and_server_settings() {
     );
 
     let entered = stall_entered.notified();
-    tokio::pin!(entered);
+    let mut entered = std::pin::pin!(entered);
     entered.as_mut().enable();
     let ch_busy = ch.clone();
     let ctx_busy = ctx.clone();
@@ -864,7 +864,7 @@ async fn close_drains_in_flight_operations_and_times_out() {
     let ch_q = ch.clone();
     let ctx_q = ctx.clone();
     let q_entered = entered.notified();
-    tokio::pin!(q_entered);
+    let mut q_entered = std::pin::pin!(q_entered);
     q_entered.as_mut().enable();
     let q_task = tokio::spawn(async move {
         ch_q.query("drain_q", "SELECT stall")
@@ -876,7 +876,7 @@ async fn close_drains_in_flight_operations_and_times_out() {
     let ch_i = ch.clone();
     let ctx_i = ctx.clone();
     let i_entered = entered.notified();
-    tokio::pin!(i_entered);
+    let mut i_entered = std::pin::pin!(i_entered);
     i_entered.as_mut().enable();
     let i_task = tokio::spawn(async move {
         ch_i.insert(

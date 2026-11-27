@@ -73,10 +73,7 @@ fn incompressible_payload(seed: u64, len: usize) -> String {
 }
 
 fn long_enum_header_mismatch_error() -> Bytes {
-    let long_enum = (0..18)
-        .map(|i| format!("'variant_long_name_{i:02}' = {i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let long_enum = Vec::from_fn(18, |i| format!("'variant_long_name_{i:02}' = {i}")).join(", ");
     let msg = format!(
         "Code: 117. DB::Exception: Type of 'payload' must be Enum8({long_enum}), not String: (while reading header). (INCORRECT_DATA)"
     );
@@ -460,8 +457,8 @@ async fn streaming_max_result_bytes_aborts_oversized_single_row_and_header_early
 
     let mut opts = base_options(format!("http://{addr}"));
     opts.query_settings = QuerySettings::Server;
-    opts.max_result_bytes = NonZeroUsize::new(64 * 1024).expect("nz");
-    opts.http_response_buffer_size = NonZeroUsize::new(64 * 1024).expect("nz");
+    opts.max_result_bytes = const { NonZeroUsize::new(64 * 1024).expect("nz") };
+    opts.http_response_buffer_size = const { NonZeroUsize::new(64 * 1024).expect("nz") };
     let ch = ClickHouse::start(opts).await.expect("start");
     let ctx = OperationContext::with_timeout(Duration::from_secs(2));
 
@@ -469,7 +466,7 @@ async fn streaming_max_result_bytes_aborts_oversized_single_row_and_header_early
         sent_chunks.store(0, Ordering::SeqCst);
         let err = ch
             .query("oversized", sql)
-            .max_result_bytes(NonZeroUsize::new(64 * 1024).expect("nz"))
+            .max_result_bytes(const { NonZeroUsize::new(64 * 1024).expect("nz") })
             .fetch_one::<WideStringRow>(&ctx)
             .await
             .expect_err(sql);
@@ -715,7 +712,7 @@ async fn separate_read_and_write_concurrency_permits_do_not_starve_each_other() 
     let ctx = OperationContext::with_timeout(Duration::from_secs(5));
 
     let r_wait = gates.read_entered.notified();
-    tokio::pin!(r_wait);
+    let mut r_wait = std::pin::pin!(r_wait);
     r_wait.as_mut().enable();
     let (ch_r, ctx_r) = (ch.clone(), ctx.clone());
     let r_holder = tokio::spawn(async move {
@@ -747,7 +744,7 @@ async fn separate_read_and_write_concurrency_permits_do_not_starve_each_other() 
     assert_eq!(r_holder.await.expect("join"), Ok(SampleRow { id: 1 }));
 
     let w_wait = gates.write_entered.notified();
-    tokio::pin!(w_wait);
+    let mut w_wait = std::pin::pin!(w_wait);
     w_wait.as_mut().enable();
     let (ch_w, ctx_w) = (ch.clone(), ctx.clone());
     let w_holder = tokio::spawn(async move {
@@ -913,7 +910,7 @@ async fn spawn_typed_mock_server() -> (
         let bodies = Arc::clone(&bodies_srv);
         async move {
             let body = req.into_body().collect().await.expect("body").to_bytes();
-            let s = String::from_utf8_lossy(&body).into_owned();
+            let s = String::from_utf8_lossy_owned(body.into());
             bodies.lock().await.push(s.clone());
             Response::builder()
                 .status(StatusCode::OK)

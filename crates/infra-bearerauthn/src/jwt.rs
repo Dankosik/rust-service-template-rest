@@ -1168,10 +1168,7 @@ mod tests {
     fn payload_and_compact_cases(body: &str) -> Vec<(String, String)> {
         const HEADER: &str = CORPUS_HEADER;
         let mut exact = Vec::new();
-        let members = body
-            .strip_prefix('{')
-            .and_then(|inner| inner.strip_suffix('}'))
-            .unwrap();
+        let members = body.strip_circumfix('{', '}').unwrap();
         for (name, payload) in [
             ("duplicate iss", format!(r#"{{{members},"iss":"x"}}"#)),
             ("duplicate aud", format!(r#"{{{members},"aud":"api"}}"#)),

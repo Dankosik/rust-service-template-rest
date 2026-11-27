@@ -125,15 +125,14 @@ pub(crate) fn duration_range(
     value: Duration,
     range: RangeInclusive<Duration>,
 ) -> Result<(), ValidationError> {
-    if !range.contains(&value) {
-        return Err(out_of_range(
+    range.contains(&value).ok_or_else(|| {
+        out_of_range(
             key,
             crate::de::display_duration(*range.start()),
             crate::de::display_duration(*range.end()),
             crate::de::display_duration(value),
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
@@ -141,10 +140,9 @@ pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
     value: T,
     range: RangeInclusive<T>,
 ) -> Result<(), ValidationError> {
-    if !range.contains(&value) {
-        return Err(out_of_range(key, range.start(), range.end(), value));
-    }
-    Ok(())
+    range
+        .contains(&value)
+        .ok_or_else(|| out_of_range(key, range.start(), range.end(), value))
 }
 
 pub(crate) fn nonzero_usize_range<T>(

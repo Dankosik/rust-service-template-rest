@@ -720,10 +720,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(result.unwrap_err(), Failure::Unavailable);
-            assert!(matches!(
+            std::assert_matches!(
                 futures_util::poll!(Box::pin(verifier.verify(&token))),
                 std::task::Poll::Ready(Err(Failure::Unavailable))
-            ));
+            );
             tokio::time::resume();
         }
     }
@@ -884,7 +884,7 @@ mod tests {
                     let mut pending = Box::pin(provider.get_document(
                         &url,
                         Document::Jwks,
-                        tokio::time::Instant::now() + Duration::from_secs(60),
+                        tokio::time::Instant::now() + Duration::from_mins(1),
                     ));
                     assert!(futures_util::poll!(pending.as_mut()).is_pending());
                     drop(pending);

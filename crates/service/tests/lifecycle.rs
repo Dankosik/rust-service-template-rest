@@ -859,11 +859,9 @@ fn inert_temporal_disabled_becomes_ready_without_dialing_endpoint() {
         .is_some(),
         "inert Temporal configuration must reach ready 200"
     );
-    assert!(
-        matches!(
-            canary.accept(),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-        ),
+    std::assert_matches!(
+        canary.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock,
         "inert Temporal configuration must never dial its endpoint"
     );
     service.terminate();

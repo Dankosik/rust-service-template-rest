@@ -777,10 +777,7 @@ mod tests {
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert!(dropped.load(Ordering::SeqCst));
         assert_eq!(permits.available_permits(), 1);
-        assert!(matches!(
-            Pin::new(&mut body).poll_frame(&mut cx),
-            Poll::Ready(None)
-        ));
+        std::assert_matches!(Pin::new(&mut body).poll_frame(&mut cx), Poll::Ready(None));
         drop(body);
         let rendered = handle.render();
         assert!(rendered.contains("grpc_code=\"Internal\"} 1"), "{rendered}");

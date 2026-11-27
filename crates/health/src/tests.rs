@@ -16,11 +16,11 @@ impl Probe for Flaky {
     fn check(&self) -> impl Future<Output = Result<(), ProbeError>> + Send {
         std::future::poll_fn(|_| {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            std::task::Poll::Ready(if self.healthy.load(Ordering::Relaxed) {
-                Ok(())
-            } else {
-                Err(ProbeError::from_static("connection refused"))
-            })
+            std::task::Poll::Ready(
+                self.healthy
+                    .load(Ordering::Relaxed)
+                    .ok_or_else(|| ProbeError::from_static("connection refused")),
+            )
         })
     }
 }
@@ -72,7 +72,7 @@ fn policy() -> RefreshPolicy {
     RefreshPolicy::try_new(
         Duration::from_millis(50),
         Duration::from_millis(20),
-        NonZeroU32::new(3).unwrap(),
+        const { NonZeroU32::new(3).unwrap() },
     )
     .unwrap()
 }
@@ -106,7 +106,7 @@ fn probe_error_formats_borrowed_and_owned_messages() {
 
 #[test]
 fn refresh_policy_enforces_duration_bounds() {
-    let threshold = NonZeroU32::new(3).unwrap();
+    let threshold = const { NonZeroU32::new(3).unwrap() };
     let valid = Duration::from_millis(50);
 
     for invalid in [
@@ -394,7 +394,7 @@ async fn a_success_observed_after_the_budget_cannot_admit_startup() {
     );
     let reader = readiness.control().reader();
     let prepared = readiness.prepare();
-    tokio::pin!(prepared);
+    let mut prepared = std::pin::pin!(prepared);
     assert!(futures_util::FutureExt::now_or_never(prepared.as_mut()).is_none());
     tokio::time::advance(policy().probe_budget + Duration::from_millis(1)).await;
     release.notify_one();
@@ -431,7 +431,7 @@ async fn refreshes_on_the_interval_and_stops_on_cancel() {
     let reader = readiness.control().reader();
     let owner = activate(readiness).await;
     let refresh = owner.refresh_until(cancel.clone());
-    tokio::pin!(refresh);
+    let mut refresh = std::pin::pin!(refresh);
 
     let interval = Duration::from_millis(50);
     assert!(refresh.as_mut().now_or_never().is_none());
@@ -476,7 +476,7 @@ async fn refresh_until_stops_while_an_evaluation_is_in_flight() {
     let cancel = CancellationToken::new();
     hold.store(true, Ordering::Relaxed);
     let run = refresher.refresh_until(cancel.clone());
-    tokio::pin!(run);
+    let mut run = std::pin::pin!(run);
     tokio::select! {
         () = &mut run => panic!("refresher stopped before cancellation"),
         () = tokio::time::sleep(policy().interval + policy().probe_budget / 2) => {}
@@ -530,7 +530,7 @@ async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
     let mut refresher = activate(readiness).await;
     hold.store(true, Ordering::Relaxed);
     let refresh = refresher.refresh();
-    tokio::pin!(refresh);
+    let mut refresh = std::pin::pin!(refresh);
     assert!(futures_util::FutureExt::now_or_never(refresh.as_mut()).is_none());
     control.start_drain();
     release.notify_one();
@@ -831,7 +831,7 @@ async fn a_ready_watch_reports_a_failed_check_published_after_a_stall_before_it_
     let mut refresher = activate(readiness).await;
     let mut reader = control.reader();
     let wait = reader.wait_until_ready_is_not(true);
-    tokio::pin!(wait);
+    let mut wait = std::pin::pin!(wait);
     assert!(futures_util::FutureExt::now_or_never(wait.as_mut()).is_none());
 
     tokio::time::advance(policy().stale_after() + Duration::from_millis(5)).await;
@@ -843,7 +843,7 @@ async fn a_ready_watch_reports_a_failed_check_published_after_a_stall_before_it_
     );
 
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(60), wait.as_mut()).await,
+        tokio::time::timeout(Duration::from_mins(1), wait.as_mut()).await,
         Ok(Some(false)),
         "a watcher that last saw ready must learn about the failed check"
     );
@@ -864,7 +864,7 @@ async fn a_ready_watch_reports_a_stall_that_ends_in_a_timed_out_check_of_a_runni
     let cancel = CancellationToken::new();
     let owner = {
         let watch = reader.wait_until_ready_is_not(false);
-        tokio::pin!(watch);
+        let mut watch = std::pin::pin!(watch);
         let prepared = readiness.prepare().await.unwrap();
         assert!(futures_util::FutureExt::now_or_never(watch.as_mut()).is_none());
         let owner = prepared.activate().unwrap();
@@ -1025,11 +1025,7 @@ proptest! {
         for (succeeds, gap_ms) in steps {
             elapsed_ms += gap_ms;
             let now = origin + Duration::from_millis(elapsed_ms);
-            let observed = if succeeds {
-                Ok(())
-            } else {
-                Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::from_millis(1) })
-            };
+            let observed = succeeds.ok_or_else(|| ProbeFailure::TimedOut { probe: "model", budget: Duration::from_millis(1) });
             let threshold = NonZeroU32::new(failure_threshold).unwrap();
             let log = state.apply_round(observed, now, threshold, stale_after);
             prop_assert!(log.is_some());

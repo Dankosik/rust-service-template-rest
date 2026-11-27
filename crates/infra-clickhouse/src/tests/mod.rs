@@ -45,15 +45,15 @@ pub(super) fn base_options(url: String) -> ClickHouseOptions {
         },
         transport: TransportSecurity::Plaintext,
         query_settings: QuerySettings::Client {
-            max_memory_usage: Some(NonZeroU64::new(512 * 1024 * 1024).expect("nz")),
+            max_memory_usage: Some(const { NonZeroU64::new(512 * 1024 * 1024).expect("nz") }),
         },
         query_timeout: Duration::from_secs(5),
         insert_timeout: Duration::from_secs(5),
-        max_read_concurrency: NonZeroUsize::new(32).expect("nz"),
-        max_write_concurrency: NonZeroUsize::new(32).expect("nz"),
-        max_result_rows: NonZeroU64::new(100_000).expect("nz"),
-        max_result_bytes: NonZeroUsize::new(16 * 1024 * 1024).expect("nz"),
-        http_response_buffer_size: NonZeroUsize::new(2 * 1024 * 1024).expect("nz"),
+        max_read_concurrency: const { NonZeroUsize::new(32).expect("nz") },
+        max_write_concurrency: const { NonZeroUsize::new(32).expect("nz") },
+        max_result_rows: const { NonZeroU64::new(100_000).expect("nz") },
+        max_result_bytes: const { NonZeroUsize::new(16 * 1024 * 1024).expect("nz") },
+        http_response_buffer_size: const { NonZeroUsize::new(2 * 1024 * 1024).expect("nz") },
         propagate_trace_context: true,
     }
 }
@@ -346,7 +346,7 @@ async fn a4_4_and_a4_6_cursor_metrics_bounds_and_multipart_params() {
 
     let err = ch
         .query("row_limit_probe", "SELECT two_rows")
-        .max_result_rows(NonZeroU64::new(1).expect("nz"))
+        .max_result_rows(NonZeroU64::MIN)
         .fetch_all::<SampleRow>(&ctx)
         .await
         .expect_err("2 rows with limit 1 must fail");
@@ -354,7 +354,7 @@ async fn a4_4_and_a4_6_cursor_metrics_bounds_and_multipart_params() {
 
     let err_bytes = ch
         .query("byte_limit_probe", "SELECT two_rows")
-        .max_result_bytes(NonZeroUsize::new(10).expect("nz"))
+        .max_result_bytes(const { NonZeroUsize::new(10).expect("nz") })
         .fetch_all::<SampleRow>(&ctx)
         .await
         .expect_err("byte limit must fail");
@@ -547,7 +547,7 @@ async fn a4_7_error_network_is_connect_and_bad_response_probes() {
         .fetch_one::<u64>()
         .await
         .expect_err("connect refused");
-    assert!(matches!(err, clickhouse::error::Error::Network(_)));
+    std::assert_matches!(err, clickhouse::error::Error::Network(_));
     assert!(error::is_hyper_connect_error(&err));
 
     let tls_material = TlsMaterial::new("localhost");
@@ -582,7 +582,7 @@ async fn a4_7_error_network_is_connect_and_bad_response_probes() {
         .fetch_one::<u64>()
         .await
         .expect_err("untrusted cert handshake fail");
-    assert!(matches!(tls_err, clickhouse::error::Error::Network(_)));
+    std::assert_matches!(tls_err, clickhouse::error::Error::Network(_));
     assert!(error::is_hyper_connect_error(&tls_err));
     tls_srv.abort();
 }
@@ -656,9 +656,7 @@ async fn a4_7_bad_response_loopback_probes() {
         .fetch_one::<u64>()
         .await
         .expect_err("158");
-    assert!(
-        matches!(&err_158, clickhouse::error::Error::BadResponse(s) if s.starts_with("Code: 158"))
-    );
+    std::assert_matches!(&err_158, clickhouse::error::Error::BadResponse(s) if s.starts_with("Code: 158"));
     let classified_158 = error::classify_query_error(&err_158, error::QueryRowCap::Uncapped);
     assert_eq!(classified_158.error, QueryError::TooLarge);
     assert_eq!(
@@ -680,8 +678,8 @@ async fn a4_7_bad_response_loopback_probes() {
             .fetch_one::<u64>()
             .await
             .expect_err(sql);
-        assert!(
-            matches!(&err, clickhouse::error::Error::BadResponse(s) if s == expected_reason),
+        std::assert_matches!(
+            &err, clickhouse::error::Error::BadResponse(s) if s == expected_reason,
             "sql={sql}: expected BadResponse({expected_reason:?}), got {err:?}"
         );
         assert_eq!(
@@ -923,7 +921,7 @@ async fn handle_raw_insert_capture_conn(mut stream: TcpStream, state: Arc<Captur
         }
         buf.extend_from_slice(&tmp[..n]);
         if !describe_handled
-            && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            && let Some(pos) = buf.array_windows::<4>().position(|w| w == b"\r\n\r\n")
             && String::from_utf8_lossy(&buf).contains("DESCRIBE TABLE")
         {
             let head_str = String::from_utf8_lossy(&buf[..pos]);
@@ -1013,7 +1011,7 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let closed = state.conns_closed.notified();
-            tokio::pin!(closed);
+            let mut closed = std::pin::pin!(closed);
             closed.as_mut().enable();
             if state.open_conns.load(Ordering::SeqCst) == 0 {
                 break;
@@ -1033,7 +1031,7 @@ async fn a4_8_idx_zero_serialization_error_wire_capture() {
     );
     for raw in inserts.iter() {
         let text = String::from_utf8_lossy(raw);
-        let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        let Some(pos) = raw.array_windows::<4>().position(|w| w == b"\r\n\r\n") else {
             panic!("expected complete HTTP headers, got: {text}");
         };
         let head = String::from_utf8_lossy(&raw[..pos]);

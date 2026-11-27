@@ -146,11 +146,9 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
                     .fetch_one(&mut *conn)
                     .await
                     .map_err(|_| JobError::retryable("probe lookup failed"))?;
-            if deliveries == 1 {
-                Err(JobError::snooze(Duration::from_millis(millis)).expect("probe delay is valid"))
-            } else {
-                Ok(())
-            }
+            (deliveries != 1).ok_or_else(|| {
+                JobError::snooze(Duration::from_millis(millis)).expect("probe delay is valid")
+            })
         }
         ProbeAction::Sleep { millis } => {
             tokio::time::sleep(Duration::from_millis(millis)).await;

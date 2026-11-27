@@ -89,7 +89,7 @@ pub struct Problem {
     retry_after: Option<Duration>,
 }
 
-const _: () = assert!(std::mem::size_of::<Problem>() <= 128);
+const _: () = assert!(size_of::<Problem>() <= 128);
 
 #[allow(
     single_use_lifetimes,

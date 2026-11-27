@@ -129,7 +129,7 @@ async fn spans_identify_the_redis_transaction_and_known_mutation_outcomes() {
         b"private-value",
         Duration::from_secs(1),
     );
-    tokio::pin!(write);
+    let mut write = std::pin::pin!(write);
     tokio::select! {
         result = &mut write => panic!("write ended before disconnect: {result:?}"),
         () = server.wait_for(Duration::from_secs(3), "write must reach Valkey", || {

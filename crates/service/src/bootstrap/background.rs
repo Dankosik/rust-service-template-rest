@@ -288,7 +288,7 @@ mod tests {
         );
         cancel.cancel();
         let joining = background.join_until(Instant::now() + Duration::from_secs(1));
-        tokio::pin!(joining);
+        let mut joining = std::pin::pin!(joining);
         assert!(futures_util::poll!(&mut joining).is_pending());
         release.send(()).unwrap();
         assert_eq!(joining.await, JoinOutcome::Failed);

@@ -43,9 +43,9 @@ async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
         .build()
         .unwrap();
     check_proxy_status(&mut proxied).await;
-    let oversized: &'static str = Box::leak("x".repeat(257).into_boxed_str());
+    let oversized: &'static str = "x".repeat(257).leak();
     record_unverified_methods(&destination, oversized);
-    let boundary: &'static str = Box::leak("b".repeat(256).into_boxed_str());
+    let boundary: &'static str = "b".repeat(256).leak();
     let mut client = Client::builder(&destination, ClientSecurity::Plaintext, WAIT)
         .build()
         .unwrap();
@@ -380,7 +380,7 @@ fn record_unverified_methods(destination: &str, oversized: &'static str) {
 
 fn fill_method_series(destination: &str) {
     for index in 0..=CLIENT_METHOD_LIMIT {
-        let method: &'static str = Box::leak(format!("Method{index}").into_boxed_str());
+        let method: &'static str = format!("Method{index}").leak();
         let mut client = Client::builder(destination, ClientSecurity::Plaintext, WAIT)
             .build()
             .unwrap();

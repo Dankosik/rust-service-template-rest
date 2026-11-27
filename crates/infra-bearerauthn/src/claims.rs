@@ -375,7 +375,7 @@ impl NumericDate {
         }
 
         let (mantissa, exponent) = number.split_once(['e', 'E']).unwrap_or((number, "0"));
-        let magnitude = mantissa.strip_prefix('-').unwrap_or(mantissa);
+        let magnitude = mantissa.trim_prefix('-');
         if !magnitude.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             return None;
         }

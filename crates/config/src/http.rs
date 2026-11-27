@@ -545,7 +545,7 @@ mod tests {
             toml::from_str("readiness_propagation_delay = { bad = 1 }\n").unwrap();
         let temporal = admit_with(|v| temporal_input.admit(super::NO_SHUTDOWN_TAIL, v)).unwrap();
         assert_eq!(temporal.grace_period, Duration::from_secs(90));
-        assert_eq!(temporal.drain_timeout, Duration::from_secs(60));
+        assert_eq!(temporal.drain_timeout, Duration::from_mins(1));
         assert!(toml::from_str::<TemporalWorkerHttpInput>("bogus = 1\n").is_err());
     }
     // template:end temporal:temporal-worker-http-config-test-tail

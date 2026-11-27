@@ -46,9 +46,7 @@ pub fn install_spans_and_events(spans: &SpanCapture, events: &EventCapture) -> S
 }
 
 fn unquote(raw: &str) -> &str {
-    raw.strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(raw)
+    raw.strip_circumfix('"', '"').unwrap_or(raw)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

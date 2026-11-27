@@ -216,11 +216,10 @@ async fn limit_body(max_bytes: usize, request: Request, next: Next) -> Response 
     let overflowed = Arc::new(AtomicBool::new(false));
     let request = request.map(|body| {
         let overflowed = Arc::clone(&overflowed);
-        Body::new(Limited::new(body, limit).map_err(move |error| {
+        Body::new(Limited::new(body, limit).inspect_err(move |error| {
             if error.is::<LengthLimitError>() {
                 overflowed.store(true, Ordering::Relaxed);
             }
-            error
         }))
     });
     let mut response = next.run(request).await;

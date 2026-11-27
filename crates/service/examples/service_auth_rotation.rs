@@ -193,10 +193,8 @@ impl Receiver {
             Err(status) => status.code(),
         };
         control.authenticate([token.as_bytes()])?;
-        if observed != want {
-            return Err(format!("{} returned {observed:?}, expected {want:?}", self.uri).into());
-        }
-        Ok(())
+        (observed == want)
+            .ok_or_else(|| format!("{} returned {observed:?}, expected {want:?}", self.uri).into())
     }
 
     async fn verify_isolated(&mut self, token: &HeaderValue, control: &Verifier) -> Result<()> {
@@ -220,11 +218,9 @@ impl Receiver {
         let deadline = Instant::now() + Duration::from_secs(35);
         loop {
             if let Some(status) = process.0.try_wait()? {
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("receiver exited with {status}").into())
-                };
+                return status
+                    .success()
+                    .ok_or_else(|| format!("receiver exited with {status}").into());
             }
             if Instant::now() >= deadline {
                 return Err("receiver did not finish draining".into());

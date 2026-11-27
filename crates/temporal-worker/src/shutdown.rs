@@ -531,7 +531,7 @@ mod tests {
         let config = worker_config(&[]).unwrap();
         let http = config.http();
         assert_eq!(http.grace_period, Duration::from_secs(90));
-        assert_eq!(http.drain_timeout, Duration::from_secs(60));
+        assert_eq!(http.drain_timeout, Duration::from_mins(1));
         assert_eq!(
             http.grace_period
                 .checked_sub(http.drain_timeout)
@@ -631,7 +631,7 @@ mod tests {
             (
                 &[("APP__HTTP__GRACE_PERIOD", "76.5s")][..],
                 Duration::from_secs(55),
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 Duration::from_secs(5),
             ),
             (

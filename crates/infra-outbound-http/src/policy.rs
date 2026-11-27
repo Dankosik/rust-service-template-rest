@@ -241,10 +241,7 @@ pub(crate) fn admit_test_http_origin(raw: &str) -> Result<TargetOrigin, InvalidO
     let uri = parse_origin_uri(raw)?;
     let authority = uri.authority().ok_or(InvalidOrigin)?;
     let raw_host = authority.host();
-    let loopback = if let Some(v6) = raw_host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-    {
+    let loopback = if let Some(v6) = raw_host.strip_circumfix('[', ']') {
         v6.parse::<Ipv6Addr>().is_ok_and(|ip| ip.is_loopback())
     } else {
         raw_host

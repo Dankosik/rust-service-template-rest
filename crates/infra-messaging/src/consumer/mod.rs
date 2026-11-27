@@ -312,7 +312,7 @@ impl Consumer {
         let concurrency = self.concurrency.get();
         let mut mode = PullMode::Normal;
         let drained = drain.cancelled();
-        tokio::pin!(drained);
+        let mut drained = std::pin::pin!(drained);
         'pulls: loop {
             while deliveries.len() == concurrency
                 || (mode == PullMode::SingleRetainedMessage && !deliveries.is_empty())
@@ -424,7 +424,8 @@ impl Consumer {
                 .messages(),
         );
         let drained = drain.cancelled();
-        tokio::pin!(request, drained);
+        let mut request = std::pin::pin!(request);
+        let mut drained = std::pin::pin!(drained);
         let result = loop {
             tokio::select! {
                 biased;
@@ -579,7 +580,8 @@ impl Consumer {
         let drained = drain.cancelled();
         let deadline =
             tokio::time::sleep_until(Instant::now() + request_limits.expires + PULL_EXPIRY_GRACE);
-        tokio::pin!(drained, deadline);
+        let mut drained = std::pin::pin!(drained);
+        let mut deadline = std::pin::pin!(deadline);
         while dispatched < request_limits.max_messages {
             let first_delivery = dispatched == 0;
             let message = tokio::select! {
@@ -801,7 +803,7 @@ async fn release_message(
     filter_subject: &str,
 ) {
     let request = redeliver_after(message, RELEASE_DELAY, filter_subject);
-    tokio::pin!(request);
+    let mut request = std::pin::pin!(request);
     tokio::select! {
         biased;
         () = drain.cancelled() => {

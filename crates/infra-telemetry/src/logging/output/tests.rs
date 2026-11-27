@@ -454,7 +454,7 @@ fn a_queue_that_grows_deep_ends_the_gathering_before_its_window() {
     let (open, _closed) = crossbeam_channel::bounded(0);
     let (gathered_tx, gathered) = mpsc::sync_channel(1);
     let waiter = thread::spawn(move || {
-        wait_for_backlog(&records, Duration::from_secs(3600));
+        wait_for_backlog(&records, Duration::from_hours(1));
         gathered_tx.send(records.len()).expect("report the queue");
     });
     let output = Output {

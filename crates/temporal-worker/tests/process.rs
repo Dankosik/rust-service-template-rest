@@ -497,8 +497,8 @@ async fn handle_poll_activity(state: &LoopbackTemporalState) -> Response<Body> {
             }),
             scheduled_time: Some(now),
             started_time: Some(now),
-            start_to_close_timeout: Duration::from_secs(60).try_into().ok(),
-            schedule_to_close_timeout: Duration::from_secs(120).try_into().ok(),
+            start_to_close_timeout: Duration::from_mins(1).try_into().ok(),
+            schedule_to_close_timeout: Duration::from_mins(2).try_into().ok(),
             attempt: 1,
             ..Default::default()
         };
@@ -542,7 +542,7 @@ struct ManagedChild {
 impl ManagedChild {
     fn spawn(child_test: &str, env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", child_test, "--ignored", "--nocapture"])
+            .args(["--exact", child_test, "--ignored", "--no-capture"])
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("TEMPORAL_WORKER_CHILD_MODE", "1")

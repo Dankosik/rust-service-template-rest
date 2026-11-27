@@ -747,7 +747,7 @@ async fn x2_polling_only_engine_claims_without_a_listening_session(pool: PgPool)
     let jobs = Pool::connect(
         &dsn_for(&pool).await,
         &infra_postgres::PoolOptions {
-            max_connections: NonZeroU32::new(3).unwrap(),
+            max_connections: const { NonZeroU32::new(3).unwrap() },
             application_name: super::APP,
             default_isolation: infra_postgres::Isolation::ReadCommitted,
             session_settings_source: infra_postgres::SessionSettingsSource::Startup,
@@ -2877,7 +2877,7 @@ async fn w4_drain_waits_for_the_in_flight_attempt_and_claims_nothing_new(pool: P
     let later = enqueue_one(&jobs, ProbeAction::Succeed).await;
     super::bounded("the drain ends after the attempt", async {
         let drain = run.started.drained();
-        tokio::pin!(drain);
+        let mut drain = std::pin::pin!(drain);
         let mut saw_running = false;
         loop {
             tokio::select! {

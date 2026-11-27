@@ -929,7 +929,7 @@ mod tests {
 
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
     fn far_deadline() -> tokio::time::Instant {
-        tokio::time::Instant::now() + Duration::from_secs(60)
+        tokio::time::Instant::now() + Duration::from_mins(1)
     }
 
     #[tokio::test]

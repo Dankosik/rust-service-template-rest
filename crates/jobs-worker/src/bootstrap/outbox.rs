@@ -63,7 +63,7 @@ mod tests {
             }),
             &mut background,
         );
-        assert!(matches!(result, Err(WorkerError::Config(_))));
+        std::assert_matches!(result.err(), Some(WorkerError::Config(_)));
     }
 
     #[tokio::test]

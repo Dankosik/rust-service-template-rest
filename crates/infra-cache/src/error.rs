@@ -100,7 +100,7 @@ pub(crate) enum ErrorType {
     Other,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum FailureCause {
     Stopped(Stopped),
     Failed(ErrorType),

@@ -70,14 +70,14 @@ mod tests {
         ] {
             let escaped = escape(input);
             assert_eq!(escaped, expected, "{input:?}");
-            assert!(matches!(escaped, std::borrow::Cow::Owned(_)), "{input:?}");
+            std::assert_matches!(escaped, std::borrow::Cow::Owned(_), "{input:?}");
         }
     }
 
     #[test]
     fn a_token_without_tilde_or_slash_is_written_as_is() {
         for plain in ["", "orders.created"] {
-            assert!(matches!(escape(plain), std::borrow::Cow::Borrowed(value) if value == plain));
+            std::assert_matches!(escape(plain), std::borrow::Cow::Borrowed(value) if value == plain);
         }
     }
 }

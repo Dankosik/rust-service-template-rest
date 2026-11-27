@@ -554,7 +554,7 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
 
     let context = OperationContext::unbounded();
     let write = namespace.set(&context, "cancelled", b"value", ttl);
-    tokio::pin!(write);
+    let mut write = std::pin::pin!(write);
     tokio::select! {
         result = &mut write => panic!("held write completed: {result:?}"),
         () = server.wait_for(limit, "write must reach the old primary", || {
@@ -698,12 +698,12 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
         None,
         crate::connection::AfterReply::KeepConfirmed,
     );
-    assert!(matches!(
+    std::assert_matches!(
         write.await,
         Err(crate::connection::DispatchError::NotApplied(
             crate::error::FailureCause::Stopped(Stopped::Cancelled)
         ))
-    ));
+    );
     assert_eq!(namespace.get(&caller, "after").await, Ok(None));
     assert_eq!(server.command_count("DEL", Some("stop:during_build")), 0);
 }
@@ -981,12 +981,12 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
             None,
             AfterReply::KeepConfirmed,
         );
-    assert!(matches!(
+    std::assert_matches!(
         futures_util::poll!(std::pin::pin!(refused)),
         Poll::Ready(Err(DispatchError::NotApplied(FailureCause::Failed(
             ErrorType::Other
         ))))
-    ));
+    );
     assert_work_metrics(&metrics, 2, 2, 0);
     drop(waiting.pop());
     assert_work_metrics(&metrics, 1, 2, 0);
@@ -1420,7 +1420,7 @@ async fn dropping_a_command_before_dispatch_keeps_the_connection() {
         }
         {
             let stopped = namespace.get(&caller, "stopped");
-            tokio::pin!(stopped);
+            let mut stopped = std::pin::pin!(stopped);
             assert!(futures_util::poll!(stopped.as_mut()).is_pending());
         }
         assert_eq!(namespace.get(&caller, "live").await, Ok(None));
@@ -1473,7 +1473,7 @@ async fn acknowledged_write_keeps_its_result_after_cancellation_and_disconnect()
     assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
     let context = OperationContext::unbounded();
     let write = namespace.set(&context, "key", b"value", Duration::from_secs(10));
-    tokio::pin!(write);
+    let mut write = std::pin::pin!(write);
     assert!(futures_util::poll!(write.as_mut()).is_pending());
     server
         .wait_for(Duration::from_secs(1), "SET was not sent", || {
@@ -1512,7 +1512,7 @@ async fn cancelled_mutation_with_ready_error_reply_still_reports_cancellation() 
         .answer_next("SET", b"-NOPERM access denied\r\n");
     let context = OperationContext::unbounded();
     let write = namespace.set(&context, "key", b"value", Duration::from_secs(10));
-    tokio::pin!(write);
+    let mut write = std::pin::pin!(write);
     assert!(futures_util::poll!(write.as_mut()).is_pending());
     server
         .wait_for(Duration::from_secs(1), "SET was not sent", || {
@@ -1544,7 +1544,7 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
     assert_eq!(namespace.get(&caller, "ready").await, Ok(None));
     let context = OperationContext::unbounded();
     let read = namespace.get(&context, "key");
-    tokio::pin!(read);
+    let mut read = std::pin::pin!(read);
     assert!(futures_util::poll!(read.as_mut()).is_pending());
     server
         .wait_for(Duration::from_secs(1), "GET was not sent", || {
@@ -1574,7 +1574,7 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
 
     {
         let exchange = namespace.get(&caller, "discarded");
-        tokio::pin!(exchange);
+        let mut exchange = std::pin::pin!(exchange);
         assert!(futures_util::poll!(exchange.as_mut()).is_pending());
         assert_eq!(namespace.get(&caller, "fence").await, Ok(None));
         assert_eq!(
@@ -1633,7 +1633,7 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
     let old = server.stall_existing();
     let context = OperationContext::with_timeout(Duration::from_secs(5));
     let write = namespace.set(&context, "once", b"value", Duration::from_secs(1));
-    tokio::pin!(write);
+    let mut write = std::pin::pin!(write);
     tokio::select! {
         result = &mut write => panic!("stalled write completed: {result:?}"),
         () = server.wait_for(Duration::from_secs(1), "write must reach provider", || server.command_count("SET", Some("cancel_effect:once")) == 1) => {},

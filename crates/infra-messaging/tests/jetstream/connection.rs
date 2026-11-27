@@ -509,10 +509,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ClosedEventGate {
         event.record(
             &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
                 let raw = format!("{value:?}");
-                let rendered = raw
-                    .strip_prefix('"')
-                    .and_then(|value| value.strip_suffix('"'))
-                    .unwrap_or(&raw);
+                let rendered = raw.strip_circumfix('"', '"').unwrap_or(&raw);
                 if field.name() == "message" && rendered == "messaging_connection" {
                     message = true;
                 }

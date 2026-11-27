@@ -574,11 +574,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.declare(&created).unwrap().handle(
             |event: Event<Created>, _: OperationContext| async move {
-                if event.payload.quantity == 0 {
-                    Err(HandlerError::Permanent)
-                } else {
-                    Ok(())
-                }
+                (event.payload.quantity != 0).ok_or(HandlerError::Permanent)
             },
         );
         registry

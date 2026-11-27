@@ -331,7 +331,7 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
             .args([
                 "--exact",
                 "traces::tests::delivery::stopped_or_timed_out_collector_preparation_never_installs_a_late_provider",
-                "--nocapture",
+                "--no-capture",
             ])
             .env_clear()
             .env(CHILD, "1")
@@ -363,7 +363,7 @@ fn stopped_or_timed_out_collector_preparation_never_installs_a_late_provider() {
         runtime.block_on(async {
             let options = options("https://127.0.0.1:1");
             let pending = install_tracer_provider(&options);
-            tokio::pin!(pending);
+            let mut pending = std::pin::pin!(pending);
             assert!(futures_util::poll!(&mut pending).is_pending());
             if expire {
                 tokio::time::advance(Duration::from_secs(5)).await;
@@ -542,7 +542,7 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
         handle.tracer().start("second batch").end();
         let outcome = runtime().block_on(async {
             let shutdown = handle.shutdown(tokio::time::Instant::now() + WAIT);
-            tokio::pin!(shutdown);
+            let mut shutdown = std::pin::pin!(shutdown);
             assert!(futures_util::poll!(&mut shutdown).is_pending());
             if during_drain {
                 release.send(()).unwrap();
@@ -610,7 +610,7 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
         let rt = runtime();
         let outcome = rt.block_on(async {
             let shutdown = handle.shutdown(tokio::time::Instant::now() + allowance);
-            tokio::pin!(shutdown);
+            let mut shutdown = std::pin::pin!(shutdown);
             let std::task::Poll::Ready(outcome) = futures_util::poll!(&mut shutdown) else {
                 panic!("no SDK allowance remains after deducting the join slack");
             };

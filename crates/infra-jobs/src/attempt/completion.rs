@@ -53,6 +53,7 @@ struct CompletionQueue {
     writer: tokio::sync::Mutex<()>,
 }
 
+#[derive(Debug)]
 enum WriteTurn<'a> {
     Write(tokio::sync::MutexGuard<'a, ()>),
     Reply(CompletionReply),
@@ -360,10 +361,10 @@ mod tests {
         let (_reply, mut response) = oneshot::channel();
         let mut turn = std::pin::pin!(later.writer_or_reply(&mut response));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        assert!(matches!(
+        std::assert_matches!(
             turn.as_mut().poll(&mut context),
             std::task::Poll::Ready(WriteTurn::Write(_))
-        ));
+        );
     }
 
     #[tokio::test]
@@ -375,10 +376,10 @@ mod tests {
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(turn.as_mut().poll(&mut context).is_pending());
         reply.send(Ok(Written::Applied)).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             turn.as_mut().poll(&mut context),
             std::task::Poll::Ready(WriteTurn::Reply(Ok(Written::Applied)))
-        ));
+        );
         drop(writer);
     }
 

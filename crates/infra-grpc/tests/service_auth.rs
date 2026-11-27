@@ -241,9 +241,9 @@ fn serve(services: Services, authentication: Authentication) -> (Server, SocketA
 }
 
 fn certificate() -> &'static tls_test_support::TlsMaterial {
-    static MATERIAL: std::sync::OnceLock<tls_test_support::TlsMaterial> =
-        std::sync::OnceLock::new();
-    MATERIAL.get_or_init(|| tls_test_support::TlsMaterial::new("127.0.0.1"))
+    static MATERIAL: std::sync::LazyLock<tls_test_support::TlsMaterial> =
+        std::sync::LazyLock::new(|| tls_test_support::TlsMaterial::new("127.0.0.1"));
+    &MATERIAL
 }
 
 fn resource(address: SocketAddr) -> Client {

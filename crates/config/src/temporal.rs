@@ -442,7 +442,7 @@ impl TemporalInput {
         v.check(duration_range(
             "temporal.connect_timeout",
             self.connect_timeout,
-            Duration::from_millis(100)..=Duration::from_secs(60),
+            Duration::from_millis(100)..=Duration::from_mins(1),
         ));
         v.check(duration_range(
             "temporal.rpc_timeout",
@@ -460,7 +460,7 @@ impl TemporalInput {
             .record(duration_range(
                 "temporal.keep_alive_timeout",
                 self.keep_alive_timeout,
-                Duration::from_secs(1)..=Duration::from_secs(60),
+                Duration::from_secs(1)..=Duration::from_mins(1),
             ))
             .is_ok();
         if keep_alive_interval_ok

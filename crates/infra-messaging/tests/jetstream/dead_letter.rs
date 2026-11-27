@@ -634,7 +634,7 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     limits.max_expires = Duration::from_secs(2);
     source.update_consumer(limits).await.unwrap();
     let mut worker = consumer_options(&fixture);
-    worker.concurrency = std::num::NonZeroUsize::new(3).unwrap();
+    worker.concurrency = const { std::num::NonZeroUsize::new(3).unwrap() };
     let messaging = Messaging::connect(
         options(&fixture, Some(worker), 32),
         &context(deadline(), &cancel),

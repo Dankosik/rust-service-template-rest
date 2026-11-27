@@ -265,6 +265,7 @@ pub(crate) enum AfterReply {
     KeepConfirmed,
 }
 
+#[derive(Debug)]
 pub(crate) enum DispatchError {
     NotApplied(FailureCause),
     OutcomeUnknown(FailureCause),

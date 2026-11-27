@@ -389,7 +389,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Ending {
         Eof,
         Overflow,
@@ -480,7 +480,7 @@ mod tests {
                         break;
                     }
                     Poll::Ready(None) => {
-                        assert!(matches!(ending, Ending::Eof | Ending::Trailers));
+                        std::assert_matches!(ending, Ending::Eof | Ending::Trailers);
                         assert_eq!(received, payload);
                         assert_eq!(received.len() as u64, len);
                         assert_eq!(

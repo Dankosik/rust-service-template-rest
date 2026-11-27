@@ -359,13 +359,12 @@ fn is_transform_reference(output: &str) -> bool {
 
 fn wildcard_index(output: &str) -> Option<usize> {
     let index_text = output.strip_prefix('$').or_else(|| {
-        let function = output.strip_prefix("{{")?.strip_suffix("}}")?.trim_ascii();
+        let function = output.strip_circumfix("{{", "}}")?.trim_ascii();
         let argument = function
             .strip_prefix("wildcard")
             .or_else(|| function.strip_prefix("Wildcard"))?
             .trim_ascii_start()
-            .strip_prefix('(')?
-            .strip_suffix(')')?;
+            .strip_circumfix('(', ')')?;
         Some(argument.trim_matches(' '))
     });
     index_text.and_then(|digits| digits.parse::<usize>().ok())

@@ -784,7 +784,7 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
             request()
         };
         let response = app.oneshot(request);
-        tokio::pin!(response);
+        let mut response = std::pin::pin!(response);
         assert!(futures_util::poll!(response.as_mut()).is_pending());
         tokio::time::advance(Duration::from_millis(delay_ms)).await;
         let response = super::bounded("receipt cutoff response", response)
